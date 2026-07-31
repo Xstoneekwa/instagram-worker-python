@@ -370,9 +370,29 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
         policy = {
             "prior_run_id": canary.REX_ONE_SHOT_SOURCE_RUN_ID,
             "restart_allowed": True,
-            "request_metadata": {"source": "auto_restart_tick"},
+            "resume_plan_id": "resume-plan-v2",
+            "incident_id": "reviewed-incident-v2",
+            "restriction_preflight_only": False,
+            "request_metadata": {
+                "source": "auto_restart_tick",
+                "recovery_mode": "human_confirmed_resume",
+            },
             "phases_to_run": {"follow": True, "welcome": False, "unfollow": False},
-            "quota_remaining": {"follow": 41, "welcome": 0, "unfollow": 0},
+            "quota_remaining": {
+                "follow": canary.REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA,
+                "welcome": 0,
+                "unfollow": 0,
+            },
+            "frozen_phase_plan": {
+                "account_id": canary.REX_ACCOUNT_ID,
+                "package_contract_ready": True,
+                "follow_60s_canary_contract": {
+                    "schema": canary.REX_ONE_SHOT_CONTRACT_SCHEMA,
+                    "source_run_id": canary.REX_ONE_SHOT_SOURCE_RUN_ID,
+                    "follow_quota": canary.REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA,
+                    "golden_fallback_policy": "proof_rejection_only",
+                },
+            },
         }
         with patch.object(canary, "REX_ONE_SHOT_EXPIRES_AT", "2999-01-01T00:00:00+00:00"):
             self.assertTrue(canary._one_shot_resume_allowed(policy)[0])
@@ -392,6 +412,23 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             })[0])
             self.assertFalse(canary._one_shot_resume_allowed({
                 **policy, "quota_remaining": {"follow": 0}
+            })[0])
+            self.assertFalse(canary._one_shot_resume_allowed({
+                **policy,
+                "frozen_phase_plan": {
+                    **policy["frozen_phase_plan"],
+                    "follow_60s_canary_contract": {},
+                },
+            })[0])
+            self.assertFalse(canary._one_shot_resume_allowed({
+                **policy,
+                "frozen_phase_plan": {
+                    **policy["frozen_phase_plan"],
+                    "follow_60s_canary_contract": {
+                        **policy["frozen_phase_plan"]["follow_60s_canary_contract"],
+                        "golden_fallback_policy": "always",
+                    },
+                },
             })[0])
 
     def test_snapshot_is_single_consume_and_invalidated_by_viewport_change(self) -> None:
@@ -504,6 +541,97 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
         self.assertEqual(out["outcome"], "no_posts")
+
+    def test_ambiguous_xml_promotes_with_one_fresh_safe_vision_cell(self) -> None:
+        device = MagicMock()
+        xml = """<hierarchy><node text="candidate"/>
+        <node content-desc="Profile tab grid" selected="true"
+              bounds="[0,700][360,820]"/></hierarchy>"""
+        raw = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(raw["outcome"], "ambiguous")
+        with patch.object(
+            nav,
+            "_post_follow_likes_probe_top_left_vision_cell_meta",
+            return_value={
+                "reliable": True,
+                "reason": "vision_thumbnail_top_left",
+                "vision_top_left_variance": 321.5,
+                "screenshot_path": "/tmp/fresh-grid.png",
+                "cell": {
+                    "left": 0,
+                    "top": 900,
+                    "right": 360,
+                    "bottom": 1260,
+                    "center_x": 180,
+                    "center_y": 1080,
+                },
+            },
+        ) as probe:
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                device, raw, ww=1080, wh=2340
+            )
+        probe.assert_called_once()
+        self.assertEqual(out["outcome"], "safe_post")
+        self.assertTrue(out["tap_safe"])
+        self.assertEqual(out["post_bounds_source"], "fresh_vision_thumbnail_top_left")
+
+    def test_ambiguous_xml_keeps_golden_fallback_when_vision_is_not_safe(self) -> None:
+        device = MagicMock()
+        raw = {
+            "outcome": "ambiguous",
+            "identity_exact": True,
+            "profile_tabs_present": True,
+            "grid_selected": True,
+            "tabs_bottom": 820,
+            "loading_visible": False,
+            "private_profile_visible": False,
+            "reels_or_tagged_selected": False,
+        }
+        with patch.object(
+            nav,
+            "_post_follow_likes_probe_top_left_vision_cell_meta",
+            return_value={
+                "reliable": False,
+                "reason": "vision_thumbnail_top_left_not_found",
+                "cell": None,
+            },
+        ):
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                device, raw, ww=1080, wh=2340
+            )
+        self.assertEqual(out["outcome"], "ambiguous")
+        self.assertEqual(
+            out["fast_vision_probe_rejection_reason"],
+            "vision_thumbnail_top_left_not_found",
+        )
+
+    def test_suggested_overlay_never_promotes_to_direct_post_tap(self) -> None:
+        device = MagicMock()
+        raw = {
+            "outcome": "ambiguous",
+            "identity_exact": True,
+            "profile_tabs_present": True,
+            "grid_selected": True,
+            "tabs_bottom": 820,
+            "loading_visible": False,
+            "private_profile_visible": False,
+            "reels_or_tagged_selected": False,
+            "suggested_overlay_visible": True,
+        }
+        with patch.object(
+            nav, "_post_follow_likes_probe_top_left_vision_cell_meta"
+        ) as probe:
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                device, raw, ww=1080, wh=2340
+            )
+        probe.assert_not_called()
+        self.assertEqual(out["outcome"], "ambiguous")
+        self.assertEqual(
+            out["fast_vision_probe_rejection_reason"],
+            "suggested_overlay_visible",
+        )
 
 
 if __name__ == "__main__":

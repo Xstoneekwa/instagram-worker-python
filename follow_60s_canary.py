@@ -18,7 +18,9 @@ from logs import log
 
 
 REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
-REX_ONE_SHOT_SOURCE_RUN_ID = "ede26eac-c1a7-4e6a-b581-c6e459388d78"
+REX_ONE_SHOT_SOURCE_RUN_ID = "c1d63950-31ee-4fe5-858f-bc3a604369a3"
+REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA = 40
+REX_ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
 REX_ONE_SHOT_EXPIRES_AT = "2026-07-31T04:00:00+00:00"
 
 _SUBFLAG_NAMES = (
@@ -41,7 +43,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
-    """Authorize exactly Rex's next natural Auto Restart attempt in this window."""
+    """Authorize exactly Rex's marked, Follow-only V2 Auto Restart attempt."""
     if not policy:
         return False, "not_auto_restart_resume"
     if str(policy.get("prior_run_id") or "") != REX_ONE_SHOT_SOURCE_RUN_ID:
@@ -51,15 +53,42 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
     request_meta = dict(policy.get("request_metadata") or {})
     if str(request_meta.get("source") or "") != "auto_restart_tick":
         return False, "source_not_auto_restart_tick"
+    if str(request_meta.get("recovery_mode") or "") != "human_confirmed_resume":
+        return False, "recovery_mode_mismatch"
+    if policy.get("restriction_preflight_only") is True:
+        return False, "restriction_preflight_not_allowed"
+    if not str(policy.get("resume_plan_id") or "").strip():
+        return False, "resume_plan_id_missing"
+    if not str(policy.get("incident_id") or "").strip():
+        return False, "incident_id_missing"
     phases = dict(policy.get("phases_to_run") or {})
     if phases.get("follow") is not True or phases.get("welcome") is not False or phases.get("unfollow") is not False:
         return False, "phase_scope_mismatch"
     quota = dict(policy.get("quota_remaining") or {})
     try:
-        if int(quota.get("follow") or 0) <= 0:
-            return False, "no_remaining_follow_quota"
+        follow_quota = int(quota.get("follow") or 0)
     except (TypeError, ValueError):
         return False, "invalid_remaining_follow_quota"
+    if follow_quota != REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA:
+        return False, "remaining_follow_quota_mismatch"
+    frozen = dict(policy.get("frozen_phase_plan") or {})
+    contract = dict(frozen.get("follow_60s_canary_contract") or {})
+    if str(frozen.get("account_id") or "") != REX_ACCOUNT_ID:
+        return False, "frozen_account_mismatch"
+    if frozen.get("package_contract_ready") is not True:
+        return False, "package_contract_not_ready"
+    if str(contract.get("schema") or "") != REX_ONE_SHOT_CONTRACT_SCHEMA:
+        return False, "canary_contract_missing"
+    if str(contract.get("source_run_id") or "") != REX_ONE_SHOT_SOURCE_RUN_ID:
+        return False, "canary_contract_source_mismatch"
+    try:
+        contract_quota = int(contract.get("follow_quota") or 0)
+    except (TypeError, ValueError):
+        return False, "canary_contract_quota_invalid"
+    if contract_quota != REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA:
+        return False, "canary_contract_quota_mismatch"
+    if str(contract.get("golden_fallback_policy") or "") != "proof_rejection_only":
+        return False, "golden_fallback_policy_mismatch"
     expires_at = datetime.fromisoformat(REX_ONE_SHOT_EXPIRES_AT)
     if datetime.now(timezone.utc) >= expires_at:
         return False, "one_shot_expired"

@@ -101,8 +101,53 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
     return ast.fix_missing_locations(RemoveAvailability().visit(normalized))
 
 
+def _without_reviewed_resume_quota_bound(node: ast.FunctionDef) -> ast.FunctionDef:
+    """Remove only the reviewed Auto Restart Follow hard-bound delta for parity."""
+    normalized = copy.deepcopy(node)
+    for index, argument in list(enumerate(normalized.args.kwonlyargs))[::-1]:
+        if argument.arg == "authorized_follow_quota":
+            normalized.args.kwonlyargs.pop(index)
+            normalized.args.kw_defaults.pop(index)
+
+    legacy_assignment = ast.parse(
+        "global_follow_goal: int | None = None"
+    ).body[0]
+
+    class RemoveReviewedQuotaBound(ast.NodeTransformer):
+        def visit_Assign(self, item):
+            if any(
+                isinstance(target, ast.Name) and target.id == "global_follow_goal"
+                for target in item.targets
+            ) and any(
+                isinstance(child, ast.Name) and child.id == "authorized_follow_quota"
+                for child in ast.walk(item.value)
+            ):
+                return copy.deepcopy(legacy_assignment)
+            return self.generic_visit(item)
+
+        def visit_If(self, item):
+            if any(
+                isinstance(child, ast.Constant)
+                and child.value == "auto_restart_follow_quota_hard_bound_applied"
+                for child in ast.walk(item)
+            ):
+                return None
+            return self.generic_visit(item)
+
+        def visit_Call(self, item):
+            updated = self.generic_visit(item)
+            updated.keywords = [
+                keyword
+                for keyword in updated.keywords
+                if keyword.arg != "authorized_follow_quota"
+            ]
+            return updated
+
+    return ast.fix_missing_locations(RemoveReviewedQuotaBound().visit(normalized))
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
-    def test_rotation_implementation_matches_production_after_removing_two_hooks(self):
+    def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
         baseline = subprocess.run(
             ["git", "show", "%s:account_session_orchestrator.py" % PRODUCTION_BASE_SHA],
@@ -115,8 +160,10 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_availability_or_provenance_hooks(
-            _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_resume_quota_bound(
+            _without_availability_or_provenance_hooks(
+                _function(current_source, "_run_follow_target_rotation")
+            )
         )
         self.assertEqual(ast.dump(actual, include_attributes=False), ast.dump(expected, include_attributes=False))
 

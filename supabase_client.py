@@ -2927,7 +2927,11 @@ def count_successful_follows_today(account_id: str) -> int:
             "account_id": f"eq.{aid}",
             "interaction_type": "eq.follow",
             "interaction_status": "eq.success",
-            "event_type": "eq.follow_verified",
+            # The canonical deferred-persistence RPC emits
+            # follow_verified_persisted_v1.  It represents the same physical,
+            # verified Follow as the live worker event and must consume the
+            # daily allowance as well.
+            "event_type": "in.(follow_verified,follow_verified_persisted_v1)",
             "run_id": "not.is.null",
             "event_at": f"gte.{start.isoformat()}",
             "limit": "10000",

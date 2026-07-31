@@ -21918,6 +21918,7 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         "reels_or_tagged_selected": False,
         "loading_visible": False,
         "private_profile_visible": False,
+        "suggested_overlay_visible": False,
     }
     if not text:
         return out
@@ -21936,6 +21937,16 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             "ce compte est privé",
             "esta cuenta es privada",
             "private account",
+        )
+    )
+    out["suggested_overlay_visible"] = any(
+        marker in text_l
+        for marker in (
+            "suggested for you",
+            "discover people",
+            "suggestions pour vous",
+            "découvrir des personnes",
+            "sugerencias para ti",
         )
     )
     try:
@@ -22064,6 +22075,85 @@ def _post_follow_post_grid_evidence_from_xml(
         out["post_bounds"] = candidate
         out["tap_safe"] = True
         out["grid_exposure"] = safe.get("grid_exposure")
+    return out
+
+
+def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+    d: u2.Device,
+    evidence: dict[str, Any],
+    *,
+    ww: int,
+    wh: int,
+    budget_s: float = 1.5,
+) -> dict[str, Any]:
+    """Promote only a strictly identified grid using one fresh top-left screenshot proof."""
+    out = dict(evidence or {})
+    out.setdefault("fast_vision_probe_attempted", False)
+    if str(out.get("outcome") or "") != "ambiguous":
+        return out
+    if not bool(out.get("identity_exact")):
+        out["fast_vision_probe_rejection_reason"] = "candidate_identity_not_exact"
+        return out
+    if not bool(out.get("profile_tabs_present")) or not bool(out.get("grid_selected")):
+        out["fast_vision_probe_rejection_reason"] = "selected_grid_not_proven"
+        return out
+    if bool(out.get("loading_visible")) or bool(out.get("private_profile_visible")):
+        out["fast_vision_probe_rejection_reason"] = "profile_surface_unsafe"
+        return out
+    if bool(out.get("reels_or_tagged_selected")):
+        out["fast_vision_probe_rejection_reason"] = "non_grid_tab_selected"
+        return out
+    if bool(out.get("suggested_overlay_visible")):
+        out["fast_vision_probe_rejection_reason"] = "suggested_overlay_visible"
+        return out
+    try:
+        tabs_bottom = int(out.get("tabs_bottom") or 0)
+    except (TypeError, ValueError):
+        tabs_bottom = 0
+    if tabs_bottom <= 0:
+        out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
+        return out
+
+    out["fast_vision_probe_attempted"] = True
+    deadline = time.perf_counter() + max(0.25, float(budget_s))
+    vision = _post_follow_likes_probe_top_left_vision_cell_meta(
+        d,
+        ww=int(ww),
+        wh=int(wh),
+        y_min_px=int(tabs_bottom),
+        budget_deadline=deadline,
+    )
+    out["fast_vision_probe_reason"] = str(vision.get("reason") or "")
+    out["fast_vision_probe_screenshot_path"] = vision.get("screenshot_path")
+    out["fast_vision_probe_variance"] = vision.get("vision_top_left_variance")
+    cell = vision.get("cell")
+    if not bool(vision.get("reliable")) or not isinstance(cell, dict):
+        out["fast_vision_probe_rejection_reason"] = str(
+            vision.get("reason") or "vision_thumbnail_top_left_not_found"
+        )
+        return out
+    safe = _post_follow_likes_evaluate_top_left_post_target(
+        dict(cell),
+        reason=str(vision.get("reason") or "vision_thumbnail_top_left"),
+        ww=int(ww),
+        wh=int(wh),
+        y_min_px=int(tabs_bottom),
+    )
+    if not bool(safe.get("top_left_post_tap_safe")):
+        out["fast_vision_probe_rejection_reason"] = str(
+            safe.get("failure_reason") or "vision_thumbnail_top_left_not_safe"
+        )
+        return out
+    out.update(
+        {
+            "outcome": "safe_post",
+            "post_bounds": dict(cell),
+            "tap_safe": True,
+            "grid_exposure": safe.get("grid_exposure"),
+            "post_bounds_source": "fresh_vision_thumbnail_top_left",
+            "fast_vision_probe_rejection_reason": "",
+        }
+    )
     return out
 
 
@@ -47214,6 +47304,37 @@ def run_post_follow_post_likes_phase(
                 _grid_xml, candidate_username=cand,
                 ww=int(_grid_ww), wh=int(_grid_wh),
             )
+            _grid_raw = _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                d,
+                _grid_raw,
+                ww=int(_grid_ww),
+                wh=int(_grid_wh),
+            )
+            try:
+                log(
+                    "info",
+                    "follow_60s_post_grid_fast_proof_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    outcome=str(_grid_raw.get("outcome") or "ambiguous"),
+                    post_bounds_source=_grid_raw.get("post_bounds_source"),
+                    fast_vision_probe_attempted=bool(
+                        _grid_raw.get("fast_vision_probe_attempted")
+                    ),
+                    fast_vision_probe_reason=str(
+                        _grid_raw.get("fast_vision_probe_reason") or ""
+                    ),
+                    fast_vision_probe_rejection_reason=str(
+                        _grid_raw.get("fast_vision_probe_rejection_reason") or ""
+                    ),
+                    tap_safe=bool(_grid_raw.get("tap_safe")),
+                    fallback_required=(
+                        str(_grid_raw.get("outcome") or "ambiguous") == "ambiguous"
+                    ),
+                )
+            except Exception:
+                pass
             _expected_ctx = dict(candidate_profile_context or {})
             _stash_post_grid_evidence(
                 candidate_username=cand, package=str(_expected_ctx.get("package") or pkg),
@@ -51818,6 +51939,62 @@ def ensure_global_search_surface(
                     intended_username=intended_username,
                 )
                 return meta
+        log(
+            "warning",
+            "ensure_global_search_surface_bounded_retry_started",
+            package=pkg,
+            intended_username=intended_username,
+            source_profile_username=source_profile_username,
+            recovery_path="fresh_exact_search_selector_retry",
+        )
+        # A fresh exact-selector retry recovers the observed transient where
+        # the Search tab accepted the first click but the EditText did not
+        # materialize.  Percentage coordinates are deliberately disabled for
+        # this recovery; failure still closes safely through the existing
+        # caller contract.
+        time.sleep(0.18)
+        if open_search(
+            d,
+            _surface_recovery_depth=1,
+            source_profile_username=(
+                intended_username or source_profile_username
+            ),
+            allow_percent_fallback=False,
+            caller_context="ensure_global_search_surface_bounded_retry",
+        ):
+            meta["ok"] = True
+            meta["reason"] = "open_search_bounded_retry_ok"
+            meta["recovery_used"] = True
+            mark_search_surface_fresh_for_follow_ct()
+            log(
+                "info",
+                "ensure_global_search_surface_bounded_retry_succeeded",
+                package=pkg,
+                intended_username=intended_username,
+                source_profile_username=source_profile_username,
+                recovery_path="fresh_exact_search_selector_retry",
+            )
+            _startup_timing_log(
+                "startup_timing_search_surface_completed",
+                t_surface,
+                phase="ct_search",
+                substep="ensure_global_search_surface_bounded_retry",
+                source="ensure_global_search_surface",
+                cache_hit=False,
+                reused_signal=False,
+                duplicate_detected=False,
+                detail="open_search_bounded_retry_ok",
+                intended_username=intended_username,
+            )
+            return meta
+        log(
+            "warning",
+            "ensure_global_search_surface_bounded_retry_exhausted",
+            package=pkg,
+            intended_username=intended_username,
+            source_profile_username=source_profile_username,
+            recovery_path="fresh_exact_search_selector_retry",
+        )
         meta["reason"] = "open_search_failed"
         return meta
     except Exception as e:

@@ -737,6 +737,25 @@ def _follow_target_ids(targets: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _authorized_resume_follow_quota(
+    policy: dict[str, Any] | None,
+) -> int | None:
+    """Return the immutable Follow allowance carried by a validated resume."""
+    if not isinstance(policy, dict):
+        return None
+    phases = policy.get("phases_to_run")
+    if not isinstance(phases, dict) or phases.get("follow") is not True:
+        return None
+    quota = policy.get("quota_remaining")
+    if not isinstance(quota, dict):
+        return None
+    try:
+        value = int(quota.get("follow"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _run_follow_target_rotation(
     d: u2.Device,
     *,
@@ -752,6 +771,7 @@ def _run_follow_target_rotation(
     force_stop_used: bool,
     max_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
+    authorized_follow_quota: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     run_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
@@ -766,7 +786,11 @@ def _run_follow_target_rotation(
     partial_resumable_targets: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
     global_follows_completed = 0
-    global_follow_goal: int | None = None
+    global_follow_goal = (
+        max(1, int(authorized_follow_quota))
+        if authorized_follow_quota is not None and int(authorized_follow_quota) > 0
+        else None
+    )
     final_exit_code = 1
     final_summary: dict[str, Any] = {}
     final_reason = "no_follow_targets"
@@ -784,7 +808,17 @@ def _run_follow_target_rotation(
         total_targets=total_targets,
         max_targets_per_run=max_targets,
         max_follows_per_target_per_run=max_follows_per_target,
+        authorized_follow_quota=global_follow_goal,
     )
+    if global_follow_goal is not None:
+        log(
+            "info",
+            "auto_restart_follow_quota_hard_bound_applied",
+            account_id=account_id,
+            run_id=run_id,
+            authorized_follow_quota=global_follow_goal,
+            source="validated_resume_policy_quota_remaining",
+        )
 
     for attempt_index, target in enumerate(bounded_targets):
         target_key = _follow_target_key(target)
@@ -3990,6 +4024,9 @@ def run_account_session(
                     max_follows_per_target_per_run
                     if max_follows_per_target_per_run is not None
                     else int(rotation_settings["max_follows_per_target_per_run"])
+                ),
+                authorized_follow_quota=_authorized_resume_follow_quota(
+                    auto_restart_resume_policy
                 ),
                 fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
                 run_request_id=run_request_id,
