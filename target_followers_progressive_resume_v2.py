@@ -1324,6 +1324,24 @@ class ProgressiveResumeController:
             )
             self.mark_safe_stop()
             return False
+        raw_commit_event_id = response.get("commit_event_id")
+        try:
+            commit_event_id = str(uuid.UUID(str(raw_commit_event_id or "")))
+        except (ValueError, AttributeError, TypeError):
+            self.last_no_commit_reason = "commit_conflict"
+            self._event(
+                "checkpoint_conflict",
+                reason="commit_provenance_event_missing_or_invalid",
+                rpc_duration_ms=rpc_duration_ms,
+                operation="commit",
+            )
+            self._event(
+                "v2_failed_open",
+                reason="commit_provenance_event_missing_or_invalid",
+                operation="commit",
+            )
+            self.mark_safe_stop()
+            return False
         commit_context = self.last_verified_commit_context
         self.claimed_version = int(response.get("optimistic_version") or self.claimed_version + 1)
         self.lease_expires_at = _parse_timestamp(response.get("lease_expires_at")) or self.lease_expires_at
@@ -1339,7 +1357,7 @@ class ProgressiveResumeController:
             reached_depth=self.reached_depth,
             rpc_duration_ms=rpc_duration_ms,
             optimistic_version=self.claimed_version,
-            commit_event_id=response.get("commit_event_id"),
+            commit_event_id=commit_event_id,
             provenance_persisted=True,
             overlap_count=commit_context.overlap_count,
             new_unique_rows=commit_context.new_unique_rows,
