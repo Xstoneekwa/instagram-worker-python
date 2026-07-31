@@ -23180,6 +23180,7 @@ def _main_impl() -> int:
             follow60_canary_control=dict(_follow60_canary_control or {}),
             follow60_attempt_id=int(_follow60_attempt_id or 1),
             business_session_id=_SESSION_SOCIAL_ID or None,
+            target_followers_resume_source_request_id=run_request_id,
         )
         if supabase_mode and run_id:
             if eng_code == 97:

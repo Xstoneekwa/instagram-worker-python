@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import inspect
 import os
@@ -934,6 +935,27 @@ class ReplayAndStaticSafetyTests(unittest.TestCase):
 
 
 class RunnerResumeProvenanceTests(unittest.TestCase):
+    def test_direct_followers_engine_keeps_follow_and_ct_request_channels_separate(self):
+        tree = ast.parse(inspect.getsource(runner._main_impl))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_run_followers_list_engine_session"
+        ]
+        self.assertEqual(len(calls), 1)
+        keyword_values = {
+            keyword.arg: ast.unparse(keyword.value)
+            for keyword in calls[0].keywords
+            if keyword.arg is not None
+        }
+        self.assertEqual(keyword_values.get("run_request_id"), "run_request_id")
+        self.assertEqual(
+            keyword_values.get("target_followers_resume_source_request_id"),
+            "run_request_id",
+        )
+
     def test_active_root_short_commit_resolves_to_matching_full_sha(self):
         full_sha = "a" * 40
         module_root = str(Path(runner.__file__).resolve().parent)
