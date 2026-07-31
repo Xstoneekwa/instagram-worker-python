@@ -10751,6 +10751,11 @@ def _reenter_ct_followers_list_after_canonical_reset(
     return True
 
 
+def _critical_persistence_chain_ok(current_ok: bool, next_ok: bool) -> bool:
+    """Never let a later persistence success erase an earlier failed gate."""
+    return bool(current_ok and next_ok)
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -10768,6 +10773,8 @@ def _run_followers_list_engine_session(
     run_request_id: str | None = None,
     follow60_canary_active: bool = False,
     follow60_canary_control: dict[str, Any] | None = None,
+    follow60_attempt_id: int = 1,
+    business_session_id: str | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -10777,6 +10784,34 @@ def _run_followers_list_engine_session(
     global _RUNTIME_SKIPPED_USERNAMES
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+    if follow60_canary_active:
+        _control = dict(follow60_canary_control or {})
+        _binding_ok = bool(
+            str(account_id or "").strip() == FOLLOW_60S_CANARY_ACCOUNT_ID
+            and str(run_id or "").strip()
+            and str(run_request_id or "").strip()
+            and int(follow60_attempt_id or 0) >= 1
+            and str(business_session_id or "").strip()
+            and str(_control.get("status") or "")
+            in {"armed", "barrier_waiting_stop", "continuation_authorized"}
+            and _control.get("binding_valid") is True
+            and str(_control.get("account_id") or "") == str(account_id or "")
+            and str(_control.get("run_id") or "") == str(run_id or "")
+            and str(_control.get("request_id") or "") == str(run_request_id or "")
+            and int(_control.get("attempt_id") or 0) == int(follow60_attempt_id or 0)
+            and str(_control.get("business_session_id") or "")
+            == str(business_session_id or "")
+        )
+        if not _binding_ok:
+            log(
+                "error", "follow60_stage_binding_missing_or_invalid",
+                account_id=account_id or None, run_id=run_id or None,
+                request_id=run_request_id or None,
+                attempt_id=int(follow60_attempt_id or 0),
+                business_session_id_present=bool(business_session_id),
+                canary_active=True, device_actions_started=False,
+            )
+            return 96
     reset_follow_target_rotation_pending()
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
@@ -19178,16 +19213,19 @@ def _run_followers_list_engine_session(
                             )
                             return False
                         try:
-                            out = supabase_client.persist_follow_60s_stage_v1(
+                            import post_follow_stage_outbox
+
+                            out = post_follow_stage_outbox.journal_stage(
                                 account_id=account_id,
-                                run_id=run_id,
+                                original_run_id=run_id,
                                 request_id=run_request_id,
                                 action_id=action_id,
-                                username=str(follower_un or ""),
+                                candidate_username=str(follower_un or ""),
                                 source_profile=source_profile_username,
                                 stage=stage,
-                                stage_idempotency_key=f"{action_id}:{stage}",
-                                event_at=datetime.now(timezone.utc).isoformat(),
+                                attempt_id=int(follow60_attempt_id or 1),
+                                business_session_id=str(business_session_id or ""),
+                                verified_at=datetime.now(timezone.utc).isoformat(),
                                 payload={
                                     **dict(payload or {}),
                                     "visual_candidate_id": _pf_log_vcid,
@@ -19196,7 +19234,7 @@ def _run_followers_list_engine_session(
                             ok = bool(out.get("ok"))
                             log(
                                 "info" if ok else "error",
-                                "follow_60s_stage_persisted_v1",
+                                "follow_60s_stage_journaled_v2",
                                 stage=stage, inserted=out.get("inserted"),
                                 run_id=run_id, request_id=run_request_id,
                                 candidate_username=str(follower_un or ""), ok=ok,
@@ -19204,7 +19242,7 @@ def _run_followers_list_engine_session(
                             return ok
                         except Exception as exc:
                             log(
-                                "error", "follow_60s_stage_persist_failed_v1",
+                                "error", "follow_60s_stage_journal_failed_v2",
                                 stage=stage, run_id=run_id,
                                 request_id=run_request_id,
                                 candidate_username=str(follower_un or ""),
@@ -19212,6 +19250,17 @@ def _run_followers_list_engine_session(
                             )
                             return False
                     _pf_stage_persist_callback = _persist_follow60_stage
+                if _follow60_stage_receipts and _pf_stage_persist_callback is None:
+                    log(
+                        "error", "follow60_stage_binding_missing_or_invalid",
+                        account_id=account_id or None, run_id=run_id or None,
+                        request_id=run_request_id or None,
+                        attempt_id=int(follow60_attempt_id or 0),
+                        business_session_id_present=bool(business_session_id),
+                        candidate_username=str(follower_un or ""),
+                        device_actions_blocked_before_post_follow=True,
+                    )
+                    return 96
                 _pf = run_visual_candidate_post_follow_phase(
                     d,
                     pkg=pkg,
@@ -19231,6 +19280,45 @@ def _run_followers_list_engine_session(
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
+                _follow60_composite_flush: dict[str, Any] = {}
+                if _follow60_stage_receipts:
+                    try:
+                        import post_follow_stage_outbox
+
+                        _follow60_composite_flush = post_follow_stage_outbox.flush_pending()
+                    except Exception as _follow60_flush_exc:
+                        _follow60_composite_flush = {
+                            "ok": False,
+                            "reason": str(_follow60_flush_exc)[:240],
+                        }
+                    _critical_persist_ok = bool(
+                        _follow60_composite_flush.get("ok")
+                        and _pf.get("stage_persist_ok") is True
+                    )
+                    _likes_pf_v2 = (
+                        _pf.get("likes") if isinstance(_pf.get("likes"), dict) else {}
+                    )
+                    _liked_n_v2 = int(_likes_pf_v2.get("liked_count") or 0)
+                    if _critical_persist_ok and _liked_n_v2 > 0:
+                        _SESSION_COUNTERS["likes"] = int(
+                            _SESSION_COUNTERS.get("likes") or 0
+                        ) + _liked_n_v2
+                        _SESSION_COUNTERS["interactions"] = int(
+                            _SESSION_COUNTERS.get("interactions") or 0
+                        ) + _liked_n_v2
+                    log(
+                        "info" if _critical_persist_ok else "error",
+                        "follow_60s_post_follow_composite_flush_barrier_v2",
+                        account_id=account_id, run_id=run_id,
+                        request_id=run_request_id,
+                        candidate_username=str(follower_un or ""),
+                        ok=_critical_persist_ok,
+                        flushed=_follow60_composite_flush.get("flushed"),
+                        pending=_follow60_composite_flush.get("pending"),
+                        reason=_follow60_composite_flush.get("reason"),
+                        liked_count=_liked_n_v2,
+                        next_candidate_blocked=not _critical_persist_ok,
+                    )
                 _post_return_next_action = "same_target_next_candidate"
                 if _runtime_follow_cap_exceeded(_follow_max_per_run):
                     _post_return_next_action = "finish_run"
@@ -19255,7 +19343,7 @@ def _run_followers_list_engine_session(
                     else:
                         _f_st_persist = "following"
                     if _follow_persistence_intent_enabled_for_account(account_id):
-                        _critical_persist_ok = _persist_verified_follow_from_durable_intent(
+                        _follow_persist_ok = _persist_verified_follow_from_durable_intent(
                             intent=_follow_persistence_ctx,
                             supabase_mode=supabase_mode,
                             account_id=account_id,
@@ -19271,7 +19359,7 @@ def _run_followers_list_engine_session(
                             post_follow_result=_pf,
                         )
                     else:
-                        _critical_persist_ok = _persist_verified_follow_success_to_supabase(
+                        _follow_persist_ok = _persist_verified_follow_success_to_supabase(
                             supabase_mode=supabase_mode,
                             account_id=account_id,
                             follower_un=str(follower_un or ""),
@@ -19284,6 +19372,9 @@ def _run_followers_list_engine_session(
                             phase="after_post_follow",
                             defer_source_follow_success=True,
                         )
+                    _critical_persist_ok = _critical_persistence_chain_ok(
+                        _critical_persist_ok, _follow_persist_ok
+                    )
                     _log_target_budget_check("after_follow_verified")
                     if _target_budget_reached():
                         _mark_target_budget_reached("target_budget_reached_after_follow_verified")
@@ -20434,6 +20525,19 @@ def _main_impl() -> int:
             run_id=run_id or "",
             account_id=account_id or "",
         )
+        _post_follow_stop_flush: dict[str, Any] = {"ok": True, "pending": 0}
+        if account_id == FOLLOW_60S_CANARY_ACCOUNT_ID:
+            try:
+                import post_follow_stage_outbox
+
+                _post_follow_stop_flush = post_follow_stage_outbox.flush_pending_bounded(
+                    budget_s=0.55
+                )
+            except Exception as exc:
+                _post_follow_stop_flush = {
+                    "ok": False,
+                    "reason": str(exc)[:200],
+                }
         try:
             spooled = _spool_noncritical_deferred_projections(
                 reason="manual_stop_after_device_action_latch",
@@ -20466,6 +20570,8 @@ def _main_impl() -> int:
             run_id=run_id or None,
             account_id=account_id or None,
             verified_follow_persist_ok=bool(verified_follow_ok),
+            post_follow_stage_flush=_post_follow_stop_flush,
+            persistence_pending=not bool(_post_follow_stop_flush.get("ok")),
             noncritical_spooled=spooled,
             stop_trace=device_action_latch.trace(),
             db_terminalization_deferred_to_consumer=True,
@@ -20671,6 +20777,7 @@ def _main_impl() -> int:
     # before any canary UI path can run so Auto Restart always remains Golden.
     _follow60_canary_active = False
     _follow60_canary_control: dict[str, Any] = {}
+    _follow60_attempt_id = 1
     try:
         from auto_restart_runtime import load_resume_policy_from_env as _load_canary_resume
         from follow_60s_canary import configure as _configure_follow_60s_canary
@@ -20682,7 +20789,32 @@ def _main_impl() -> int:
             package=str(config.INSTAGRAM_PACKAGE or ""),
             resume_policy=_load_canary_resume(),
         ))
+        if _follow60_canary_active:
+            from follow_60s_canary import runtime_context as _follow60_runtime_context
+
+            _follow60_attempt_id = int(
+                _follow60_runtime_context().get("attempt_id") or 1
+            )
         if _follow60_canary_active and supabase_mode:
+            try:
+                import post_follow_stage_outbox
+
+                _startup_replay = post_follow_stage_outbox.flush_pending()
+            except Exception as _startup_replay_exc:
+                _startup_replay = {
+                    "ok": False,
+                    "reason": str(_startup_replay_exc)[:240],
+                }
+            if not bool(_startup_replay.get("ok")):
+                log(
+                    "error", "follow60_stage_outbox_replay_blocked_before_ui",
+                    account_id=account_id, run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    reason=str(_startup_replay.get("reason") or "replay_failed"),
+                    pending=_startup_replay.get("pending"),
+                    device_actions_started=False,
+                )
+                return 96
             _follow60_canary_control = supabase_client.get_follow_60s_canary_control_v1(
                 account_id
             )
@@ -20703,6 +20835,37 @@ def _main_impl() -> int:
                     device_actions_started=False,
                 )
                 return 94
+            _bound_control = supabase_client.bind_follow_60s_canary_runtime_v2(
+                account_id=account_id,
+                run_id=str(run_id or ""),
+                request_id=str(run_request_id or ""),
+                attempt_id=int(_follow60_attempt_id or 1),
+                business_session_id=str(_SESSION_SOCIAL_ID or ""),
+            )
+            if not (
+                _bound_control.get("ok") is True
+                and _bound_control.get("binding_valid") is True
+                and str(_bound_control.get("account_id") or "") == str(account_id or "")
+                and str(_bound_control.get("run_id") or "") == str(run_id or "")
+                and str(_bound_control.get("request_id") or "") == str(run_request_id or "")
+                and int(_bound_control.get("attempt_id") or 0) == int(_follow60_attempt_id or 1)
+                and str(_bound_control.get("business_session_id") or "")
+                == str(_SESSION_SOCIAL_ID or "")
+            ):
+                log(
+                    "error", "follow60_stage_binding_missing_or_invalid",
+                    account_id=account_id, run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    attempt_id=int(_follow60_attempt_id or 0),
+                    business_session_id_present=bool(_SESSION_SOCIAL_ID),
+                    control_status=_control_status,
+                    device_actions_started=False,
+                )
+                return 96
+            _follow60_canary_control = {
+                **dict(_follow60_canary_control or {}),
+                **dict(_bound_control or {}),
+            }
             log(
                 "info", "follow_60s_canary_control_gate_passed",
                 account_id=account_id, run_id=run_id or None,
@@ -22350,6 +22513,11 @@ def _main_impl() -> int:
             business_action_deadline=str(
                 os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
             ).strip() or None,
+            run_request_id=run_request_id or None,
+            follow60_canary_active=bool(_follow60_canary_active),
+            follow60_canary_control=dict(_follow60_canary_control or {}),
+            follow60_attempt_id=int(_follow60_attempt_id or 1),
+            business_session_id=_SESSION_SOCIAL_ID or None,
         )
         if supabase_mode and run_id:
             _update_run_status_safe(
@@ -22496,6 +22664,8 @@ def _main_impl() -> int:
             run_request_id=run_request_id,
             follow60_canary_active=bool(_follow60_canary_active),
             follow60_canary_control=dict(_follow60_canary_control or {}),
+            follow60_attempt_id=int(_follow60_attempt_id or 1),
+            business_session_id=_SESSION_SOCIAL_ID or None,
         )
         if supabase_mode and run_id:
             if eng_code == 97:

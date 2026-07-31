@@ -773,6 +773,11 @@ def _run_follow_target_rotation(
     max_follows_per_target_per_run: int | None = None,
     authorized_follow_quota: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
+    run_request_id: str | None = None,
+    follow60_canary_active: bool = False,
+    follow60_canary_control: dict[str, Any] | None = None,
+    follow60_attempt_id: int = 1,
+    business_session_id: str | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -953,6 +958,11 @@ def _run_follow_target_rotation(
             "force_stop_used": force_stop_used,
             "target_follow_budget": target_budget,
             "session_global_follow_cap": global_follow_goal,
+            "run_request_id": str(run_request_id or "") or None,
+            "follow60_canary_active": bool(follow60_canary_active),
+            "follow60_canary_control": dict(follow60_canary_control or {}),
+            "follow60_attempt_id": int(follow60_attempt_id or 1),
+            "business_session_id": str(business_session_id or "") or None,
         }
         if start_from_current_followers_list:
             call_kwargs["start_from_current_followers_list"] = True
@@ -3543,6 +3553,11 @@ def run_account_session(
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     business_action_deadline: str | None = None,
+    run_request_id: str | None = None,
+    follow60_canary_active: bool = False,
+    follow60_canary_control: dict[str, Any] | None = None,
+    follow60_attempt_id: int = 1,
+    business_session_id: str | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
     _LAST_ACCOUNT_SESSION_SUMMARY = {}
@@ -4020,6 +4035,11 @@ def run_account_session(
                     auto_restart_resume_policy
                 ),
                 fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
+                run_request_id=run_request_id,
+                follow60_canary_active=follow60_canary_active,
+                follow60_canary_control=follow60_canary_control,
+                follow60_attempt_id=follow60_attempt_id,
+                business_session_id=business_session_id,
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
@@ -4956,6 +4976,11 @@ def dispatch_account_session(
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     business_action_deadline: str | None = None,
+    run_request_id: str | None = None,
+    follow60_canary_active: bool = False,
+    follow60_canary_control: dict[str, Any] | None = None,
+    follow60_attempt_id: int = 1,
+    business_session_id: str | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -4974,4 +4999,9 @@ def dispatch_account_session(
         force_stop_used=force_stop_used,
         auto_restart_resume_policy=auto_restart_resume_policy,
         business_action_deadline=business_action_deadline,
+        run_request_id=run_request_id,
+        follow60_canary_active=follow60_canary_active,
+        follow60_canary_control=follow60_canary_control,
+        follow60_attempt_id=follow60_attempt_id,
+        business_session_id=business_session_id,
     )

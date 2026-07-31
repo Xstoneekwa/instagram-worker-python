@@ -114,6 +114,39 @@ def _without_reviewed_resume_quota_bound(node: ast.FunctionDef) -> ast.FunctionD
     return ast.fix_missing_locations(RemoveReviewedQuotaBound().visit(normalized))
 
 
+def _without_reviewed_follow60_binding(node: ast.FunctionDef) -> ast.FunctionDef:
+    """Remove only the reviewed Loriele Follow60 binding transport delta."""
+    normalized = copy.deepcopy(node)
+    reviewed_arguments = {
+        "run_request_id",
+        "follow60_canary_active",
+        "follow60_canary_control",
+        "follow60_attempt_id",
+        "business_session_id",
+    }
+    for index, argument in list(enumerate(normalized.args.kwonlyargs))[::-1]:
+        if argument.arg in reviewed_arguments:
+            normalized.args.kwonlyargs.pop(index)
+            normalized.args.kw_defaults.pop(index)
+
+    class RemoveReviewedFollow60Binding(ast.NodeTransformer):
+        def visit_Dict(self, item):
+            updated = self.generic_visit(item)
+            pairs = [
+                (key, value)
+                for key, value in zip(updated.keys, updated.values)
+                if not (
+                    isinstance(key, ast.Constant)
+                    and key.value in reviewed_arguments
+                )
+            ]
+            updated.keys = [key for key, _value in pairs]
+            updated.values = [value for _key, value in pairs]
+            return updated
+
+    return ast.fix_missing_locations(RemoveReviewedFollow60Binding().visit(normalized))
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -128,9 +161,11 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_resume_quota_bound(
-            _without_availability_hooks(
-                _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_follow60_binding(
+            _without_reviewed_resume_quota_bound(
+                _without_availability_hooks(
+                    _function(current_source, "_run_follow_target_rotation")
+                )
             )
         )
         self.assertEqual(ast.dump(actual, include_attributes=False), ast.dump(expected, include_attributes=False))

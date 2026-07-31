@@ -526,10 +526,12 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             [event for _level, event, _fields in logs],
         )
         source = Path(runner.__file__).read_text(encoding="utf-8")
-        persist_pos = source.index("_critical_persist_ok = _persist_verified_follow_from_durable_intent")
-        resume_pos = source.index('"post_return_ui_resume_allowed"', persist_pos)
+        persist_pos = source.index("_follow_persist_ok = _persist_verified_follow_from_durable_intent")
+        chain_pos = source.index("_critical_persist_ok = _critical_persistence_chain_ok", persist_pos)
+        resume_pos = source.index('"post_return_ui_resume_allowed"', chain_pos)
         next_action_pos = source.index('"post_return_next_ui_action_started"', resume_pos)
-        self.assertLess(persist_pos, resume_pos)
+        self.assertLess(persist_pos, chain_pos)
+        self.assertLess(chain_pos, resume_pos)
         self.assertLess(resume_pos, next_action_pos)
 
     def test_canonical_request_run_account_binding_is_certified_once(self) -> None:
