@@ -6,6 +6,7 @@ import itertools
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -168,7 +169,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(ast.dump(actual, include_attributes=False), ast.dump(expected, include_attributes=False))
 
     def test_flags_off_outputs_calls_metrics_and_transitions_match_no_hook_path(self):
-        def exercise(disable_hook: bool):
+        def exercise(disable_hook: bool, *, isolation_root: Path):
             engine = FakeFollowersEngine()
             logs: list[tuple[str, str, dict]] = []
             timings: list[tuple[str, dict]] = []
@@ -183,6 +184,15 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
                         "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "false",
                         "TARGET_AVAILABILITY_WRITER_ENABLED": "false",
                         "TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST": "",
+                        "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                            isolation_root / "absent-control.json"
+                        ),
+                        "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                            isolation_root / "absent-auto-kill.json"
+                        ),
+                        "TARGET_AVAILABILITY_KILL_SWITCH_FILE": str(
+                            isolation_root / "absent-kill-switch"
+                        ),
                     },
                 ),
             ]
@@ -214,8 +224,10 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
                 for active in reversed(patches):
                     active.stop()
 
-        with_hooks = exercise(False)
-        without_hooks = exercise(True)
+        with tempfile.TemporaryDirectory(prefix="target-availability-parity-") as value:
+            isolation_root = Path(value)
+            with_hooks = exercise(False, isolation_root=isolation_root)
+            without_hooks = exercise(True, isolation_root=isolation_root)
         self.assertEqual(with_hooks, without_hooks)
 
     def test_sensitive_runtime_modules_only_have_reviewed_successor_deltas(self):
