@@ -82,7 +82,7 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
-REX_FOLLOW_60S_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -2091,10 +2091,10 @@ def _wait_for_subprocess(
                 request_id=request_id,
                 worker_id=cfg.worker_id,
             )
-            # Rex Follow 60s may need to replay one verified Follow intent and
+            # The scoped Follow 60s canary may need to replay one verified Follow intent and
             # flush bounded deferred projections. Keep every other account on
             # the exact Golden 30-second termination contract.
-            if str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID:
+            if str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID:
                 return _terminate_subprocess(
                     proc, graceful_timeout_seconds=90.0
                 ), False

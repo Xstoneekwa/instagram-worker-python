@@ -1841,40 +1841,39 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         )
         self.assertNotIn("post_follow_post_like_open_skipped_no_post_grid", logs)
 
-    def test_canary_fresh_vision_bounds_open_directly_without_golden(self) -> None:
+    def test_canary_fresh_post_grid_bounds_open_directly_without_golden(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)
         device.dump_hierarchy.return_value = "<hierarchy/>"
         contract_ctx = _like_phase_contract_ctx()
         logs: list[tuple[str, dict[str, object]]] = []
         canary.configure(
-            account_id=canary.REX_ACCOUNT_ID,
-            account_username="rex_gen_boost_ai",
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
             run_id="canary-fast-vision",
             package="com.instagram.android",
             resume_policy=None,
         )
+        canary.stash_post_grid_evidence(
+            candidate_username="cand",
+            package="com.instagram.android",
+            activity="",
+            navigation_generation="",
+            viewport_fingerprint="",
+            outcome="safe_post",
+            post_bounds={
+                "left": 0,
+                "top": 900,
+                "right": 360,
+                "bottom": 1260,
+                "center_x": 180,
+                "center_y": 1080,
+            },
+            ttl_ms=3000.0,
+        )
         try:
             with ExitStack() as stack:
                 _patch_like_phase_common(stack, contract_ctx=contract_ctx)
-                stack.enter_context(
-                    mock.patch.object(
-                        nav,
-                        "_post_follow_post_grid_evidence_from_xml",
-                        return_value={
-                            "outcome": "ambiguous",
-                            "post_bounds": None,
-                            "viewport_fingerprint": "same-viewport",
-                            "identity_exact": True,
-                            "profile_tabs_present": True,
-                            "grid_selected": True,
-                            "tabs_bottom": 820,
-                            "loading_visible": False,
-                            "private_profile_visible": False,
-                            "reels_or_tagged_selected": False,
-                        },
-                    )
-                )
                 vision_probe = stack.enter_context(
                     mock.patch.object(
                         nav,
@@ -1990,18 +1989,16 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 resume_policy=None,
             )
 
-        vision_probe.assert_called_once()
+        vision_probe.assert_not_called()
         device.click.assert_called_once_with(180, 1080)
         legacy_open.assert_not_called()
         golden_open.assert_not_called()
         self.assertEqual(out.get("phase_outcome"), "success")
         self.assertEqual(out.get("liked_count"), 1)
-        fast_rows = [
-            kw for event, kw in logs
-            if event == "follow_60s_post_grid_fast_proof_completed"
-        ]
-        self.assertEqual(fast_rows[-1]["outcome"], "safe_post")
-        self.assertFalse(fast_rows[-1]["fallback_required"])
+        self.assertNotIn(
+            "follow_60s_post_grid_evidence_fallback_golden_direct",
+            [event for event, _kw in logs],
+        )
 
     def test_canary_ambiguous_grid_evidence_falls_directly_to_golden_and_likes(self) -> None:
         device = mock.MagicMock()
@@ -2010,8 +2007,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         contract_ctx = _like_phase_contract_ctx()
         logs: list[tuple[str, dict[str, object]]] = []
         canary.configure(
-            account_id=canary.REX_ACCOUNT_ID,
-            account_username="rex_gen_boost_ai",
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
             run_id="canary-ambiguous-fallback",
             package="com.instagram.android",
             resume_policy=None,

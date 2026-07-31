@@ -504,7 +504,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(other, (0, False))
         terminate.assert_called_once_with(canceled_proc)
 
-    def test_rex_manual_stop_gets_extended_verified_follow_flush_grace(self) -> None:
+    def test_follow_60s_canary_manual_stop_gets_extended_verified_follow_flush_grace(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -536,7 +536,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 cfg,
                 proc,
                 request_id=TEST_REQUEST_ID,
-                account_id=consumer.REX_FOLLOW_60S_ACCOUNT_ID,
+                account_id=consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
             )
 
         self.assertEqual(result, (143, False))

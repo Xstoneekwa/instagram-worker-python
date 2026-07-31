@@ -17,10 +17,9 @@ from typing import Any
 from logs import log
 
 
-REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
-REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA = 27
-REX_ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
-REX_ONE_SHOT_EXPIRES_AT = "2026-07-31T04:00:00+00:00"
+CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
+CANARY_ACCOUNT_USERNAME = "j_automatise_pour_toi"
+ONE_SHOT_CONTRACT_SCHEMA = "J_AUTOMATISE_FOLLOW_60S_ONE_SHOT_V1"
 
 _SUBFLAG_NAMES = (
     "opening_follow_composite",
@@ -43,7 +42,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
-    """Authorize exactly Rex's marked, Follow-only V2 Auto Restart attempt."""
+    """Authorize only an explicit, frozen, source-linked Follow-only retry."""
     if not policy:
         return False, "not_auto_restart_resume"
     source_run_id = str(policy.get("prior_run_id") or "").strip()
@@ -70,15 +69,15 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
         follow_quota = int(quota.get("follow") or 0)
     except (TypeError, ValueError):
         return False, "invalid_remaining_follow_quota"
-    if follow_quota != REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA:
-        return False, "remaining_follow_quota_mismatch"
+    if follow_quota <= 0 or follow_quota > 50:
+        return False, "remaining_follow_quota_out_of_bounds"
     frozen = dict(policy.get("frozen_phase_plan") or {})
     contract = dict(frozen.get("follow_60s_canary_contract") or {})
-    if str(frozen.get("account_id") or "") != REX_ACCOUNT_ID:
+    if str(frozen.get("account_id") or "") != CANARY_ACCOUNT_ID:
         return False, "frozen_account_mismatch"
     if frozen.get("package_contract_ready") is not True:
         return False, "package_contract_not_ready"
-    if str(contract.get("schema") or "") != REX_ONE_SHOT_CONTRACT_SCHEMA:
+    if str(contract.get("schema") or "") != ONE_SHOT_CONTRACT_SCHEMA:
         return False, "canary_contract_missing"
     if str(contract.get("source_run_id") or "").strip() != source_run_id:
         return False, "canary_contract_source_mismatch"
@@ -86,11 +85,19 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
         contract_quota = int(contract.get("follow_quota") or 0)
     except (TypeError, ValueError):
         return False, "canary_contract_quota_invalid"
-    if contract_quota != REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA:
+    if contract_quota != follow_quota:
         return False, "canary_contract_quota_mismatch"
     if str(contract.get("golden_fallback_policy") or "") != "proof_rejection_only":
         return False, "golden_fallback_policy_mismatch"
-    expires_at = datetime.fromisoformat(REX_ONE_SHOT_EXPIRES_AT)
+    expires_raw = str(contract.get("expires_at") or "").strip()
+    if not expires_raw:
+        return False, "one_shot_expiry_missing"
+    try:
+        expires_at = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False, "one_shot_expiry_invalid"
+    if expires_at.tzinfo is None:
+        return False, "one_shot_expiry_timezone_missing"
     if datetime.now(timezone.utc) >= expires_at:
         return False, "one_shot_expired"
     return True, ""
@@ -126,6 +133,11 @@ class CandidateProfileVerdict:
     sheet_closed: bool
     mute_posts_verified: bool
     mute_stories_verified: bool
+    viewport_fingerprint: str
+    post_grid_outcome: str
+    post_bounds: dict[str, int] | None
+    no_posts_positive: bool
+    invalidation_counter: int
     created_at_monotonic: float
     ttl_ms: float
 
@@ -142,6 +154,9 @@ class PostGridEvidence:
     viewport_fingerprint: str
     outcome: str
     post_bounds: dict[str, int] | None
+    grid_visible: bool
+    no_posts_positive: bool
+    invalidation_counter: int
     created_at_monotonic: float
     ttl_ms: float
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -157,6 +172,10 @@ class NextCandidateSnapshot:
     activity: str
     navigation_generation: str
     viewport_fingerprint: str
+    navigation_counter: int
+    scroll_counter: int
+    invalidation_counter: int
+    dedup_fingerprint: str
     created_at_monotonic: float
     ttl_ms: float
     detection: dict[str, Any] = field(default_factory=dict)
@@ -172,6 +191,9 @@ class _Runtime:
     natural_attempt: bool = True
     package: str = ""
     ui_generation: int = 0
+    navigation_counter: int = 0
+    scroll_counter: int = 0
+    invalidation_counter: int = 0
     subflags: dict[str, bool] = field(default_factory=dict)
     proofs: dict[str, FreshUiProof] = field(default_factory=dict)
     candidate_verdicts: dict[str, CandidateProfileVerdict] = field(default_factory=dict)
@@ -192,7 +214,7 @@ def configure(
     package: str,
     resume_policy: dict[str, Any] | None,
 ) -> bool:
-    """Enable only Rex's first natural business-session attempt."""
+    """Enable only j_automatise_pour_toi's first natural attempt or frozen retry."""
     global _RUNTIME
     policy = dict(resume_policy or {})
     one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)
@@ -201,7 +223,9 @@ def configure(
     parent = _env_bool("FOLLOW_60S_CANARY_ENABLED", True)
     enabled = bool(
         parent
-        and str(account_id or "").strip() == REX_ACCOUNT_ID
+        and str(account_id or "").strip() == CANARY_ACCOUNT_ID
+        and str(account_username or "").strip().lstrip("@").lower()
+        == CANARY_ACCOUNT_USERNAME
         and ((natural and attempt_id == 1) or one_shot_resume)
     )
     subflags = {
@@ -230,7 +254,19 @@ def configure(
         auto_restart_resume=bool(policy),
         one_shot_canary_resume=one_shot_resume,
         one_shot_source_run_id=(str(policy.get("prior_run_id") or "").strip() if one_shot_resume else None),
-        one_shot_expires_at=(REX_ONE_SHOT_EXPIRES_AT if one_shot_resume else None),
+        one_shot_expires_at=(
+            str(
+                dict(
+                    dict(policy.get("frozen_phase_plan") or {}).get(
+                        "follow_60s_canary_contract"
+                    )
+                    or {}
+                ).get("expires_at")
+                or ""
+            )
+            if one_shot_resume
+            else None
+        ),
         one_shot_rejection_reason=(one_shot_reject if policy and not one_shot_resume else None),
         package=_RUNTIME.package or None,
         subflags=subflags,
@@ -255,6 +291,9 @@ def runtime_context() -> dict[str, Any]:
         "natural_attempt": _RUNTIME.natural_attempt,
         "package": _RUNTIME.package,
         "ui_generation": _RUNTIME.ui_generation,
+        "navigation_counter": _RUNTIME.navigation_counter,
+        "scroll_counter": _RUNTIME.scroll_counter,
+        "invalidation_counter": _RUNTIME.invalidation_counter,
         "subflags": dict(_RUNTIME.subflags),
     }
 
@@ -478,6 +517,12 @@ def invalidate(reason: str, *, bump_generation: bool = True) -> None:
     reason_s = str(reason or "unknown_ui_mutation")
     if bump_generation:
         _RUNTIME.ui_generation += 1
+    _RUNTIME.invalidation_counter += 1
+    lowered_reason = reason_s.lower()
+    if "scroll" in lowered_reason or "swipe" in lowered_reason:
+        _RUNTIME.scroll_counter += 1
+    else:
+        _RUNTIME.navigation_counter += 1
     invalidated = len(_RUNTIME.proofs)
     _RUNTIME.proofs = {
         purpose: replace(proof, invalidation_reason=reason_s)
@@ -492,6 +537,9 @@ def invalidate(reason: str, *, bump_generation: bool = True) -> None:
         invalidation_reason=reason_s,
         invalidated_count=invalidated,
         ui_generation=_RUNTIME.ui_generation,
+        navigation_counter=_RUNTIME.navigation_counter,
+        scroll_counter=_RUNTIME.scroll_counter,
+        invalidation_counter=_RUNTIME.invalidation_counter,
     )
 
 
@@ -499,6 +547,9 @@ def stats() -> dict[str, Any]:
     return {
         "enabled": _RUNTIME.enabled,
         "ui_generation": _RUNTIME.ui_generation,
+        "navigation_counter": _RUNTIME.navigation_counter,
+        "scroll_counter": _RUNTIME.scroll_counter,
+        "invalidation_counter": _RUNTIME.invalidation_counter,
         "proof_counts": {key: dict(value) for key, value in _RUNTIME.proof_stats.items()},
         "optimization_counts": {
             key: dict(value) for key, value in _RUNTIME.optimization_stats.items()
@@ -514,6 +565,8 @@ def create_candidate_profile_verdict(
     *, candidate_username: str, package: str, activity: str,
     navigation_generation: str, exact_identity: bool, sheet_closed: bool,
     mute_posts_verified: bool, mute_stories_verified: bool, ttl_ms: float = 2500.0,
+    viewport_fingerprint: str = "", post_grid_outcome: str = "",
+    post_bounds: dict[str, int] | None = None, no_posts_positive: bool = False,
 ) -> CandidateProfileVerdict | None:
     if not enabled("mute_like_handoff"):
         return None
@@ -526,6 +579,11 @@ def create_candidate_profile_verdict(
         package=str(package or ""), activity=str(activity or ""),
         navigation_generation=str(navigation_generation or ""), exact_identity=True,
         sheet_closed=True, mute_posts_verified=True, mute_stories_verified=True,
+        viewport_fingerprint=str(viewport_fingerprint or ""),
+        post_grid_outcome=str(post_grid_outcome or ""),
+        post_bounds=dict(post_bounds) if isinstance(post_bounds, dict) else None,
+        no_posts_positive=bool(no_posts_positive),
+        invalidation_counter=_RUNTIME.invalidation_counter,
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
     )
     _RUNTIME.candidate_verdicts[candidate] = verdict
@@ -555,6 +613,8 @@ def get_candidate_profile_verdict(
                 break
         if not reason and age_ms > verdict.ttl_ms:
             reason = "ttl_expired"
+        if not reason and verdict.invalidation_counter != _RUNTIME.invalidation_counter:
+            reason = "invalidation_counter_mismatch"
     _count("candidate_profile_verdict", "rejected" if reason else "reused")
     return (None if reason else verdict), age_ms, reason
 
@@ -577,6 +637,11 @@ def stash_post_grid_evidence(
         navigation_generation=str(navigation_generation or ""),
         viewport_fingerprint=str(viewport_fingerprint or ""), outcome=normalized,
         post_bounds=dict(post_bounds) if isinstance(post_bounds, dict) else None,
+        grid_visible=bool(normalized == "safe_post" and post_bounds),
+        no_posts_positive=bool(
+            normalized == "no_posts" and bool((metadata or {}).get("no_posts_positive"))
+        ),
+        invalidation_counter=_RUNTIME.invalidation_counter,
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
         metadata=dict(metadata or {}),
     )
@@ -607,8 +672,12 @@ def consume_post_grid_evidence(
                 break
         if not reason and age_ms > ev.ttl_ms:
             reason = "ttl_expired"
+        if not reason and ev.invalidation_counter != _RUNTIME.invalidation_counter:
+            reason = "invalidation_counter_mismatch"
         if not reason and ev.outcome == "ambiguous":
             reason = "ambiguous_outcome"
+        if not reason and ev.outcome == "no_posts" and not ev.no_posts_positive:
+            reason = "no_posts_not_positive"
         if not reason and ev.outcome == "safe_post":
             ok, bounds_reason = safe_bounds(ev.post_bounds, screen_size=screen_size)
             if not ok:
@@ -630,6 +699,15 @@ def stash_next_candidate_snapshot(
         package=str(package or ""), activity=str(activity or ""),
         navigation_generation=str(navigation_generation or ""),
         viewport_fingerprint=str(viewport_fingerprint or ""),
+        navigation_counter=_RUNTIME.navigation_counter,
+        scroll_counter=_RUNTIME.scroll_counter,
+        invalidation_counter=_RUNTIME.invalidation_counter,
+        dedup_fingerprint=str(
+            detection.get("dedup_fingerprint")
+            or detection.get("candidate_fingerprint")
+            or detection.get("list_fingerprint")
+            or ""
+        ),
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
         detection=dict(detection),
     )
@@ -661,5 +739,11 @@ def consume_next_candidate_snapshot(
                 break
         if not reason and age_ms > snap.ttl_ms:
             reason = "ttl_expired"
+        if not reason and snap.navigation_counter != _RUNTIME.navigation_counter:
+            reason = "navigation_counter_mismatch"
+        if not reason and snap.scroll_counter != _RUNTIME.scroll_counter:
+            reason = "scroll_counter_mismatch"
+        if not reason and snap.invalidation_counter != _RUNTIME.invalidation_counter:
+            reason = "invalidation_counter_mismatch"
     _count("next_candidate_snapshot", "rejected" if reason else "reused")
     return (None if reason else snap), age_ms, reason

@@ -3281,7 +3281,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             runner, "log"
         ):
             revision = runner._load_follow_persistence_settings_revision(
-                runner.REX_FOLLOW_60S_ACCOUNT_ID
+                runner.FOLLOW_60S_CANARY_ACCOUNT_ID
             )
 
         self.assertEqual(revision, "2026-07-28T23:57:34+00:00")
@@ -3295,26 +3295,43 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             return_value={"unfollow_enabled": True},
         ), patch.object(runner.time, "sleep"), patch.object(runner, "log"):
             revision = runner._load_follow_persistence_settings_revision(
-                runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
                 max_attempts=2,
             )
 
         self.assertIsNone(revision)
 
-    def test_follow_persistence_request_id_uses_explicit_engine_binding(self) -> None:
-        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"):
-            request_id = runner._resolve_follow_persistence_request_id("engine-request")
+    def test_follow_persistence_request_id_accepts_only_matching_dispatcher_binding(self) -> None:
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"), patch.object(
+            runner,
+            "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING",
+            {"request_id": "dispatcher-request"},
+        ):
+            request_id = runner._resolve_follow_persistence_request_id("dispatcher-request")
 
-        self.assertEqual(request_id, "engine-request")
+        self.assertEqual(request_id, "dispatcher-request")
+
+    def test_follow_persistence_request_id_rejects_engine_mismatch(self) -> None:
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"), patch.object(
+            runner,
+            "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING",
+            {"request_id": "dispatcher-request"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "request_id_binding_mismatch"):
+                runner._resolve_follow_persistence_request_id("engine-request")
 
     def test_follow_persistence_request_id_falls_back_to_dispatcher_binding(self) -> None:
-        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"):
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"), patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", None
+        ):
             request_id = runner._resolve_follow_persistence_request_id(None)
 
         self.assertEqual(request_id, "dispatcher-request")
 
     def test_follow_persistence_request_id_missing_still_fails_closed(self) -> None:
-        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", None):
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", None), patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", None
+        ):
             request_id = runner._resolve_follow_persistence_request_id(None)
 
         self.assertEqual(request_id, "")
@@ -3683,7 +3700,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             ok = runner._persist_verified_follow_intents_for_manual_stop(
                 supabase_mode=True,
                 run_id="run",
-                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
             )
 
         self.assertTrue(ok)
@@ -3714,25 +3731,25 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             ok = runner._persist_verified_follow_intents_for_manual_stop(
                 supabase_mode=True,
                 run_id="run",
-                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
             )
 
         self.assertFalse(ok)
 
-    def test_rex_keeps_local_follow_intent_when_rpc_v1_is_off(self) -> None:
+    def test_canary_keeps_local_follow_intent_when_rpc_v1_is_off(self) -> None:
         with patch.object(
             runner, "follow_persistence_rpc_v1_enabled", return_value=False
         ):
             self.assertTrue(
                 runner._follow_persistence_intent_enabled_for_account(
-                    runner.REX_FOLLOW_60S_ACCOUNT_ID
+                    runner.FOLLOW_60S_CANARY_ACCOUNT_ID
                 )
             )
             self.assertFalse(
                 runner._follow_persistence_intent_enabled_for_account("other-account")
             )
 
-    def test_rex_manual_stop_rpc_replay_closes_verified_intent(self) -> None:
+    def test_canary_manual_stop_rpc_replay_closes_verified_intent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {
@@ -3741,20 +3758,20 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             },
         ):
             action_id = runner.deterministic_action_id(
-                runner.REX_FOLLOW_60S_ACCOUNT_ID, "run-rex", "cand_verified"
+                runner.FOLLOW_60S_CANARY_ACCOUNT_ID, "run-j-automatise", "cand_verified"
             )
             runner.follow_persistence_intent.create_prepared_intent(
                 action_id=action_id,
-                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
-                run_id="run-rex",
-                request_id="request-rex",
+                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                run_id="run-j-automatise",
+                request_id="request-j-automatise",
                 candidate_username="cand_verified",
                 source_target_id="target-one",
                 source_ct_username="ct_one",
                 settings_revision="revision-one",
             )
             runner.follow_persistence_intent.update_intent_stage(
-                run_id="run-rex",
+                run_id="run-j-automatise",
                 action_id=action_id,
                 stage="follow_physically_verified",
                 followed_at="2026-07-31T00:00:00+00:00",
@@ -3763,7 +3780,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 "ok": True,
                 "status": "created",
                 "action_id": action_id,
-                "interaction_id": "interaction-rex",
+                "interaction_id": "interaction-j-automatise",
                 "follow_persisted": True,
                 "eligible_unfollow_at": "2026-08-03T00:00:00+00:00",
                 "audit_persisted": True,
@@ -3788,8 +3805,8 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             ) as legacy, patch.object(runner, "log"):
                 ok = runner._persist_verified_follow_intents_for_manual_stop(
                     supabase_mode=True,
-                    run_id="run-rex",
-                    account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                    run_id="run-j-automatise",
+                    account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
                 )
 
             self.assertTrue(ok)
@@ -3797,8 +3814,8 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             legacy.assert_not_called()
             self.assertEqual(
                 runner.follow_persistence_intent.load_nonterminal_intents(
-                    account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
-                    run_id="run-rex",
+                    account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                    run_id="run-j-automatise",
                 ),
                 [],
             )

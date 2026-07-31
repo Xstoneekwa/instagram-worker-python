@@ -188,7 +188,7 @@ from instagram_navigation import (
 from logs import get_run_log_file_path, init_run_file_logging, log
 
 
-REX_FOLLOW_60S_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
 
 
 def _pre_follow_gap_log(
@@ -3181,7 +3181,7 @@ def _persist_verified_follow_intents_for_manual_stop(
     """
     if not (supabase_mode and run_id and account_id):
         return True
-    if str(account_id or "") != REX_FOLLOW_60S_ACCOUNT_ID:
+    if str(account_id or "") != FOLLOW_60S_CANARY_ACCOUNT_ID:
         return True
     try:
         intents = follow_persistence_intent.load_nonterminal_intents(
@@ -3250,26 +3250,132 @@ def _persist_verified_follow_intents_for_manual_stop(
 
 
 def _follow_persistence_intent_enabled_for_account(account_id: str | None) -> bool:
-    """Keep a crash-safe Follow intent for RPC V1 or the scoped Rex canary.
-
-    Rex forces the canonical idempotent RPC even while the global RPC V1 flag is
-    disabled, and keeps the same local proof journal so a Follow verified during
-    post-follow cannot disappear before the critical DB write.
-    """
+    """Keep a crash-safe Follow intent for RPC V1 or the scoped canary."""
     return bool(
         follow_persistence_rpc_v1_enabled()
-        or str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID
+        or str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID
     )
 
 
 def _resolve_follow_persistence_request_id(local_request_id: str | None) -> str:
-    """Return the dispatcher-bound request id for a Follow persistence intent.
+    """Return only the request UUID certified by the startup run binding."""
+    local = str(local_request_id or "").strip()
+    binding = dict(_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING or {})
+    canonical = str(binding.get("request_id") or _CURRENT_RUN_REQUEST_ID or "").strip()
+    if local and canonical and local != canonical:
+        raise RuntimeError("follow_persistence_request_id_binding_mismatch")
+    return canonical
 
-    Account-session rotation calls the injected followers engine without its
-    optional request-id keyword, while runner startup has already bound the
-    same canonical request globally.  The explicit engine value still wins.
-    """
-    return str(local_request_id or _CURRENT_RUN_REQUEST_ID or "").strip()
+
+def _normalize_required_uuid(value: str | None, field: str) -> str:
+    raw = str(value or "").strip()
+    try:
+        normalized = str(uuid.UUID(raw))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError(f"follow_persistence_{field}_invalid") from exc
+    if normalized != raw.lower():
+        raise RuntimeError(f"follow_persistence_{field}_noncanonical")
+    return normalized
+
+
+def _establish_follow_persistence_run_binding(
+    *,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+) -> dict[str, str]:
+    """Certify request -> run -> account once, before any Instagram UI action."""
+    from account_run_control import get_account_run_request, get_ig_run_by_id
+
+    canonical_account_id = _normalize_required_uuid(account_id, "account_id")
+    canonical_run_id = _normalize_required_uuid(run_id, "run_id")
+    canonical_request_id = _normalize_required_uuid(request_id, "request_id")
+    request_row = get_account_run_request(canonical_request_id)
+    run_row = get_ig_run_by_id(canonical_run_id)
+    if not isinstance(request_row, dict):
+        raise RuntimeError("follow_persistence_request_not_found")
+    if not isinstance(run_row, dict):
+        raise RuntimeError("follow_persistence_run_not_found")
+    checks = {
+        "request_id": (request_row.get("id"), canonical_request_id),
+        "request_account_id": (request_row.get("account_id"), canonical_account_id),
+        "request_run_id": (request_row.get("run_id"), canonical_run_id),
+        "run_id": (run_row.get("id"), canonical_run_id),
+        "run_account_id": (run_row.get("account_id"), canonical_account_id),
+    }
+    mismatches = [
+        name
+        for name, (got, expected) in checks.items()
+        if str(got or "").strip().lower() != str(expected or "").strip().lower()
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "follow_persistence_run_binding_mismatch:" + ",".join(sorted(mismatches))
+        )
+    binding = {
+        "account_id": canonical_account_id,
+        "run_id": canonical_run_id,
+        "request_id": canonical_request_id,
+    }
+    log(
+        "info",
+        "follow_persistence_run_binding_certified",
+        **binding,
+        safe_to_tap=True,
+    )
+    return binding
+
+
+def _validate_follow_persistence_intent_context(
+    intent: dict[str, Any] | None,
+    *,
+    account_id: str,
+    run_id: str,
+    candidate_username: str,
+) -> dict[str, Any]:
+    """Validate the immutable durable intent used at and after the Follow tap."""
+    ctx = dict(intent or {})
+    binding = dict(_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING or {})
+    required = (
+        "action_id",
+        "account_id",
+        "run_id",
+        "request_id",
+        "candidate_username",
+        "settings_revision",
+    )
+    missing = [name for name in required if not str(ctx.get(name) or "").strip()]
+    if missing:
+        raise RuntimeError(
+            "follow_persistence_intent_context_missing:" + ",".join(sorted(missing))
+        )
+    if not binding:
+        raise RuntimeError("follow_persistence_run_binding_missing")
+    candidate = str(candidate_username or "").strip().lstrip("@").lower()
+    checks = {
+        "account_id": (ctx.get("account_id"), account_id),
+        "run_id": (ctx.get("run_id"), run_id),
+        "request_id": (ctx.get("request_id"), binding.get("request_id")),
+        "binding_account_id": (account_id, binding.get("account_id")),
+        "binding_run_id": (run_id, binding.get("run_id")),
+        "candidate_username": (
+            str(ctx.get("candidate_username") or "").strip().lstrip("@").lower(),
+            candidate,
+        ),
+    }
+    mismatches = [
+        name
+        for name, (got, expected) in checks.items()
+        if str(got or "").strip().lower() != str(expected or "").strip().lower()
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "follow_persistence_intent_context_mismatch:" + ",".join(sorted(mismatches))
+        )
+    _normalize_required_uuid(str(ctx.get("request_id") or ""), "request_id")
+    _normalize_required_uuid(str(ctx.get("run_id") or ""), "run_id")
+    _normalize_required_uuid(str(ctx.get("account_id") or ""), "account_id")
+    return ctx
 
 
 def _load_follow_persistence_settings_revision(
@@ -3431,7 +3537,7 @@ def _persist_verified_follow_success_to_supabase(
     t_persist = time.perf_counter()
     rpc_enabled = bool(
         follow_persistence_rpc_v1_enabled()
-        or str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID
+        or str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID
     )
     if rpc_enabled and bool(follow_out.get("skipped_tap")):
         if action_id and run_id:
@@ -3742,6 +3848,110 @@ def _persist_verified_follow_success_to_supabase(
     return ok_all
 
 
+def _persist_verified_follow_from_durable_intent(
+    *,
+    intent: dict[str, Any] | None,
+    supabase_mode: bool,
+    account_id: str,
+    follower_un: str,
+    source_profile_username: str,
+    run_id: str,
+    follow_out: dict[str, Any],
+    fs_af: str,
+    f_st: str,
+    target_id: str | None,
+    phase: str,
+    defer_source_follow_success: bool,
+    post_follow_result: dict[str, Any] | None = None,
+) -> bool:
+    """Persist a physical Follow using only its validated durable tap intent."""
+    if bool((follow_out or {}).get("skipped_tap")):
+        return _persist_verified_follow_success_to_supabase(
+            supabase_mode=supabase_mode,
+            account_id=account_id,
+            follower_un=follower_un,
+            source_profile_username=source_profile_username,
+            run_id=run_id,
+            follow_out=follow_out,
+            fs_af=fs_af,
+            f_st=f_st,
+            target_id=target_id,
+            phase=phase,
+            defer_source_follow_success=defer_source_follow_success,
+        )
+    try:
+        ctx = _validate_follow_persistence_intent_context(
+            intent,
+            account_id=account_id,
+            run_id=run_id,
+            candidate_username=follower_un,
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "follow_persistence_durable_intent_rejected",
+            account_id=account_id,
+            run_id=run_id,
+            candidate_username=follower_un,
+            reason=str(exc)[:240],
+            safe_to_continue_ui=False,
+        )
+        return False
+    pf = dict(post_follow_result or {})
+    mute = dict(pf.get("mute") or {})
+    likes = dict(pf.get("likes") or {})
+    phase_trace = {
+        "follow_physically_verified": str(ctx.get("stage") or "")
+        == "follow_physically_verified",
+        "mute_verified": bool(
+            mute.get("ok")
+            and mute.get("posts_verified")
+            and mute.get("stories_verified")
+        ),
+        "like_verified": bool(
+            int(likes.get("liked_count") or 0) > 0
+            or str(likes.get("phase_outcome") or "") == "success"
+        ),
+        "return_ct_exact": bool(
+            pf.get("return_ok")
+            and str(pf.get("return_method") or "")
+            in {
+                "fresh_candidate_proof_one_back_then_exact_ct",
+                "compact_foreign_profile_back_visual_followers_list_confirmed",
+                "compact_foreign_profile_fallback_then_list",
+                "compact_safe_back_then_list",
+            }
+        ),
+    }
+    log(
+        "info",
+        "follow_persistence_end_to_end_phase_trace",
+        account_id=account_id,
+        run_id=run_id,
+        request_id=str(ctx["request_id"]),
+        candidate_username=follower_un,
+        phase_trace=phase_trace,
+        persistence_source="durable_intent_only",
+    )
+    return _persist_verified_follow_success_to_supabase(
+        supabase_mode=supabase_mode,
+        account_id=account_id,
+        follower_un=follower_un,
+        source_profile_username=source_profile_username,
+        run_id=run_id,
+        follow_out=follow_out,
+        fs_af=fs_af,
+        f_st=f_st,
+        target_id=target_id,
+        phase=phase,
+        defer_source_follow_success=defer_source_follow_success,
+        request_id=str(ctx["request_id"]),
+        action_id=str(ctx["action_id"]),
+        settings_revision_expected=str(ctx["settings_revision"]),
+        followed_at=str(ctx.get("followed_at") or "") or None,
+    )
+
+
 def _recover_verified_follow_persistence_intents(
     d,
     *,
@@ -3897,6 +4107,7 @@ _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
 _RUNNER_SESSION_CLEANUP_COMPLETE = False
 _PENDING_TERMINAL_RUN_STATUS: dict[str, Any] | None = None
 _CURRENT_RUN_REQUEST_ID: str | None = None
+_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING: dict[str, str] | None = None
 
 
 def _terminalize_run_request_after_cleanup(run_status: str) -> None:
@@ -11587,6 +11798,7 @@ def _run_followers_list_engine_session(
                             or pick_ctx.get("resolved_username_hint")
                             or ""
                         ),
+                        expected_package=pkg,
                     )
             except Exception:
                 _pre_follow_mono_capture = None
@@ -17651,6 +17863,12 @@ def _run_followers_list_engine_session(
                             source_ct_username=source_profile_username,
                             settings_revision=_settings_revision,
                         )
+                        intent = _validate_follow_persistence_intent_context(
+                            intent,
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=follower_un,
+                        )
                     except Exception as exc:
                         log(
                             "error",
@@ -18486,18 +18704,34 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                 elif supabase_mode and account_id:
-                    _persist_verified_follow_success_to_supabase(
-                        supabase_mode=supabase_mode,
-                        account_id=account_id,
-                        follower_un=str(follower_un or ""),
-                        source_profile_username=source_profile_username,
-                        run_id=run_id,
-                        follow_out=follow_out if isinstance(follow_out, dict) else {},
-                        fs_af=fs_af,
-                        f_st=f_st,
-                        target_id=target_id,
-                        phase="before_post_follow_skipped",
-                    )
+                    if _follow_persistence_intent_enabled_for_account(account_id):
+                        _persist_verified_follow_from_durable_intent(
+                            intent=_follow_persistence_ctx,
+                            supabase_mode=supabase_mode,
+                            account_id=account_id,
+                            follower_un=str(follower_un or ""),
+                            source_profile_username=source_profile_username,
+                            run_id=run_id,
+                            follow_out=follow_out if isinstance(follow_out, dict) else {},
+                            fs_af=fs_af,
+                            f_st=f_st,
+                            target_id=target_id,
+                            phase="before_post_follow_skipped",
+                            defer_source_follow_success=False,
+                        )
+                    else:
+                        _persist_verified_follow_success_to_supabase(
+                            supabase_mode=supabase_mode,
+                            account_id=account_id,
+                            follower_un=str(follower_un or ""),
+                            source_profile_username=source_profile_username,
+                            run_id=run_id,
+                            follow_out=follow_out if isinstance(follow_out, dict) else {},
+                            fs_af=fs_af,
+                            f_st=f_st,
+                            target_id=target_id,
+                            phase="before_post_follow_skipped",
+                        )
             else:
                 if _vcid_sm and _followers_resolved_continue_to_follow:
                     log(
@@ -18643,25 +18877,36 @@ def _run_followers_list_engine_session(
                         _f_st_persist = "requested"
                     else:
                         _f_st_persist = "following"
-                    _critical_persist_ok = _persist_verified_follow_success_to_supabase(
-                        supabase_mode=supabase_mode,
-                        account_id=account_id,
-                        follower_un=str(follower_un or ""),
-                        source_profile_username=source_profile_username,
-                        run_id=run_id,
-                        follow_out=follow_out if isinstance(follow_out, dict) else {},
-                        fs_af=_fs_af_persist,
-                        f_st=_f_st_persist,
-                        target_id=target_id,
-                        phase="after_post_follow",
-                        defer_source_follow_success=True,
-                        request_id=str(run_request_id or "") or None,
-                        action_id=str((_follow_persistence_ctx or {}).get("action_id") or "") or None,
-                        settings_revision_expected=str(
-                            (_follow_persistence_ctx or {}).get("settings_revision") or ""
-                        ) or None,
-                        followed_at=str((_follow_persistence_ctx or {}).get("followed_at") or "") or None,
-                    )
+                    if _follow_persistence_intent_enabled_for_account(account_id):
+                        _critical_persist_ok = _persist_verified_follow_from_durable_intent(
+                            intent=_follow_persistence_ctx,
+                            supabase_mode=supabase_mode,
+                            account_id=account_id,
+                            follower_un=str(follower_un or ""),
+                            source_profile_username=source_profile_username,
+                            run_id=run_id,
+                            follow_out=follow_out if isinstance(follow_out, dict) else {},
+                            fs_af=_fs_af_persist,
+                            f_st=_f_st_persist,
+                            target_id=target_id,
+                            phase="after_post_follow",
+                            defer_source_follow_success=True,
+                            post_follow_result=_pf,
+                        )
+                    else:
+                        _critical_persist_ok = _persist_verified_follow_success_to_supabase(
+                            supabase_mode=supabase_mode,
+                            account_id=account_id,
+                            follower_un=str(follower_un or ""),
+                            source_profile_username=source_profile_username,
+                            run_id=run_id,
+                            follow_out=follow_out if isinstance(follow_out, dict) else {},
+                            fs_af=_fs_af_persist,
+                            f_st=_f_st_persist,
+                            target_id=target_id,
+                            phase="after_post_follow",
+                            defer_source_follow_success=True,
+                        )
                     _log_target_budget_check("after_follow_verified")
                     if _target_budget_reached():
                         _mark_target_budget_reached("target_budget_reached_after_follow_verified")
@@ -19419,11 +19664,13 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
 
 def _main_impl() -> int:
     global _CURRENT_RUN_REQUEST_ID
+    global _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
     _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = True
     _RUNNER_SESSION_CLEANUP_COMPLETE = False
     _PENDING_TERMINAL_RUN_STATUS = None
+    _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING = None
 
     parser = argparse.ArgumentParser(description="Instagram safe navigation worker")
     parser.add_argument(
@@ -19576,6 +19823,7 @@ def _main_impl() -> int:
         _t_run_control = time.perf_counter()
         run = _safe_supabase_call("create_run", account_id=account_id) or {}
         run_id = str(run.get("id") or "").strip()
+        linked: dict[str, Any] | None = None
         if run_request_id and run_id:
             try:
                 from account_run_control import insert_manual_run_audit, link_account_run_request_run
@@ -19609,6 +19857,64 @@ def _main_impl() -> int:
                     run_id=run_id,
                     error=str(exc)[:200],
                 )
+        if _follow_persistence_intent_enabled_for_account(account_id):
+            try:
+                if not run_request_id or not run_id or not linked:
+                    raise RuntimeError("follow_persistence_run_binding_not_linked")
+                _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING = (
+                    _establish_follow_persistence_run_binding(
+                        account_id=account_id,
+                        run_id=run_id,
+                        request_id=run_request_id,
+                    )
+                )
+            except Exception as exc:
+                log(
+                    "error",
+                    "run_aborted",
+                    reason="follow_persistence_run_binding_invalid",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    run_request_id=run_request_id or None,
+                    contract_error=str(exc)[:240],
+                    safe_to_tap=False,
+                )
+                # The run row already exists at this point.  Fail closed before
+                # any UI interaction, but also close that durable row so a bad
+                # dispatcher/request binding cannot leave an active ig_run that
+                # blocks the canonical zero-runtime gate.
+                if run_id:
+                    terminalized = False
+                    try:
+                        supabase_client.update_run_status(
+                            run_id=run_id,
+                            status="failed",
+                            totals={},
+                            performance_summary={
+                                "reason": "follow_persistence_run_binding_invalid",
+                                "safe_to_tap": False,
+                                "contract_error": str(exc)[:240],
+                            },
+                        )
+                        terminalized = True
+                    except Exception as terminal_exc:
+                        log(
+                            "error",
+                            "follow_persistence_invalid_binding_run_terminalize_failed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            run_request_id=run_request_id or None,
+                            error=str(terminal_exc)[:240],
+                        )
+                    log(
+                        "info" if terminalized else "warning",
+                        "follow_persistence_invalid_binding_run_terminalized",
+                        account_id=account_id,
+                        run_id=run_id,
+                        run_request_id=run_request_id or None,
+                        terminalized=terminalized,
+                    )
+                return 11
         if _abort_if_run_request_canceled(
             run_request_id=run_request_id,
             run_id=run_id or None,

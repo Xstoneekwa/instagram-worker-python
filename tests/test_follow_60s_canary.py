@@ -22,20 +22,20 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
             resume_policy=None,
         )
 
-    def _configure_rex(self, resume_policy=None) -> bool:
+    def _configure_canary(self, resume_policy=None) -> bool:
         return canary.configure(
-            account_id=canary.REX_ACCOUNT_ID,
-            account_username="rex_gen_boost_ai",
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=resume_policy,
         )
 
-    def test_only_rex_first_natural_attempt_is_enabled(self) -> None:
-        self.assertTrue(self._configure_rex())
+    def test_only_j_automatise_first_natural_attempt_is_enabled(self) -> None:
+        self.assertTrue(self._configure_canary())
         self.assertTrue(canary.enabled("mute_like_handoff"))
 
-        self.assertFalse(self._configure_rex({"attempt_id": 2}))
+        self.assertFalse(self._configure_canary({"attempt_id": 2}))
         self.assertFalse(canary.enabled())
 
         self.assertFalse(
@@ -49,7 +49,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         )
 
     def test_matching_fresh_safe_bounds_proof_reuses(self) -> None:
-        self._configure_rex()
+        self._configure_canary()
         canary.stash(
             "cell",
             subject_username="ct",
@@ -77,7 +77,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "")
 
     def test_mismatch_or_navigation_invalidates_and_falls_back(self) -> None:
-        self._configure_rex()
+        self._configure_canary()
         canary.stash(
             "profile",
             subject_username="ct",
@@ -110,7 +110,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "bounds_hit_region_unsafe")
 
     def test_metadata_mismatch_rejects_fresh_proof(self) -> None:
-        self._configure_rex()
+        self._configure_canary()
         canary.stash(
             "opening_follow_composite",
             subject_username="ct",
@@ -134,7 +134,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "metadata_navigation_token_mismatch")
 
     def test_optimization_outcomes_are_aggregated_separately(self) -> None:
-        self._configure_rex()
+        self._configure_canary()
         canary.record_outcome(
             "mute_known_depth",
             "used",
@@ -153,8 +153,113 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(stats["dumps"], 1)
         self.assertEqual(stats["estimated_gain_ms"], 1400.0)
 
+    def test_ten_synthetic_cycles_reuse_each_stage_scoped_proof(self) -> None:
+        self._configure_canary()
+        for index in range(10):
+            candidate = f"candidate_{index}"
+            generation = str(canary.runtime_context()["ui_generation"])
+            canary.stash(
+                "opening_follow_composite",
+                subject_username="ct",
+                target_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                surface="candidate_profile_follow_ready",
+                detection_source="mono_capture",
+                ttl_ms=3500.0,
+                metadata={"cycle": str(index + 1)},
+            )
+            opening, opening_age, opening_reason = canary.consume(
+                "opening_follow_composite",
+                subject_username="ct",
+                target_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                surface="candidate_profile_follow_ready",
+                consume_once=True,
+                metadata_equals={"cycle": str(index + 1)},
+            )
+            self.assertIsNotNone(opening)
+            self.assertGreaterEqual(opening_age, 0.0)
+            self.assertEqual(opening_reason, "")
+
+            canary.create_candidate_profile_verdict(
+                candidate_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                navigation_generation=generation,
+                exact_identity=True,
+                sheet_closed=True,
+                mute_posts_verified=True,
+                mute_stories_verified=True,
+                viewport_fingerprint=f"viewport-{index}",
+                post_grid_outcome="safe_post",
+                post_bounds={"left": 10, "top": 900, "right": 330, "bottom": 1220},
+            )
+            verdict, verdict_age, verdict_reason = canary.get_candidate_profile_verdict(
+                candidate_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                navigation_generation=generation,
+            )
+            self.assertIsNotNone(verdict)
+            self.assertGreaterEqual(verdict_age, 0.0)
+            self.assertEqual(verdict_reason, "")
+
+            canary.stash_post_grid_evidence(
+                candidate_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                navigation_generation=generation,
+                viewport_fingerprint=f"viewport-{index}",
+                outcome="safe_post",
+                post_bounds={"left": 10, "top": 900, "right": 330, "bottom": 1220},
+                ttl_ms=3000.0,
+            )
+            grid, grid_age, grid_reason = canary.consume_post_grid_evidence(
+                candidate_username=candidate,
+                package="com.instagram.android",
+                activity="ProfileActivity",
+                navigation_generation=generation,
+                viewport_fingerprint=f"viewport-{index}",
+                screen_size=(1080, 2340),
+            )
+            self.assertIsNotNone(grid)
+            self.assertGreaterEqual(grid_age, 0.0)
+            self.assertEqual(grid_reason, "")
+
+            canary.stash_next_candidate_snapshot(
+                source_profile_username="ct",
+                package="com.instagram.android",
+                activity="FollowersActivity",
+                navigation_generation=generation,
+                viewport_fingerprint=f"ct-viewport-{index}",
+                detection={
+                    "is_followers_list": True,
+                    "dedup_fingerprint": f"rows-{index}",
+                },
+            )
+            snapshot, snapshot_age, snapshot_reason = (
+                canary.consume_next_candidate_snapshot(
+                    source_profile_username="ct",
+                    package="com.instagram.android",
+                    activity="FollowersActivity",
+                    navigation_generation=generation,
+                    viewport_fingerprint=f"ct-viewport-{index}",
+                )
+            )
+            self.assertIsNotNone(snapshot)
+            self.assertGreaterEqual(snapshot_age, 0.0)
+            self.assertEqual(snapshot_reason, "")
+
+        counts = canary.stats()["proof_counts"]
+        self.assertEqual(counts["opening_follow_composite"]["reused"], 10)
+        self.assertEqual(counts["candidate_profile_verdict"]["reused"], 10)
+        self.assertEqual(counts["post_grid_evidence"]["reused"], 10)
+        self.assertEqual(counts["next_candidate_snapshot"]["reused"], 10)
+
     def test_opening_composite_proof_contains_public_identity_and_cta(self) -> None:
-        self._configure_rex()
+        self._configure_canary()
         proof_dict = nav.build_pre_follow_observation_proof(
             follower_username="candidate",
             source_profile_username="ct_source",
@@ -167,6 +272,12 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
                 "private_profile_detected": False,
                 "detection_method": "fresh_xml_no_private_markers",
                 "probe_ms": 120.0,
+                "package": "com.instagram.android",
+                "activity": "com.instagram.profile.ProfileActivity",
+                "package_exact": True,
+                "follow_cta_positive": True,
+                "navigation_generation": "generation-1",
+                "xml_fingerprint": "xml-proof-1",
             },
             navigation_token="generation-1",
         )
@@ -248,8 +359,8 @@ class Follow60sMuteKnownDepthTest(unittest.TestCase):
 
     def test_following_options_depth_is_reused_before_final_profile_proof(self) -> None:
         canary.configure(
-            account_id=canary.REX_ACCOUNT_ID,
-            account_username="rex_gen_boost_ai",
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=None,
@@ -286,9 +397,9 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
         self.log_patch = patch.object(canary, "log")
         self.log_patch.start()
         canary.configure(
-            account_id=canary.REX_ACCOUNT_ID,
-            account_username="rex_gen_boost_ai",
-            run_id="run-rex",
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
+            run_id="run-j-automatise",
             package="com.instagram.android",
             resume_policy=None,
         )
@@ -366,7 +477,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
         self.assertIsNone(ev)
         self.assertEqual(reason, "ambiguous_outcome")
 
-    def test_rex_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
+    def test_canary_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
         source_run_id = "rotated-source-run"
         policy = {
             "prior_run_id": source_run_id,
@@ -380,26 +491,27 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             },
             "phases_to_run": {"follow": True, "welcome": False, "unfollow": False},
             "quota_remaining": {
-                "follow": canary.REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA,
+                "follow": 27,
                 "welcome": 0,
                 "unfollow": 0,
             },
             "frozen_phase_plan": {
-                "account_id": canary.REX_ACCOUNT_ID,
+                "account_id": canary.CANARY_ACCOUNT_ID,
                 "package_contract_ready": True,
                 "follow_60s_canary_contract": {
-                    "schema": canary.REX_ONE_SHOT_CONTRACT_SCHEMA,
+                    "schema": canary.ONE_SHOT_CONTRACT_SCHEMA,
                     "source_run_id": source_run_id,
-                    "follow_quota": canary.REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA,
+                    "follow_quota": 27,
                     "golden_fallback_policy": "proof_rejection_only",
+                    "expires_at": "2999-01-01T00:00:00+00:00",
                 },
             },
         }
-        with patch.object(canary, "REX_ONE_SHOT_EXPIRES_AT", "2999-01-01T00:00:00+00:00"):
-            self.assertTrue(canary._one_shot_resume_allowed(policy)[0])
+        self.assertTrue(canary._one_shot_resume_allowed(policy)[0])
+        with self.subTest("valid frozen one-shot"):
             self.assertTrue(canary.configure(
-                account_id=canary.REX_ACCOUNT_ID,
-                account_username="rex_gen_boost_ai",
+                account_id=canary.CANARY_ACCOUNT_ID,
+                account_username=canary.CANARY_ACCOUNT_USERNAME,
                 run_id="resume-run",
                 package="com.instagram.androig",
                 resume_policy=policy,

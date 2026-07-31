@@ -205,16 +205,16 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             [],
         )
 
-    def test_rex_flag_off_forces_account_scoped_idempotent_rpc(self) -> None:
-        rex_account_id = runner.REX_FOLLOW_60S_ACCOUNT_ID
-        rex_run_id = "77777777-7777-4777-8777-777777777777"
+    def test_canary_flag_off_forces_account_scoped_idempotent_rpc(self) -> None:
+        canary_account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+        canary_run_id = "77777777-7777-4777-8777-777777777777"
         action_id = follow_persistence_rpc.deterministic_action_id(
-            rex_account_id, rex_run_id, "candidate"
+            canary_account_id, canary_run_id, "candidate"
         )
         follow_persistence_intent.create_prepared_intent(
             action_id=action_id,
-            account_id=rex_account_id,
-            run_id=rex_run_id,
+            account_id=canary_account_id,
+            run_id=canary_run_id,
             request_id=REQUEST_ID,
             candidate_username="candidate",
             source_target_id=TARGET_ID,
@@ -222,7 +222,7 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             settings_revision=SETTINGS_REVISION,
         )
         follow_persistence_intent.update_intent_stage(
-            run_id=rex_run_id,
+            run_id=canary_run_id,
             action_id=action_id,
             stage="follow_physically_verified",
             followed_at=FOLLOWED_AT,
@@ -238,10 +238,10 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         ) as legacy:
             ok = runner._persist_verified_follow_success_to_supabase(
                 supabase_mode=True,
-                account_id=rex_account_id,
+                account_id=canary_account_id,
                 follower_un="candidate",
                 source_profile_username="source",
-                run_id=rex_run_id,
+                run_id=canary_run_id,
                 follow_out={"skipped_tap": False},
                 fs_af="following",
                 f_st="following",
@@ -258,10 +258,149 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(
             follow_persistence_intent.load_nonterminal_intents(
-                account_id=rex_account_id, run_id=rex_run_id
+                account_id=canary_account_id, run_id=canary_run_id
             ),
             [],
         )
+
+    def test_dispatcher_to_post_follow_rpc_uses_one_durable_request_context(self) -> None:
+        account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+        action_id = follow_persistence_rpc.deterministic_action_id(
+            account_id, RUN_ID, "candidate"
+        )
+        intent = follow_persistence_intent.create_prepared_intent(
+            action_id=action_id,
+            account_id=account_id,
+            run_id=RUN_ID,
+            request_id=REQUEST_ID,
+            candidate_username="candidate",
+            source_target_id=TARGET_ID,
+            source_ct_username="source",
+            settings_revision=SETTINGS_REVISION,
+        )
+        intent = follow_persistence_intent.update_intent_stage(
+            run_id=RUN_ID,
+            action_id=action_id,
+            stage="follow_physically_verified",
+            followed_at=FOLLOWED_AT,
+        )
+        binding = {
+            "account_id": account_id,
+            "run_id": RUN_ID,
+            "request_id": REQUEST_ID,
+        }
+        logs: list[tuple[str, str, dict]] = []
+        with mock.patch.dict(
+            os.environ, {"FOLLOW_PERSISTENCE_RPC_V1_ENABLED": "false"}
+        ), mock.patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", binding
+        ), mock.patch.object(
+            runner, "_CURRENT_RUN_REQUEST_ID", REQUEST_ID
+        ), mock.patch.object(
+            supabase_client,
+            "persist_verified_follow_success_rpc",
+            return_value=rpc_success(action_id),
+        ) as rpc, mock.patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **fields: logs.append(
+                (level, event, fields)
+            ),
+        ):
+            ok = runner._persist_verified_follow_from_durable_intent(
+                intent=intent,
+                supabase_mode=True,
+                account_id=account_id,
+                follower_un="candidate",
+                source_profile_username="source",
+                run_id=RUN_ID,
+                follow_out={"skipped_tap": False},
+                fs_af="following",
+                f_st="following",
+                target_id=TARGET_ID,
+                phase="after_post_follow",
+                defer_source_follow_success=True,
+                post_follow_result={
+                    "mute": {
+                        "ok": True,
+                        "posts_verified": True,
+                        "stories_verified": True,
+                    },
+                    "likes": {"phase_outcome": "success", "liked_count": 1},
+                    "return_ok": True,
+                    "return_method": "fresh_candidate_proof_one_back_then_exact_ct",
+                },
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(rpc.call_args.kwargs["request_id"], REQUEST_ID)
+        trace = next(
+            fields["phase_trace"]
+            for _level, event, fields in logs
+            if event == "follow_persistence_end_to_end_phase_trace"
+        )
+        self.assertTrue(all(trace.values()))
+
+    def test_canonical_request_run_account_binding_is_certified_once(self) -> None:
+        account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+        with mock.patch(
+            "account_run_control.get_account_run_request",
+            return_value={"id": REQUEST_ID, "account_id": account_id, "run_id": RUN_ID},
+        ), mock.patch(
+            "account_run_control.get_ig_run_by_id",
+            return_value={"id": RUN_ID, "account_id": account_id, "status": "running"},
+        ), mock.patch.object(runner, "log"):
+            binding = runner._establish_follow_persistence_run_binding(
+                account_id=account_id,
+                run_id=RUN_ID,
+                request_id=REQUEST_ID,
+            )
+
+        self.assertEqual(binding["request_id"], REQUEST_ID)
+        self.assertEqual(binding["run_id"], RUN_ID)
+        self.assertEqual(binding["account_id"], account_id)
+
+    def test_missing_or_mismatched_request_context_fails_before_rpc(self) -> None:
+        account_id = ACCOUNT_ID
+        binding = {
+            "account_id": account_id,
+            "run_id": RUN_ID,
+            "request_id": REQUEST_ID,
+        }
+        intents = follow_persistence_intent.load_nonterminal_intents(
+            account_id=ACCOUNT_ID,
+            run_id=RUN_ID,
+        )
+        self.assertEqual(len(intents), 1)
+        valid = intents[0]
+        missing = dict(valid or {})
+        missing["request_id"] = ""
+        mismatched = dict(valid or {})
+        mismatched["request_id"] = "66666666-6666-4666-8666-666666666666"
+        with mock.patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", binding
+        ), mock.patch.object(
+            supabase_client, "persist_verified_follow_success_rpc"
+        ) as rpc:
+            with self.assertRaisesRegex(
+                RuntimeError, "follow_persistence_intent_context_missing:request_id"
+            ):
+                runner._validate_follow_persistence_intent_context(
+                    missing,
+                    account_id=account_id,
+                    run_id=RUN_ID,
+                    candidate_username="candidate",
+                )
+            with self.assertRaisesRegex(
+                RuntimeError, "follow_persistence_intent_context_mismatch:request_id"
+            ):
+                runner._validate_follow_persistence_intent_context(
+                    mismatched,
+                    account_id=account_id,
+                    run_id=RUN_ID,
+                    candidate_username="candidate",
+                )
+        rpc.assert_not_called()
 
     def test_created_and_replay_contract_resume(self) -> None:
         for status in ("created", "idempotent_replay"):
