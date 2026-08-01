@@ -1893,6 +1893,14 @@ def _followers_visible_window_exhausted_scroll_required(
     return True
 
 
+def _followers_snapshot_viewport_exhausted(
+    candidates: list[Any] | None,
+) -> bool:
+    """True only when a reused immutable snapshot contains no unseen row."""
+    rows = [row for row in list(candidates or []) if isinstance(row, dict)]
+    return bool(rows) and all(bool(row.get("already_seen_runtime")) for row in rows)
+
+
 def _followers_visible_window_scroll_strategy(*, scroll_used: int) -> dict[str, Any]:
     attempt_index = max(1, int(scroll_used or 0) + 1)
     if attempt_index == 1:
@@ -14770,6 +14778,19 @@ def _run_followers_list_engine_session(
                 visual_loop_state["_ac_pending_had_skip_hit"] = False
                 _expl_v1.begin_visible_window(cand_list)
                 _checkpoint_fast_skip_started = False
+                if _followers_snapshot_viewport_exhausted(cand_list):
+                    for _ in cand_list:
+                        _expl_v1.note_visible_skip("snapshot_runtime_seen")
+                    log(
+                        "info",
+                        "follow_60s_next_candidate_snapshot_viewport_exhausted",
+                        source_profile_username=source_profile_username,
+                        candidate_rows=len(cand_list),
+                        row_reprobe_count=0,
+                        ui_probe_count=0,
+                        action_taken="advance_to_canonical_scroll_boundary",
+                    )
+                    return None
                 for c in cand_list:
                     ckey = _norm_ig_handle(str(c.get("username") or ""))
                     if ckey == src_key:

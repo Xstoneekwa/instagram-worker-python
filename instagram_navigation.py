@@ -17722,6 +17722,7 @@ def _stash_post_mute_sheet_closed_proof(
     action_bar_title: str,
     duration_ms: float,
     candidate_context: dict[str, Any] | None = None,
+    authoritative_final_close: bool = False,
 ) -> None:
     global _post_mute_sheet_closed_proof_stash
     src = _normalize_handle(str(source_profile_username or ""))
@@ -17731,6 +17732,36 @@ def _stash_post_mute_sheet_closed_proof(
         _clear_post_mute_sheet_closed_proof_stash()
         return
     context = dict(candidate_context or {})
+    existing = dict(_post_mute_sheet_closed_proof_stash or {})
+    existing_context = dict(existing.get("candidate_context") or {})
+    existing_frame = dict(
+        dict(existing_context.get("post_grid_metadata") or {}).get("coordinate_frame") or {}
+    )
+    incoming_frame = dict(
+        dict(context.get("post_grid_metadata") or {}).get("coordinate_frame") or {}
+    )
+    # A later Golden/profile-only checkpoint is not allowed to replace the
+    # immutable final-close PostGrid evidence. This is the exact guard against
+    # the terrain 1080x2340 -> 1x1 metadata regression.
+    if (
+        not authoritative_final_close
+        and existing
+        and _normalize_handle(str(existing.get("candidate_username") or "")) == cand
+        and existing_frame.get("transform_version") == "coordinate_frame_v1"
+        and not incoming_frame
+    ):
+        try:
+            log(
+                "info",
+                "post_mute_non_authoritative_proof_overwrite_blocked",
+                candidate_username=cand,
+                existing_coordinate_frame_hash=str(existing_frame.get("transform_hash") or ""),
+                rejection_reason="authoritative_final_close_proof_already_present",
+                fallback_used=False,
+            )
+        except Exception:
+            pass
+        return
     _post_mute_sheet_closed_proof_stash = {
         "stashed_at_monotonic": time.perf_counter(),
         "source_profile_username": src,
@@ -17804,7 +17835,7 @@ def _stash_post_mute_sheet_closed_proof(
                         context.get("post_grid_no_posts_positive")
                     ),
                 )
-                if _verdict is not None and str(
+                if authoritative_final_close and _verdict is not None and str(
                     context.get("post_grid_outcome") or ""
                 ) in {
                     "POST_ROW_POSITIVE_SAFE",
@@ -17874,6 +17905,7 @@ def _stash_post_mute_sheet_closed_proof(
                         reveal_count_total_for_like_phase=int(
                             _grid.get("reveal_count_total_for_like_phase") or 0
                         ),
+                        coordinate_frame=dict(_grid.get("coordinate_frame") or {}),
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -17909,6 +17941,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
     mute_posts_verified: bool,
     mute_stories_verified: bool,
     started_at: float,
+    profile_xml: str = "",
 ) -> dict[str, Any] | None:
     """Create the immutable Mute->Like verdict at the exact close boundary."""
     try:
@@ -17928,7 +17961,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
         # Identity and post-grid evidence must share this exact final-sheet-close
         # observation.  Missing XML/title rejects the fast proof and leaves the
         # existing Golden checkpoint in charge.
-        profile_xml = str(d.dump_hierarchy(compressed=False) or "")
+        profile_xml = str(profile_xml or d.dump_hierarchy(compressed=False) or "")
         action_bar_title = str(
             _followers_entry_v2_action_bar_title_from_hierarchy_xml(profile_xml)
             or ""
@@ -17973,17 +18006,82 @@ def _publish_post_mute_verdict_at_final_sheet_close(
             )
             profile_grid["candidate_username"] = cand
             profile_grid.update(profile_dimensions)
-            if str(profile_grid.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
-                profile_grid = (
-                    _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
-                        d,
-                        profile_grid,
-                        ww=int(profile_ww),
-                        wh=int(profile_wh),
-                        candidate_username=cand,
-                        budget_s=1.5,
+            # The empty-state artwork may render one frame after the stable
+            # profile shell. Re-observe only the strict empty-grid transition;
+            # every other ambiguity falls through to Golden immediately.
+            if (
+                str(profile_grid.get("outcome") or "")
+                == "POST_GRID_AMBIGUOUS_FINAL"
+                and bool(profile_grid.get("identity_exact"))
+                and bool(profile_grid.get("profile_tabs_present"))
+                and bool(profile_grid.get("grid_selected"))
+                and not bool(profile_grid.get("physical_cells"))
+                and not bool(profile_grid.get("post_count_positive"))
+                and not bool(profile_grid.get("loading_visible"))
+                and not bool(profile_grid.get("private_profile_visible"))
+                and not bool(profile_grid.get("reels_or_tagged_selected"))
+            ):
+                time.sleep(0.28)
+                stable_empty_xml = str(d.dump_hierarchy(compressed=False) or "")
+                profile_grid = _post_follow_post_grid_evidence_from_xml(
+                    stable_empty_xml,
+                    candidate_username=cand,
+                    ww=int(profile_ww),
+                    wh=int(profile_wh),
+                    profile_identity_exact=True,
+                )
+                profile_grid.update(
+                    _post_follow_screen_dimensions_from_hierarchy(
+                        stable_empty_xml,
+                        raw_width=int(profile_ww),
+                        raw_height=int(profile_wh),
                     )
                 )
+                profile_grid["candidate_username"] = cand
+                profile_grid["bounded_empty_grid_recheck"] = True
+                profile_grid["stabilization_dump_count"] = 1
+            if str(profile_grid.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
+                from follow_60s_canary import validate_coordinate_frame_v1
+
+                clipped_runtime = _follow_60s_runtime_context()
+                clipped_frame_ok, clipped_frame_reason = validate_coordinate_frame_v1(
+                    profile_grid.get("coordinate_frame"),
+                    consumer_size=(int(profile_ww), int(profile_wh)),
+                    navigation_generation=str(
+                        clipped_runtime.get("ui_generation") or ""
+                    ),
+                    scroll_generation=int(
+                        clipped_runtime.get("scroll_counter") or 0
+                    ),
+                    consumer_orientation=(
+                        "landscape" if int(profile_ww) > int(profile_wh) else "portrait"
+                    ),
+                )
+                if not clipped_frame_ok:
+                    profile_grid.update(
+                        {
+                            "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                            "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
+                            "tap_safe": False,
+                            "reveal_scroll_attempted": False,
+                            "fast_vision_probe_attempted": False,
+                            "rejection_reason": clipped_frame_reason,
+                            "fast_vision_probe_rejection_reason": (
+                                "coordinate_frame_untrusted_before_reveal"
+                            ),
+                        }
+                    )
+                else:
+                    profile_grid = (
+                        _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                            d,
+                            profile_grid,
+                            ww=int(profile_ww),
+                            wh=int(profile_wh),
+                            candidate_username=cand,
+                            budget_s=1.5,
+                        )
+                    )
                 profile_grid["candidate_username"] = cand
                 profile_grid.update(
                     _post_follow_screen_dimensions_from_hierarchy(
@@ -18000,7 +18098,9 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 profile_grid.get("outcome") == "NO_POSTS_POSITIVE"
                 and profile_grid.get("identity_exact")
                 and profile_grid.get("profile_tabs_present")
+                and profile_grid.get("grid_selected")
                 and profile_grid.get("empty_marker_xml")
+                and not profile_grid.get("reels_or_tagged_selected")
                 and not profile_grid.get("private_profile_visible")
                 and not profile_grid.get("loading_visible")
             )
@@ -18018,7 +18118,8 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                         profile_grid.get("no_posts_positive")
                     ),
                     "post_grid_metadata": dict(profile_grid),
-                    "post_grid_dump_count": 1,
+                    "post_grid_dump_count": 1
+                    + int(profile_grid.get("stabilization_dump_count") or 0),
                 }
             )
             log(
@@ -18035,7 +18136,9 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                     in {"POST_ROW_POSITIVE_SAFE", "POST_ROW_POSITIVE_BUT_CLIPPED"}
                 ),
                 no_posts_positive=bool(context_out["post_grid_no_posts_positive"]),
-                dumps=1 + int(profile_grid.get("reacquire_dump_count") or 0),
+                dumps=1
+                + int(profile_grid.get("stabilization_dump_count") or 0)
+                + int(profile_grid.get("reacquire_dump_count") or 0),
                 screenshots=1 if profile_grid.get("fast_vision_probe_attempted") else 0,
                 retries=1 if profile_grid.get("reveal_scroll_attempted") else 0,
                 producer_raw_width=int(
@@ -18084,6 +18187,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
         action_bar_title=action_bar_title,
         duration_ms=duration_ms,
         candidate_context=context_out,
+        authoritative_final_close=True,
     )
     log(
         "info",
@@ -22731,7 +22835,15 @@ def _post_follow_post_grid_evidence_from_xml(
     out["tagged_tab_state"] = (
         "selected" if bool(base.get("tagged_selected")) else "not_selected"
     )
-    if identity_exact and bool(base.get("profile_tabs_present")) and bool(base.get("empty_marker_xml")):
+    if (
+        identity_exact
+        and bool(base.get("profile_tabs_present"))
+        and bool(base.get("grid_selected"))
+        and bool(base.get("empty_marker_xml"))
+        and not bool(base.get("reels_or_tagged_selected"))
+        and not bool(base.get("loading_visible"))
+        and not bool(base.get("private_profile_visible"))
+    ):
         out["outcome"] = "NO_POSTS_POSITIVE"
         out["evidence_status"] = "NO_POSTS_POSITIVE"
         out["grid_tab_state"] = "empty_grid_positive"
@@ -22891,6 +23003,42 @@ def _post_follow_screen_dimensions_from_hierarchy(
         )
     out["hierarchy_max_right"] = max_right
     out["hierarchy_max_bottom"] = max_bottom
+    if bool(out.get("screen_dimensions_trusted")):
+        try:
+            from dataclasses import asdict as _asdict
+            from follow_60s_canary import (
+                build_coordinate_frame_v1,
+                runtime_context as _coordinate_runtime_context,
+            )
+
+            coordinate_runtime = _coordinate_runtime_context()
+            frame = build_coordinate_frame_v1(
+                source=str(out.get("screen_dimensions_source") or ""),
+                raw_width=raw_w,
+                raw_height=raw_h,
+                canonical_width=int(out.get("screen_width") or 0),
+                canonical_height=int(out.get("screen_height") or 0),
+                inset_top=int(out.get("screen_inset_top") or 0),
+                inset_bottom=int(out.get("screen_inset_bottom") or 0),
+                orientation=("landscape" if raw_w > raw_h else "portrait"),
+                captured_at=time.monotonic(),
+                navigation_generation=str(
+                    coordinate_runtime.get("ui_generation") or ""
+                ),
+                scroll_generation=int(
+                    coordinate_runtime.get("scroll_counter") or 0
+                ),
+            )
+            if frame is None:
+                out["screen_dimensions_source"] = "screen_dimensions_untrusted"
+                out["screen_dimensions_trusted"] = False
+            else:
+                out["coordinate_frame"] = _asdict(frame)
+                out["coordinate_frame_version"] = frame.version
+                out["coordinate_frame_hash"] = frame.transform_hash
+        except Exception:
+            out["screen_dimensions_source"] = "screen_dimensions_untrusted"
+            out["screen_dimensions_trusted"] = False
     return out
 
 
@@ -44235,7 +44383,26 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             except Exception:
                 pass
         else:
-            fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+            if canary_known_depth and str(candidate_username or "").strip():
+                fast_ok, fast_meta = _mute_engine_v2_stable_sheet_closed_profile_capture(
+                    d,
+                    candidate_username=candidate_username,
+                )
+                if not fast_ok:
+                    legacy_fast_ok, legacy_fast_meta = (
+                        _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+                    )
+                    if legacy_fast_ok:
+                        fast_ok = True
+                        fast_meta = {
+                            **legacy_fast_meta,
+                            "stable_capture_rejection_reason": str(
+                                fast_meta.get("reason") or ""
+                            ),
+                            "hierarchy_xml": "",
+                        }
+            else:
+                fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
             if fast_ok:
                 ms = round((time.perf_counter() - t0) * 1000.0, 2)
                 _record_known_depth(
@@ -44297,6 +44464,7 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                     mute_posts_verified=mute_posts_verified,
                     mute_stories_verified=mute_stories_verified,
                     started_at=t0,
+                    profile_xml=str(fast_meta.get("hierarchy_xml") or ""),
                 )
                 return True, ms
             try:
@@ -44423,7 +44591,30 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             time.sleep(0.2)
         except Exception:
             ok = False
-        fast_ok_after_second, fast_meta_after_second = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+        if canary_known_depth and str(candidate_username or "").strip():
+            fast_ok_after_second, fast_meta_after_second = (
+                _mute_engine_v2_stable_sheet_closed_profile_capture(
+                    d,
+                    candidate_username=candidate_username,
+                )
+            )
+            if not fast_ok_after_second:
+                legacy_second_ok, legacy_second_meta = (
+                    _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+                )
+                if legacy_second_ok:
+                    fast_ok_after_second = True
+                    fast_meta_after_second = {
+                        **legacy_second_meta,
+                        "stable_capture_rejection_reason": str(
+                            fast_meta_after_second.get("reason") or ""
+                        ),
+                        "hierarchy_xml": "",
+                    }
+        else:
+            fast_ok_after_second, fast_meta_after_second = (
+                _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+            )
         if fast_ok_after_second:
             ms = round((time.perf_counter() - t0) * 1000.0, 2)
             if reused_following_options_after_first_back:
@@ -44495,6 +44686,7 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 mute_posts_verified=mute_posts_verified,
                 mute_stories_verified=mute_stories_verified,
                 started_at=t0,
+                profile_xml=str(fast_meta_after_second.get("hierarchy_xml") or ""),
             )
             return True, ms
         if reused_following_options_after_first_back:
@@ -45364,6 +45556,55 @@ def _mute_engine_v2_fast_sheet_closed_profile_proof(d: u2.Device) -> tuple[bool,
     return True, out
 
 
+def _mute_engine_v2_stable_sheet_closed_profile_capture(
+    d: u2.Device,
+    *,
+    candidate_username: str,
+) -> tuple[bool, dict[str, Any]]:
+    """One hierarchy proves stable Mute close, exact profile and PostGrid input."""
+    t0 = time.perf_counter()
+    try:
+        xml = str(d.dump_hierarchy(compressed=False) or "")
+    except Exception:
+        xml = ""
+    out: dict[str, Any] = {
+        "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "hierarchy_xml": xml,
+        "reason": "stable_close_xml_missing",
+        "action_bar_title": "",
+        "profile_tabs_visible": False,
+    }
+    if not xml:
+        return False, out
+    lower = xml.lower()
+    if any(
+        marker in lower
+        for marker in (
+            '>mute<', 'text="mute"', 'text="unfollow"',
+            'text="close friend"', 'text="add to favorites"',
+        )
+    ):
+        out["reason"] = "mute_or_following_options_still_visible"
+        return False, out
+    action_bar = str(
+        _followers_entry_v2_action_bar_title_from_hierarchy_xml(xml) or ""
+    ).strip().lstrip("@")
+    out["action_bar_title"] = action_bar
+    out["profile_tabs_visible"] = bool(
+        "profile_tabs_container" in lower
+        or "profile tab grid" in lower
+        or "profile_tab_grid" in lower
+    )
+    if _normalize_handle(action_bar) != _normalize_handle(candidate_username):
+        out["reason"] = "stable_close_candidate_identity_mismatch"
+        return False, out
+    if not out["profile_tabs_visible"]:
+        out["reason"] = "stable_close_profile_tabs_missing"
+        return False, out
+    out["reason"] = "stable_close_exact_profile_single_xml"
+    return True, out
+
+
 def _mute_engine_v2_fast_following_options_marker(
     d: u2.Device,
 ) -> tuple[bool, dict[str, Any]]:
@@ -46207,6 +46448,7 @@ def run_mute_engine_v2(
 
     t_all = time.perf_counter()
     timings: dict[str, float] = {}
+    final_candidate_context: dict[str, Any] = {}
     vcid = str(visual_candidate_id or "").strip()
     src = str(source_profile_username or "").strip()
     log_account_id = ""
@@ -46257,6 +46499,7 @@ def run_mute_engine_v2(
         mute_posts_verified: bool = False,
         mute_stories_verified: bool = False,
     ) -> None:
+        nonlocal final_candidate_context
         try:
             _dismiss_ok, _dismiss_ms = _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 d,
@@ -46270,6 +46513,14 @@ def run_mute_engine_v2(
             )
             timings["sheet_dismiss_ms"] = _dismiss_ms
             timings["mute_sheet_dismiss_ok"] = bool(_dismiss_ok)
+            if _dismiss_ok:
+                published = dict(_post_mute_sheet_closed_proof_stash or {})
+                if _normalize_handle(
+                    str(published.get("candidate_username") or "")
+                ) == _normalize_handle(str(follower_username or "")):
+                    final_candidate_context = dict(
+                        published.get("candidate_context") or {}
+                    )
         except Exception:
             pass
         try:
@@ -47539,6 +47790,7 @@ def run_mute_engine_v2(
                 "posts_axis_reason": posts_axis_reason,
                 "stories_axis_reason": stories_axis_reason,
                 "mute_row_label": "",
+                "candidate_context": dict(final_candidate_context),
                 "timings_ms": dict(timings),
             }
         if posts_ok or stories_ok:
@@ -47704,6 +47956,7 @@ def run_mute_engine_v2(
             "mute_stories_attempted": bool(stories_tapped),
             "posts_axis_reason": posts_axis_reason,
             "stories_axis_reason": stories_axis_reason,
+            "candidate_context": dict(final_candidate_context),
             "timings_ms": dict(timings),
         }
     _ab2, _fr2 = _mute_engine_v2_classify_single_toggle_failure(
@@ -49227,6 +49480,9 @@ def run_post_follow_post_likes_phase(
                 ),
                 screen_size=(int(_grid_ww), int(_grid_wh)),
                 screen_dimensions_source="consumer_live_window_size",
+                screen_orientation=(
+                    "landscape" if int(_grid_ww) > int(_grid_wh) else "portrait"
+                ),
                 producer_fingerprint=str(
                     _expected_ctx.get("viewport_fingerprint") or ""
                 ),
@@ -53392,6 +53648,7 @@ def run_visual_candidate_post_follow_phase(
                 allow_fast_profile_proof=True,
                 candidate_context={
                     **dict(candidate_profile_context or {}),
+                    **dict(v2.get("candidate_context") or {}),
                     "posts_verified": bool(v2.get("posts_verified")),
                     "stories_verified": bool(v2.get("stories_verified")),
                 },

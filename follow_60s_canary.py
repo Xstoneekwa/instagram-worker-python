@@ -156,6 +156,197 @@ class CandidateProfileVerdict:
 
 
 @dataclass(frozen=True)
+class CoordinateFrameV1:
+    """Deterministic mapping between the device window and hierarchy bounds."""
+
+    source: str
+    raw_window_size: tuple[int, int]
+    hierarchy_viewport_size: tuple[int, int]
+    app_content_rect: dict[str, int]
+    system_insets: dict[str, int]
+    canonical_content_size: tuple[int, int]
+    orientation: str
+    density: float
+    transform_version: str
+    transform_hash: str
+    captured_at: float
+    navigation_generation: str
+    scroll_generation: int
+
+    @property
+    def version(self) -> str:
+        return self.transform_version
+
+    @property
+    def raw_width(self) -> int:
+        return int(self.raw_window_size[0])
+
+    @property
+    def raw_height(self) -> int:
+        return int(self.raw_window_size[1])
+
+    @property
+    def canonical_width(self) -> int:
+        return int(self.canonical_content_size[0])
+
+    @property
+    def canonical_height(self) -> int:
+        return int(self.canonical_content_size[1])
+
+
+def build_coordinate_frame_v1(
+    *,
+    source: str,
+    raw_width: int,
+    raw_height: int,
+    canonical_width: int,
+    canonical_height: int,
+    inset_left: int = 0,
+    inset_top: int = 0,
+    inset_right: int = 0,
+    inset_bottom: int = 0,
+    orientation: str = "portrait",
+    density: float = 0.0,
+    captured_at: float | None = None,
+    navigation_generation: str = "",
+    scroll_generation: int = 0,
+) -> CoordinateFrameV1 | None:
+    """Build a trusted frame only from exact, internally consistent geometry."""
+    raw_w, raw_h = int(raw_width or 0), int(raw_height or 0)
+    canonical_w, canonical_h = int(canonical_width or 0), int(canonical_height or 0)
+    left, top = max(0, int(inset_left or 0)), max(0, int(inset_top or 0))
+    right, bottom = max(0, int(inset_right or 0)), max(0, int(inset_bottom or 0))
+    normalized_source = str(source or "")
+    if normalized_source not in {"raw_window_exact", "hierarchy_coordinate_frame"}:
+        return None
+    if min(raw_w, raw_h, canonical_w, canonical_h) <= 0:
+        return None
+    if raw_w != left + canonical_w + right:
+        return None
+    if raw_h != top + canonical_h + bottom:
+        return None
+    version = "coordinate_frame_v1"
+    orientation_value = str(orientation or "portrait")
+    density_value = max(0.0, float(density or 0.0))
+    material = "|".join(
+        str(value)
+        for value in (
+            version, normalized_source, raw_w, raw_h, canonical_w,
+            canonical_h, left, top, right, bottom, orientation_value,
+            f"{density_value:.6f}",
+        )
+    )
+    return CoordinateFrameV1(
+        source=normalized_source,
+        raw_window_size=(raw_w, raw_h),
+        hierarchy_viewport_size=(canonical_w, canonical_h),
+        app_content_rect={
+            "left": left,
+            "top": top,
+            "right": left + canonical_w,
+            "bottom": top + canonical_h,
+        },
+        system_insets={
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+        },
+        canonical_content_size=(canonical_w, canonical_h),
+        orientation=orientation_value,
+        density=density_value,
+        transform_version=version,
+        transform_hash=hashlib.sha256(material.encode("utf-8")).hexdigest()[:24],
+        captured_at=float(time.monotonic() if captured_at is None else captured_at),
+        navigation_generation=str(navigation_generation or ""),
+        scroll_generation=max(0, int(scroll_generation or 0)),
+    )
+
+
+def validate_coordinate_frame_v1(
+    frame: CoordinateFrameV1 | dict[str, Any] | None,
+    *,
+    consumer_size: tuple[int, int] | None,
+    navigation_generation: str = "",
+    scroll_generation: int | None = None,
+    consumer_orientation: str = "",
+    consumer_density: float | None = None,
+) -> tuple[bool, str]:
+    """Validate an exact transform; no numeric tolerance is permitted."""
+    if frame is None or consumer_size is None:
+        return False, "coordinate_frame_untrusted"
+    payload = asdict(frame) if isinstance(frame, CoordinateFrameV1) else dict(frame)
+    def _pair(value: Any) -> tuple[int, int]:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return int(value[0]), int(value[1])
+        return 0, 0
+
+    raw_size = _pair(payload.get("raw_window_size"))
+    hierarchy_size = _pair(payload.get("hierarchy_viewport_size"))
+    canonical_size = _pair(payload.get("canonical_content_size"))
+    app_rect = dict(payload.get("app_content_rect") or {})
+    insets = dict(payload.get("system_insets") or {})
+    rebuilt = build_coordinate_frame_v1(
+        source=str(payload.get("source") or ""),
+        raw_width=raw_size[0],
+        raw_height=raw_size[1],
+        canonical_width=canonical_size[0],
+        canonical_height=canonical_size[1],
+        inset_left=int(insets.get("left") or 0),
+        inset_top=int(insets.get("top") or 0),
+        inset_right=int(insets.get("right") or 0),
+        inset_bottom=int(insets.get("bottom") or 0),
+        orientation=str(payload.get("orientation") or "portrait"),
+        density=float(payload.get("density") or 0.0),
+        captured_at=float(payload.get("captured_at") or 0.0),
+        navigation_generation=str(payload.get("navigation_generation") or ""),
+        scroll_generation=int(payload.get("scroll_generation") or 0),
+    )
+    frame_version = str(payload.get("transform_version") or "")
+    if not frame_version:
+        return False, "coordinate_frame_untrusted"
+    if frame_version != "coordinate_frame_v1":
+        return False, "coordinate_frame_transform_version_mismatch"
+    if rebuilt is None or rebuilt.transform_hash != str(payload.get("transform_hash") or ""):
+        return False, "coordinate_frame_untrusted"
+    if hierarchy_size != rebuilt.hierarchy_viewport_size:
+        return False, "coordinate_frame_viewport_mismatch"
+    if app_rect != rebuilt.app_content_rect:
+        return False, "coordinate_frame_inset_mismatch"
+    if consumer_orientation and str(consumer_orientation) != rebuilt.orientation:
+        return False, "coordinate_frame_viewport_mismatch"
+    if (
+        consumer_density is not None
+        and float(consumer_density) != float(rebuilt.density)
+    ):
+        return False, "coordinate_frame_viewport_mismatch"
+    if (
+        navigation_generation
+        and rebuilt.navigation_generation
+        and str(navigation_generation) != rebuilt.navigation_generation
+    ):
+        return False, "coordinate_frame_stale"
+    if (
+        scroll_generation is not None
+        and int(scroll_generation) != rebuilt.scroll_generation
+    ):
+        return False, "coordinate_frame_stale"
+    consumer_w, consumer_h = int(consumer_size[0]), int(consumer_size[1])
+    if consumer_w != rebuilt.raw_width:
+        return False, "coordinate_frame_viewport_mismatch"
+    if consumer_h != rebuilt.raw_height:
+        expected_insets = int(rebuilt.system_insets.get("top") or 0) + int(
+            rebuilt.system_insets.get("bottom") or 0
+        )
+        if consumer_h == rebuilt.canonical_height and expected_insets > 0:
+            return False, "coordinate_frame_inset_mismatch"
+        return False, "coordinate_frame_viewport_mismatch"
+    if rebuilt.source == "raw_window_exact":
+        return True, "coordinate_frame_exact_match"
+    return True, "coordinate_frame_normalized_match"
+
+
+@dataclass(frozen=True)
 class PostGridEvidence:
     """Immutable, fully typed final decision produced at Mute-sheet close."""
 
@@ -193,6 +384,7 @@ class PostGridEvidence:
     screen_inset_top: int = 0
     screen_inset_bottom: int = 0
     reveal_count_total_for_like_phase: int = 0
+    coordinate_frame: dict[str, Any] = field(default_factory=dict)
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -781,6 +973,7 @@ def stash_post_grid_evidence(
     screen_dimensions_source: str = "", screen_inset_top: int = 0,
     screen_inset_bottom: int = 0,
     reveal_count_total_for_like_phase: int = 0,
+    coordinate_frame: CoordinateFrameV1 | dict[str, Any] | None = None,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -803,6 +996,22 @@ def stash_post_grid_evidence(
         else None
     )
     post_count_positive = bool(post_count_positive or cells)
+    typed_frame = (
+        asdict(coordinate_frame)
+        if isinstance(coordinate_frame, CoordinateFrameV1)
+        else dict(coordinate_frame or {})
+    )
+    if not typed_frame:
+        legacy_frame = build_coordinate_frame_v1(
+            source=str(screen_dimensions_source or "raw_window_exact"),
+            raw_width=int(producer_screen_width or screen_width),
+            raw_height=int(producer_screen_height or screen_height),
+            canonical_width=int(screen_width),
+            canonical_height=int(screen_height),
+            inset_top=int(screen_inset_top or 0),
+            inset_bottom=int(screen_inset_bottom or 0),
+        )
+        typed_frame = asdict(legacy_frame) if legacy_frame is not None else {}
     evidence = PostGridEvidence(
         account_id=_RUNTIME.account_id, candidate_username=candidate,
         package_name=str(package_name or ""), activity_name=str(activity_name or ""),
@@ -838,6 +1047,7 @@ def stash_post_grid_evidence(
         reveal_count_total_for_like_phase=max(
             0, int(reveal_count_total_for_like_phase or 0)
         ),
+        coordinate_frame=typed_frame,
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
@@ -850,6 +1060,8 @@ def consume_post_grid_evidence(
     screen_size: tuple[int, int] | None = None,
     screen_dimensions_source: str = "",
     producer_fingerprint: str = "",
+    screen_orientation: str = "",
+    screen_density: float | None = None,
 ) -> tuple[PostGridEvidence | None, float, str]:
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     ev = _RUNTIME.post_grid_evidence.pop(candidate, None) if enabled("like_fresh_cell_bounds") else None
@@ -871,27 +1083,30 @@ def consume_post_grid_evidence(
         if not reason and "InstagramMainActivity" not in ev.activity_name:
             reason = "activity_not_instagram_main"
         if not reason and age_ms > ev.ttl_ms:
-            reason = "ttl_expired"
+            reason = "coordinate_frame_stale"
         if not reason and ev.invalidation_counter != _RUNTIME.invalidation_counter:
             reason = "invalidation_counter_mismatch"
         if not reason and ev.navigation_counter != _RUNTIME.navigation_counter:
             reason = "navigation_counter_mismatch"
         if not reason and ev.scroll_generation != _RUNTIME.scroll_counter:
             reason = "scroll_generation_mismatch"
-        dimensions_reason = "screen_dimensions_untrusted"
+        dimensions_reason = "coordinate_frame_untrusted"
         if not reason:
-            if screen_size is None:
-                reason = "screen_dimensions_untrusted"
+            frame_ok, frame_reason = validate_coordinate_frame_v1(
+                ev.coordinate_frame,
+                consumer_size=screen_size,
+                navigation_generation=str(navigation_generation or ""),
+                scroll_generation=_RUNTIME.scroll_counter,
+                consumer_orientation=str(screen_orientation or ""),
+                consumer_density=screen_density,
+            )
+            if not frame_ok:
+                reason = frame_reason
             else:
                 consumer_w, consumer_h = int(screen_size[0]), int(screen_size[1])
                 producer_w = int(ev.producer_screen_width or ev.screen_width)
                 producer_h = int(ev.producer_screen_height or ev.screen_height)
                 canonical_w, canonical_h = int(ev.screen_width), int(ev.screen_height)
-                explicit_insets = int(ev.screen_inset_top) + int(ev.screen_inset_bottom)
-                source_trusted = ev.screen_dimensions_source in {
-                    "hierarchy_coordinate_frame",
-                    "raw_window_exact",
-                }
                 fingerprint_value = str(
                     producer_fingerprint or viewport_fingerprint or ""
                 )
@@ -905,26 +1120,10 @@ def consume_post_grid_evidence(
                         and fingerprint_value == ev.viewport_fingerprint
                     )
                 )
-                if not source_trusted or not fingerprint_trusted:
-                    reason = "screen_dimensions_untrusted"
-                elif (consumer_w, consumer_h) == (canonical_w, canonical_h):
-                    dimensions_reason = (
-                        "screen_dimensions_exact_match"
-                        if (producer_w, producer_h) == (canonical_w, canonical_h)
-                        else "screen_dimensions_normalized_match"
-                    )
-                elif (
-                    ev.screen_dimensions_source == "hierarchy_coordinate_frame"
-                    and (consumer_w, consumer_h) == (producer_w, producer_h)
-                    and producer_w == canonical_w
-                    and producer_h - canonical_h == explicit_insets
-                    and explicit_insets > 0
-                ):
-                    dimensions_reason = "screen_dimensions_normalized_match"
-                elif consumer_w == canonical_w and abs(consumer_h - canonical_h) == explicit_insets and explicit_insets > 0:
-                    reason = "screen_dimensions_inset_mismatch"
+                if not fingerprint_trusted:
+                    reason = "coordinate_frame_untrusted"
                 else:
-                    reason = "screen_dimensions_viewport_mismatch"
+                    dimensions_reason = frame_reason
                 log(
                     "info",
                     "follow_60s_post_grid_screen_dimensions_checked",
@@ -940,6 +1139,10 @@ def consume_post_grid_evidence(
                     consumer_height=consumer_h,
                     consumer_source=str(screen_dimensions_source or ""),
                     viewport_fingerprint_match=fingerprint_trusted,
+                    coordinate_frame_version=str(
+                        ev.coordinate_frame.get("transform_version") or ""
+                    ),
+                    coordinate_frame_hash=str(ev.coordinate_frame.get("transform_hash") or ""),
                     dimensions_reason=(reason or dimensions_reason),
                     accepted=not bool(reason),
                 )

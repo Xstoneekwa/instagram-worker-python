@@ -566,9 +566,9 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
     def test_post_grid_dimensions_reject_inset_viewport_and_untrusted_frames(self) -> None:
         cases = (
-            ("inset", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2280), "screen_dimensions_inset_mismatch"),
-            ("viewport", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2500), "screen_dimensions_viewport_mismatch"),
-            ("untrusted", 2340, 2340, "screen_dimensions_untrusted", 0, (1080, 2340), "screen_dimensions_untrusted"),
+            ("inset", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2280), "coordinate_frame_viewport_mismatch"),
+            ("viewport", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2500), "coordinate_frame_viewport_mismatch"),
+            ("untrusted", 2340, 2340, "screen_dimensions_untrusted", 0, (1080, 2340), "coordinate_frame_untrusted"),
         )
         for candidate, raw_h, canonical_h, source, inset, consumer, expected in cases:
             with self.subTest(case=candidate):

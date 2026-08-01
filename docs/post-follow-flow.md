@@ -133,3 +133,27 @@ crash, le replay est DB-only et précède toute connexion au téléphone.
 Ce contrat est account-scoped : tous les autres comptes conservent le chemin
 Golden normal. L'absence ou la contradiction du binding canary échoue avant
 toute action Post-Follow avec `follow60_stage_binding_missing_or_invalid`.
+
+### Final performance pass — CoordinateFrameV1
+
+Chaque preuve PostGrid autoritaire porte désormais un
+`coordinate_frame_v1` : fenêtre brute, viewport canonique issu de la
+hiérarchie, insets exacts, orientation, densité et hash déterministe de la
+transformation. L'acceptation est exacte (`coordinate_frame_exact_match`) ou
+normalisée par des insets explicitement comptabilisés
+(`coordinate_frame_normalized_match`). Une version, un hash, un inset ou un
+viewport incohérent rejette la preuve vers Golden ; aucune tolérance numérique
+n'est utilisée.
+
+La hiérarchie stable de fermeture Mute est partagée par la preuve de fermeture,
+l'identité exacte et le classifieur PostGrid. Un checkpoint Golden ultérieur,
+non autoritaire, ne peut plus écraser cette preuve. Cela supprime la régression
+terrain où un repère valide `1080x2340` était remplacé par des valeurs par
+défaut `1x1`.
+
+Un profil identifié avec grille sélectionnée, vide, non privé et hors
+Reels/Tagged peut recevoir une seule observation de stabilisation bornée à
+280 ms afin de promouvoir un marqueur exact `No Posts Yet`. Toute autre
+ambiguïté va directement au Golden. Une ligne de posts positivement prouvée
+mais coupée conserve un seul reveal, une seule acquisition fraîche, puis le
+garde Story/Highlight V5 obligatoire avant tout Like.
