@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -413,6 +414,96 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         vision.assert_not_called()
         self.assertEqual(out["outcome"], canary.POST_ROW_POSITIVE_SAFE)
         self.assertEqual(out["post_bounds_source"], "single_reveal_fresh_xml_physical_cell")
+
+    def test_operator_capture_structure_classifies_clipped_without_fixed_coordinates(self) -> None:
+        fixture_path = Path(__file__).parent / "fixtures" / (
+            "follow60_postgrid_clipped_after_mute_v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertIs(fixture["fixed_tap_coordinates"], False)
+        ratios = fixture["geometry_ratios"]
+        username = fixture["profile"]["candidate_token"]
+        post_count = int(fixture["profile"]["post_count"])
+
+        for width, height in ((1080, 2340), (1440, 3120)):
+            with self.subTest(viewport=(width, height)):
+                def y(name: str) -> int:
+                    return int(round(float(ratios[name]) * height))
+
+                cell_right = int(round(float(ratios["cell_width_x"]) * width))
+                xml = f"""<hierarchy>
+                  <node text="{username}"/>
+                  <node text="{post_count} posts"/>
+                  <node resource-id="profile_tabs_container"
+                        bounds="[0,{y('tabs_top_y')}][{width},{y('tabs_bottom_y')}]"/>
+                  <node content-desc="Profile tab grid" selected="true"
+                        bounds="[0,{y('tabs_top_y')}][{cell_right},{y('tabs_bottom_y')}]"/>
+                  <node class="android.widget.ImageView" content-desc="Post thumbnail"
+                        bounds="[0,{y('partial_media_top_y')}][{cell_right},{y('partial_media_bottom_y')}]"/>
+                  <node resource-id="com.instagram.android:id/main_tab_bar"
+                        bounds="[0,{y('bottom_navigation_top_y')}][{width},{height}]"/>
+                </hierarchy>"""
+                out = nav._post_follow_post_grid_evidence_from_xml(
+                    xml,
+                    candidate_username=username,
+                    ww=width,
+                    wh=height,
+                )
+                self.assertEqual(out["outcome"], canary.POST_ROW_POSITIVE_BUT_CLIPPED)
+                self.assertTrue(out["clipped_detected"])
+                self.assertFalse(out["tap_safe"])
+                self.assertEqual(out["fully_exploitable_bottom"], y("bottom_navigation_top_y"))
+                self.assertEqual(out["post_bounds"]["right"], cell_right)
+
+    def test_short_media_strip_without_full_positive_contract_stays_ambiguous(self) -> None:
+        xml = """<hierarchy>
+          <node text="candidate"/>
+          <node resource-id="profile_tabs_container" bounds="[0,1700][1080,1900]"/>
+          <node content-desc="Profile tab grid" selected="true" bounds="[0,1700][360,1900]"/>
+          <node class="android.widget.ImageView" content-desc="Post thumbnail" bounds="[0,2080][360,2140]"/>
+          <node resource-id="main_tab_bar" bounds="[0,2140][1080,2340]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], canary.POST_GRID_AMBIGUOUS_FINAL)
+        self.assertEqual(out["rejection_reason"], "post_grid_ambiguous")
+
+    def test_clipped_reacquisition_not_safe_goes_direct_golden_without_vision(self) -> None:
+        device = mock.MagicMock()
+        device.dump_hierarchy.return_value = """<hierarchy>
+          <node text="candidate"/><node text="17 posts"/>
+          <node resource-id="profile_tabs_container" bounds="[0,700][1080,820]"/>
+          <node content-desc="Profile tab grid" selected="true" bounds="[0,700][360,820]"/>
+        </hierarchy>"""
+        clipped = {
+            "outcome": canary.POST_ROW_POSITIVE_BUT_CLIPPED,
+            "candidate_username": "candidate",
+            "identity_exact": True,
+            "profile_tabs_present": True,
+            "grid_selected": True,
+            "tabs_bottom": 820,
+            "loading_visible": False,
+            "private_profile_visible": False,
+            "reels_or_tagged_selected": False,
+        }
+        with mock.patch.object(
+            nav,
+            "_post_follow_likes_profile_scroll_swipe",
+            return_value={"swipe_ok": True, "scroll_distance_px": 311},
+        ) as reveal, mock.patch.object(
+            nav, "_post_follow_likes_probe_top_left_vision_cell_meta"
+        ) as vision:
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                device, clipped, ww=1080, wh=2340, candidate_username="candidate"
+            )
+        reveal.assert_called_once()
+        device.dump_hierarchy.assert_called_once()
+        vision.assert_not_called()
+        self.assertEqual(out["outcome"], canary.POST_GRID_AMBIGUOUS_FINAL)
+        self.assertEqual(out["reveal_count_total_for_like_phase"], 1)
+        self.assertEqual(out["reveal_distance_px"], 311)
+        self.assertEqual(out["golden_fallback_reason"], "clipped_reacquisition_not_tap_safe")
 
     def test_like_phase_reveal_budget_allows_at_most_one_scroll_total(self) -> None:
         device = mock.MagicMock()

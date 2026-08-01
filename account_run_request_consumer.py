@@ -1273,17 +1273,30 @@ def _reconcile_linked_run(
 
                         control = supabase_client.get_follow_60s_canary_control_v1(account_id)
                         binding = parse_control(control)
-                        if binding.control_id and binding.control_status != "waiting_operator_evaluation":
+                        control_terminal_status: str | None
+                        if mapped_terminal_status in {"failed", "blocked", "aborted"}:
+                            control_terminal_status = "activation_failed"
+                        elif mapped_terminal_status in {"stopped", "canceled"}:
+                            control_terminal_status = (
+                                None
+                                if binding.control_status == "waiting_operator_evaluation"
+                                else "canceled"
+                            )
+                        elif mapped_terminal_status == "completed":
+                            control_terminal_status = (
+                                None
+                                if binding.control_status == "waiting_operator_evaluation"
+                                else "completed"
+                            )
+                        else:
+                            control_terminal_status = "activation_failed"
+                        if binding.control_id and control_terminal_status:
                             supabase_client.terminalize_follow_60s_canary_control_v1(
                                 control_id=binding.control_id,
                                 account_id=account_id,
                                 run_id=str(run_id),
                                 request_id=request_id,
-                                status=(
-                                    "completed"
-                                    if mapped_terminal_status == "completed"
-                                    else "canceled"
-                                ),
+                                status=control_terminal_status,
                                 reason=f"run_terminal_{mapped_terminal_status}",
                                 metadata_safe={"canonical_totals_reconciled": True},
                             )

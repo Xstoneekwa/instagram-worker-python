@@ -1784,6 +1784,73 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(terminalize.call_args.kwargs["status"], "canceled")
         self.assertEqual(terminalize.call_args.kwargs["reason"], "run_terminal_stopped")
 
+    def test_failed_bound_follow60_run_terminalizes_activation_failed(self) -> None:
+        control = bound_control(
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            run_id=TEST_RUN_ID,
+            request_id=TEST_REQUEST_ID,
+            status="running",
+        )
+        with (
+            patch.object(consumer, "_follow60_control_applies", return_value=True),
+            patch.object(
+                consumer.supabase_client,
+                "reconcile_ig_run_canonical_totals_v1",
+                return_value={"ok": True, "total_follow": 1, "total_like": 0},
+            ),
+            patch.object(
+                consumer.supabase_client,
+                "get_follow_60s_canary_control_v1",
+                return_value=control,
+            ),
+            patch.object(
+                consumer.supabase_client,
+                "terminalize_follow_60s_canary_control_v1",
+                return_value={"ok": True, "status": "activation_failed"},
+            ) as terminalize,
+        ):
+            consumer._reconcile_linked_run(
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                run_id=TEST_RUN_ID,
+                terminal_status="failed",
+                request_id=TEST_REQUEST_ID,
+                exit_code=96,
+            )
+        self.assertEqual(terminalize.call_args.kwargs["status"], "activation_failed")
+
+    def test_barrier_waiting_control_is_not_overwritten_by_successful_stop(self) -> None:
+        control = bound_control(
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            run_id=TEST_RUN_ID,
+            request_id=TEST_REQUEST_ID,
+            status="waiting_operator_evaluation",
+        )
+        with (
+            patch.object(consumer, "_follow60_control_applies", return_value=True),
+            patch.object(
+                consumer.supabase_client,
+                "reconcile_ig_run_canonical_totals_v1",
+                return_value={"ok": True, "total_follow": 10, "total_like": 8},
+            ),
+            patch.object(
+                consumer.supabase_client,
+                "get_follow_60s_canary_control_v1",
+                return_value=control,
+            ),
+            patch.object(
+                consumer.supabase_client,
+                "terminalize_follow_60s_canary_control_v1",
+            ) as terminalize,
+        ):
+            consumer._reconcile_linked_run(
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                run_id=TEST_RUN_ID,
+                terminal_status="canceled",
+                request_id=TEST_REQUEST_ID,
+                exit_code=-15,
+            )
+        terminalize.assert_not_called()
+
     def test_wait_for_subprocess_terminates_on_cancel_request(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

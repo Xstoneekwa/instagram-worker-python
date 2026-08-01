@@ -26,12 +26,11 @@ class Follow60P0SourceContractTest(unittest.TestCase):
         self.assertIn('export WORKER_GIT_SHA="$RUNTIME_GIT_SHA"', source)
         self.assertIn('WORKER_GIT_SHA_SOURCE="runtime_release_head"', source)
 
-    def test_forbidden_ui_files_are_not_in_p0_diff(self) -> None:
-        # The P0 contract deliberately confines runtime edits to orchestration,
-        # identity and persistence files. This guard catches accidental scope
-        # creep when the suite is run from a dirty worktree.
+    def test_unfollow_ui_files_are_not_in_follow60_diff(self) -> None:
+        # The original P0 excluded every navigation edit. The approved
+        # PostGrid/Like successor deliberately changes instagram_navigation,
+        # while Unfollow remains outside scope and must stay untouched.
         forbidden = {
-            "instagram_navigation.py",
             "unfollow_hybrid_strategy.py",
             "unfollow_session_orchestrator.py",
         }

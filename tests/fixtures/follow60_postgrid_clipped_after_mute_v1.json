@@ -1,0 +1,25 @@
+{
+  "schema": "follow60_postgrid_clipped_after_mute_v1",
+  "source": "normalized_structure_from_operator_capture",
+  "fixed_tap_coordinates": false,
+  "profile": {
+    "candidate_token": "fixture_candidate",
+    "post_count": 17
+  },
+  "geometry_ratios": {
+    "tabs_top_y": 0.760,
+    "tabs_bottom_y": 0.817,
+    "bottom_navigation_top_y": 0.923,
+    "partial_media_top_y": 0.897,
+    "partial_media_bottom_y": 0.923,
+    "cell_width_x": 0.333
+  },
+  "required_structure": [
+    "exact_profile_identity",
+    "positive_post_count",
+    "posts_tab_selected",
+    "reels_and_tagged_not_selected",
+    "physical_media_strip_below_tabs",
+    "media_strip_clipped_by_bottom_navigation"
+  ]
+}

@@ -25,6 +25,36 @@ _SURFACE_PRECHECK_OK: dict[str, object] = {
 }
 
 
+def _typed_safe_grid_evidence() -> mock.MagicMock:
+    evidence = mock.MagicMock()
+    evidence.outcome = "POST_ROW_POSITIVE_SAFE"
+    evidence.package = "com.instagram.android"
+    evidence.activity = "profile"
+    evidence.first_post_cell_bounds = {
+        "left": 0,
+        "top": 900,
+        "right": 360,
+        "bottom": 1260,
+        "center_x": 180,
+        "center_y": 1080,
+    }
+    evidence.first_post_cell_source = "fresh_canary_post_grid_evidence"
+    evidence.grid_tab_state = "selected"
+    evidence.reels_tab_state = "not_selected"
+    evidence.tagged_tab_state = "not_selected"
+    evidence.post_count_positive = True
+    evidence.physical_cells = [dict(evidence.first_post_cell_bounds)]
+    evidence.no_posts_positive = False
+    evidence.rejection_reason = ""
+    evidence.screen_width = 1080
+    evidence.screen_height = 2340
+    evidence.producer_screen_width = 1080
+    evidence.producer_screen_height = 2340
+    evidence.screen_dimensions_source = "producer"
+    evidence.reveal_count_total_for_like_phase = 0
+    return evidence
+
+
 def _test_post_identity_contract(*_args: object, **kwargs: object) -> dict[str, object]:
     story_detected = bool(kwargs.get("story_detected"))
     like_surface_ok = bool(kwargs.get("like_surface_ok"))
@@ -2229,6 +2259,13 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 _patch_like_phase_common(stack, contract_ctx=contract_ctx)
                 stack.enter_context(
                     mock.patch.object(
+                        canary,
+                        "consume_post_grid_evidence",
+                        return_value=(_typed_safe_grid_evidence(), 100.0, ""),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
                         nav,
                         "_visual_profile_no_posts_tier1_direct_check",
                         return_value={
@@ -2439,8 +2476,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertEqual(len(freshness_rows), 1)
         self.assertFalse(freshness_rows[0]["valid"])
         self.assertEqual(freshness_rows[0]["age_ms"], 2000.0)
-        grid_probe.assert_called_once()
-        legacy_open.assert_called_once()
+        grid_probe.assert_not_called()
+        legacy_open.assert_not_called()
         device.click.assert_not_called()
         golden_open.assert_called_once()
         self.assertEqual(out.get("phase_outcome"), "success")
@@ -2535,6 +2572,19 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         },
                     )
                 )
+                golden_open = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_open_recent_post_from_profile",
+                        return_value={
+                            "ok": True,
+                            "post_detected": True,
+                            "failure_reason": "",
+                            "open_strategy": "golden_direct",
+                            "likes_perf_post_open": {},
+                        },
+                    )
+                )
                 stack.enter_context(
                     mock.patch.object(
                         nav,
@@ -2603,7 +2653,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 resume_policy=None,
             )
 
-        self.assertEqual(legacy_open.call_count, 10)
+        self.assertEqual(golden_open.call_count, 10)
+        legacy_open.assert_not_called()
         self.assertTrue(all(out.get("phase_outcome") == "success" for out in outputs))
         self.assertTrue(all(out.get("liked_count") == 1 for out in outputs))
         fallback_rows = [
