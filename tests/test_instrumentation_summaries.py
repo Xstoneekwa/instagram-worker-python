@@ -38,6 +38,37 @@ class InstrumentationSummariesTest(unittest.TestCase):
             {"runtime_seen": 1, "private_account": 1, "already_followed": 1},
         )
 
+    def test_lifecycle_rejection_reason_is_preserved_and_unknown_stays_unknown(self) -> None:
+        tracker = runner._target_rejection_tracker("mythyllus")
+        logs: list[tuple[str, str, dict]] = []
+        with patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            runner._target_rejection_record(
+                tracker,
+                reason="lifecycle_unfollowed_completed",
+                candidate_username="known_candidate",
+                source_phase="social_memory",
+            )
+            runner._target_rejection_record(
+                tracker,
+                reason="future_unclassified_reason",
+                candidate_username="unknown_candidate",
+                source_phase="unit",
+            )
+
+        self.assertEqual(
+            tracker["rejection_reason_counts"],
+            {"lifecycle_unfollowed_completed": 1, "unknown": 1},
+        )
+        rejection_logs = [kw for _level, event, kw in logs if event == "target_candidate_rejected"]
+        self.assertEqual(rejection_logs[0]["reason"], "lifecycle_unfollowed_completed")
+        self.assertEqual(rejection_logs[0]["raw_reason"], "lifecycle_unfollowed_completed")
+        self.assertEqual(rejection_logs[1]["reason"], "unknown")
+        self.assertEqual(rejection_logs[1]["raw_reason"], "future_unclassified_reason")
+
     def test_target_scan_no_candidate_summary_payload_counts(self) -> None:
         tracker = runner._target_rejection_tracker("mythyllus")
         tracker["candidates_seen_count"] = 5

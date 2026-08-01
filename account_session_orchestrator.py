@@ -960,11 +960,6 @@ def _run_follow_target_rotation(
             "force_stop_used": force_stop_used,
             "target_follow_budget": target_budget,
             "session_global_follow_cap": global_follow_goal,
-            "run_request_id": str(run_request_id or "") or None,
-            "follow60_canary_active": bool(follow60_canary_active),
-            "follow60_canary_control": dict(follow60_canary_control or {}),
-            "follow60_attempt_id": int(follow60_attempt_id or 1),
-            "business_session_id": str(business_session_id or "") or None,
             # Checkpoint provenance and Follow persistence have independent
             # safety contracts; never populate the engine's run_request_id
             # implicitly from this CT Resume channel.
@@ -978,6 +973,16 @@ def _run_follow_target_rotation(
                 else None
             ),
         }
+        if follow60_canary_active:
+            call_kwargs.update(
+                {
+                    "run_request_id": str(run_request_id or "") or None,
+                    "follow60_canary_active": True,
+                    "follow60_canary_control": dict(follow60_canary_control or {}),
+                    "follow60_attempt_id": int(follow60_attempt_id or 1),
+                    "business_session_id": str(business_session_id or "") or None,
+                }
+            )
         if start_from_current_followers_list:
             call_kwargs["start_from_current_followers_list"] = True
             call_kwargs["prevalidated_followers_list_meta"] = dict(prevalidated_followers_meta)
@@ -4024,6 +4029,15 @@ def run_account_session(
                 run_id=run_id,
                 settings_source=rotation_settings["settings_source"],
             )
+            _follow60_rotation_kwargs: dict[str, Any] = {}
+            if follow60_canary_active:
+                _follow60_rotation_kwargs = {
+                    "run_request_id": run_request_id,
+                    "follow60_canary_active": True,
+                    "follow60_canary_control": follow60_canary_control,
+                    "follow60_attempt_id": follow60_attempt_id,
+                    "business_session_id": business_session_id,
+                }
             rotation_result = _run_follow_target_rotation(
                 d,
                 account_id=aid,
@@ -4050,15 +4064,11 @@ def run_account_session(
                     auto_restart_resume_policy
                 ),
                 fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
-                run_request_id=run_request_id,
-                follow60_canary_active=follow60_canary_active,
-                follow60_canary_control=follow60_canary_control,
-                follow60_attempt_id=follow60_attempt_id,
-                business_session_id=business_session_id,
                 target_followers_resume_source_request_id=(
                     target_followers_resume_source_request_id
                 ),
                 auto_restart_resume_policy=auto_restart_resume_policy,
+                **_follow60_rotation_kwargs,
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True

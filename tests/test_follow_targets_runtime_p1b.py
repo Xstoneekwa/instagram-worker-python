@@ -1734,6 +1734,51 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         type_search.assert_not_called()
         tap_account.assert_not_called()
 
+    def test_fast_rotation_back_failure_uses_one_proven_canonical_search_reset(self) -> None:
+        d = FakeDevice()
+        controlled_search = {
+            "is_global_search": True,
+            "is_local_followers_search": False,
+            "is_lightweight_search": True,
+            "is_global_search_empty": True,
+            "is_recent_search_surface": False,
+            "has_search_bar": True,
+            "has_account_results": False,
+            "has_explore_grid": False,
+            "surface_type": "global_search_empty",
+            "surface_reason": "controlled_empty",
+        }
+        with patch.object(runner, "followers_surface_quick_revalidate", return_value=(True, {})), patch.object(
+            runner, "verify_profile", return_value=True
+        ), patch.object(
+            runner, "_fast_rotation_back_back_to_global_search", return_value=(False, "back_to_search_not_validated", 2)
+        ), patch.object(
+            runner, "open_search", return_value=True
+        ) as open_search, patch.object(
+            runner, "_fast_rotation_probe_search_surface", return_value=controlled_search
+        ), patch.object(
+            runner, "type_search", return_value=True
+        ), patch.object(
+            runner, "open_accounts_tab", return_value=False
+        ), patch.object(
+            runner, "tap_account_result", return_value=True
+        ), patch.object(
+            runner,
+            "open_followers_list_from_profile",
+            return_value=(True, {"open_detection_method": "xml"}),
+        ):
+            result = runner.fast_rotate_to_next_target_from_followers(
+                d,
+                account_id="acct",
+                run_id="run",
+                from_source_target="source_a",
+                to_source_target="source_b",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("canonical_search_reset", result["steps_completed"])
+        open_search.assert_called_once_with(d)
+
     def test_fast_rotation_wrong_result_profile_validation_fails_closed(self) -> None:
         d = FakeDevice()
         global_probe = {

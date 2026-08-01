@@ -167,6 +167,11 @@ def _without_reviewed_follow60_binding(node: ast.FunctionDef) -> ast.FunctionDef
             normalized.args.kw_defaults.pop(index)
 
     class RemoveReviewedFollow60Binding(ast.NodeTransformer):
+        def visit_If(self, item):
+            if isinstance(item.test, ast.Name) and item.test.id == "follow60_canary_active":
+                return None
+            return self.generic_visit(item)
+
         def visit_Dict(self, item):
             updated = self.generic_visit(item)
             pairs = [

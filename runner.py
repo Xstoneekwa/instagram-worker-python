@@ -1203,6 +1203,11 @@ _TARGET_REJECTION_STABLE_REASONS = frozenset(
         "already_interacted",
         "runtime_seen",
         "social_memory_blocked",
+        "lifecycle_unfollowed_completed",
+        "lifecycle_followed_completed",
+        "lifecycle_blocked_future_follow",
+        "refollow_after_unfollow_forbidden",
+        "cooldown_until_active",
         "follow_max_per_run",
         "global_follow_cap_reached",
         "private_account",
@@ -7345,6 +7350,74 @@ def _fast_rotation_recover_global_search_surface(
     return False, "recent_search_recovery_failed"
 
 
+def _fast_rotation_canonical_search_reset(
+    d,
+    *,
+    pkg: str,
+    from_source_target: str,
+    to_source_target: str,
+    account_id: str,
+    run_id: str | None,
+    started_at: float,
+) -> tuple[bool, str]:
+    """One bounded Search-tab recovery, accepted only with a reusable Search proof."""
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_canonical_search_reset_started",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="canonical_search_reset",
+        reason="back_to_search_not_validated",
+        started_at=started_at,
+        fallback_used=True,
+    )
+    try:
+        opened = bool(open_search(d))
+    except Exception:
+        opened = False
+    if not opened:
+        return False, "canonical_search_open_failed"
+
+    probe = _fast_rotation_probe_search_surface(
+        d, pkg, from_source_target, to_source_target
+    )
+    if _fast_rotation_search_probe_is_previous_results(probe):
+        reason = "canonical_previous_target_search_results"
+    elif _fast_rotation_search_probe_is_exploitable_recent(probe):
+        reason = "canonical_recent_search_ready"
+    elif _fast_rotation_search_probe_is_controlled_empty(probe):
+        reason = "canonical_controlled_empty_search"
+    else:
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_canonical_search_reset_rejected",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="canonical_search_reset",
+            reason=str(probe.get("surface_reason") or "search_surface_not_proven"),
+            started_at=started_at,
+            surface_type=probe.get("surface_type"),
+            fallback_used=True,
+        )
+        return False, "canonical_search_surface_not_proven"
+
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_canonical_search_reset_completed",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="canonical_search_reset",
+        reason=reason,
+        started_at=started_at,
+        surface_type=probe.get("surface_type"),
+        fallback_used=True,
+    )
+    return True, reason
+
+
 def _fast_rotation_back_back_to_global_search(
     d,
     *,
@@ -8086,7 +8159,20 @@ def fast_rotate_to_next_target_from_followers(
         started_on_followers_list=bool(list_ok),
     )
     if not search_ok:
-        return fail(search_reason, "back_search")
+        recovered, recovery_reason = _fast_rotation_canonical_search_reset(
+            d,
+            pkg=pkg,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            account_id=account_id,
+            run_id=run_id,
+            started_at=started_at,
+        )
+        if not recovered:
+            return fail(search_reason, "back_search")
+        search_ok = True
+        search_reason = recovery_reason
+        steps.append("canonical_search_reset")
     if list_ok:
         steps.append("back_profile")
     steps.append("back_search")
