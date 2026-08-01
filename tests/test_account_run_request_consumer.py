@@ -1738,6 +1738,52 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         )
         generic_reconcile.assert_not_called()
 
+    def test_generic_canonical_reconciliation_terminalizes_bound_follow60_control(self) -> None:
+        canonical = {
+            "ok": True,
+            "run_id": TEST_RUN_ID,
+            "status": "stopped",
+            "total_follow": 3,
+            "total_like": 2,
+        }
+        control = bound_control(
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            run_id=TEST_RUN_ID,
+            request_id=TEST_REQUEST_ID,
+            status="running",
+        )
+        with (
+            patch.object(consumer, "_follow60_control_applies", return_value=True),
+            patch.object(
+                consumer.supabase_client,
+                "reconcile_ig_run_canonical_totals_v1",
+                return_value=canonical,
+            ) as reconcile,
+            patch.object(
+                consumer.supabase_client,
+                "get_follow_60s_canary_control_v1",
+                return_value=control,
+            ),
+            patch.object(
+                consumer.supabase_client,
+                "terminalize_follow_60s_canary_control_v1",
+                return_value={"ok": True, "status": "canceled"},
+            ) as terminalize,
+        ):
+            result = consumer._reconcile_linked_run(
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                run_id=TEST_RUN_ID,
+                terminal_status="canceled",
+                request_id=TEST_REQUEST_ID,
+                exit_code=-15,
+            )
+
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(result["reason"], "canonical_event_reconciliation")
+        self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "stopped")
+        self.assertEqual(terminalize.call_args.kwargs["status"], "canceled")
+        self.assertEqual(terminalize.call_args.kwargs["reason"], "run_terminal_stopped")
+
     def test_wait_for_subprocess_terminates_on_cancel_request(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

@@ -11145,7 +11145,7 @@ def _run_followers_list_engine_session(
             and int(follow60_attempt_id or 0) >= 1
             and str(business_session_id or "").strip()
             and str(_control.get("status") or "")
-            in {"armed", "barrier_waiting_stop", "continuation_authorized"}
+            in {"armed", "running", "barrier_waiting_stop", "continuation_authorized"}
             and _control.get("binding_valid") is True
             and str(_control.get("account_id") or "") == str(account_id or "")
             and str(_control.get("run_id") or "") == str(run_id or "")
@@ -11169,6 +11169,7 @@ def _run_followers_list_engine_session(
     src_key = _norm_ig_handle(source_profile_username)
     processed = 0
     follows_completed_count = 0
+    follow60_completed_cycle_count = 0
     max_iter: int | None = None
     _followers_session_summary: dict[str, Any] = {
         "source_profile_username": source_profile_username,
@@ -11229,7 +11230,7 @@ def _run_followers_list_engine_session(
         ),
     )
     target_followers_resume_controller = None
-    if _target_followers_resume_flags.shadow_allowed_for(str(account_id or "")):
+    if _target_followers_resume_flags.rollout_allowed_for(str(account_id or "")):
         (
             _target_followers_resume_provenance,
             _target_followers_resume_provenance_reason,
@@ -11247,8 +11248,8 @@ def _run_followers_list_engine_session(
                     "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
                     "run_id": str(run_id or ""),
                     "reason": _target_followers_resume_provenance_reason,
-                    "shadow": True,
-                    "enforce": False,
+                    "shadow": _target_followers_resume_flags.mode == "shadow",
+                    "enforce": _target_followers_resume_flags.mode == "enforce",
                 },
             )
         else:
@@ -11276,8 +11277,8 @@ def _run_followers_list_engine_session(
                     "run_id": str(run_id or ""),
                     "reason": "checkpoint_load_or_claim_failed",
                     "error_type": type(exc).__name__,
-                    "shadow": True,
-                    "enforce": False,
+                    "shadow": _target_followers_resume_flags.mode == "shadow",
+                    "enforce": _target_followers_resume_flags.mode == "enforce",
                 },
             )
             target_followers_resume_controller = None
@@ -11406,7 +11407,7 @@ def _run_followers_list_engine_session(
         *,
         stage_receipts_enabled: bool,
         cycle_complete: bool,
-    ) -> None:
+    ) -> bool:
         from follow_60s_canary_binding_v2 import parse_control
 
         control = dict(follow60_canary_control or {})
@@ -11415,10 +11416,10 @@ def _run_followers_list_engine_session(
             canary_active=bool(follow60_canary_active),
             stage_receipts_enabled=bool(stage_receipts_enabled),
             cycle_complete=bool(cycle_complete),
-            completed_new_cycles=int(_RUNTIME_FOLLOW_COUNT),
+            completed_new_cycles=int(follow60_completed_cycle_count),
             max_new_cycles=evaluation_increment,
         ):
-            return
+            return False
         expected_barrier_total = int(control.get("baseline_follow_count") or 0) + evaluation_increment
         canonical_barrier_total = supabase_client.count_successful_follows_today(account_id)
         if canonical_barrier_total != expected_barrier_total:
@@ -11427,6 +11428,7 @@ def _run_followers_list_engine_session(
                 expected=expected_barrier_total,
                 canonical=canonical_barrier_total,
                 local_new_follows=int(_RUNTIME_FOLLOW_COUNT),
+                completed_new_cycles=int(follow60_completed_cycle_count),
                 cycle_complete=bool(cycle_complete),
                 device_actions_blocked=True,
             )
@@ -11446,37 +11448,16 @@ def _run_followers_list_engine_session(
             TEN_NEW_FOLLOWS_REACHED_READY_FOR_LIAM_STOP="YES",
             canonical_follow_count=canonical_barrier_total,
             local_new_follows=int(_RUNTIME_FOLLOW_COUNT),
+            completed_new_cycles=int(follow60_completed_cycle_count),
             cycle_complete=bool(cycle_complete),
             no_eleventh_candidate=True,
         )
-        barrier_deadline = time.monotonic() + 1800.0
-        while time.monotonic() < barrier_deadline:
-            if _run_request_cancel_requested(run_request_id):
-                device_action_latch.request_stop(reason="evaluation_operator_stop_observed")
-                try:
-                    supabase_client.mark_follow_60s_canary_evaluation_hold_v1(
-                        account_id=account_id,
-                        run_id=run_id,
-                        request_id=run_request_id,
-                        metadata_safe={
-                            "source": "evaluation_barrier_poll",
-                            "cycle_complete": bool(cycle_complete),
-                        },
-                    )
-                finally:
-                    raise SystemExit(143)
-            time.sleep(0.5)
-        device_action_latch.request_stop(reason="evaluation_barrier_timeout")
-        supabase_client.mark_follow_60s_canary_evaluation_hold_v1(
-            account_id=account_id,
-            run_id=run_id,
-            request_id=run_request_id,
-            metadata_safe={
-                "source": "evaluation_barrier_timeout",
-                "cycle_complete": bool(cycle_complete),
-            },
-        )
-        raise SystemExit(143)
+        # The DB transition above atomically installs the evaluation hold and
+        # blocks Auto Restart. Return through normal orchestration so cleanup,
+        # phase terminalization and canonical totals all complete without a
+        # 30-minute pseudo-run or an operator Stop.
+        device_action_latch.request_stop(reason="evaluation_barrier_reached")
+        return True
 
     follow_runtime_inputs: dict[str, Any] = {}
     if account_id:
@@ -13135,10 +13116,15 @@ def _run_followers_list_engine_session(
     _followers_loop_finally_status = "loop_exited"
     _followers_loop_finally_stop = ""
     _followers_loop_finally_error = ""
+    _target_followers_resume_claimed = False
+    _target_followers_resume_enforce_done = False
     try:
         if target_followers_resume_controller is not None:
             try:
-                if not target_followers_resume_controller.claim():
+                _target_followers_resume_claimed = bool(
+                    target_followers_resume_controller.claim()
+                )
+                if not _target_followers_resume_claimed:
                     _target_followers_resume_v2_emit(
                         "v2_failed_open",
                         {
@@ -13146,10 +13132,11 @@ def _run_followers_list_engine_session(
                             "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
                             "run_id": str(run_id or ""),
                             "reason": "checkpoint_claim_rejected",
-                            "shadow": True,
-                            "enforce": False,
+                            "shadow": _target_followers_resume_flags.mode == "shadow",
+                            "enforce": _target_followers_resume_flags.mode == "enforce",
                         },
                     )
+                    target_followers_resume_controller.mark_safe_stop()
             except Exception as exc:
                 _target_followers_resume_v2_emit(
                     "v2_failed_open",
@@ -13159,8 +13146,8 @@ def _run_followers_list_engine_session(
                         "run_id": str(run_id or ""),
                         "reason": "checkpoint_claim_exception",
                         "error_type": type(exc).__name__,
-                        "shadow": True,
-                        "enforce": False,
+                        "shadow": _target_followers_resume_flags.mode == "shadow",
+                        "enforce": _target_followers_resume_flags.mode == "enforce",
                     },
                 )
                 target_followers_resume_controller = None
@@ -14417,6 +14404,128 @@ def _run_followers_list_engine_session(
                         },
                     )
                     target_followers_resume_controller.mark_safe_stop()
+
+            # Enforce replays only the bounded, checkpoint-proven physical
+            # depth. Every gesture must produce the same continuity evidence
+            # as a normal legacy scroll. Any doubt evaluates the current
+            # viewport from row zero; it never invents a skipped username.
+            if (
+                isinstance(candidates, list)
+                and target_followers_resume_controller is not None
+                and _target_followers_resume_claimed
+                and _target_followers_resume_flags.mode == "enforce"
+                and not _target_followers_resume_enforce_done
+                and target_followers_resume_controller.plan is not None
+                and not target_followers_resume_controller.plan.use_legacy_navigation
+            ):
+                _resume_plan = target_followers_resume_controller.plan
+                if target_followers_resume_controller.reached_depth < _resume_plan.planned_depth:
+                    _ff_surface, _ff_target = _target_followers_resume_v2_surface_proof(det)
+                    _ff_diag: dict[str, Any] = {}
+                    _ff_scroll_index = int(scroll_used) + 1
+                    _ff_ok = bool(
+                        _ff_surface
+                        and _ff_target
+                        and scroll_followers_list_forward(
+                            d,
+                            scroll_profile="canonical_controlled",
+                            source_profile_username=source_profile_username,
+                            bypass_post_tap_capture_gate=True,
+                            bypass_scroll_xml_guards=True,
+                            scroll_diag_out=_ff_diag,
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            previous_actual_overlap=(
+                                int(target_scan_tracker.get("last_verified_scroll_overlap"))
+                                if target_scan_tracker.get("last_verified_scroll_overlap") is not None
+                                else None
+                            ),
+                        )
+                    )
+                    _ff_verdict = target_followers_resume_controller.note_legacy_scroll_progress(
+                        _ff_diag,
+                        observed_scroll_index=_ff_scroll_index,
+                        followers_surface_confirmed=_ff_surface,
+                        expected_target_confirmed=_ff_target,
+                    )
+                    if _ff_ok:
+                        scroll_used = _ff_scroll_index
+                        target_scan_tracker["scrolls_attempted"] = int(
+                            target_scan_tracker.get("scrolls_attempted") or 0
+                        ) + 1
+                    if _ff_ok and str(_ff_verdict.reason) == "legacy_scroll_proof_staged":
+                        log(
+                            "info", "ct_resume_v4_enforce_scroll_applied",
+                            account_id=account_id, run_id=run_id,
+                            target_id_hash=target_followers_resume_v2.stable_id_hash(target_id),
+                            checkpoint_id=(
+                                target_followers_resume_controller.checkpoint.checkpoint_id
+                                if target_followers_resume_controller.checkpoint else None
+                            ),
+                            starting_depth=_resume_plan.previous_depth,
+                            physical_scrolls=scroll_used,
+                            planned_depth=_resume_plan.planned_depth,
+                        )
+                        continue
+                    _target_followers_resume_enforce_done = True
+                    target_followers_resume_controller.mark_safe_stop()
+                    log(
+                        "warning", "ct_resume_v4_enforce_rejected",
+                        account_id=account_id, run_id=run_id,
+                        target_id_hash=target_followers_resume_v2.stable_id_hash(target_id),
+                        reason=str(_ff_verdict.reason or "fast_forward_scroll_unproven"),
+                        safe_legacy_fallback=True,
+                        usernames_skipped_by_checkpoint=0,
+                    )
+                    # If the UI moved, never consume the pre-scroll candidate
+                    # snapshot even when continuity proof was rejected.  A
+                    # fresh collection is mandatory before legacy evaluation.
+                    if _ff_ok:
+                        continue
+                else:
+                    _ff_handles = [
+                        str(item.get("username") or item.get("resolved_username_hint") or "")
+                        for item in candidates if isinstance(item, dict)
+                    ]
+                    _ff_cursor, _ff_reason = (
+                        target_followers_resume_controller.enforce_cursor_for_viewport(
+                            _ff_handles,
+                            terminally_handled=lambda handle: (
+                                _norm_ig_handle(handle) in _RUNTIME_SEEN_FOLLOWER_USERNAMES
+                                or _norm_ig_handle(handle) in _RUNTIME_INTERACTED_USERNAMES
+                                or _norm_ig_handle(handle) in _RUNTIME_SKIPPED_USERNAMES
+                            ),
+                        )
+                    )
+                    _target_followers_resume_enforce_done = True
+                    if _ff_cursor > 0:
+                        candidates = candidates[_ff_cursor:]
+                        log(
+                            "info", "ct_resume_v4_enforce_applied",
+                            account_id=account_id, run_id=run_id,
+                            target_id_hash=target_followers_resume_v2.stable_id_hash(target_id),
+                            checkpoint_id=(
+                                target_followers_resume_controller.checkpoint.checkpoint_id
+                                if target_followers_resume_controller.checkpoint else None
+                            ),
+                            starting_depth=_resume_plan.previous_depth,
+                            recovered_anchor=True,
+                            overlap_count=_ff_cursor,
+                            physical_scrolls=target_followers_resume_controller.reached_depth,
+                            usernames_reprocessed=len(candidates),
+                            usernames_skipped_by_checkpoint=_ff_cursor,
+                            resume_result="enforce_applied",
+                        )
+                    else:
+                        log(
+                            "warning", "ct_resume_v4_enforce_rejected",
+                            account_id=account_id, run_id=run_id,
+                            target_id_hash=target_followers_resume_v2.stable_id_hash(target_id),
+                            reason=_ff_reason,
+                            safe_legacy_fallback=True,
+                            usernames_skipped_by_checkpoint=0,
+                        )
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":
                 _svf_early = (
@@ -20441,10 +20550,21 @@ def _run_followers_list_engine_session(
                 _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fk_session, None)
 
             if not bool((follow_out or {}).get("skipped_tap")):
-                _follow60_wait_at_evaluation_barrier_if_reached(
+                if follow60_canary_active and _follow60_stage_receipts:
+                    # This point is reached only after verified Follow,
+                    # verified-or-safe-skip Post-Follow, exact Return CT and
+                    # the critical stage persistence ACK.
+                    follow60_completed_cycle_count += 1
+                if _follow60_wait_at_evaluation_barrier_if_reached(
                     stage_receipts_enabled=bool(_follow60_stage_receipts),
                     cycle_complete=True,
-                )
+                ):
+                    _publish_followers_session_summary(
+                        exit_code=0,
+                        follow_session_outcome="evaluation_barrier_reached",
+                        follow_stop_reason="follow60_evaluation_barrier_reached",
+                    )
+                    return 0
 
             processed += 1
             if _runtime_follow_cap_exceeded(_follow_max_per_run):
@@ -21357,9 +21477,39 @@ def _main_impl() -> int:
     _follow60_canary_control: dict[str, Any] = {}
     _follow60_attempt_id = 1
     _raw_control: dict[str, Any] | None = None
+    _follow60_persistence_binding_ready = False
+
+    def _terminalize_follow60_activation_failure(
+        reason: str,
+        *,
+        binding_consumed: bool = False,
+        metadata_safe: dict[str, Any] | None = None,
+    ) -> None:
+        control_id = str((_raw_control or {}).get("id") or (_raw_control or {}).get("control_id") or "")
+        if not control_id or not supabase_mode:
+            return
+        supabase_client.terminalize_follow_60s_canary_control_v1(
+            control_id=control_id,
+            account_id=account_id,
+            run_id=str(run_id or "") or None,
+            request_id=str(run_request_id or "") or None,
+            status="activation_failed",
+            reason=str(reason or "follow60_activation_failed")[:160],
+            metadata_safe={
+                "binding_consumed": bool(binding_consumed),
+                "device_actions_started": False,
+                **dict(metadata_safe or {}),
+            },
+        )
+
     try:
         from auto_restart_runtime import load_resume_policy_from_env as _load_canary_resume
-        from follow_60s_canary import configure as _configure_follow_60s_canary
+        from follow_60s_canary import (
+            activation_component_status as _follow60_activation_component_status,
+            configure as _configure_follow_60s_canary,
+            install_activation_components as _install_follow60_activation_components,
+            runtime_context as _follow60_runtime_context,
+        )
         from follow_60s_canary_binding_v2 import (
             validate_armed_control,
             validate_runtime_binding,
@@ -21388,20 +21538,23 @@ def _main_impl() -> int:
                     account_id
                 )
                 if _live_follow_count == _control_baseline and _binding_claim is not None:
-                    _bound_control = supabase_client.bind_follow_60s_canary_runtime_v2(
-                        control_id=_binding_claim.control_id,
-                        account_id=account_id,
-                        expected_worker_sha=_binding_claim.expected_worker_sha,
-                        baseline_release_sha=_binding_claim.baseline_release_sha,
-                        run_id=str(run_id or ""),
-                        request_id=str(run_request_id or ""),
-                        attempt_id=int(_follow60_attempt_id or 1),
-                        business_session_id=str(_SESSION_SOCIAL_ID or ""),
-                        binding_version=_binding_claim.binding_version,
+                    _binding_args = {
+                        "control_id": _binding_claim.control_id,
+                        "account_id": account_id,
+                        "expected_worker_sha": _binding_claim.expected_worker_sha,
+                        "baseline_release_sha": _binding_claim.baseline_release_sha,
+                        "run_id": str(run_id or ""),
+                        "request_id": str(run_request_id or ""),
+                        "attempt_id": int(_follow60_attempt_id or 1),
+                        "business_session_id": str(_SESSION_SOCIAL_ID or ""),
+                        "binding_version": _binding_claim.binding_version,
+                    }
+                    _prepared_control = supabase_client.prepare_follow_60s_canary_runtime_v3(
+                        **_binding_args
                     )
                     _follow60_canary_control = {
                         **dict(_raw_control or {}),
-                        **dict(_bound_control or {}),
+                        **dict(_prepared_control or {}),
                     }
                     _runtime_verdict = validate_runtime_binding(
                         _follow60_canary_control,
@@ -21416,6 +21569,11 @@ def _main_impl() -> int:
                         business_session_id=str(_SESSION_SOCIAL_ID or ""),
                     )
                     if not _runtime_verdict.valid:
+                        _terminalize_follow60_activation_failure(
+                            _runtime_verdict.reason,
+                            binding_consumed=False,
+                            metadata_safe={"stage": "prepared_binding_validation"},
+                        )
                         log(
                             "error",
                             "follow_60s_armed_control_safe_stop_pre_device",
@@ -21435,7 +21593,181 @@ def _main_impl() -> int:
                             safe_to_continue_ui=False,
                         )
                         return 96
+
+                    _follow60_canary_active = bool(_configure_follow_60s_canary(
+                        account_id=account_id,
+                        account_username=account_username,
+                        run_id=run_id,
+                        package=str(config.INSTAGRAM_PACKAGE or ""),
+                        resume_policy=_canary_resume_policy,
+                        control=_follow60_canary_control,
+                        worker_sha=_worker_sha,
+                        run_type=dispatch_run_type,
+                        request_id=str(run_request_id or ""),
+                        business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    ))
+                    _phase_plan = dict(
+                        _canary_resume_policy.get("phases_to_run")
+                        or {"follow": True, "welcome": False, "unfollow": False}
+                    )
+                    _phase_plan_ok = bool(
+                        _phase_plan.get("follow") is True
+                        and _phase_plan.get("welcome") is False
+                        and _phase_plan.get("unfollow") is False
+                    )
+                    if not _follow60_canary_active or not _phase_plan_ok:
+                        _activation_reason = (
+                            "phase_scope_mismatch" if not _phase_plan_ok
+                            else "follow60_runtime_configuration_failed"
+                        )
+                        supabase_client.terminalize_follow_60s_canary_control_v1(
+                            control_id=_binding_claim.control_id,
+                            account_id=account_id,
+                            run_id=str(run_id or "") or None,
+                            request_id=str(run_request_id or "") or None,
+                            status="activation_failed",
+                            reason=_activation_reason,
+                            metadata_safe={
+                                "binding_consumed": False,
+                                "device_actions_started": False,
+                            },
+                        )
+                        log(
+                            "error", "follow60_activation_failed_pre_device",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            reason=_activation_reason,
+                            binding_consumed=False, fallback_used=False,
+                            phase_plan=_phase_plan,
+                        )
+                        return 96
+
+                    # Persistence and outbox replay are part of activation, not
+                    # deferred until after the control is consumed.
+                    _ensure_follow_persistence_run_binding(
+                        persistence_required=True,
+                        account_id=account_id,
+                        run_id=run_id,
+                        request_id=run_request_id,
+                        request_linked=bool(linked),
+                    )
+                    _follow60_persistence_binding_ready = True
+                    try:
+                        import post_follow_stage_outbox
+
+                        _startup_replay = post_follow_stage_outbox.flush_pending()
+                    except Exception as _startup_replay_exc:
+                        _startup_replay = {
+                            "ok": False,
+                            "reason": str(_startup_replay_exc)[:240],
+                        }
+                    if not bool(_startup_replay.get("ok")):
+                        supabase_client.terminalize_follow_60s_canary_control_v1(
+                            control_id=_binding_claim.control_id,
+                            account_id=account_id,
+                            run_id=str(run_id or "") or None,
+                            request_id=str(run_request_id or "") or None,
+                            status="activation_failed",
+                            reason="follow60_stage_outbox_replay_failed",
+                            metadata_safe={"binding_consumed": False},
+                        )
+                        log(
+                            "error", "follow60_stage_outbox_replay_blocked_before_ui",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            reason=str(_startup_replay.get("reason") or "replay_failed"),
+                            pending=_startup_replay.get("pending"),
+                            device_actions_started=False,
+                        )
+                        return 96
+
+                    _install_follow60_activation_components(
+                        opening_composite=acquire_pre_follow_mono_capture,
+                        pre_tap_callback=build_pre_follow_tap_context,
+                        post_cycle_callback=_follow60_evaluation_barrier_due,
+                        stage_receipts=post_follow_stage_outbox.journal_stage,
+                        barrier=supabase_client.mark_follow_60s_canary_barrier_v1,
+                    )
+                    _components = _follow60_activation_component_status()
+                    if not all(bool(value) for value in _components.values()):
+                        supabase_client.terminalize_follow_60s_canary_control_v1(
+                            control_id=_binding_claim.control_id,
+                            account_id=account_id,
+                            run_id=str(run_id or "") or None,
+                            request_id=str(run_request_id or "") or None,
+                            status="activation_failed",
+                            reason="follow60_component_installation_failed",
+                            metadata_safe={
+                                "binding_consumed": False,
+                                "component_status": _components,
+                                "device_actions_started": False,
+                            },
+                        )
+                        log(
+                            "error", "follow60_component_installation_failed_pre_device",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            component_status=_components,
+                            binding_consumed=False, fallback_used=False,
+                            device_actions_started=False,
+                        )
+                        return 96
+
+                    _committed_control = supabase_client.commit_follow_60s_canary_runtime_v3(
+                        **_binding_args
+                    )
+                    _follow60_canary_control = {
+                        **dict(_raw_control or {}),
+                        **dict(_committed_control or {}),
+                    }
+                    _committed_verdict = validate_runtime_binding(
+                        _follow60_canary_control,
+                        account_id=account_id,
+                        account_username=account_username,
+                        active_worker_sha=_worker_sha,
+                        run_type=dispatch_run_type,
+                        package=str(config.INSTAGRAM_PACKAGE or ""),
+                        run_id=str(run_id or ""),
+                        request_id=str(run_request_id or ""),
+                        attempt_id=int(_follow60_attempt_id or 1),
+                        business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    )
+                    if not _committed_verdict.valid or _committed_control.get("committed") is not True:
+                        _terminalize_follow60_activation_failure(
+                            _committed_verdict.reason or "follow60_activation_commit_failed",
+                            binding_consumed=bool(
+                                _committed_control.get("runtime_binding_consumed")
+                            ),
+                            metadata_safe={"stage": "committed_binding_validation"},
+                        )
+                        log(
+                            "error", "follow60_activation_commit_failed_pre_device",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            reason=_committed_verdict.reason,
+                            fallback_used=False, device_actions_started=False,
+                        )
+                        return 96
+                    log(
+                        "info", "follow60_activation_transaction_committed",
+                        control_id=_binding_claim.control_id,
+                        account_id=account_id, run_id=run_id,
+                        request_id=run_request_id, worker_sha=_worker_sha,
+                        baseline=_control_baseline,
+                        max_new_cycles=int(_committed_control.get("max_new_cycles") or 0),
+                        phase_plan={"follow": True, "welcome": False, "unfollow": False},
+                        barrier_target=int(_committed_control.get("target_follow_count") or 0),
+                        binding_consumed_after_configure=True,
+                    )
                 else:
+                    _terminalize_follow60_activation_failure(
+                        "baseline_follow_count_mismatch",
+                        binding_consumed=False,
+                        metadata_safe={
+                            "control_baseline": _control_baseline,
+                            "live_follow_count": _live_follow_count,
+                        },
+                    )
                     log(
                         "warning", "follow_60s_canary_control_gate_rejected",
                         account_id=account_id, run_id=run_id or None,
@@ -21447,6 +21779,11 @@ def _main_impl() -> int:
                     )
                     return 96
             elif _raw_control:
+                _terminalize_follow60_activation_failure(
+                    _prebind.reason,
+                    binding_consumed=False,
+                    metadata_safe={"stage": "armed_control_validation"},
+                )
                 log(
                     "warning", "follow_60s_canary_control_gate_rejected",
                     account_id=account_id, run_id=run_id or None,
@@ -21456,43 +21793,10 @@ def _main_impl() -> int:
                 )
                 return 96
 
-        _follow60_canary_active = bool(_configure_follow_60s_canary(
-            account_id=account_id,
-            account_username=account_username,
-            run_id=run_id,
-            package=str(config.INSTAGRAM_PACKAGE or ""),
-            resume_policy=_canary_resume_policy,
-            control=_follow60_canary_control,
-            worker_sha=_worker_sha,
-            run_type=dispatch_run_type,
-            request_id=str(run_request_id or ""),
-            business_session_id=str(_SESSION_SOCIAL_ID or ""),
-        ))
         if _follow60_canary_active:
-            from follow_60s_canary import runtime_context as _follow60_runtime_context
-
             _follow60_attempt_id = int(
                 _follow60_runtime_context().get("attempt_id") or 1
             )
-            try:
-                import post_follow_stage_outbox
-
-                _startup_replay = post_follow_stage_outbox.flush_pending()
-            except Exception as _startup_replay_exc:
-                _startup_replay = {
-                    "ok": False,
-                    "reason": str(_startup_replay_exc)[:240],
-                }
-            if not bool(_startup_replay.get("ok")):
-                log(
-                    "error", "follow60_stage_outbox_replay_blocked_before_ui",
-                    account_id=account_id, run_id=run_id or None,
-                    request_id=run_request_id or None,
-                    reason=str(_startup_replay.get("reason") or "replay_failed"),
-                    pending=_startup_replay.get("pending"),
-                    device_actions_started=False,
-                )
-                return 96
             log(
                 "info", "follow_60s_canary_control_gate_passed",
                 account_id=account_id, run_id=run_id or None,
@@ -21509,6 +21813,33 @@ def _main_impl() -> int:
         # fails closed. A read failure before any control is observed preserves
         # the established Golden availability contract for non-canary accounts.
         if _raw_control:
+            try:
+                from follow_60s_canary_binding_v2 import parse_control
+
+                _failed_binding = parse_control(_raw_control)
+                if _failed_binding.control_id:
+                    supabase_client.terminalize_follow_60s_canary_control_v1(
+                        control_id=_failed_binding.control_id,
+                        account_id=account_id,
+                        run_id=str(run_id or "") or None,
+                        request_id=str(run_request_id or "") or None,
+                        status="activation_failed",
+                        reason=str(exc)[:160] or "follow60_activation_failed",
+                        metadata_safe={
+                            "binding_consumed": bool(
+                                _follow60_canary_control.get("runtime_binding_consumed")
+                            ),
+                            "device_actions_started": False,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+            except Exception as _terminalize_exc:
+                log(
+                    "error", "follow60_activation_failure_terminalization_failed",
+                    account_id=account_id or None, run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    reason=str(_terminalize_exc)[:200],
+                )
             log(
                 "error",
                 "follow_60s_control_resolution_safe_stop_pre_device",
@@ -21541,7 +21872,7 @@ def _main_impl() -> int:
     # the persistence binding now when the canonical control has activated the
     # canary; otherwise every eligible candidate would fail closed at the
     # pre-tap intent boundary with follow_persistence_run_binding_missing.
-    if _follow60_canary_active:
+    if _follow60_canary_active and not _follow60_persistence_binding_ready:
         try:
             _ensure_follow_persistence_run_binding(
                 persistence_required=True,

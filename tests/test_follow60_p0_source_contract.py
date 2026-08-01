@@ -32,7 +32,6 @@ class Follow60P0SourceContractTest(unittest.TestCase):
         # creep when the suite is run from a dirty worktree.
         forbidden = {
             "instagram_navigation.py",
-            "follow_60s_canary.py",
             "unfollow_hybrid_strategy.py",
             "unfollow_session_orchestrator.py",
         }
@@ -46,6 +45,12 @@ class Follow60P0SourceContractTest(unittest.TestCase):
             ).splitlines()
         )
         self.assertFalse(changed & forbidden, changed & forbidden)
+
+        # The transactional activation GO explicitly requires the canary
+        # registry to install concrete callbacks before consuming control.
+        canary = (ROOT / "follow_60s_canary.py").read_text(encoding="utf-8")
+        self.assertIn("def install_activation_components", canary)
+        self.assertIn("callable(components.get(name))", canary)
 
 
 if __name__ == "__main__":

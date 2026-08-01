@@ -294,6 +294,13 @@ class ResumeFlags:
             and _clean_id(account_id).lower() in self.shadow_account_ids
         )
 
+    def rollout_allowed_for(self, account_id: str) -> bool:
+        """Apply shadow or enforce only to the existing UUID rollout set."""
+        return bool(
+            self.enabled
+            and _clean_id(account_id).lower() in self.shadow_account_ids
+        )
+
 
 @dataclass(frozen=True)
 class ViewportObservation:
@@ -380,6 +387,7 @@ def validate_depth_transition(
 
 @dataclass(frozen=True)
 class Checkpoint:
+    checkpoint_id: str
     account_id: str
     target_id: str
     surface: str
@@ -415,6 +423,7 @@ class Checkpoint:
             return tuple(str(item)[:64] for item in raw[:MAX_ANCHORS] if str(item).startswith("a3:"))
 
         return cls(
+            checkpoint_id=_clean_id(row.get("id")),
             account_id=_clean_id(row.get("account_id")),
             target_id=_clean_id(row.get("target_id")),
             surface=str(row.get("surface") or ""),
@@ -450,6 +459,32 @@ class Checkpoint:
 
     def fingerprint(self, mode: str) -> str:
         return self.anchor_fingerprint if mode == "enforce" else self.shadow_anchor_fingerprint
+
+    def promoted_shadow_ready_for_enforce(self) -> bool:
+        """Allow a certified V3 shadow checkpoint to seed first enforcement.
+
+        Enforce-owned fields remain authoritative once they exist.  Promotion
+        is deliberately narrow: a V3 checkpoint, positive bounded depth,
+        anchors, a completed verification timestamp, and no invalidation.
+        """
+        return bool(
+            self.checkpoint_version >= 3
+            and self.last_safe_depth == 0
+            and self.shadow_last_safe_depth > 0
+            and self.shadow_visible_anchor_hashes
+            and self.last_verified_at is not None
+            and not self.invalidation_reason
+        )
+
+    def resume_depth(self, mode: str) -> int:
+        if mode == "enforce" and self.promoted_shadow_ready_for_enforce():
+            return self.shadow_last_safe_depth
+        return self.depth(mode)
+
+    def resume_anchors(self, mode: str) -> tuple[str, ...]:
+        if mode == "enforce" and self.promoted_shadow_ready_for_enforce():
+            return self.shadow_visible_anchor_hashes
+        return self.anchors(mode)
 
 
 @dataclass(frozen=True)
@@ -511,11 +546,12 @@ def build_resume_plan(
     )
     if not valid:
         return ResumePlan(True, mode, 0, 0, (), checkpoint.checkpoint_version, checkpoint.optimistic_version, reason)
-    depth = min(MAX_DEPTH, checkpoint.depth(mode))
+    depth = min(MAX_DEPTH, checkpoint.resume_depth(mode))
+    resume_anchors = checkpoint.resume_anchors(mode)
     if checkpoint.status == "exhausted":
-        return ResumePlan(True, mode, depth, depth, checkpoint.anchors(mode), checkpoint.checkpoint_version, checkpoint.optimistic_version, "checkpoint_exhausted")
+        return ResumePlan(True, mode, depth, depth, resume_anchors, checkpoint.checkpoint_version, checkpoint.optimistic_version, "checkpoint_exhausted")
     if depth > MAX_FAST_FORWARD_DEPTH:
-        return ResumePlan(True, mode, depth, 0, checkpoint.anchors(mode), checkpoint.checkpoint_version, checkpoint.optimistic_version, "fast_forward_depth_exceeds_bound")
+        return ResumePlan(True, mode, depth, 0, resume_anchors, checkpoint.checkpoint_version, checkpoint.optimistic_version, "fast_forward_depth_exceeds_bound")
     # Shadow always leaves navigation to legacy. Enforce may consume this plan
     # only after an atomic claim and per-transition UI validation.
     return ResumePlan(
@@ -523,10 +559,14 @@ def build_resume_plan(
         mode=mode,
         previous_depth=depth,
         planned_depth=depth,
-        anchor_hashes=checkpoint.anchors(mode),
+        anchor_hashes=resume_anchors,
         checkpoint_version=checkpoint.checkpoint_version,
         optimistic_version=checkpoint.optimistic_version,
-        reason="shadow_plan_only" if mode == "shadow" else "checkpoint_ready",
+        reason=(
+            "shadow_plan_promoted_for_enforce"
+            if mode == "enforce" and checkpoint.promoted_shadow_ready_for_enforce()
+            else ("shadow_plan_only" if mode == "shadow" else "checkpoint_ready")
+        ),
     )
 
 
@@ -843,13 +883,10 @@ class ProgressiveResumeController:
         )
         self.checkpoint_depth_before = self.plan.previous_depth
         self.last_committed_depth = self.plan.previous_depth
-        # Shadow observes the authoritative legacy navigation from its real
-        # physical start (depth zero).  A stored theoretical resume depth must
-        # never be added to that physical depth because shadow does not move
-        # the list.  Enforce remains disabled by the production builder.
-        self.reached_depth = (
-            self.plan.previous_depth if self.flags.mode == "enforce" else 0
-        )
+        # Both modes begin at physical depth zero. Enforce must prove every
+        # bounded transition before reaching the stored depth; treating the
+        # checkpoint depth as already physical would create a false jump.
+        self.reached_depth = 0
         self._event(
             "target_followers_checkpoint_loaded",
             reason="loaded" if self.checkpoint else "checkpoint_missing",
@@ -866,11 +903,15 @@ class ProgressiveResumeController:
             theoretical_fast_forward_depth=self.plan.planned_depth,
             theoretical_scrolls_avoided=self.plan.planned_depth,
         )
-        if self.plan.planned_depth > 0 and self.plan.reason == "shadow_plan_only":
+        if self.plan.planned_depth > 0:
             self._event(
                 "fast_forward_started",
-                reason="theoretical_shadow_only",
-                theoretical=True,
+                reason=(
+                    "theoretical_shadow_only"
+                    if self.flags.mode == "shadow"
+                    else "checkpoint_enforce_bounded"
+                ),
+                theoretical=self.flags.mode == "shadow",
             )
         if self.plan.use_legacy_navigation:
             self._event("resume_fallback_legacy", reason=self.plan.reason)
@@ -1178,6 +1219,51 @@ class ProgressiveResumeController:
         # In shadow this is observation of a legacy mutation, not one initiated
         # by V2.  The counter therefore remains zero.
         return True
+
+    def enforce_cursor_for_viewport(
+        self,
+        visible_handles: Iterable[object],
+        *,
+        terminally_handled: Callable[[str], bool] | None = None,
+    ) -> tuple[int, str]:
+        """Return the safe overlap cursor after physical fast-forward.
+
+        No cursor is emitted until the lease is live, the requested physical
+        depth has been reached and a checkpoint anchor is present.  Rejection
+        therefore falls back to evaluating the current viewport from row zero.
+        """
+        if (
+            self.flags.mode != "enforce"
+            or self.plan is None
+            or self.plan.use_legacy_navigation
+            or not self._lease_is_valid()
+        ):
+            return 0, "enforce_not_ready"
+        if self.reached_depth < self.plan.planned_depth:
+            return 0, "fast_forward_incomplete"
+        cursor, reason = find_resume_cursor(
+            tuple(visible_handles),
+            self.plan.anchor_hashes,
+            terminally_handled=terminally_handled,
+            hmac_secret=self.hmac_secret,
+        )
+        if not reason.startswith("anchor_found"):
+            self._event(
+                "anchor_not_found",
+                reason=reason,
+                resume_result="safe_legacy_fallback_current_viewport",
+            )
+            return 0, reason
+        self._event(
+            "anchor_found",
+            reason=reason,
+            overlap_count=cursor,
+            physical_scrolls=self.reached_depth,
+            usernames_reprocessed=max(0, len(normalize_visible_handles(visible_handles)) - cursor),
+            usernames_skipped_by_checkpoint=cursor,
+            resume_result="enforce_applied",
+        )
+        return cursor, reason
 
     def _renew_if_due(self) -> bool:
         if self.claimed_version is None:
@@ -1516,15 +1602,15 @@ def build_runtime_controller(
     rpc_call: Callable[[str, dict[str, Any]], Any] | None = None,
     hmac_secret: str | None = None,
 ) -> ProgressiveResumeController | None:
-    """Construct only for an explicitly allowlisted shadow account.
+    """Construct only for an explicitly allowlisted rollout account.
 
     The gate runs before importing the Supabase client, guaranteeing that an
     ineligible account performs no V2 RPC and creates no V2 event/checkpoint.
-    Enforcement intentionally remains unavailable in the first rollout.
+    Enforce reuses the exact same bounded UUID allowlist as Shadow.
     """
     flags = flags or ResumeFlags.from_env()
     secret = str(hmac_secret if hmac_secret is not None else os.environ.get(HMAC_SECRET_FLAG, "")).strip()
-    if not flags.shadow_allowed_for(account_id) or not all(
+    if not flags.rollout_allowed_for(account_id) or not all(
         (_clean_id(account_id), _clean_id(target_id), _clean_id(run_id))
     ):
         return None
@@ -1537,8 +1623,8 @@ def build_runtime_controller(
                     "target_id_hash": stable_id_hash(target_id),
                     "run_id": _clean_id(run_id),
                     "reason": "hmac_secret_missing_or_too_short",
-                    "shadow": True,
-                    "enforce": False,
+                    "shadow": flags.mode == "shadow",
+                    "enforce": flags.mode == "enforce",
                 },
             )
         return None
@@ -1565,8 +1651,8 @@ def build_runtime_controller(
                     "target_id_hash": stable_id_hash(target_id),
                     "run_id": _clean_id(run_id),
                     "reason": "checkpoint_provenance_invalid",
-                    "shadow": True,
-                    "enforce": False,
+                    "shadow": flags.mode == "shadow",
+                    "enforce": flags.mode == "enforce",
                 },
             )
         return None

@@ -14,6 +14,19 @@
 - A normal V2 fallback is fail-open and never creates operator review or a
   Slack/Discord notification.
 
+## Target Followers Progressive Resume V4 Enforce — 2026-08-01
+
+- The 2026-07-24 Shadow-only authority is superseded only for UUIDs already in
+  the bounded production rollout allowlist.
+- Enforce may reuse a verified V3/V4 Shadow checkpoint only after exact target,
+  request, attempt, release, lease, physical-depth and anchor continuity proof.
+- Invalid, stale, missing or unproven checkpoints use the current viewport from
+  row zero; they never skip a username and never create a device action from
+  persisted depth alone.
+- Non-allowlisted and future accounts remain entirely outside CT Resume.
+- Rollback disables Enforce and preserves checkpoint/event history; it never
+  deletes or backfills CT Resume state.
+
 ## T-10 and Follow-source defaults — 2026-07-24
 
 - T-10 is backend-only. A backend-reread `connected` + `ready` account never receives a preflight UI request.

@@ -33,6 +33,7 @@ os.environ[resume.HMAC_SECRET_FLAG] = TEST_HMAC_SECRET
 
 def checkpoint_row(**overrides):
     row = {
+        "id": "40000000-0000-4000-8000-000000000010",
         "account_id": ACCOUNT_A,
         "target_id": TARGET_A,
         "surface": "followers",
@@ -309,6 +310,77 @@ class CheckpointTests(unittest.TestCase):
     def test_37_malformed_anchor_array_is_trimmed(self):
         cp = resume.Checkpoint.from_rpc(checkpoint_row(last_visible_anchor_hashes=[resume.anchor_hash(str(i)) for i in range(20)]))
         self.assertEqual(len(cp.last_visible_anchor_hashes), resume.MAX_ANCHORS)
+
+    def test_37a_v3_verified_shadow_checkpoint_promotes_into_first_enforce(self):
+        verified_at = datetime.now(timezone.utc).isoformat()
+        cp = resume.Checkpoint.from_rpc(
+            checkpoint_row(
+                checkpoint_version=3,
+                last_safe_depth=0,
+                last_visible_anchor_hashes=[],
+                shadow_last_safe_depth=2,
+                shadow_visible_anchor_hashes=list(
+                    resume.bounded_anchor_hashes(["row1", "row2"])
+                ),
+                last_verified_at=verified_at,
+            )
+        )
+        plan = resume.build_resume_plan(
+            cp,
+            flags=resume.ResumeFlags(False, True),
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+        )
+        self.assertFalse(plan.use_legacy_navigation)
+        self.assertEqual(plan.planned_depth, 2)
+        self.assertEqual(plan.anchor_hashes, cp.shadow_visible_anchor_hashes)
+        self.assertEqual(plan.reason, "shadow_plan_promoted_for_enforce")
+
+    def test_37b_unverified_shadow_checkpoint_is_never_promoted(self):
+        cp = resume.Checkpoint.from_rpc(
+            checkpoint_row(
+                checkpoint_version=3,
+                last_safe_depth=0,
+                shadow_last_safe_depth=2,
+                last_verified_at=None,
+            )
+        )
+        plan = resume.build_resume_plan(
+            cp,
+            flags=resume.ResumeFlags(False, True),
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+        )
+        self.assertEqual(plan.planned_depth, 0)
+        self.assertEqual(plan.anchor_hashes, cp.last_visible_anchor_hashes)
+        self.assertEqual(plan.reason, "checkpoint_ready")
+
+    def test_37c_paysdorange_verified_depth_two_fixture_promotes_safely(self):
+        cp = resume.Checkpoint.from_rpc(
+            checkpoint_row(
+                checkpoint_version=3,
+                last_safe_depth=0,
+                last_visible_anchor_hashes=[],
+                shadow_last_safe_depth=2,
+                shadow_visible_anchor_hashes=list(
+                    resume.bounded_anchor_hashes(["fixture.row.one", "fixture.row.two"])
+                ),
+                last_verified_at=datetime.now(timezone.utc).isoformat(),
+                end_reached=False,
+            )
+        )
+        plan = resume.build_resume_plan(
+            cp,
+            flags=resume.ResumeFlags(False, True),
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="paysdorangeenprovencetourisme",
+        )
+        self.assertFalse(plan.use_legacy_navigation)
+        self.assertEqual(plan.planned_depth, 2)
+        self.assertEqual(plan.reason, "shadow_plan_promoted_for_enforce")
 
 
 class RepositoryAndControllerTests(unittest.TestCase):
@@ -1259,10 +1331,14 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertIsNone(self.build(ACCOUNT_A, rpc, [], self.flags()))
         self.assertEqual(rpc.calls, [])
 
-    def test_65_enforce_true_fails_closed_even_for_allowlisted_account(self):
-        rpc = FakeRpc()
-        self.assertIsNone(self.build(ACCOUNT_A, rpc, [], self.flags(ACCOUNT_A, enforce=True)))
-        self.assertEqual(rpc.calls, [])
+    def test_65_enforce_true_is_limited_to_existing_allowlisted_account(self):
+        rpc = FakeRpc(row=checkpoint_row())
+        controller = self.build(ACCOUNT_A, rpc, [], self.flags(ACCOUNT_A, enforce=True))
+        self.assertIsNotNone(controller)
+        self.assertEqual(controller.flags.mode, "enforce")
+        other_rpc = FakeRpc(row=checkpoint_row(account_id=ACCOUNT_B))
+        self.assertIsNone(self.build(ACCOUNT_B, other_rpc, [], self.flags(ACCOUNT_A, enforce=True)))
+        self.assertEqual(other_rpc.calls, [])
 
     def test_66_no_account_id_is_hardcoded_in_product(self):
         source = Path(resume.__file__).read_text(encoding="utf-8")

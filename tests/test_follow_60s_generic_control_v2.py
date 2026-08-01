@@ -197,6 +197,37 @@ class Follow60GenericControlV2Tests(unittest.TestCase):
         self.assertTrue(canary.enabled("like_fresh_cell_bounds"))
         self.assertTrue(canary.enabled("return_candidate_handoff"))
 
+    def test_activation_components_are_not_ready_until_concrete_handlers_installed(self):
+        self.assertTrue(self._configure())
+        before = canary.activation_component_status()
+        self.assertFalse(before["opening_composite_active"])
+        self.assertFalse(before["stage_receipts_installed"])
+
+        def handler(*_args, **_kwargs):
+            return True
+
+        installed = canary.install_activation_components(
+            opening_composite=handler,
+            pre_tap_callback=handler,
+            post_cycle_callback=handler,
+            stage_receipts=handler,
+            barrier=handler,
+        )
+        self.assertTrue(all(installed.values()))
+        self.assertTrue(all(canary.activation_component_status().values()))
+
+    def test_activation_components_fail_closed_on_non_callable_handler(self):
+        self.assertTrue(self._configure())
+        installed = canary.install_activation_components(
+            opening_composite=lambda: True,
+            pre_tap_callback=lambda: True,
+            post_cycle_callback=lambda: True,
+            stage_receipts=None,
+            barrier=lambda: True,
+        )
+        self.assertFalse(installed["stage_receipts"])
+        self.assertFalse(canary.activation_component_status()["stage_receipts_installed"])
+
 
 if __name__ == "__main__":
     unittest.main()

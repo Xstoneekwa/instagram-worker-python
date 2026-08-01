@@ -18,10 +18,10 @@ ONE_SHOT_CONTRACT_SCHEMA = "FOLLOW_60S_ONE_SHOT_V2"
 ALLOWED_RUN_TYPES = frozenset({"account_session"})
 ARMED_STATUSES = frozenset({"armed"})
 BOUND_STATUSES = frozenset(
-    {"armed", "barrier_waiting_stop", "continuation_authorized"}
+    {"armed", "running", "barrier_waiting_stop", "continuation_authorized"}
 )
 CONSUMER_BOUND_STATUSES = frozenset(
-    {*BOUND_STATUSES, "waiting_operator_evaluation"}
+    {*BOUND_STATUSES, "waiting_operator_evaluation", "completed", "canceled"}
 )
 
 
@@ -212,6 +212,7 @@ def validate_armed_control(
     run_type: str,
     package: str = "",
     now: datetime | None = None,
+    allowed_statuses: frozenset[str] = ARMED_STATUSES,
 ) -> BindingVerdict:
     if not control:
         return BindingVerdict(False, "control_absent")
@@ -237,7 +238,7 @@ def validate_armed_control(
     missing = next((name for name, value in required.items() if not value), "")
     if missing:
         return BindingVerdict(False, f"control_incomplete_{missing}", binding)
-    if binding.control_status not in ARMED_STATUSES:
+    if binding.control_status not in allowed_statuses:
         return BindingVerdict(False, f"control_status_{binding.control_status or 'missing'}", binding)
     if binding.binding_version != BINDING_VERSION:
         return BindingVerdict(False, "binding_version_mismatch", binding)
@@ -309,6 +310,7 @@ def validate_runtime_binding(
         run_type=run_type,
         package=package,
         now=now,
+        allowed_statuses=BOUND_STATUSES,
     )
     binding = verdict.binding
     if not verdict.valid or binding is None:

@@ -8,20 +8,29 @@ import supabase_client
 
 
 class Follow60GenericRpcContractTests(unittest.TestCase):
-    def test_runner_forwards_canonical_prebind_claims(self) -> None:
+    def test_runner_forwards_canonical_transactional_binding_claims(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "runner.py").read_text()
-        call_start = source.index(
-            "_bound_control = supabase_client.bind_follow_60s_canary_runtime_v2("
-        )
-        call_end = source.index("\n                    )", call_start)
-        call = source[call_start:call_end]
+        args_start = source.index("_binding_args = {")
+        args_end = source.index("\n                    }", args_start)
+        args = source[args_start:args_end]
         for claim in (
-            "control_id=_binding_claim.control_id",
-            "expected_worker_sha=_binding_claim.expected_worker_sha",
-            "baseline_release_sha=_binding_claim.baseline_release_sha",
-            "binding_version=_binding_claim.binding_version",
+            '"control_id": _binding_claim.control_id',
+            '"expected_worker_sha": _binding_claim.expected_worker_sha',
+            '"baseline_release_sha": _binding_claim.baseline_release_sha',
+            '"binding_version": _binding_claim.binding_version',
         ):
-            self.assertIn(claim, call)
+            self.assertIn(claim, args)
+        prepare = source.index(
+            "supabase_client.prepare_follow_60s_canary_runtime_v3("
+        )
+        commit = source.index(
+            "supabase_client.commit_follow_60s_canary_runtime_v3("
+        )
+        device = source.index("device_connected")
+        self.assertLess(prepare, commit)
+        self.assertLess(commit, device)
+        self.assertIn("**_binding_args", source[prepare : prepare + 180])
+        self.assertIn("**_binding_args", source[commit : commit + 180])
 
     def test_binding_payload_is_complete_and_account_neutral(self) -> None:
         accounts = (

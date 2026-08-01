@@ -1233,6 +1233,84 @@ def _reconcile_linked_run(
     is_follow60_canary = _follow60_control_applies(
         account_id=account_id, run_id=run_id, request_id=request_id
     )
+    mapped_terminal_status = (
+        "stopped"
+        if str(terminal_status or "").strip().lower() in {"canceled", "cancelled"}
+        else str(terminal_status or "").strip().lower()
+    )
+    if mapped_terminal_status not in {
+        "completed", "failed", "stopped", "canceled", "blocked", "aborted"
+    }:
+        mapped_terminal_status = "failed"
+
+    # Every run is reconciled from durable canonical events.  This makes an
+    # operator Stop and a natural terminal exit equivalent for counters and is
+    # idempotent under consumer recovery/replay.
+    if run_id:
+        try:
+            canonical = supabase_client.reconcile_ig_run_canonical_totals_v1(
+                run_id=str(run_id),
+                account_id=account_id,
+                terminal_status=mapped_terminal_status,
+                metadata_safe={
+                    "request_id": request_id,
+                    "exit_code": exit_code,
+                    "follow60_bound": bool(is_follow60_canary),
+                },
+            )
+            if canonical.get("ok") is True:
+                result = {
+                    "reconciled": True,
+                    "reason": "canonical_event_reconciliation",
+                    "run_id": run_id,
+                    "terminal_status": mapped_terminal_status,
+                    "previous_status": None,
+                    "canonical": canonical,
+                }
+                if is_follow60_canary:
+                    try:
+                        from follow_60s_canary_binding_v2 import parse_control
+
+                        control = supabase_client.get_follow_60s_canary_control_v1(account_id)
+                        binding = parse_control(control)
+                        if binding.control_id and binding.control_status != "waiting_operator_evaluation":
+                            supabase_client.terminalize_follow_60s_canary_control_v1(
+                                control_id=binding.control_id,
+                                account_id=account_id,
+                                run_id=str(run_id),
+                                request_id=request_id,
+                                status=(
+                                    "completed"
+                                    if mapped_terminal_status == "completed"
+                                    else "canceled"
+                                ),
+                                reason=f"run_terminal_{mapped_terminal_status}",
+                                metadata_safe={"canonical_totals_reconciled": True},
+                            )
+                    except Exception as control_exc:
+                        log(
+                            "error", "follow60_control_terminalization_failed",
+                            account_id=account_id, run_id=run_id,
+                            request_id=request_id, reason=str(control_exc)[:200],
+                        )
+                log(
+                    "info", "ig_run_canonical_totals_reconciled",
+                    account_id=account_id, run_id=run_id, request_id=request_id,
+                    terminal_status=mapped_terminal_status,
+                    total_follow=canonical.get("total_follow"),
+                    total_like=canonical.get("total_like"),
+                    source="canonical_event_reconciliation",
+                )
+                return result
+        except Exception as canonical_exc:
+            log(
+                "error" if is_follow60_canary else "warning",
+                "ig_run_canonical_totals_reconciliation_failed",
+                account_id=account_id, run_id=run_id, request_id=request_id,
+                reason=str(canonical_exc)[:240],
+                follow60_bound=bool(is_follow60_canary),
+            )
+
     canary_terminal_payload: dict[str, Any] | None = None
     if is_follow60_canary:
         try:

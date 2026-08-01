@@ -463,6 +463,7 @@ class _Runtime:
     proof_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     optimization_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     terminal_optimization_outcomes: dict[str, str] = field(default_factory=dict)
+    activation_components: dict[str, bool] = field(default_factory=dict)
 
 
 _RUNTIME = _Runtime()
@@ -558,6 +559,45 @@ def configure(
         binding_rejection_reason=(None if verdict.valid else verdict.reason),
     )
     return enabled
+
+
+def install_activation_components(**components: Any) -> dict[str, bool]:
+    """Install and freeze the concrete pre-device Follow60 component registry."""
+    required = {
+        "opening_composite",
+        "pre_tap_callback",
+        "post_cycle_callback",
+        "stage_receipts",
+        "barrier",
+    }
+    _RUNTIME.activation_components = {
+        name: callable(components.get(name)) for name in sorted(required)
+    }
+    return dict(_RUNTIME.activation_components)
+
+
+def activation_component_status() -> dict[str, bool]:
+    """Concrete readiness checked before the DB binding is consumed."""
+    return {
+        "runtime_active": bool(_RUNTIME.enabled),
+        "opening_composite_active": bool(
+            _RUNTIME.enabled
+            and _RUNTIME.subflags.get("opening_follow_composite")
+            and _RUNTIME.activation_components.get("opening_composite")
+        ),
+        "pre_tap_callback_installed": bool(
+            _RUNTIME.activation_components.get("pre_tap_callback")
+        ),
+        "post_cycle_callback_installed": bool(
+            _RUNTIME.activation_components.get("post_cycle_callback")
+        ),
+        "stage_receipts_installed": bool(
+            _RUNTIME.activation_components.get("stage_receipts")
+        ),
+        "barrier_installed": bool(_RUNTIME.activation_components.get("barrier")),
+        "control_id_loaded": bool(_RUNTIME.control_id),
+        "run_bound": bool(_RUNTIME.run_id),
+    }
 
 
 def enabled(subflag: str | None = None) -> bool:

@@ -2806,6 +2806,79 @@ def bind_follow_60s_canary_runtime_v2(
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 
+def _follow60_runtime_binding_v3(
+    function_name: str,
+    *, control_id: str, account_id: str, expected_worker_sha: str,
+    baseline_release_sha: str, run_id: str, request_id: str,
+    attempt_id: int, business_session_id: str, binding_version: str,
+) -> dict[str, Any]:
+    out = call_rpc(
+        function_name,
+        {
+            "p_control_id": str(control_id),
+            "p_account_id": str(account_id),
+            "p_expected_worker_sha": str(expected_worker_sha),
+            "p_baseline_release_sha": str(baseline_release_sha),
+            "p_run_request_id": str(request_id),
+            "p_run_id": str(run_id),
+            "p_attempt_id": int(attempt_id),
+            "p_business_session_id": str(business_session_id),
+            "p_binding_version": str(binding_version),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def prepare_follow_60s_canary_runtime_v3(**kwargs: Any) -> dict[str, Any]:
+    """Validate and materialize a binding without consuming its control."""
+    return _follow60_runtime_binding_v3(
+        "prepare_follow_60s_canary_runtime_v3", **kwargs
+    )
+
+
+def commit_follow_60s_canary_runtime_v3(**kwargs: Any) -> dict[str, Any]:
+    """Atomically consume a binding after local Follow60 readiness is proven."""
+    return _follow60_runtime_binding_v3(
+        "commit_follow_60s_canary_runtime_v3", **kwargs
+    )
+
+
+def terminalize_follow_60s_canary_control_v1(
+    *, control_id: str, account_id: str, run_id: str | None,
+    request_id: str | None, status: str, reason: str,
+    metadata_safe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out = call_rpc(
+        "terminalize_follow_60s_canary_control_v1",
+        {
+            "p_control_id": str(control_id),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id) if run_id else None,
+            "p_request_id": str(request_id) if request_id else None,
+            "p_status": str(status),
+            "p_reason": str(reason),
+            "p_metadata_safe": dict(metadata_safe or {}),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def reconcile_ig_run_canonical_totals_v1(
+    *, run_id: str, account_id: str, terminal_status: str,
+    metadata_safe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out = call_rpc(
+        "reconcile_ig_run_canonical_totals_v1",
+        {
+            "p_run_id": str(run_id),
+            "p_account_id": str(account_id),
+            "p_terminal_status": str(terminal_status),
+            "p_metadata_safe": dict(metadata_safe or {}),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def mark_follow_60s_canary_barrier_v1(
     *, account_id: str, run_id: str, request_id: str, canonical_follow_count: int
 ) -> dict[str, Any]:
