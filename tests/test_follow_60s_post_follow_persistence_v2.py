@@ -12,6 +12,11 @@ import account_session_orchestrator as account_session
 import instagram_navigation as nav
 import post_follow_stage_outbox as outbox
 import runner
+from tests.follow60_generic_fixtures import (
+    TEST_CANARY_ACCOUNT_ID,
+    TEST_CANARY_USERNAME,
+    configure_canary,
+)
 
 
 class Follow60PostFollowOutboxV2Test(unittest.TestCase):
@@ -19,7 +24,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "outbox.sqlite3"
         self.binding = {
-            "account_id": canary.CANARY_ACCOUNT_ID,
+            "account_id": TEST_CANARY_ACCOUNT_ID,
             "original_run_id": "00000000-0000-0000-0000-000000000101",
             "request_id": "00000000-0000-0000-0000-000000000102",
             "action_id": "00000000-0000-0000-0000-000000000103",
@@ -195,7 +200,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
 
 class Follow60BindingAndPostGridV2Test(unittest.TestCase):
     def tearDown(self) -> None:
-        canary.configure(
+        configure_canary(canary,
             account_id="other",
             account_username="other",
             run_id="reset",
@@ -208,7 +213,7 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         code = runner._run_followers_list_engine_session(
             device,
             source_profile_username="source_ct",
-            account_id=canary.CANARY_ACCOUNT_ID,
+            account_id=TEST_CANARY_ACCOUNT_ID,
             run_id="run-1",
             supabase_mode=True,
             warm_session_used=False,
@@ -243,14 +248,14 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         engine.last_session_summary = {}
         control = {
             "status": "armed", "binding_valid": True,
-            "account_id": canary.CANARY_ACCOUNT_ID, "run_id": "run-1",
+            "account_id": TEST_CANARY_ACCOUNT_ID, "run_id": "run-1",
             "request_id": "request-1", "attempt_id": 1,
             "business_session_id": "business-1",
         }
         result = account_session._run_follow_target_rotation(
             object(),
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-1",
             follow_targets=[{"target_id": "target-1", "source_profile": "ct"}],
             run_followers_list_engine_session=engine,
@@ -275,8 +280,8 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         control = {"status": "armed", "binding_valid": True}
         with mock.patch.object(account_session, "run_account_session", return_value=0) as run:
             code = account_session.dispatch_account_session(
-                object(), account_id=canary.CANARY_ACCOUNT_ID,
-                account_username=canary.CANARY_ACCOUNT_USERNAME,
+                object(), account_id=TEST_CANARY_ACCOUNT_ID,
+                account_username=TEST_CANARY_USERNAME,
                 run_id="run-1", run_request_id="request-1",
                 source_profile_username="ct",
                 run_followers_list_engine_session=mock.Mock(),
@@ -296,9 +301,9 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         self.assertEqual(kwargs["business_session_id"], "business-1")
 
     def test_typed_evidence_preserves_every_generation_and_geometry_field(self) -> None:
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-typed",
             package="com.instagram.android",
             resume_policy=None,
@@ -344,9 +349,9 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         self.assertEqual(consumed.first_post_cell_source, "fresh_final_mute_close_xml_physical_cell")
 
     def test_direct_evidence_rejects_wrong_package_or_non_main_activity(self) -> None:
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-typed-negative",
             package="com.instagram.android",
             resume_policy=None,

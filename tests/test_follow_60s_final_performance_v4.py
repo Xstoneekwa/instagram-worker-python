@@ -6,6 +6,11 @@ from unittest.mock import MagicMock, patch
 import follow_60s_canary as canary
 import instagram_navigation as nav
 import runner
+from tests.follow60_generic_fixtures import (
+    TEST_CANARY_ACCOUNT_ID,
+    TEST_CANARY_USERNAME,
+    configure_canary,
+)
 
 
 class CoordinateFrameV1ContractTest(unittest.TestCase):
@@ -154,7 +159,7 @@ class CoordinateFrameV1ContractTest(unittest.TestCase):
 class FinalMuteBoundaryContractTest(unittest.TestCase):
     def tearDown(self) -> None:
         nav._clear_post_mute_sheet_closed_proof_stash()
-        canary.configure(
+        configure_canary(canary,
             account_id="other",
             account_username="other",
             run_id="reset",
@@ -206,9 +211,9 @@ class FinalMuteBoundaryContractTest(unittest.TestCase):
         device.dump_hierarchy.assert_called_once_with(compressed=False)
 
     def test_bounded_empty_grid_recheck_promotes_exact_no_posts(self) -> None:
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="empty-grid-v4",
             package="com.instagram.android",
             resume_policy=None,
@@ -273,9 +278,9 @@ class FinalMuteBoundaryContractTest(unittest.TestCase):
         self.assertEqual(reels["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_clipped_grid_with_untrusted_frame_never_reveals(self) -> None:
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="clipped-untrusted-v4",
             package="com.instagram.android",
             resume_policy=None,

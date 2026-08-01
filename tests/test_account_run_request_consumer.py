@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import account_run_request_consumer as consumer
+from tests.follow60_generic_fixtures import TEST_CANARY_ACCOUNT_ID, bound_control
 
 TEST_REQUEST_ID = "00000000-0000-4000-8000-000000000101"
 TEST_ACCOUNT_ID = "00000000-0000-4000-8000-000000000201"
@@ -530,13 +531,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                     "cancel_requested_at": "2026-07-31T00:00:00Z",
                 },
             ),
+            patch.object(consumer, "_follow60_control_applies", return_value=True),
             patch.object(consumer, "_terminate_subprocess", return_value=143) as terminate,
         ):
             result = consumer._wait_for_subprocess(
                 cfg,
                 proc,
                 request_id=TEST_REQUEST_ID,
-                account_id=consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                account_id=TEST_CANARY_ACCOUNT_ID,
             )
 
         self.assertEqual(result, (143, False))
@@ -1701,7 +1703,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 return [
                     {
                         "id": TEST_RUN_ID,
-                        "account_id": consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                        "account_id": TEST_CANARY_ACCOUNT_ID,
                         "status": "running",
                     }
                 ]
@@ -1715,13 +1717,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             self.assertTrue(summary["terminalized_after_worker_exit"])
 
         with (
+            patch.object(consumer, "_follow60_control_applies", return_value=True),
             patch.object(consumer.supabase_client, "_request_json", side_effect=request_json),
             patch.object(consumer.supabase_client, "update_run_status", side_effect=update_run_status),
             patch.object(consumer, "reconcile_linked_ig_run_terminal") as generic_reconcile,
             patch.object(consumer, "_audit"),
         ):
             result = consumer._reconcile_linked_run(
-                account_id=consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                account_id=TEST_CANARY_ACCOUNT_ID,
                 run_id=TEST_RUN_ID,
                 terminal_status="canceled",
                 request_id=TEST_REQUEST_ID,

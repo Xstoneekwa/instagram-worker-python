@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from logs import log
+from follow_60s_canary_binding_v2 import (
+    ONE_SHOT_CONTRACT_SCHEMA,
+    Follow60CanaryBindingV2,
+    validate_runtime_binding,
+)
 
-
-CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
-CANARY_ACCOUNT_USERNAME = "rex_gen_boost_ai"
-ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
 
 POST_ROW_POSITIVE_SAFE = "POST_ROW_POSITIVE_SAFE"
 POST_ROW_POSITIVE_BUT_CLIPPED = "POST_ROW_POSITIVE_BUT_CLIPPED"
@@ -54,7 +55,9 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
+def _one_shot_resume_allowed(
+    policy: dict[str, Any], *, account_id: str
+) -> tuple[bool, str]:
     """Authorize only an explicit, frozen, source-linked Follow-only retry."""
     if not policy:
         return False, "not_auto_restart_resume"
@@ -86,7 +89,7 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
         return False, "remaining_follow_quota_out_of_bounds"
     frozen = dict(policy.get("frozen_phase_plan") or {})
     contract = dict(frozen.get("follow_60s_canary_contract") or {})
-    if str(frozen.get("account_id") or "") != CANARY_ACCOUNT_ID:
+    if str(frozen.get("account_id") or "") != str(account_id or "").strip():
         return False, "frozen_account_mismatch"
     if frozen.get("package_contract_ready") is not True:
         return False, "package_contract_not_ready"
@@ -442,6 +445,8 @@ class _Runtime:
     enabled: bool = False
     account_id: str = ""
     account_username: str = ""
+    control_id: str = ""
+    binding_version: str = ""
     run_id: str = ""
     attempt_id: int = 1
     natural_attempt: bool = True
@@ -470,21 +475,39 @@ def configure(
     run_id: str,
     package: str,
     resume_policy: dict[str, Any] | None,
+    control: dict[str, Any] | None = None,
+    worker_sha: str = "",
+    run_type: str = "account_session",
+    request_id: str = "",
+    business_session_id: str = "",
 ) -> bool:
-    """Enable only rex_gen_boost_ai's first natural attempt or frozen retry."""
+    """Enable only the account selected by a fully bound canonical control."""
     global _RUNTIME
     policy = dict(resume_policy or {})
-    one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)
+    one_shot_resume, one_shot_reject = _one_shot_resume_allowed(
+        policy, account_id=str(account_id or "").strip()
+    )
     attempt_id = int(policy.get("attempt_id") or (2 if one_shot_resume else 1))
     natural = not bool(policy)
     parent = _env_bool("FOLLOW_60S_CANARY_ENABLED", True)
+    verdict = validate_runtime_binding(
+        control,
+        account_id=str(account_id or "").strip(),
+        account_username=str(account_username or "").strip(),
+        active_worker_sha=str(worker_sha or "").strip(),
+        run_type=str(run_type or "").strip(),
+        package=str(package or "").strip(),
+        run_id=str(run_id or "").strip(),
+        request_id=str(request_id or "").strip(),
+        attempt_id=attempt_id,
+        business_session_id=str(business_session_id or "").strip(),
+    )
     enabled = bool(
         parent
-        and str(account_id or "").strip() == CANARY_ACCOUNT_ID
-        and str(account_username or "").strip().lstrip("@").lower()
-        == CANARY_ACCOUNT_USERNAME
+        and verdict.valid
         and ((natural and attempt_id == 1) or one_shot_resume)
     )
+    binding: Follow60CanaryBindingV2 | None = verdict.binding
     subflags = {
         name: _env_bool(f"FOLLOW_60S_CANARY_{name.upper()}", True)
         for name in _SUBFLAG_NAMES
@@ -493,6 +516,8 @@ def configure(
         enabled=enabled,
         account_id=str(account_id or "").strip(),
         account_username=str(account_username or "").strip().lstrip("@"),
+        control_id=(binding.control_id if binding else ""),
+        binding_version=(binding.binding_version if binding else ""),
         run_id=str(run_id or "").strip(),
         attempt_id=attempt_id,
         natural_attempt=natural,
@@ -528,6 +553,9 @@ def configure(
         package=_RUNTIME.package or None,
         subflags=subflags,
         fallback="golden_current" if not enabled else None,
+        control_id=_RUNTIME.control_id or None,
+        binding_version=_RUNTIME.binding_version or None,
+        binding_rejection_reason=(None if verdict.valid else verdict.reason),
     )
     return enabled
 
@@ -536,6 +564,15 @@ def enabled(subflag: str | None = None) -> bool:
     if not _RUNTIME.enabled:
         return False
     return True if not subflag else bool(_RUNTIME.subflags.get(subflag, False))
+
+
+def enabled_for_account(account_id: str | None) -> bool:
+    """Return true only for the account in the validated runtime binding."""
+    return bool(
+        _RUNTIME.enabled
+        and _RUNTIME.account_id
+        and _RUNTIME.account_id == str(account_id or "").strip()
+    )
 
 
 def runtime_context() -> dict[str, Any]:

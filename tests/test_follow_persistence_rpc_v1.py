@@ -13,6 +13,7 @@ import follow_persistence_intent
 import follow_persistence_rpc
 import runner
 import supabase_client
+from tests.follow60_generic_fixtures import TEST_CANARY_ACCOUNT_ID
 
 
 ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
@@ -344,7 +345,7 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         )
 
     def test_canary_flag_off_forces_account_scoped_idempotent_rpc(self) -> None:
-        canary_account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+        canary_account_id = TEST_CANARY_ACCOUNT_ID
         canary_run_id = "77777777-7777-4777-8777-777777777777"
         action_id = follow_persistence_rpc.deterministic_action_id(
             canary_account_id, canary_run_id, "candidate"
@@ -367,6 +368,8 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         )
         with mock.patch.dict(
             os.environ, {"FOLLOW_PERSISTENCE_RPC_V1_ENABLED": "false"}
+        ), mock.patch.object(
+            runner, "_follow60_canary_enabled_for_account", return_value=True
         ), mock.patch.object(
             supabase_client,
             "persist_verified_follow_success_rpc",
@@ -535,7 +538,7 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         self.assertLess(resume_pos, next_action_pos)
 
     def test_canonical_request_run_account_binding_is_certified_once(self) -> None:
-        account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+        account_id = TEST_CANARY_ACCOUNT_ID
         with mock.patch(
             "account_run_control.get_account_run_request",
             return_value={"id": REQUEST_ID, "account_id": account_id, "run_id": RUN_ID},

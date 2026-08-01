@@ -191,7 +191,34 @@ from instagram_navigation import (
 from logs import get_run_log_file_path, init_run_file_logging, log
 
 
-FOLLOW_60S_CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+def _follow60_canary_enabled_for_account(account_id: str | None) -> bool:
+    """Consult the validated runtime binding; never a compile-time allowlist."""
+    try:
+        from follow_60s_canary import enabled_for_account
+
+        return bool(enabled_for_account(account_id))
+    except Exception:
+        return False
+
+
+def _follow60_evaluation_barrier_due(
+    *,
+    canary_active: bool,
+    stage_receipts_enabled: bool,
+    cycle_complete: bool,
+    completed_new_cycles: int,
+    max_new_cycles: int,
+) -> bool:
+    """Pure, account-neutral gate preventing an eleventh canary candidate."""
+    return bool(
+        canary_active
+        and stage_receipts_enabled
+        and cycle_complete
+        and int(max_new_cycles or 0) > 0
+        and int(completed_new_cycles or 0) >= int(max_new_cycles or 0)
+    )
+
+
 
 
 def _pre_follow_gap_log(
@@ -3249,7 +3276,7 @@ def _persist_verified_follow_intents_for_manual_stop(
     """
     if not (supabase_mode and run_id and account_id):
         return True
-    if str(account_id or "") != FOLLOW_60S_CANARY_ACCOUNT_ID:
+    if not _follow60_canary_enabled_for_account(account_id):
         return True
     try:
         intents = follow_persistence_intent.load_nonterminal_intents(
@@ -3321,7 +3348,7 @@ def _follow_persistence_intent_enabled_for_account(account_id: str | None) -> bo
     """Keep a crash-safe Follow intent for RPC V1 or the scoped canary."""
     return bool(
         follow_persistence_rpc_v1_enabled()
-        or str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID
+        or _follow60_canary_enabled_for_account(account_id)
     )
 
 
@@ -3686,7 +3713,7 @@ def _persist_verified_follow_success_to_supabase(
     t_persist = time.perf_counter()
     rpc_enabled = bool(
         follow_persistence_rpc_v1_enabled()
-        or str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID
+        or _follow60_canary_enabled_for_account(account_id)
     )
     if rpc_enabled and bool(follow_out.get("skipped_tap")):
         if action_id and run_id:
@@ -10795,7 +10822,7 @@ def _run_followers_list_engine_session(
     if follow60_canary_active:
         _control = dict(follow60_canary_control or {})
         _binding_ok = bool(
-            str(account_id or "").strip() == FOLLOW_60S_CANARY_ACCOUNT_ID
+            _follow60_canary_enabled_for_account(account_id)
             and str(run_id or "").strip()
             and str(run_request_id or "").strip()
             and int(follow60_attempt_id or 0) >= 1
@@ -11023,12 +11050,16 @@ def _run_followers_list_engine_session(
         stage_receipts_enabled: bool,
         cycle_complete: bool,
     ) -> None:
+        from follow_60s_canary_binding_v2 import parse_control
+
         control = dict(follow60_canary_control or {})
-        evaluation_increment = int(control.get("evaluation_increment") or 10)
-        if (
-            not follow60_canary_active
-            or not stage_receipts_enabled
-            or int(_RUNTIME_FOLLOW_COUNT) < evaluation_increment
+        evaluation_increment = int(parse_control(control).max_new_cycles or 0)
+        if not _follow60_evaluation_barrier_due(
+            canary_active=bool(follow60_canary_active),
+            stage_receipts_enabled=bool(stage_receipts_enabled),
+            cycle_complete=bool(cycle_complete),
+            completed_new_cycles=int(_RUNTIME_FOLLOW_COUNT),
+            max_new_cycles=evaluation_increment,
         ):
             return
         expected_barrier_total = int(control.get("baseline_follow_count") or 0) + evaluation_increment
@@ -19089,7 +19120,7 @@ def _run_followers_list_engine_session(
                 try:
                     from follow_60s_canary import enabled as _follow60_enabled
                     _follow60_stage_receipts = bool(
-                        account_id == FOLLOW_60S_CANARY_ACCOUNT_ID
+                        _follow60_canary_enabled_for_account(account_id)
                         and _follow60_enabled()
                     )
                 except Exception:
@@ -20576,7 +20607,7 @@ def _main_impl() -> int:
             account_id=account_id or "",
         )
         _post_follow_stop_flush: dict[str, Any] = {"ok": True, "pending": 0}
-        if account_id == FOLLOW_60S_CANARY_ACCOUNT_ID:
+        if _follow60_canary_enabled_for_account(account_id):
             try:
                 import post_follow_stage_outbox
 
@@ -20595,7 +20626,7 @@ def _main_impl() -> int:
         except Exception as exc:
             spooled = {"error": str(exc)[:200]}
         if (
-            account_id == FOLLOW_60S_CANARY_ACCOUNT_ID
+            _follow60_canary_enabled_for_account(account_id)
             and run_id
             and run_request_id
         ):
@@ -20823,21 +20854,77 @@ def _main_impl() -> int:
         release=str(os.environ.get("WORKER_RELEASE") or ""),
     )
 
-    # Account-scoped consolidated Follow latency canary.  Resume policy is read
-    # before any canary UI path can run so Auto Restart always remains Golden.
+    # Generic Follow latency canary. The canonical V2 control is the sole
+    # account selector; invalid or absent controls leave the account Golden.
     _follow60_canary_active = False
     _follow60_canary_control: dict[str, Any] = {}
     _follow60_attempt_id = 1
     try:
         from auto_restart_runtime import load_resume_policy_from_env as _load_canary_resume
         from follow_60s_canary import configure as _configure_follow_60s_canary
+        from follow_60s_canary_binding_v2 import validate_armed_control
+
+        _canary_resume_policy = dict(_load_canary_resume() or {})
+        _follow60_attempt_id = int(
+            _canary_resume_policy.get("attempt_id")
+            or (2 if _canary_resume_policy else 1)
+        )
+        _worker_sha = str(os.environ.get("WORKER_GIT_SHA") or "").strip()
+        if supabase_mode:
+            _raw_control = supabase_client.get_follow_60s_canary_control_v1(account_id)
+            _prebind = validate_armed_control(
+                _raw_control,
+                account_id=account_id,
+                account_username=account_username,
+                active_worker_sha=_worker_sha,
+                run_type=dispatch_run_type,
+                package=str(config.INSTAGRAM_PACKAGE or ""),
+            )
+            if _prebind.valid:
+                _control_baseline = int(_raw_control.get("baseline_follow_count") or 0)
+                _live_follow_count = supabase_client.count_successful_follows_today(
+                    account_id
+                )
+                if _live_follow_count == _control_baseline:
+                    _bound_control = supabase_client.bind_follow_60s_canary_runtime_v2(
+                        account_id=account_id,
+                        run_id=str(run_id or ""),
+                        request_id=str(run_request_id or ""),
+                        attempt_id=int(_follow60_attempt_id or 1),
+                        business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    )
+                    _follow60_canary_control = {
+                        **dict(_raw_control or {}),
+                        **dict(_bound_control or {}),
+                    }
+                else:
+                    log(
+                        "warning", "follow_60s_canary_control_gate_rejected",
+                        account_id=account_id, run_id=run_id or None,
+                        reason="baseline_follow_count_mismatch",
+                        control_baseline=_control_baseline,
+                        live_follow_count=_live_follow_count,
+                        fallback="golden_current", device_actions_started=False,
+                    )
+            elif _raw_control:
+                log(
+                    "warning", "follow_60s_canary_control_gate_rejected",
+                    account_id=account_id, run_id=run_id or None,
+                    reason=_prebind.reason,
+                    fallback="golden_current", device_actions_started=False,
+                )
 
         _follow60_canary_active = bool(_configure_follow_60s_canary(
             account_id=account_id,
             account_username=account_username,
             run_id=run_id,
             package=str(config.INSTAGRAM_PACKAGE or ""),
-            resume_policy=_load_canary_resume(),
+            resume_policy=_canary_resume_policy,
+            control=_follow60_canary_control,
+            worker_sha=_worker_sha,
+            run_type=dispatch_run_type,
+            request_id=str(run_request_id or ""),
+            business_session_id=str(_SESSION_SOCIAL_ID or ""),
         ))
         if _follow60_canary_active:
             from follow_60s_canary import runtime_context as _follow60_runtime_context
@@ -20845,7 +20932,6 @@ def _main_impl() -> int:
             _follow60_attempt_id = int(
                 _follow60_runtime_context().get("attempt_id") or 1
             )
-        if _follow60_canary_active and supabase_mode:
             try:
                 import post_follow_stage_outbox
 
@@ -20865,68 +20951,20 @@ def _main_impl() -> int:
                     device_actions_started=False,
                 )
                 return 96
-            _follow60_canary_control = supabase_client.get_follow_60s_canary_control_v1(
-                account_id
-            )
-            _control_status = str(_follow60_canary_control.get("status") or "")
-            _control_baseline = int(
-                _follow60_canary_control.get("baseline_follow_count") or 0
-            )
-            _live_follow_count = supabase_client.count_successful_follows_today(
-                account_id
-            )
-            if _control_status != "armed" or _live_follow_count != _control_baseline:
-                log(
-                    "error", "follow_60s_canary_control_gate_failed",
-                    account_id=account_id, run_id=run_id or None,
-                    control_status=_control_status,
-                    control_baseline=_control_baseline,
-                    live_follow_count=_live_follow_count,
-                    device_actions_started=False,
-                )
-                return 94
-            _bound_control = supabase_client.bind_follow_60s_canary_runtime_v2(
-                account_id=account_id,
-                run_id=str(run_id or ""),
-                request_id=str(run_request_id or ""),
-                attempt_id=int(_follow60_attempt_id or 1),
-                business_session_id=str(_SESSION_SOCIAL_ID or ""),
-            )
-            if not (
-                _bound_control.get("ok") is True
-                and _bound_control.get("binding_valid") is True
-                and str(_bound_control.get("account_id") or "") == str(account_id or "")
-                and str(_bound_control.get("run_id") or "") == str(run_id or "")
-                and str(_bound_control.get("request_id") or "") == str(run_request_id or "")
-                and int(_bound_control.get("attempt_id") or 0) == int(_follow60_attempt_id or 1)
-                and str(_bound_control.get("business_session_id") or "")
-                == str(_SESSION_SOCIAL_ID or "")
-            ):
-                log(
-                    "error", "follow60_stage_binding_missing_or_invalid",
-                    account_id=account_id, run_id=run_id or None,
-                    request_id=run_request_id or None,
-                    attempt_id=int(_follow60_attempt_id or 0),
-                    business_session_id_present=bool(_SESSION_SOCIAL_ID),
-                    control_status=_control_status,
-                    device_actions_started=False,
-                )
-                return 96
-            _follow60_canary_control = {
-                **dict(_follow60_canary_control or {}),
-                **dict(_bound_control or {}),
-            }
             log(
                 "info", "follow_60s_canary_control_gate_passed",
                 account_id=account_id, run_id=run_id or None,
-                baseline_follow_count=_control_baseline,
+                control_id=_follow60_runtime_context().get("control_id"),
+                baseline_follow_count=int(
+                    _follow60_canary_control.get("baseline_follow_count") or 0
+                ),
                 evaluation_increment=int(
                     _follow60_canary_control.get("evaluation_increment") or 10
                 ),
             )
     except Exception as exc:
-        # Fail closed before device connect for the scoped canary. Other
-        # accounts remain byte-for-byte Golden.
+        # Control-plane failures disable only the optional canary path. The
+        # account continues through the byte-for-byte Golden path.
         log(
             "warning",
             "follow_60s_canary_configuration_failed",
@@ -20936,8 +20974,7 @@ def _main_impl() -> int:
             fallback="golden_current",
             error_type=type(exc).__name__,
         )
-        if account_id == FOLLOW_60S_CANARY_ACCOUNT_ID:
-            return 94
+        _follow60_canary_active = False
 
     # P3: canonical resume plan created EARLY, before any device/UI action.
     # Covers every dispatched account_session regardless of trigger
@@ -21008,7 +21045,7 @@ def _main_impl() -> int:
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
     device_action_latch.configure(
-        enabled=bool(account_id == FOLLOW_60S_CANARY_ACCOUNT_ID),
+        enabled=bool(_follow60_canary_active),
         account_id=account_id or "",
         run_id=run_id or "",
     )

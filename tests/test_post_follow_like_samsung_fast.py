@@ -9,6 +9,11 @@ from unittest import mock
 import instagram_navigation as nav
 import config
 import follow_60s_canary as canary
+from tests.follow60_generic_fixtures import (
+    TEST_CANARY_ACCOUNT_ID,
+    TEST_CANARY_USERNAME,
+    configure_canary,
+)
 
 _SURFACE_PRECHECK_OK: dict[str, object] = {
     "skip_like": False,
@@ -1934,9 +1939,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         device.dump_hierarchy.return_value = "<hierarchy/>"
         contract_ctx = _like_phase_contract_ctx()
         logs: list[tuple[str, dict[str, object]]] = []
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="canary-fast-vision",
             package="com.instagram.android",
             resume_policy=None,
@@ -2088,7 +2093,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     skipped_tap=False,
                 )
         finally:
-            canary.configure(
+            configure_canary(canary,
                 account_id="other",
                 account_username="other",
                 run_id="reset",
@@ -2112,9 +2117,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)
         contract_ctx = _like_phase_contract_ctx()
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="canary-no-posts-fast",
             package="com.instagram.android",
             resume_policy=None,
@@ -2175,7 +2180,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 surface="candidate_profile_after_like",
             )
         finally:
-            canary.configure(
+            configure_canary(canary,
                 account_id="other",
                 account_username="other",
                 run_id="reset",
@@ -2199,15 +2204,15 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         canary_logs: list[tuple[str, dict[str, object]]] = []
         nav_logs: list[tuple[str, dict[str, object]]] = []
         freshness_rows: list[dict[str, object]] = []
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="canary-stale-at-tap",
             package="com.instagram.android",
             resume_policy=None,
         )
         proof = canary.FreshUiProof(
-            account_id=canary.CANARY_ACCOUNT_ID,
+            account_id=TEST_CANARY_ACCOUNT_ID,
             subject_username="ct",
             target_username="cand",
             package="com.instagram.android",
@@ -2422,7 +2427,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     skipped_tap=False,
                 )
         finally:
-            canary.configure(
+            configure_canary(canary,
                 account_id="other",
                 account_username="other",
                 run_id="reset",
@@ -2458,9 +2463,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         device.dump_hierarchy.return_value = "<hierarchy/>"
         contract_ctx = _like_phase_contract_ctx()
         logs: list[tuple[str, dict[str, object]]] = []
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="canary-ambiguous-fallback",
             package="com.instagram.android",
             resume_policy=None,
@@ -2590,7 +2595,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         skipped_tap=False,
                     ))
         finally:
-            canary.configure(
+            configure_canary(canary,
                 account_id="other",
                 account_username="other",
                 run_id="reset",

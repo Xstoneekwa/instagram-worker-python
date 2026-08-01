@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import account_session_orchestrator as session
 import instagram_navigation as nav
 import runner
+from tests.follow60_generic_fixtures import TEST_CANARY_ACCOUNT_ID
 
 
 class FakeFollowersEngine:
@@ -3330,7 +3331,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             runner, "log"
         ):
             revision = runner._load_follow_persistence_settings_revision(
-                runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+                TEST_CANARY_ACCOUNT_ID
             )
 
         self.assertEqual(revision, "2026-07-28T23:57:34+00:00")
@@ -3344,7 +3345,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             return_value={"unfollow_enabled": True},
         ), patch.object(runner.time, "sleep"), patch.object(runner, "log"):
             revision = runner._load_follow_persistence_settings_revision(
-                runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                TEST_CANARY_ACCOUNT_ID,
                 max_attempts=2,
             )
 
@@ -3742,6 +3743,8 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             "load_nonterminal_intents",
             return_value=intents,
         ), patch.object(
+            runner, "_follow60_canary_enabled_for_account", return_value=True
+        ), patch.object(
             runner,
             "_persist_verified_follow_success_to_supabase",
             return_value=True,
@@ -3749,7 +3752,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             ok = runner._persist_verified_follow_intents_for_manual_stop(
                 supabase_mode=True,
                 run_id="run",
-                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                account_id=TEST_CANARY_ACCOUNT_ID,
             )
 
         self.assertTrue(ok)
@@ -3773,6 +3776,8 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 }
             ],
         ), patch.object(
+            runner, "_follow60_canary_enabled_for_account", return_value=True
+        ), patch.object(
             runner,
             "_persist_verified_follow_success_to_supabase",
             return_value=False,
@@ -3780,7 +3785,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             ok = runner._persist_verified_follow_intents_for_manual_stop(
                 supabase_mode=True,
                 run_id="run",
-                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                account_id=TEST_CANARY_ACCOUNT_ID,
             )
 
         self.assertFalse(ok)
@@ -3788,10 +3793,13 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
     def test_canary_keeps_local_follow_intent_when_rpc_v1_is_off(self) -> None:
         with patch.object(
             runner, "follow_persistence_rpc_v1_enabled", return_value=False
+        ), patch.object(
+            runner, "_follow60_canary_enabled_for_account",
+            side_effect=lambda account_id: account_id == TEST_CANARY_ACCOUNT_ID,
         ):
             self.assertTrue(
                 runner._follow_persistence_intent_enabled_for_account(
-                    runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+                    TEST_CANARY_ACCOUNT_ID
                 )
             )
             self.assertFalse(
@@ -3807,11 +3815,11 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             },
         ):
             action_id = runner.deterministic_action_id(
-                runner.FOLLOW_60S_CANARY_ACCOUNT_ID, "run-j-automatise", "cand_verified"
+                TEST_CANARY_ACCOUNT_ID, "run-j-automatise", "cand_verified"
             )
             runner.follow_persistence_intent.create_prepared_intent(
                 action_id=action_id,
-                account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                account_id=TEST_CANARY_ACCOUNT_ID,
                 run_id="run-j-automatise",
                 request_id="request-j-automatise",
                 candidate_username="cand_verified",
@@ -3850,12 +3858,14 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 "persist_verified_follow_success_rpc",
                 return_value=rpc_result,
             ) as rpc, patch.object(
+                runner, "_follow60_canary_enabled_for_account", return_value=True
+            ), patch.object(
                 runner, "_timed_safe_supabase_call"
             ) as legacy, patch.object(runner, "log"):
                 ok = runner._persist_verified_follow_intents_for_manual_stop(
                     supabase_mode=True,
                     run_id="run-j-automatise",
-                    account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                    account_id=TEST_CANARY_ACCOUNT_ID,
                 )
 
             self.assertTrue(ok)
@@ -3863,7 +3873,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             legacy.assert_not_called()
             self.assertEqual(
                 runner.follow_persistence_intent.load_nonterminal_intents(
-                    account_id=runner.FOLLOW_60S_CANARY_ACCOUNT_ID,
+                    account_id=TEST_CANARY_ACCOUNT_ID,
                     run_id="run-j-automatise",
                 ),
                 [],

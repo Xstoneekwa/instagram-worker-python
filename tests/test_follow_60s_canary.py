@@ -5,6 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import follow_60s_canary as canary
 import instagram_navigation as nav
+from tests.follow60_generic_fixtures import (
+    TEST_CANARY_ACCOUNT_ID,
+    TEST_CANARY_USERNAME,
+    configure_canary,
+)
 
 
 class Follow60sCanaryRuntimeTest(unittest.TestCase):
@@ -14,7 +19,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.log_patch.stop()
-        canary.configure(
+        configure_canary(canary,
             account_id="other",
             account_username="other",
             run_id="reset",
@@ -23,15 +28,15 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         )
 
     def _configure_canary(self, resume_policy=None) -> bool:
-        return canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        return configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=resume_policy,
         )
 
-    def test_only_rex_first_natural_attempt_is_enabled(self) -> None:
+    def test_only_bound_account_first_natural_attempt_is_enabled(self) -> None:
         self.assertTrue(self._configure_canary())
         self.assertTrue(canary.enabled("mute_like_handoff"))
 
@@ -39,7 +44,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertFalse(canary.enabled())
 
         self.assertFalse(
-            canary.configure(
+            configure_canary(canary,
                 account_id="another-account",
                 account_username="another",
                 run_id="run-2",
@@ -49,10 +54,10 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         )
 
         self.assertFalse(
-            canary.configure(
-                account_id="dfe78a92-3a51-435e-8911-ed10c93a4d82",
-                account_username="lorielebras_autom",
-                run_id="run-loriele-mainline",
+            configure_canary(canary,
+                account_id="unbound-account",
+                account_username="unbound_account",
+                run_id="run-unbound-mainline",
                 package="com.instagram.androig",
                 resume_policy=None,
             )
@@ -369,7 +374,7 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
 
 class Follow60sMuteKnownDepthTest(unittest.TestCase):
     def tearDown(self) -> None:
-        canary.configure(
+        configure_canary(canary,
             account_id="other",
             account_username="other",
             run_id="reset",
@@ -378,9 +383,9 @@ class Follow60sMuteKnownDepthTest(unittest.TestCase):
         )
 
     def test_following_options_depth_is_reused_before_final_profile_proof(self) -> None:
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=None,
@@ -416,9 +421,9 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.log_patch = patch.object(canary, "log")
         self.log_patch.start()
-        canary.configure(
-            account_id=canary.CANARY_ACCOUNT_ID,
-            account_username=canary.CANARY_ACCOUNT_USERNAME,
+        configure_canary(canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
             run_id="run-j-automatise",
             package="com.instagram.android",
             resume_policy=None,
@@ -426,7 +431,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.log_patch.stop()
-        canary.configure(
+        configure_canary(canary,
             account_id="other", account_username="other", run_id="reset",
             package="com.instagram.android", resume_policy=None,
         )
@@ -693,7 +698,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 "unfollow": 0,
             },
             "frozen_phase_plan": {
-                "account_id": canary.CANARY_ACCOUNT_ID,
+                "account_id": TEST_CANARY_ACCOUNT_ID,
                 "package_contract_ready": True,
                 "follow_60s_canary_contract": {
                     "schema": canary.ONE_SHOT_CONTRACT_SCHEMA,
@@ -704,11 +709,14 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 },
             },
         }
-        self.assertTrue(canary._one_shot_resume_allowed(policy)[0])
+        allowed = lambda value: canary._one_shot_resume_allowed(
+            value, account_id=TEST_CANARY_ACCOUNT_ID
+        )
+        self.assertTrue(allowed(policy)[0])
         with self.subTest("valid frozen one-shot"):
-            self.assertTrue(canary.configure(
-                account_id=canary.CANARY_ACCOUNT_ID,
-                account_username=canary.CANARY_ACCOUNT_USERNAME,
+            self.assertTrue(configure_canary(canary,
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                account_username=TEST_CANARY_USERNAME,
                 run_id="resume-run",
                 package="com.instagram.androig",
                 resume_policy=policy,
@@ -718,24 +726,24 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 "prior_run_id": "different-run",
             }
             self.assertEqual(
-                canary._one_shot_resume_allowed(mismatched_source),
+                allowed(mismatched_source),
                 (False, "canary_contract_source_mismatch"),
             )
-            self.assertFalse(canary._one_shot_resume_allowed({
+            self.assertFalse(allowed({
                 **policy,
                 "phases_to_run": {"follow": True, "welcome": False, "unfollow": True},
             })[0])
-            self.assertFalse(canary._one_shot_resume_allowed({
+            self.assertFalse(allowed({
                 **policy, "quota_remaining": {"follow": 0}
             })[0])
-            self.assertFalse(canary._one_shot_resume_allowed({
+            self.assertFalse(allowed({
                 **policy,
                 "frozen_phase_plan": {
                     **policy["frozen_phase_plan"],
                     "follow_60s_canary_contract": {},
                 },
             })[0])
-            self.assertFalse(canary._one_shot_resume_allowed({
+            self.assertFalse(allowed({
                 **policy,
                 "frozen_phase_plan": {
                     **policy["frozen_phase_plan"],
@@ -809,7 +817,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
 class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
     def tearDown(self) -> None:
-        canary.configure(
+        configure_canary(canary,
             account_id="other",
             account_username="other",
             run_id="reset",
@@ -1021,9 +1029,9 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
 
     def test_final_mute_close_uses_one_xml_for_identity_verdict_and_grid(self) -> None:
         self.assertTrue(
-            canary.configure(
-                account_id=canary.CANARY_ACCOUNT_ID,
-                account_username=canary.CANARY_ACCOUNT_USERNAME,
+            configure_canary(canary,
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                account_username=TEST_CANARY_USERNAME,
                 run_id="mono-final-close",
                 package="com.instagram.android",
                 resume_policy=None,

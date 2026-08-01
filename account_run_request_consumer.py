@@ -83,8 +83,40 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
-FOLLOW_60S_CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
 _last_integration_noop_proof: dict[str, Any] | None = None
+
+
+def _follow60_control_applies(
+    *, account_id: str, run_id: str | None, request_id: str
+) -> bool:
+    """Resolve special terminal handling from the canonical bound control."""
+    if not account_id or not run_id or not request_id:
+        return False
+    try:
+        from follow_60s_canary_binding_v2 import validate_consumer_binding
+
+        control = supabase_client.get_follow_60s_canary_control_v1(account_id)
+        verdict = validate_consumer_binding(
+            control,
+            account_id=account_id,
+            active_worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+            run_id=str(run_id),
+            request_id=str(request_id),
+        )
+        if not verdict.valid and control:
+            log(
+                "warning", "follow60_consumer_binding_rejected",
+                account_id=account_id, run_id=run_id, request_id=request_id,
+                reason=verdict.reason, fallback="golden_current",
+            )
+        return bool(verdict.valid)
+    except Exception as exc:
+        log(
+            "warning", "follow60_consumer_binding_read_failed",
+            account_id=account_id, run_id=run_id, request_id=request_id,
+            error_type=type(exc).__name__, fallback="golden_current",
+        )
+        return False
 
 
 def _integration_mode_enabled() -> bool:
@@ -1193,8 +1225,8 @@ def _reconcile_linked_run(
     request_id: str,
     exit_code: int | None = None,
 ) -> dict[str, Any]:
-    is_follow60_canary = bool(
-        account_id == FOLLOW_60S_CANARY_ACCOUNT_ID and run_id
+    is_follow60_canary = _follow60_control_applies(
+        account_id=account_id, run_id=run_id, request_id=request_id
     )
     canary_terminal_payload: dict[str, Any] | None = None
     if is_follow60_canary:
@@ -2241,7 +2273,11 @@ def _wait_for_subprocess(
             # The scoped Follow 60s canary may need to replay one verified Follow intent and
             # flush bounded deferred projections. Keep every other account on
             # the exact Golden 30-second termination contract.
-            if str(account_id or "") == FOLLOW_60S_CANARY_ACCOUNT_ID:
+            if _follow60_control_applies(
+                account_id=account_id,
+                run_id=str(latest.get("run_id") or ""),
+                request_id=request_id,
+            ):
                 return _terminate_subprocess(
                     proc, graceful_timeout_seconds=90.0
                 ), False
