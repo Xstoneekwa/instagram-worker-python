@@ -61,6 +61,11 @@ import incident_notifications
 import runtime_incidents
 import supabase_client
 import deferred_projection_outbox
+import follow_persistence_receipt_replay
+from worker_runtime_identity import (
+    export_worker_runtime_identity,
+    resolve_worker_runtime_identity,
+)
 from account_protection_lists import (
     SNAPSHOT_ENV as ACCOUNT_PROTECTION_SNAPSHOT_ENV,
     load_snapshot_for_run,
@@ -3269,6 +3274,25 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                 )
         return 3
 
+    receipt_replay = follow_persistence_receipt_replay.replay_verified_receipts(
+        limit=100,
+        time_budget_seconds=8.0,
+    )
+    if not bool(receipt_replay.get("ok")):
+        log(
+            "error",
+            "candidate_local_receipt_replay_blocked_dispatcher_startup",
+            device_actions_started=False,
+            **receipt_replay,
+        )
+        return 4
+    log(
+        "info",
+        "candidate_local_receipt_replay_completed_dispatcher_startup",
+        device_actions_started=False,
+        **receipt_replay,
+    )
+
     log(
         "info",
         "run_control_dispatcher_started",
@@ -3395,6 +3419,16 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
+    export_worker_runtime_identity(runtime_identity)
+    log(
+        "info",
+        "worker_runtime_identity_resolved",
+        worker_sha=runtime_identity.worker_sha,
+        runtime_root=runtime_identity.runtime_root,
+        identity_source=runtime_identity.source,
+        runtime_root_ok=True,
+    )
     args = list(argv or sys.argv[1:])
     if args and args[0] in {"--preflight", "preflight"}:
         cfg = load_dispatcher_config()

@@ -26,6 +26,25 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+RUNTIME_GIT_ROOT="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+RUNTIME_GIT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+if [[ -z "$RUNTIME_GIT_ROOT" || "$(cd "$RUNTIME_GIT_ROOT" && pwd -P)" != "$(cd "$ROOT_DIR" && pwd -P)" ]]; then
+  echo "FAIL worker_runtime_root_mismatch root=$ROOT_DIR git_root=${RUNTIME_GIT_ROOT:-missing}" >&2
+  exit 2
+fi
+if [[ ! "$RUNTIME_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "FAIL worker_runtime_sha_invalid root=$ROOT_DIR" >&2
+  exit 2
+fi
+DECLARED_WORKER_GIT_SHA="$(printf '%s' "${WORKER_GIT_SHA:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ -n "$DECLARED_WORKER_GIT_SHA" && "$DECLARED_WORKER_GIT_SHA" != "$RUNTIME_GIT_SHA" ]]; then
+  echo "FAIL worker_runtime_declared_sha_mismatch declared=${WORKER_GIT_SHA} actual=$RUNTIME_GIT_SHA" >&2
+  exit 2
+fi
+export WORKER_RUNTIME_ROOT="$ROOT_DIR"
+export WORKER_GIT_SHA="$RUNTIME_GIT_SHA"
+export WORKER_GIT_SHA_SOURCE="runtime_release_head"
+
 _resolve_adb_path() {
   if [[ -n "${ADB_PATH:-}" && -x "${ADB_PATH}" ]]; then
     printf '%s' "${ADB_PATH}"

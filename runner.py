@@ -41,8 +41,13 @@ import runtime_events
 import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
+import follow_persistence_receipt_replay
 import deferred_projection_outbox
 import device_action_latch
+from worker_runtime_identity import (
+    export_worker_runtime_identity,
+    resolve_worker_runtime_identity,
+)
 from follow_outcome_contract import merge_follow_outcome
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
 from follow_persistence_rpc import (
@@ -3594,6 +3599,79 @@ def _flush_deferred_persists_for_manual_stop(
         return ok
     finally:
         _MANUAL_STOP_FLUSH_IN_PROGRESS = False
+
+
+def _drain_candidate_receipts_for_manual_stop(
+    *,
+    account_id: str,
+    run_id: str,
+    budget_s: float = 8.0,
+) -> dict[str, Any]:
+    """Drain only DB persistence after the device latch, within a hard budget."""
+    if not str(account_id or "").strip() or not str(run_id or "").strip():
+        return {
+            "ok": True,
+            "reason": "candidate_receipt_drain_not_applicable",
+            "budget_s": float(budget_s),
+            "follow_replay": {"ok": True, "replayed": 0},
+            "post_follow_replay": {"ok": True, "pending": 0, "flushed": 0},
+        }
+    result: dict[str, Any] = {
+        "ok": False,
+        "reason": "candidate_receipt_drain_timeout",
+        "budget_s": float(budget_s),
+    }
+
+    def _run() -> None:
+        started = time.monotonic()
+        follow_replay = follow_persistence_receipt_replay.replay_verified_receipts(
+            account_id=account_id,
+            run_id=run_id,
+            limit=25,
+            time_budget_seconds=max(0.1, float(budget_s) - 0.25),
+        )
+        post_follow: dict[str, Any] = {"ok": True, "pending": 0, "flushed": 0}
+        if bool(follow_replay.get("ok")):
+            try:
+                import post_follow_stage_outbox
+
+                remaining = max(
+                    0.1,
+                    float(budget_s) - (time.monotonic() - started),
+                )
+                post_follow = post_follow_stage_outbox.flush_pending_bounded(
+                    budget_s=remaining
+                )
+            except Exception as exc:
+                post_follow = {"ok": False, "reason": type(exc).__name__}
+        result.clear()
+        result.update(
+            {
+                "ok": bool(follow_replay.get("ok") and post_follow.get("ok")),
+                "reason": "candidate_receipt_drain_completed"
+                if follow_replay.get("ok") and post_follow.get("ok")
+                else str(
+                    follow_replay.get("reason")
+                    or post_follow.get("reason")
+                    or "candidate_receipt_drain_failed"
+                ),
+                "follow_replay": follow_replay,
+                "post_follow_replay": post_follow,
+                "duration_ms": round((time.monotonic() - started) * 1000.0, 2),
+                "budget_s": float(budget_s),
+            }
+        )
+
+    worker = threading.Thread(
+        target=_run,
+        name="follow60-candidate-receipt-stop-drain",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(max(5.0, min(10.0, float(budget_s))))
+    if worker.is_alive():
+        return dict(result)
+    return dict(result)
 
 
 def _reconcile_follow_persistence_from_canonical_rows(
@@ -18371,6 +18449,12 @@ def _run_followers_list_engine_session(
                                 action_id=str(_follow_persistence_ctx["action_id"]),
                                 stage="follow_physically_verified",
                                 followed_at=_intent_followed_at,
+                                metadata_safe={
+                                    "physical_follow_state": "following",
+                                    "verification_method": "worker_exact_following_state",
+                                    "candidate_username": str(follower_un or ""),
+                                    "source_profile": str(source_profile_username or ""),
+                                },
                             )
                         else:
                             _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
@@ -19358,6 +19442,54 @@ def _run_followers_list_engine_session(
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
                 _follow60_composite_flush: dict[str, Any] = {}
+                if _follow_persistence_ctx is not None:
+                    try:
+                        _follow_persistence_ctx = follow_persistence_intent.update_intent_metadata(
+                            run_id=run_id,
+                            action_id=str(_follow_persistence_ctx["action_id"]),
+                            metadata_safe={
+                                "post_follow_stage_results": dict(
+                                    _pf.get("stage_persist_results") or {}
+                                ),
+                                "post_follow_stage_persist_ok": bool(
+                                    _pf.get("stage_persist_ok", True)
+                                ),
+                                "return_ct_exact": bool(
+                                    _pf.get("final_ct_exact") is True
+                                    or _pf.get("return_ok") is True
+                                ),
+                                "receipt_ready_before_critical_rpc": True,
+                            },
+                        )
+                        log(
+                            "info",
+                            "candidate_local_persistence_receipt_ready",
+                            account_id=account_id,
+                            run_id=run_id,
+                            request_id=run_request_id or None,
+                            action_id_hash=action_id_hash(
+                                str(_follow_persistence_ctx.get("action_id") or "")
+                            ),
+                            candidate_username=str(follower_un or ""),
+                            physical_follow_state=str(
+                                _follow_persistence_ctx.get("stage") or ""
+                            ),
+                            post_follow_stage_results=dict(
+                                _pf.get("stage_persist_results") or {}
+                            ),
+                            safe_to_continue_ui=False,
+                        )
+                    except Exception as exc:
+                        log(
+                            "error",
+                            "candidate_local_persistence_receipt_failed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=str(follower_un or ""),
+                            reason=str(exc)[:200],
+                            safe_to_continue_ui=False,
+                        )
+                        return 96
                 if _follow60_stage_receipts:
                     try:
                         import post_follow_stage_outbox
@@ -19557,6 +19689,30 @@ def _run_followers_list_engine_session(
                     flush_required_before_completed=True,
                     pending_deferred_count=_pending_deferred_follow_action_log_count(),
                     safe_to_continue_ui=bool(_critical_persist_ok),
+                )
+                log(
+                    "info" if _critical_persist_ok else "error",
+                    "candidate_local_persistence_summary",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    action_id_hash=action_id_hash(
+                        str((_follow_persistence_ctx or {}).get("action_id") or "")
+                    ),
+                    candidate_username=str(follower_un or ""),
+                    physical_follow_verified=str(
+                        (_follow_persistence_ctx or {}).get("stage") or ""
+                    )
+                    == "follow_physically_verified",
+                    post_follow_stage_results=dict(
+                        _pf.get("stage_persist_results") or {}
+                    ),
+                    composite_flush_ok=bool(
+                        not _follow60_stage_receipts
+                        or _follow60_composite_flush.get("ok")
+                    ),
+                    critical_rpc_acknowledged=bool(_critical_persist_ok),
+                    next_candidate_allowed=bool(_critical_persist_ok),
                 )
                 if not _critical_persist_ok:
                     log(
@@ -20279,6 +20435,17 @@ def _main_impl() -> int:
         help="phone_app_instances.id resolved by the dispatcher (observability only).",
     )
     args = parser.parse_args()
+    runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
+    export_worker_runtime_identity(runtime_identity)
+    log(
+        "info",
+        "worker_runtime_identity_resolved",
+        worker_sha=runtime_identity.worker_sha,
+        runtime_root=runtime_identity.runtime_root,
+        identity_source=runtime_identity.source,
+        runtime_root_ok=True,
+        device_actions_started=False,
+    )
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
     welcome_scan_run = _is_welcome_scan_run(args)
@@ -20601,24 +20768,15 @@ def _main_impl() -> int:
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
             stop_trace=stop_trace,
         )
-        verified_follow_ok = _persist_verified_follow_intents_for_manual_stop(
-            supabase_mode=supabase_mode,
-            run_id=run_id or "",
+        _candidate_receipt_drain = _drain_candidate_receipts_for_manual_stop(
             account_id=account_id or "",
+            run_id=run_id or "",
+            budget_s=8.0,
         )
-        _post_follow_stop_flush: dict[str, Any] = {"ok": True, "pending": 0}
-        if _follow60_canary_enabled_for_account(account_id):
-            try:
-                import post_follow_stage_outbox
-
-                _post_follow_stop_flush = post_follow_stage_outbox.flush_pending_bounded(
-                    budget_s=0.55
-                )
-            except Exception as exc:
-                _post_follow_stop_flush = {
-                    "ok": False,
-                    "reason": str(exc)[:200],
-                }
+        verified_follow_ok = bool(_candidate_receipt_drain.get("ok"))
+        _post_follow_stop_flush = dict(
+            _candidate_receipt_drain.get("post_follow_replay") or {}
+        )
         try:
             spooled = _spool_noncritical_deferred_projections(
                 reason="manual_stop_after_device_action_latch",
@@ -20652,7 +20810,8 @@ def _main_impl() -> int:
             account_id=account_id or None,
             verified_follow_persist_ok=bool(verified_follow_ok),
             post_follow_stage_flush=_post_follow_stop_flush,
-            persistence_pending=not bool(_post_follow_stop_flush.get("ok")),
+            candidate_receipt_drain=_candidate_receipt_drain,
+            persistence_pending=not bool(_candidate_receipt_drain.get("ok")),
             noncritical_spooled=spooled,
             stop_trace=device_action_latch.trace(),
             db_terminalization_deferred_to_consumer=True,
@@ -20859,10 +21018,14 @@ def _main_impl() -> int:
     _follow60_canary_active = False
     _follow60_canary_control: dict[str, Any] = {}
     _follow60_attempt_id = 1
+    _raw_control: dict[str, Any] | None = None
     try:
         from auto_restart_runtime import load_resume_policy_from_env as _load_canary_resume
         from follow_60s_canary import configure as _configure_follow_60s_canary
-        from follow_60s_canary_binding_v2 import validate_armed_control
+        from follow_60s_canary_binding_v2 import (
+            validate_armed_control,
+            validate_runtime_binding,
+        )
 
         _canary_resume_policy = dict(_load_canary_resume() or {})
         _follow60_attempt_id = int(
@@ -20902,6 +21065,38 @@ def _main_impl() -> int:
                         **dict(_raw_control or {}),
                         **dict(_bound_control or {}),
                     }
+                    _runtime_verdict = validate_runtime_binding(
+                        _follow60_canary_control,
+                        account_id=account_id,
+                        account_username=account_username,
+                        active_worker_sha=_worker_sha,
+                        run_type=dispatch_run_type,
+                        package=str(config.INSTAGRAM_PACKAGE or ""),
+                        run_id=str(run_id or ""),
+                        request_id=str(run_request_id or ""),
+                        attempt_id=int(_follow60_attempt_id or 1),
+                        business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    )
+                    if not _runtime_verdict.valid:
+                        log(
+                            "error",
+                            "follow_60s_armed_control_safe_stop_pre_device",
+                            account_id=account_id,
+                            run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            reason=_runtime_verdict.reason,
+                            control_status=str(
+                                _follow60_canary_control.get("control_status")
+                                or _follow60_canary_control.get("status")
+                                or ""
+                            ),
+                            worker_sha=_worker_sha,
+                            worker_sha_source=os.environ.get("WORKER_GIT_SHA_SOURCE"),
+                            device_actions_started=False,
+                            fallback_used=False,
+                            safe_to_continue_ui=False,
+                        )
+                        return 96
                 else:
                     log(
                         "warning", "follow_60s_canary_control_gate_rejected",
@@ -20909,15 +21104,19 @@ def _main_impl() -> int:
                         reason="baseline_follow_count_mismatch",
                         control_baseline=_control_baseline,
                         live_follow_count=_live_follow_count,
-                        fallback="golden_current", device_actions_started=False,
+                        fallback_used=False, device_actions_started=False,
+                        safe_to_continue_ui=False,
                     )
+                    return 96
             elif _raw_control:
                 log(
                     "warning", "follow_60s_canary_control_gate_rejected",
                     account_id=account_id, run_id=run_id or None,
                     reason=_prebind.reason,
-                    fallback="golden_current", device_actions_started=False,
+                    fallback_used=False, device_actions_started=False,
+                    safe_to_continue_ui=False,
                 )
+                return 96
 
         _follow60_canary_active = bool(_configure_follow_60s_canary(
             account_id=account_id,
@@ -20968,16 +21167,35 @@ def _main_impl() -> int:
                 ),
             )
     except Exception as exc:
-        # Control-plane failures disable only the optional canary path. The
-        # account continues through the byte-for-byte Golden path.
+        # Once an armed control has been observed, any bind/configuration error
+        # fails closed. A read failure before any control is observed preserves
+        # the established Golden availability contract for non-canary accounts.
+        if _raw_control:
+            log(
+                "error",
+                "follow_60s_control_resolution_safe_stop_pre_device",
+                account_id=account_id or None,
+                run_id=run_id or None,
+                request_id=run_request_id or None,
+                fallback_used=False,
+                error_type=type(exc).__name__,
+                reason=str(exc)[:240],
+                device_actions_started=False,
+                safe_to_continue_ui=False,
+            )
+            return 96
         log(
             "warning",
-            "follow_60s_canary_configuration_failed",
+            "follow_60s_canary_control_read_failed_golden_preserved",
             account_id=account_id or None,
             run_id=run_id or None,
+            request_id=run_request_id or None,
             fallback_used=True,
             fallback="golden_current",
             error_type=type(exc).__name__,
+            reason=str(exc)[:240],
+            device_actions_started=False,
+            safe_to_continue_ui=True,
         )
         _follow60_canary_active = False
 
