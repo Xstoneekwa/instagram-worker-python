@@ -47,6 +47,30 @@ class RuntimeHeartbeatTest(unittest.TestCase):
         self.assertEqual(upsert_worker.call_args.args[0]["status"], "idle")
         self.assertIn("last_seen_at", upsert_worker.call_args.args[0])
 
+    def test_worker_heartbeat_prefers_canonical_worker_git_sha(self) -> None:
+        worker_sha = "a" * 40
+        legacy_sha = "b" * 40
+        with (
+            patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True),
+            patch.object(
+                runtime_heartbeat.supabase_client,
+                "upsert_worker_heartbeat",
+                return_value={"worker_id": "worker-1"},
+            ) as upsert_worker,
+            patch.dict(
+                runtime_heartbeat.os.environ,
+                {"WORKER_GIT_SHA": worker_sha, "GIT_SHA": legacy_sha},
+                clear=True,
+            ),
+        ):
+            runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="idle")
+        self.assertEqual(upsert_worker.call_args.args[0]["git_sha"], worker_sha)
+
+    def test_worker_heartbeat_keeps_legacy_git_sha_compatibility(self) -> None:
+        legacy_sha = "b" * 40
+        with patch.dict(runtime_heartbeat.os.environ, {"GIT_SHA": legacy_sha}, clear=True):
+            self.assertEqual(runtime_heartbeat._git_sha(), legacy_sha)
+
     def test_worker_heartbeat_payload_includes_last_seen_at(self) -> None:
         fixed_ts = "2026-05-25T12:00:00+00:00"
         with (

@@ -39,7 +39,7 @@ def _worker_id() -> str:
 
 
 def _git_sha() -> str:
-    return str(os.getenv("GIT_SHA") or "unknown").strip() or "unknown"
+    return str(os.getenv("WORKER_GIT_SHA") or os.getenv("GIT_SHA") or "unknown").strip() or "unknown"
 
 
 def _utc_now_iso() -> str:

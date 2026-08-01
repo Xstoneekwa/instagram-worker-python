@@ -3419,17 +3419,28 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = list(argv or sys.argv[1:])
+    machine_json_preflight = bool(
+        args
+        and args[0] in {"--preflight", "preflight"}
+        and "--json" in args
+    )
     runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
     export_worker_runtime_identity(runtime_identity)
-    log(
-        "info",
-        "worker_runtime_identity_resolved",
-        worker_sha=runtime_identity.worker_sha,
-        runtime_root=runtime_identity.runtime_root,
-        identity_source=runtime_identity.source,
-        runtime_root_ok=True,
+    identity_log_context = (
+        contextlib.redirect_stdout(sys.stderr)
+        if machine_json_preflight
+        else contextlib.nullcontext()
     )
-    args = list(argv or sys.argv[1:])
+    with identity_log_context:
+        log(
+            "info",
+            "worker_runtime_identity_resolved",
+            worker_sha=runtime_identity.worker_sha,
+            runtime_root=runtime_identity.runtime_root,
+            identity_source=runtime_identity.source,
+            runtime_root_ok=True,
+        )
     if args and args[0] in {"--preflight", "preflight"}:
         cfg = load_dispatcher_config()
         if "--json" in args:
