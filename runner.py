@@ -13923,7 +13923,32 @@ def _run_followers_list_engine_session(
                 followers_xml_detect_skipped=bool(followers_xml_detect_skipped_this_iter),
             )
             try:
-                candidates = _collect_follower_candidates()
+                _snapshot_rows = (
+                    det.get("candidate_rows_snapshot")
+                    if _snapshot_reuse_used and isinstance(det, dict)
+                    else None
+                )
+                if isinstance(_snapshot_rows, list) and _snapshot_rows:
+                    candidates = []
+                    for _snapshot_row in _snapshot_rows:
+                        if not isinstance(_snapshot_row, dict):
+                            continue
+                        _row = dict(_snapshot_row)
+                        _row_key = str(_row.get("username") or "").strip().lstrip("@").lower()
+                        _row["already_seen_runtime"] = (
+                            _row_key in _RUNTIME_SEEN_FOLLOWER_USERNAMES
+                        )
+                        candidates.append(_row)
+                    log(
+                        "info",
+                        "follow_60s_next_candidate_snapshot_rows_consumed",
+                        source_profile_username=source_profile_username,
+                        candidate_rows=len(candidates),
+                        hierarchy_dump_skipped=True,
+                        refresh_count=0,
+                    )
+                else:
+                    candidates = _collect_follower_candidates()
             except Exception as _collect_exc:
                 log(
                     "error",
@@ -19806,9 +19831,13 @@ def _run_followers_list_engine_session(
                                 _exact_return_det = {}
                             else:
                                 _exact_return_det = dict(_snap_obj.detection)
-                                _record_follow_60s_outcome(
-                                    "post_return_snapshot_reuse", "used",
-                                    age_ms=_snap_age_ms, estimated_gain_ms=1800.0,
+                                log(
+                                    "info",
+                                    "follow_60s_next_candidate_snapshot_consumed_for_handoff",
+                                    source_profile_username=source_profile_username,
+                                    follower_username=follower_un,
+                                    proof_age_ms=round(float(_snap_age_ms or 0.0), 2),
+                                    terminal_outcome_deferred_until_picker=True,
                                 )
                         except Exception:
                             _exact_return_det = {}

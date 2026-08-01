@@ -491,6 +491,144 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             "missing_evidence",
         )
 
+    def _stash_dimension_evidence(
+        self,
+        *,
+        candidate: str,
+        raw_height: int,
+        canonical_height: int,
+        source: str,
+        inset_bottom: int = 0,
+        fingerprint: str = "viewport-v2",
+    ) -> None:
+        canary.stash_post_grid_evidence(
+            candidate_username=candidate,
+            package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
+            navigation_generation="g1",
+            viewport_fingerprint=fingerprint,
+            outcome="POST_ROW_POSITIVE_SAFE",
+            mute_sheet_closed=True,
+            mute_posts_verified=True,
+            mute_stories_verified=True,
+            profile_identity_method="test_exact_profile",
+            screen_width=1080,
+            screen_height=canonical_height,
+            producer_screen_width=1080,
+            producer_screen_height=raw_height,
+            screen_dimensions_source=source,
+            screen_inset_bottom=inset_bottom,
+            grid_tab_state="selected_or_physical_row",
+            post_count_positive=True,
+            physical_post_cells=[
+                {"left": 0, "top": 900, "right": 360, "bottom": 1260}
+            ],
+            first_post_bounds={
+                "left": 0, "top": 900, "right": 360, "bottom": 1260
+            },
+        )
+
+    def test_post_grid_dimensions_accept_exact_and_explicit_normalized_frames(self) -> None:
+        self._stash_dimension_evidence(
+            candidate="exact",
+            raw_height=2340,
+            canonical_height=2340,
+            source="raw_window_exact",
+        )
+        exact, _, exact_reason = canary.consume_post_grid_evidence(
+            candidate_username="exact",
+            package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
+            navigation_generation="g1",
+            viewport_fingerprint="viewport-v2",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNotNone(exact)
+        self.assertEqual(exact_reason, "")
+
+        self._stash_dimension_evidence(
+            candidate="normalized",
+            raw_height=2400,
+            canonical_height=2340,
+            source="hierarchy_coordinate_frame",
+            inset_bottom=60,
+        )
+        normalized, _, normalized_reason = canary.consume_post_grid_evidence(
+            candidate_username="normalized",
+            package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
+            navigation_generation="g1",
+            viewport_fingerprint="viewport-v2",
+            screen_size=(1080, 2400),
+        )
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized_reason, "")
+
+    def test_post_grid_dimensions_reject_inset_viewport_and_untrusted_frames(self) -> None:
+        cases = (
+            ("inset", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2280), "screen_dimensions_inset_mismatch"),
+            ("viewport", 2400, 2340, "hierarchy_coordinate_frame", 60, (1080, 2500), "screen_dimensions_viewport_mismatch"),
+            ("untrusted", 2340, 2340, "screen_dimensions_untrusted", 0, (1080, 2340), "screen_dimensions_untrusted"),
+        )
+        for candidate, raw_h, canonical_h, source, inset, consumer, expected in cases:
+            with self.subTest(case=candidate):
+                self._stash_dimension_evidence(
+                    candidate=candidate,
+                    raw_height=raw_h,
+                    canonical_height=canonical_h,
+                    source=source,
+                    inset_bottom=inset,
+                )
+                evidence, _, reason = canary.consume_post_grid_evidence(
+                    candidate_username=candidate,
+                    package="com.instagram.android",
+                    activity="com.instagram.mainactivity.InstagramMainActivity",
+                    navigation_generation="g1",
+                    viewport_fingerprint="viewport-v2",
+                    screen_size=consumer,
+                )
+                self.assertIsNone(evidence)
+                self.assertEqual(reason, expected)
+
+    def test_post_grid_dimensions_reject_fingerprint_mismatch_as_untrusted(self) -> None:
+        self._stash_dimension_evidence(
+            candidate="fingerprint",
+            raw_height=2340,
+            canonical_height=2340,
+            source="raw_window_exact",
+        )
+        evidence, _, reason = canary.consume_post_grid_evidence(
+            candidate_username="fingerprint",
+            package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
+            navigation_generation="g1",
+            viewport_fingerprint="different-viewport",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNone(evidence)
+        self.assertEqual(reason, "viewport_mismatch")
+
+    def test_terminal_outcome_is_unique_per_candidate_and_feature(self) -> None:
+        self.assertTrue(
+            canary.record_terminal_outcome(
+                "mute_like_handoff",
+                candidate_username="candidate",
+                status="used",
+            )
+        )
+        self.assertFalse(
+            canary.record_terminal_outcome(
+                "mute_like_handoff",
+                candidate_username="candidate",
+                status="fallback",
+                reason="late_probe",
+                fallback_used=True,
+            )
+        )
+        stats = canary.stats()["optimization_counts"]["mute_like_handoff"]
+        self.assertEqual(stats["used"], 1)
+        self.assertEqual(stats["fallback"], 0)
+
     def test_ambiguous_post_grid_evidence_is_returned_for_one_direct_golden_decision(self) -> None:
         canary.stash_post_grid_evidence(
             candidate_username="candidate", package_name="com.instagram.android",
@@ -794,6 +932,38 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         )
         self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
         self.assertEqual(out["post_bounds"]["left"], 0)
+
+    def test_post_grid_dimension_producer_classifies_exact_normalized_and_untrusted(self) -> None:
+        exact = nav._post_follow_screen_dimensions_from_hierarchy(
+            '<hierarchy><node bounds="[0,0][1080,2400]"/></hierarchy>',
+            raw_width=1080,
+            raw_height=2400,
+        )
+        self.assertEqual(exact["screen_dimensions_source"], "raw_window_exact")
+        self.assertEqual(exact["screen_height"], 2400)
+
+        normalized = nav._post_follow_screen_dimensions_from_hierarchy(
+            '<hierarchy><node bounds="[0,0][1080,2340]"/></hierarchy>',
+            raw_width=1080,
+            raw_height=2400,
+        )
+        self.assertEqual(
+            normalized["screen_dimensions_source"],
+            "hierarchy_coordinate_frame",
+        )
+        self.assertEqual(normalized["screen_height"], 2340)
+        self.assertEqual(normalized["screen_inset_bottom"], 60)
+
+        untrusted = nav._post_follow_screen_dimensions_from_hierarchy(
+            '<hierarchy><node bounds="[0,0][1000,2340]"/></hierarchy>',
+            raw_width=1080,
+            raw_height=2400,
+        )
+        self.assertFalse(untrusted["screen_dimensions_trusted"])
+        self.assertEqual(
+            untrusted["screen_dimensions_source"],
+            "screen_dimensions_untrusted",
+        )
 
     def test_post_grid_one_to_three_visible_posts_are_positive_without_scroll(self) -> None:
         for count in (1, 2, 3):

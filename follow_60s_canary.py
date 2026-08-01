@@ -187,6 +187,12 @@ class PostGridEvidence:
     ttl_ms: float
     invalidation_reason: str = ""
     rejection_reason: str = ""
+    producer_screen_width: int = 0
+    producer_screen_height: int = 0
+    screen_dimensions_source: str = ""
+    screen_inset_top: int = 0
+    screen_inset_bottom: int = 0
+    reveal_count_total_for_like_phase: int = 0
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -259,6 +265,7 @@ class _Runtime:
     next_candidate_snapshot: NextCandidateSnapshot | None = None
     proof_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     optimization_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    terminal_optimization_outcomes: dict[str, str] = field(default_factory=dict)
 
 
 _RUNTIME = _Runtime()
@@ -548,6 +555,59 @@ def record_outcome(
     )
 
 
+def record_terminal_outcome(
+    feature: str,
+    *,
+    candidate_username: str,
+    status: str,
+    age_ms: float | None = None,
+    reason: str = "",
+    fallback_used: bool = False,
+    estimated_gain_ms: float = 0.0,
+) -> bool:
+    """Publish exactly one terminal optimization verdict per candidate/feature."""
+    if not enabled(feature):
+        return False
+    candidate = str(candidate_username or "").strip().lstrip("@").lower()
+    if not candidate:
+        return False
+    key = f"{feature}:{candidate}"
+    prior = _RUNTIME.terminal_optimization_outcomes.get(key)
+    if prior:
+        log(
+            "info",
+            "follow_60s_terminal_optimization_outcome_deduplicated",
+            feature=str(feature),
+            candidate_username=candidate,
+            prior_status=prior,
+            ignored_status=str(status or ""),
+            ignored_reason=str(reason or ""),
+        )
+        return False
+    normalized = str(status or "rejected").strip().lower()
+    if normalized not in {"used", "rejected", "fallback"}:
+        normalized = "rejected"
+    _RUNTIME.terminal_optimization_outcomes[key] = normalized
+    record_outcome(
+        feature,
+        normalized,
+        age_ms=age_ms,
+        reason=reason,
+        fallback_used=fallback_used,
+        estimated_gain_ms=estimated_gain_ms,
+    )
+    log(
+        "info",
+        "follow_60s_terminal_optimization_outcome",
+        feature=str(feature),
+        candidate_username=candidate,
+        status=normalized,
+        rejection_reason=str(reason or "") if normalized != "used" else "",
+        fallback_used=bool(fallback_used),
+    )
+    return True
+
+
 def safe_bounds(
     bounds: dict[str, int] | None,
     *,
@@ -646,7 +706,13 @@ def create_candidate_profile_verdict(
         return None
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     if not candidate or not all((exact_identity, sheet_closed, mute_posts_verified, mute_stories_verified)):
-        record_outcome("mute_like_handoff", "rejected", reason="candidate_verdict_incomplete", fallback_used=True)
+        log(
+            "info",
+            "mute_to_like_candidate_verdict_rejected_nonterminal",
+            candidate_username=candidate or None,
+            rejection_reason="candidate_verdict_incomplete",
+            final_outcome_deferred=True,
+        )
         return None
     verdict = CandidateProfileVerdict(
         account_id=_RUNTIME.account_id, candidate_username=candidate,
@@ -711,6 +777,10 @@ def stash_post_grid_evidence(
     first_post_bounds: dict[str, int] | None = None,
     first_post_cell_source: str = "", no_posts_positive: bool = False,
     rejection_reason: str = "", ttl_ms: float = 3000.0,
+    producer_screen_width: int = 0, producer_screen_height: int = 0,
+    screen_dimensions_source: str = "", screen_inset_top: int = 0,
+    screen_inset_bottom: int = 0,
+    reveal_count_total_for_like_phase: int = 0,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -760,6 +830,14 @@ def stash_post_grid_evidence(
         invalidation_counter=_RUNTIME.invalidation_counter,
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
         rejection_reason=str(rejection_reason or ""),
+        producer_screen_width=max(1, int(producer_screen_width or screen_width)),
+        producer_screen_height=max(1, int(producer_screen_height or screen_height)),
+        screen_dimensions_source=str(screen_dimensions_source or "raw_window_exact"),
+        screen_inset_top=max(0, int(screen_inset_top or 0)),
+        screen_inset_bottom=max(0, int(screen_inset_bottom or 0)),
+        reveal_count_total_for_like_phase=max(
+            0, int(reveal_count_total_for_like_phase or 0)
+        ),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
@@ -770,6 +848,8 @@ def consume_post_grid_evidence(
     *, candidate_username: str, package: str = "", activity: str = "",
     navigation_generation: str = "", viewport_fingerprint: str = "",
     screen_size: tuple[int, int] | None = None,
+    screen_dimensions_source: str = "",
+    producer_fingerprint: str = "",
 ) -> tuple[PostGridEvidence | None, float, str]:
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     ev = _RUNTIME.post_grid_evidence.pop(candidate, None) if enabled("like_fresh_cell_bounds") else None
@@ -798,16 +878,77 @@ def consume_post_grid_evidence(
             reason = "navigation_counter_mismatch"
         if not reason and ev.scroll_generation != _RUNTIME.scroll_counter:
             reason = "scroll_generation_mismatch"
-        if not reason and screen_size is not None and (
-            ev.screen_width != int(screen_size[0])
-            or ev.screen_height != int(screen_size[1])
-        ):
-            reason = "screen_dimensions_mismatch"
+        dimensions_reason = "screen_dimensions_untrusted"
+        if not reason:
+            if screen_size is None:
+                reason = "screen_dimensions_untrusted"
+            else:
+                consumer_w, consumer_h = int(screen_size[0]), int(screen_size[1])
+                producer_w = int(ev.producer_screen_width or ev.screen_width)
+                producer_h = int(ev.producer_screen_height or ev.screen_height)
+                canonical_w, canonical_h = int(ev.screen_width), int(ev.screen_height)
+                explicit_insets = int(ev.screen_inset_top) + int(ev.screen_inset_bottom)
+                source_trusted = ev.screen_dimensions_source in {
+                    "hierarchy_coordinate_frame",
+                    "raw_window_exact",
+                }
+                fingerprint_value = str(
+                    producer_fingerprint or viewport_fingerprint or ""
+                )
+                # A producer fingerprint strengthens continuity when present.
+                # Older/Golden-compatible producers may not emit one; exact
+                # trusted coordinate-frame equality remains sufficient then.
+                fingerprint_trusted = bool(
+                    (not ev.viewport_fingerprint and not fingerprint_value)
+                    or (
+                        bool(fingerprint_value)
+                        and fingerprint_value == ev.viewport_fingerprint
+                    )
+                )
+                if not source_trusted or not fingerprint_trusted:
+                    reason = "screen_dimensions_untrusted"
+                elif (consumer_w, consumer_h) == (canonical_w, canonical_h):
+                    dimensions_reason = (
+                        "screen_dimensions_exact_match"
+                        if (producer_w, producer_h) == (canonical_w, canonical_h)
+                        else "screen_dimensions_normalized_match"
+                    )
+                elif (
+                    ev.screen_dimensions_source == "hierarchy_coordinate_frame"
+                    and (consumer_w, consumer_h) == (producer_w, producer_h)
+                    and producer_w == canonical_w
+                    and producer_h - canonical_h == explicit_insets
+                    and explicit_insets > 0
+                ):
+                    dimensions_reason = "screen_dimensions_normalized_match"
+                elif consumer_w == canonical_w and abs(consumer_h - canonical_h) == explicit_insets and explicit_insets > 0:
+                    reason = "screen_dimensions_inset_mismatch"
+                else:
+                    reason = "screen_dimensions_viewport_mismatch"
+                log(
+                    "info",
+                    "follow_60s_post_grid_screen_dimensions_checked",
+                    candidate_username=candidate,
+                    producer_raw_width=producer_w,
+                    producer_raw_height=producer_h,
+                    producer_canonical_width=canonical_w,
+                    producer_canonical_height=canonical_h,
+                    producer_source=ev.screen_dimensions_source,
+                    producer_inset_top=int(ev.screen_inset_top),
+                    producer_inset_bottom=int(ev.screen_inset_bottom),
+                    consumer_width=consumer_w,
+                    consumer_height=consumer_h,
+                    consumer_source=str(screen_dimensions_source or ""),
+                    viewport_fingerprint_match=fingerprint_trusted,
+                    dimensions_reason=(reason or dimensions_reason),
+                    accepted=not bool(reason),
+                )
         if not reason and ev.outcome == NO_POSTS_POSITIVE and not ev.no_posts_positive:
             reason = "no_posts_not_positive"
         if not reason and ev.outcome == POST_ROW_POSITIVE_SAFE:
             ok, bounds_reason = safe_bounds(
-                ev.first_post_cell_bounds, screen_size=screen_size
+                ev.first_post_cell_bounds,
+                screen_size=(int(ev.screen_width), int(ev.screen_height)),
             )
             if not ok:
                 reason = bounds_reason

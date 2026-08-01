@@ -2108,6 +2108,89 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             [event for event, _kw in logs],
         )
 
+    def test_canary_no_posts_evidence_skips_without_extra_probe_and_keeps_return_proof(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        contract_ctx = _like_phase_contract_ctx()
+        canary.configure(
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
+            run_id="canary-no-posts-fast",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        canary.stash_post_grid_evidence(
+            candidate_username="cand",
+            package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
+            navigation_generation="",
+            viewport_fingerprint="",
+            outcome="NO_POSTS_POSITIVE",
+            mute_sheet_closed=True,
+            mute_posts_verified=True,
+            mute_stories_verified=True,
+            profile_identity_method="final_mute_close_exact_action_bar_xml",
+            screen_width=1080,
+            screen_height=2340,
+            grid_tab_state="selected_or_physical_row",
+            no_posts_positive=True,
+            ttl_ms=3000.0,
+        )
+        try:
+            with ExitStack() as stack:
+                _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_followers_current_pkg_activity",
+                        return_value={
+                            "current_package": "com.instagram.android",
+                            "current_activity": "profile",
+                        },
+                    )
+                )
+                tier1 = stack.enter_context(
+                    mock.patch.object(nav, "_visual_profile_no_posts_tier1_direct_check")
+                )
+                visual = stack.enter_context(
+                    mock.patch.object(nav, "visual_profile_has_no_posts")
+                )
+                golden = stack.enter_context(
+                    mock.patch.object(nav, "visual_open_recent_post_from_profile")
+                )
+                out = nav.run_post_follow_post_likes_phase(
+                    device,
+                    pkg="com.instagram.android",
+                    source_profile_username="ct",
+                    follower_username="cand",
+                    visual_candidate_id="vc-no-posts",
+                    follow_success_verified=True,
+                    follow_state_after="following",
+                    skipped_tap=False,
+                )
+            proof, _, proof_reason = canary.consume(
+                "return_candidate_profile",
+                subject_username="ct",
+                target_username="cand",
+                surface="candidate_profile_after_like",
+            )
+        finally:
+            canary.configure(
+                account_id="other",
+                account_username="other",
+                run_id="reset",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+
+        tier1.assert_not_called()
+        visual.assert_not_called()
+        golden.assert_not_called()
+        self.assertEqual(out.get("skipped_reason"), "post_like_skipped_no_posts_yet")
+        self.assertEqual(out.get("attempted_count"), 0)
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof_reason, "")
+
     def test_canary_cell_proof_expired_at_tap_uses_one_golden_without_direct_tap(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)

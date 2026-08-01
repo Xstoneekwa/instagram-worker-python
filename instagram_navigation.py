@@ -15587,6 +15587,7 @@ def detect_followers_list_screen(
         "scrollable_count": 0,
         "profile_tabs_absent": False,
         "visible_usernames_sample": [],
+        "candidate_rows_snapshot": [],
         "signals": [],
         "visible_header_texts": [],
         "candidate_username_count": 0,
@@ -15906,6 +15907,16 @@ def detect_followers_list_screen(
                 )
                 if bool(own_live.get("detected")):
                     own_meta = own_live
+            try:
+                out["candidate_rows_snapshot"] = (
+                    _extract_own_unified_followers_usernames_from_hierarchy_xml(
+                        hier_for_own,
+                        source_profile_username=source_profile_username,
+                        runtime_seen=set(),
+                    )
+                )
+            except Exception:
+                out["candidate_rows_snapshot"] = []
         else:
             own_live = _detect_own_unified_followers_list_live(
                 d,
@@ -17660,6 +17671,35 @@ def open_visual_follower_candidate_from_screenshot(
 
 # --- Visual post grid + like dry-run (screenshot heuristics; like tap never sent when VISUAL_POST_LIKE_DRY_RUN) ---
 _VISUAL_POST_LIKE_TAPS_RECORDED: int = 0
+_POST_FOLLOW_LIKE_REVEAL_BUDGET: dict[str, Any] | None = None
+
+
+def _post_follow_like_reveal_budget_begin(*, initial_count: int = 0) -> None:
+    global _POST_FOLLOW_LIKE_REVEAL_BUDGET
+    _POST_FOLLOW_LIKE_REVEAL_BUDGET = {
+        "count": max(0, int(initial_count)),
+        "maximum": 1,
+        "blocked": 0,
+    }
+
+
+def _post_follow_like_reveal_budget_seed(count: int) -> None:
+    if isinstance(_POST_FOLLOW_LIKE_REVEAL_BUDGET, dict):
+        _POST_FOLLOW_LIKE_REVEAL_BUDGET["count"] = max(
+            int(_POST_FOLLOW_LIKE_REVEAL_BUDGET.get("count") or 0),
+            max(0, int(count or 0)),
+        )
+
+
+def _post_follow_like_reveal_budget_end() -> dict[str, int]:
+    global _POST_FOLLOW_LIKE_REVEAL_BUDGET
+    current = dict(_POST_FOLLOW_LIKE_REVEAL_BUDGET or {})
+    _POST_FOLLOW_LIKE_REVEAL_BUDGET = None
+    return {
+        "reveal_count_total_for_like_phase": int(current.get("count") or 0),
+        "reveal_count_maximum": int(current.get("maximum") or 1),
+        "reveal_attempts_blocked": int(current.get("blocked") or 0),
+    }
 
 # Session: after a follower candidate profile opens successfully, pin that profile until flow end.
 _VISUAL_TARGET_PROFILE_LOCK_ACTIVE: bool = False
@@ -17814,6 +17854,26 @@ def _stash_post_mute_sheet_closed_proof(
                             or _grid.get("rejection_reason")
                             or ""
                         ),
+                        producer_screen_width=int(
+                            _grid.get("producer_screen_width")
+                            or _grid.get("screen_width")
+                            or 1
+                        ),
+                        producer_screen_height=int(
+                            _grid.get("producer_screen_height")
+                            or _grid.get("screen_height")
+                            or 1
+                        ),
+                        screen_dimensions_source=str(
+                            _grid.get("screen_dimensions_source") or ""
+                        ),
+                        screen_inset_top=int(_grid.get("screen_inset_top") or 0),
+                        screen_inset_bottom=int(
+                            _grid.get("screen_inset_bottom") or 0
+                        ),
+                        reveal_count_total_for_like_phase=int(
+                            _grid.get("reveal_count_total_for_like_phase") or 0
+                        ),
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -17904,10 +17964,15 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 candidate_username=cand,
                 ww=int(profile_ww),
                 wh=int(profile_wh),
+                profile_identity_exact=True,
+            )
+            profile_dimensions = _post_follow_screen_dimensions_from_hierarchy(
+                profile_xml,
+                raw_width=int(profile_ww),
+                raw_height=int(profile_wh),
             )
             profile_grid["candidate_username"] = cand
-            profile_grid["screen_width"] = int(profile_ww)
-            profile_grid["screen_height"] = int(profile_wh)
+            profile_grid.update(profile_dimensions)
             if str(profile_grid.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
                 profile_grid = (
                     _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
@@ -17920,8 +17985,13 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                     )
                 )
                 profile_grid["candidate_username"] = cand
-                profile_grid["screen_width"] = int(profile_ww)
-                profile_grid["screen_height"] = int(profile_wh)
+                profile_grid.update(
+                    _post_follow_screen_dimensions_from_hierarchy(
+                        str(profile_grid.pop("reacquired_hierarchy_xml", "") or profile_xml),
+                        raw_width=int(profile_ww),
+                        raw_height=int(profile_wh),
+                    )
+                )
                 runtime = _follow_60s_runtime_context()
                 context_out["navigation_generation"] = str(
                     runtime.get("ui_generation") or "0"
@@ -17968,6 +18038,28 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 dumps=1 + int(profile_grid.get("reacquire_dump_count") or 0),
                 screenshots=1 if profile_grid.get("fast_vision_probe_attempted") else 0,
                 retries=1 if profile_grid.get("reveal_scroll_attempted") else 0,
+                producer_raw_width=int(
+                    profile_grid.get("producer_screen_width") or profile_ww
+                ),
+                producer_raw_height=int(
+                    profile_grid.get("producer_screen_height") or profile_wh
+                ),
+                producer_canonical_width=int(
+                    profile_grid.get("screen_width") or profile_ww
+                ),
+                producer_canonical_height=int(
+                    profile_grid.get("screen_height") or profile_wh
+                ),
+                screen_dimensions_source=str(
+                    profile_grid.get("screen_dimensions_source") or ""
+                ),
+                screen_inset_top=int(profile_grid.get("screen_inset_top") or 0),
+                screen_inset_bottom=int(
+                    profile_grid.get("screen_inset_bottom") or 0
+                ),
+                reveal_count_total_for_like_phase=int(
+                    profile_grid.get("reveal_count_total_for_like_phase") or 0
+                ),
                 fallback_required=bool(
                     context_out["post_grid_outcome"]
                     == "POST_GRID_AMBIGUOUS_FINAL"
@@ -18051,7 +18143,7 @@ def _validate_post_mute_sheet_closed_proof(
         from follow_60s_canary import (
             enabled as _follow_60s_canary_enabled,
             get_candidate_profile_verdict as _get_candidate_profile_verdict,
-            record_outcome as _record_follow_60s_outcome,
+            record_terminal_outcome as _record_follow_60s_terminal_outcome,
         )
 
         if _follow_60s_canary_enabled("mute_like_handoff"):
@@ -18065,18 +18157,24 @@ def _validate_post_mute_sheet_closed_proof(
                 ),
             )
             if central is None:
-                _record_follow_60s_outcome(
-                    "mute_like_handoff",
-                    "fallback",
-                    age_ms=central_age_ms,
-                    reason=central_reject,
-                    fallback_used=True,
+                log(
+                    "info",
+                    "mute_to_like_nonterminal_probe_rejected",
+                    candidate_username=_normalize_handle(candidate_username),
+                    proof_age_ms=round(float(central_age_ms or 0.0), 2),
+                    rejection_reason=str(central_reject or ""),
+                    final_outcome_deferred=True,
                 )
                 return False, {}, central_age_ms, central_reject
             # The immutable verdict is the canary authority. Do not reread the
             # mutable legacy stash below; that path remains Golden-only.
-            _record_follow_60s_outcome("mute_like_handoff", "used", age_ms=central_age_ms,
-                                       estimated_gain_ms=3000.0)
+            _record_follow_60s_terminal_outcome(
+                "mute_like_handoff",
+                candidate_username=candidate_username,
+                status="used",
+                age_ms=central_age_ms,
+                estimated_gain_ms=3000.0,
+            )
             immutable_context = {
                 **expected_context,
                 "viewport_fingerprint": central.viewport_fingerprint,
@@ -20707,6 +20805,31 @@ def _post_follow_likes_profile_scroll_swipe(
     y_start = int(geom["y_start"])
     y_end = int(geom["y_end"])
     duration_s = float(geom["duration_s"])
+    budget = _POST_FOLLOW_LIKE_REVEAL_BUDGET
+    if isinstance(budget, dict):
+        count = int(budget.get("count") or 0)
+        maximum = int(budget.get("maximum") or 1)
+        if count >= maximum:
+            budget["blocked"] = int(budget.get("blocked") or 0) + 1
+            log(
+                "info",
+                "post_follow_like_reveal_blocked_by_shared_budget",
+                scroll_profile=sp,
+                reveal_count_total_for_like_phase=count,
+                reveal_count_maximum=maximum,
+                reason="reveal_budget_exhausted",
+            )
+            return {
+                "swipe_ok": False,
+                "scroll_profile": sp,
+                "y_start": y_start,
+                "y_end": y_end,
+                "scroll_distance_px": abs(y_start - y_end),
+                "duration_s": duration_s,
+                "error": "reveal_budget_exhausted",
+                "reveal_budget_blocked": True,
+            }
+        budget["count"] = count + 1
     try:
         _followers_log_scroll_or_swipe_about_to_run(
             d,
@@ -22477,6 +22600,7 @@ def _post_follow_post_grid_evidence_from_xml(
     candidate_username: str,
     ww: int,
     wh: int,
+    profile_identity_exact: bool = False,
 ) -> dict[str, Any]:
     """Derive the Like branch from one immutable profile hierarchy."""
     xml = str(hierarchy_xml or "")
@@ -22505,7 +22629,7 @@ def _post_follow_post_grid_evidence_from_xml(
         out["rejection_reason"] = "final_mute_close_xml_parse_failed"
         return out
     expected = _normalize_handle(candidate_username)
-    identity_exact = False
+    identity_exact = bool(profile_identity_exact)
     tabs_bottom = 0
     raw_cells: list[dict[str, int]] = []
     grid_tab_marker = False
@@ -22704,6 +22828,72 @@ def _post_follow_post_grid_evidence_from_xml(
     return out
 
 
+def _post_follow_screen_dimensions_from_hierarchy(
+    hierarchy_xml: str,
+    *,
+    raw_width: int,
+    raw_height: int,
+) -> dict[str, Any]:
+    """Resolve the tap coordinate frame from the same immutable hierarchy.
+
+    No tolerance is used. A normalized frame is trusted only when the XML
+    explicitly reaches the full raw width and its bottom edge accounts exactly
+    for the system inset excluded from the application viewport.
+    """
+    raw_w, raw_h = max(1, int(raw_width)), max(1, int(raw_height))
+    out: dict[str, Any] = {
+        "screen_width": raw_w,
+        "screen_height": raw_h,
+        "producer_screen_width": raw_w,
+        "producer_screen_height": raw_h,
+        "screen_dimensions_source": "raw_window_exact",
+        "screen_inset_top": 0,
+        "screen_inset_bottom": 0,
+        "screen_dimensions_trusted": True,
+    }
+    xml = str(hierarchy_xml or "")
+    if not xml:
+        out["screen_dimensions_source"] = "screen_dimensions_untrusted"
+        out["screen_dimensions_trusted"] = False
+        return out
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        out["screen_dimensions_source"] = "screen_dimensions_untrusted"
+        out["screen_dimensions_trusted"] = False
+        return out
+    max_right = 0
+    max_bottom = 0
+    for node in root.iter():
+        bounds = _parse_ui_bounds_str((node.attrib or {}).get("bounds"))
+        if not bounds:
+            continue
+        max_right = max(max_right, int(bounds["right"]))
+        max_bottom = max(max_bottom, int(bounds["bottom"]))
+    if max_right != raw_w or max_bottom <= 0 or max_bottom > raw_h:
+        out["screen_dimensions_source"] = "screen_dimensions_untrusted"
+        out["screen_dimensions_trusted"] = False
+        out["hierarchy_max_right"] = max_right
+        out["hierarchy_max_bottom"] = max_bottom
+        return out
+    inset_bottom = raw_h - max_bottom
+    if inset_bottom > 0:
+        out.update(
+            {
+                "screen_width": max_right,
+                "screen_height": max_bottom,
+                "screen_dimensions_source": "hierarchy_coordinate_frame",
+                # Coordinates retain the raw top origin; only the missing
+                # bottom extent is normalized out of this hierarchy frame.
+                "screen_inset_top": 0,
+                "screen_inset_bottom": inset_bottom,
+            }
+        )
+    out["hierarchy_max_right"] = max_right
+    out["hierarchy_max_bottom"] = max_bottom
+    return out
+
+
 def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     d: u2.Device,
     evidence: dict[str, Any],
@@ -22722,6 +22912,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     """
     out = dict(evidence or {})
     out.setdefault("fast_vision_probe_attempted", False)
+    out.setdefault("reveal_count_total_for_like_phase", 0)
     if str(out.get("outcome") or "") != "POST_ROW_POSITIVE_BUT_CLIPPED":
         return out
     if not bool(out.get("identity_exact")):
@@ -22736,9 +22927,6 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     if bool(out.get("reels_or_tagged_selected")):
         out["fast_vision_probe_rejection_reason"] = "non_grid_tab_selected"
         return out
-    if bool(out.get("suggested_overlay_visible")):
-        out["fast_vision_probe_rejection_reason"] = "suggested_overlay_visible"
-        return out
     try:
         tabs_bottom = int(out.get("tabs_bottom") or 0)
     except (TypeError, ValueError):
@@ -22748,6 +22936,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         return out
 
     out["reveal_scroll_attempted"] = True
+    out["reveal_count_total_for_like_phase"] = 1
     try:
         reveal = _post_follow_likes_profile_scroll_swipe(
             d,
@@ -22774,10 +22963,13 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
             candidate_username=(candidate_username or str(out.get("candidate_username") or "")),
             ww=int(ww),
             wh=int(wh),
+            profile_identity_exact=True,
         )
         reacquired["reveal_scroll_attempted"] = True
         reacquired["reveal_scroll_ok"] = True
         reacquired["reacquire_dump_count"] = 1
+        reacquired["reveal_count_total_for_like_phase"] = 1
+        reacquired["reacquired_hierarchy_xml"] = fresh_xml
         out = reacquired
     except Exception:
         out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
@@ -48370,6 +48562,7 @@ def run_post_follow_post_likes_phase(
         "failure_reason": None,
         "likes_failure_kind": None,
     }
+    _post_follow_like_reveal_budget_begin(initial_count=0)
 
     def _likes_cfg_effective() -> dict[str, Any]:
         return {
@@ -48419,6 +48612,7 @@ def run_post_follow_post_likes_phase(
         log_early_exit: bool = False,
         **counts: Any,
     ) -> dict[str, Any]:
+        reveal_budget = _post_follow_like_reveal_budget_end()
         _clear_post_follow_open_like_proof_stash()
         _clear_post_mute_sheet_closed_proof_stash()
         if log_early_exit and skipped_reason:
@@ -48429,6 +48623,15 @@ def run_post_follow_post_likes_phase(
         out["skipped"] = skipped
         out["skipped_reason"] = skipped_reason
         out["ok"] = ok
+        out.update(reveal_budget)
+        log(
+            "info",
+            "post_follow_like_reveal_budget_terminal",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            **reveal_budget,
+        )
         if str(phase_outcome or "") == "failed_safe_continue":
             out["post_follow_likes_recoverable_failure_count"] = 1
         for k, v in counts.items():
@@ -48877,6 +49080,36 @@ def run_post_follow_post_likes_phase(
         NavigationEngineState.PRIVATE_PROFILE.value,
     )
     ab_match = bool(ab) and _normalize_handle(ab) == _normalize_handle(cand)
+    if not fast_profile_guard_reused:
+        try:
+            from follow_60s_canary import (
+                enabled as _follow_60s_canary_enabled,
+                record_terminal_outcome as _record_follow_60s_terminal_outcome,
+            )
+
+            if _follow_60s_canary_enabled("mute_like_handoff"):
+                _handoff_live_ok = bool(
+                    ab_match
+                    and prof_like
+                    and not (profile_guard_live_mismatch and not ab_match)
+                )
+                _record_follow_60s_terminal_outcome(
+                    "mute_like_handoff",
+                    candidate_username=cand,
+                    status="fallback" if _handoff_live_ok else "rejected",
+                    age_ms=proof_age_ms,
+                    reason=str(
+                        proof_reject
+                        or (
+                            "golden_profile_guard_used"
+                            if _handoff_live_ok
+                            else "golden_profile_guard_rejected"
+                        )
+                    ),
+                    fallback_used=bool(_handoff_live_ok),
+                )
+        except Exception:
+            pass
     if (profile_guard_live_mismatch and not ab_match) or (not prof_like and not ab_match):
         log(
             "warning",
@@ -48900,6 +49133,79 @@ def run_post_follow_post_likes_phase(
             ),
         )
 
+    def _stash_return_candidate_proof_after_safe_skip(
+        *, reason: str, identity_already_confirmed: bool = False
+    ) -> bool:
+        """Keep the fast Return CT path when Like is safely omitted on-profile."""
+        exact_identity = bool(identity_already_confirmed)
+        if not exact_identity:
+            try:
+                live_ab = str(
+                    read_current_profile_username_for_follow_gate(d) or ""
+                ).strip().lstrip("@")
+                exact_identity = _normalize_handle(live_ab) == _normalize_handle(cand)
+            except Exception:
+                exact_identity = False
+        if not exact_identity:
+            log(
+                "info",
+                "follow_60s_return_candidate_skip_proof_rejected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                rejection_reason="candidate_identity_not_exact",
+                skip_reason=str(reason or ""),
+                fallback_used=True,
+            )
+            return False
+        try:
+            from follow_60s_canary import (
+                enabled as _follow_60s_canary_enabled,
+                stash as _stash_follow_60s_proof,
+            )
+
+            if not _follow_60s_canary_enabled("return_candidate_handoff"):
+                return False
+            meta = _followers_current_pkg_activity(d)
+            proof = _stash_follow_60s_proof(
+                "return_candidate_profile",
+                subject_username=src,
+                target_username=cand,
+                package=str(meta.get("current_package") or pkg),
+                activity=str(meta.get("current_activity") or ""),
+                surface="candidate_profile_after_like",
+                detection_source=f"exact_candidate_profile_after_safe_like_skip:{reason}",
+                ttl_ms=1200.0,
+                metadata={
+                    "visual_candidate_id": vcid,
+                    "like_skipped_safely": True,
+                    "skip_reason": str(reason or ""),
+                },
+            )
+            if proof is not None:
+                log(
+                    "info",
+                    "follow_60s_return_candidate_skip_proof_stashed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    skip_reason=str(reason or ""),
+                    fallback_used=False,
+                )
+                return True
+        except Exception as exc:
+            log(
+                "warning",
+                "follow_60s_return_candidate_skip_proof_rejected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                rejection_reason=f"proof_contract_error:{type(exc).__name__}",
+                skip_reason=str(reason or ""),
+                fallback_used=True,
+            )
+        return False
+
     _canary_grid_evidence: dict[str, Any] | None = None
     _canary_grid_decision_consumed = False
     try:
@@ -48920,8 +49226,15 @@ def run_post_follow_post_likes_phase(
                     _expected_ctx.get("viewport_fingerprint") or ""
                 ),
                 screen_size=(int(_grid_ww), int(_grid_wh)),
+                screen_dimensions_source="consumer_live_window_size",
+                producer_fingerprint=str(
+                    _expected_ctx.get("viewport_fingerprint") or ""
+                ),
             )
             if _grid_ev is not None:
+                _post_follow_like_reveal_budget_seed(
+                    _grid_ev.reveal_count_total_for_like_phase
+                )
                 _canary_grid_decision_consumed = True
                 _candidate_grid = {
                     "outcome": _grid_ev.outcome,
@@ -48937,6 +49250,14 @@ def run_post_follow_post_likes_phase(
                     "no_posts_positive": _grid_ev.no_posts_positive,
                     "rejection_reason": _grid_ev.rejection_reason,
                     "proof_age_ms": _grid_age,
+                    "screen_width": _grid_ev.screen_width,
+                    "screen_height": _grid_ev.screen_height,
+                    "producer_screen_width": _grid_ev.producer_screen_width,
+                    "producer_screen_height": _grid_ev.producer_screen_height,
+                    "screen_dimensions_source": _grid_ev.screen_dimensions_source,
+                    "reveal_count_total_for_like_phase": (
+                        _grid_ev.reveal_count_total_for_like_phase
+                    ),
                 }
                 if str(_candidate_grid.get("outcome") or "") in {
                     "POST_ROW_POSITIVE_SAFE",
@@ -49168,6 +49489,10 @@ def run_post_follow_post_likes_phase(
         def _skip_no_posts(no_posts_check: dict[str, Any]) -> dict[str, Any]:
             meta_np = _followers_current_pkg_activity(d)
             reason_np = "post_like_skipped_no_posts_yet"
+            _stash_return_candidate_proof_after_safe_skip(
+                reason="no_posts_positive",
+                identity_already_confirmed=bool(ab_match and prof_like),
+            )
             post_rec["outcome"] = "no_posts"
             post_rec["failure_reason"] = reason_np
             per_post.append(post_rec)
@@ -49256,6 +49581,10 @@ def run_post_follow_post_likes_phase(
             grid_state_before: Any = None,
             grid_state_after: Any = None,
         ) -> dict[str, Any]:
+            _stash_return_candidate_proof_after_safe_skip(
+                reason="post_grid_open_skipped_safe",
+                identity_already_confirmed=bool(ab_match and prof_like),
+            )
             post_rec["outcome"] = "skipped"
             post_rec["failure_reason"] = "post_like_skipped_no_post_grid"
             per_post.append(post_rec)
@@ -49828,6 +50157,33 @@ def run_post_follow_post_likes_phase(
             )
         except Exception:
             pass
+        if (
+            _canary_grid_evidence is not None
+            and str(_canary_grid_evidence.get("outcome") or "")
+            == "NO_POSTS_POSITIVE"
+        ):
+            # This is not a weak Tier-1 hint: it is the already-consumed
+            # immutable mono-XML composite (exact profile + grid tab + empty
+            # marker + no loading/private/non-grid state). Do not rebuild it
+            # through the slower cheap/visual No Posts chain.
+            log(
+                "info",
+                "follow_60s_no_posts_positive_short_circuit",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                detection_method="single_post_grid_evidence",
+                extra_dump_count=0,
+                screenshot_count=0,
+                fallback_used=False,
+            )
+            return _skip_no_posts(
+                {
+                    "no_posts_detected": True,
+                    "detection_method": "single_post_grid_evidence",
+                    "confidence": 1.0,
+                }
+            )
         if tier1_check.get("no_posts_detected") is True:
             try:
                 log(
@@ -51533,6 +51889,10 @@ def run_post_follow_post_likes_phase(
             )
             _likes_perf_ctx["return_success"] = bool(ret_skip.get("ok"))
             if ret_skip.get("ok"):
+                _stash_return_candidate_proof_after_safe_skip(
+                    reason=str(stable_reason or skipped_reason),
+                    identity_already_confirmed=False,
+                )
                 log(
                     "info",
                     "post_follow_post_likes_return_to_profile_success",

@@ -409,6 +409,44 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
         self.assertEqual(out["outcome"], canary.POST_ROW_POSITIVE_SAFE)
         self.assertEqual(out["post_bounds_source"], "single_reveal_fresh_xml_physical_cell")
 
+    def test_like_phase_reveal_budget_allows_at_most_one_scroll_total(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_followers_log_scroll_or_swipe_about_to_run", return_value=None
+        ):
+            nav._post_follow_like_reveal_budget_begin(initial_count=1)
+            blocked = nav._post_follow_likes_profile_scroll_swipe(
+                device,
+                scroll_profile="reveal_moderate",
+                ww=1080,
+                wh=2340,
+            )
+            exhausted = nav._post_follow_like_reveal_budget_end()
+            self.assertFalse(blocked["swipe_ok"])
+            self.assertEqual(blocked["error"], "reveal_budget_exhausted")
+            self.assertEqual(device.swipe.call_count, 0)
+            self.assertEqual(exhausted["reveal_count_total_for_like_phase"], 1)
+
+            nav._post_follow_like_reveal_budget_begin(initial_count=0)
+            first = nav._post_follow_likes_profile_scroll_swipe(
+                device,
+                scroll_profile="reveal_moderate",
+                ww=1080,
+                wh=2340,
+            )
+            second = nav._post_follow_likes_profile_scroll_swipe(
+                device,
+                scroll_profile="reveal_moderate",
+                ww=1080,
+                wh=2340,
+            )
+            used = nav._post_follow_like_reveal_budget_end()
+        self.assertTrue(first["swipe_ok"])
+        self.assertFalse(second["swipe_ok"])
+        self.assertEqual(device.swipe.call_count, 1)
+        self.assertEqual(used["reveal_count_total_for_like_phase"], 1)
+        self.assertEqual(used["reveal_attempts_blocked"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
