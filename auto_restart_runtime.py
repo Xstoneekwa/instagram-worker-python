@@ -52,6 +52,7 @@ def is_hard_stop_reason(reason: str) -> bool:
 
 
 HUMAN_CONFIRMED_RESUME_MODE = "human_confirmed_resume"
+FOLLOW60_ARMED_CONTROL_RESUME_MODE = "follow60_armed_control_resume"
 
 
 def is_auto_restart_request(metadata: dict[str, Any] | None) -> bool:
@@ -457,6 +458,8 @@ def validate_auto_restart_request_at_claim(
     if quota_reason:
         return False, quota_reason, None
 
+    follow60_contract = _read_record(embedded.get("follow_60s_canary_contract"))
+    follow60_armed_control = bool(follow60_contract)
     policy = {
         "schema": AUTO_RESTART_RESUME_PLAN_SCHEMA,
         "resume_plan_version": RESUME_PLAN_VERSION,
@@ -475,12 +478,24 @@ def validate_auto_restart_request_at_claim(
         **retry_context,
         "request_metadata": {
             "source": AUTO_RESTART_TICK_SOURCE,
+            **(
+                {"recovery_mode": FOLLOW60_ARMED_CONTROL_RESUME_MODE}
+                if follow60_armed_control
+                else {}
+            ),
             "session_termination_class": meta.get("session_termination_class"),
             "trigger_source": meta.get("trigger_source"),
             "execution_worker_id": meta.get("execution_worker_id"),
             **retry_context,
         },
     }
+    if follow60_armed_control:
+        # The scheduler has already projected a validated armed control onto an
+        # exact Follow-only request. Preserve that immutable request contract
+        # for the Worker binding check instead of treating it as a legacy
+        # human-incident resume (which requires an unrelated resume-plan row).
+        policy["recovery_mode"] = FOLLOW60_ARMED_CONTROL_RESUME_MODE
+        policy["frozen_phase_plan"] = embedded
     return True, "", policy
 
 

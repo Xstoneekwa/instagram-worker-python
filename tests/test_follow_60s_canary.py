@@ -754,6 +754,40 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 },
             })[0])
 
+    def test_armed_control_resume_uses_exact_contract_without_human_incident_fields(self) -> None:
+        policy = {
+            "prior_run_id": "source-run",
+            "restart_allowed": True,
+            "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+            "quota_remaining": {"follow": 10, "welcome": 0, "unfollow": 0},
+            "request_metadata": {
+                "source": "auto_restart_tick",
+                "recovery_mode": "follow60_armed_control_resume",
+            },
+            "frozen_phase_plan": {
+                "account_id": "account-1",
+                "package_contract_ready": True,
+                "phase_plan_source": "follow60_armed_control",
+                "follow_60s_canary_contract": {
+                    "schema": "FOLLOW_60S_ONE_SHOT_V2",
+                    "control_id": "control-1",
+                    "source_run_id": "source-run",
+                    "follow_quota": 10,
+                    "golden_fallback_policy": "proof_rejection_only",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                },
+            },
+        }
+        self.assertEqual(
+            canary._one_shot_resume_allowed(policy, account_id="account-1"),
+            (True, ""),
+        )
+        policy["frozen_phase_plan"]["phase_plan_source"] = "legacy"
+        self.assertEqual(
+            canary._one_shot_resume_allowed(policy, account_id="account-1"),
+            (False, "armed_control_phase_plan_source_mismatch"),
+        )
+
     def test_snapshot_is_single_consume_and_invalidated_by_viewport_change(self) -> None:
         canary.stash_next_candidate_snapshot(
             source_profile_username="ct", package="pkg", activity="act",

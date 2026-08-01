@@ -47,6 +47,9 @@ _SUBFLAG_NAMES = (
     "post_return_snapshot_reuse",
 )
 
+_HUMAN_CONFIRMED_RESUME_MODE = "human_confirmed_resume"
+_ARMED_CONTROL_RESUME_MODE = "follow60_armed_control_resume"
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = str(os.environ.get(name, "") or "").strip().lower()
@@ -69,14 +72,19 @@ def _one_shot_resume_allowed(
     request_meta = dict(policy.get("request_metadata") or {})
     if str(request_meta.get("source") or "") != "auto_restart_tick":
         return False, "source_not_auto_restart_tick"
-    if str(request_meta.get("recovery_mode") or "") != "human_confirmed_resume":
+    recovery_mode = str(request_meta.get("recovery_mode") or "")
+    if recovery_mode not in {
+        _HUMAN_CONFIRMED_RESUME_MODE,
+        _ARMED_CONTROL_RESUME_MODE,
+    }:
         return False, "recovery_mode_mismatch"
     if policy.get("restriction_preflight_only") is True:
         return False, "restriction_preflight_not_allowed"
-    if not str(policy.get("resume_plan_id") or "").strip():
-        return False, "resume_plan_id_missing"
-    if not str(policy.get("incident_id") or "").strip():
-        return False, "incident_id_missing"
+    if recovery_mode == _HUMAN_CONFIRMED_RESUME_MODE:
+        if not str(policy.get("resume_plan_id") or "").strip():
+            return False, "resume_plan_id_missing"
+        if not str(policy.get("incident_id") or "").strip():
+            return False, "incident_id_missing"
     phases = dict(policy.get("phases_to_run") or {})
     if phases.get("follow") is not True or phases.get("welcome") is not False or phases.get("unfollow") is not False:
         return False, "phase_scope_mismatch"
@@ -89,6 +97,11 @@ def _one_shot_resume_allowed(
         return False, "remaining_follow_quota_out_of_bounds"
     frozen = dict(policy.get("frozen_phase_plan") or {})
     contract = dict(frozen.get("follow_60s_canary_contract") or {})
+    if recovery_mode == _ARMED_CONTROL_RESUME_MODE:
+        if str(frozen.get("phase_plan_source") or "") != "follow60_armed_control":
+            return False, "armed_control_phase_plan_source_mismatch"
+        if not str(contract.get("control_id") or "").strip():
+            return False, "armed_control_id_missing"
     if str(frozen.get("account_id") or "") != str(account_id or "").strip():
         return False, "frozen_account_mismatch"
     if frozen.get("package_contract_ready") is not True:

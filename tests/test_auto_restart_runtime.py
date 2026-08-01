@@ -23,6 +23,60 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertFalse(phase_enabled("welcome", default=True, policy=policy))
         self.assertTrue(phase_enabled("follow", default=False, policy=policy))
 
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_follow60_armed_control_request_preserves_exact_contract_without_human_resume_row(
+        self, load_summary
+    ) -> None:
+        account_id = "11111111-1111-4111-8111-111111111111"
+        prior_run_id = "22222222-2222-4222-8222-222222222222"
+        embedded = {
+            "schema": "AUTO_RESTART_RESUME_PLAN_V2",
+            "account_id": account_id,
+            "attempt_id": 1,
+            "restart_allowed": True,
+            "package_contract_ready": True,
+            "phase_plan_source": "follow60_armed_control",
+            "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+            "quota_remaining": {"follow": 10, "welcome": 0, "unfollow": 0},
+            "follow_60s_canary_contract": {
+                "schema": "FOLLOW_60S_ONE_SHOT_V2",
+                "control_id": "33333333-3333-4333-8333-333333333333",
+                "source_run_id": prior_run_id,
+                "follow_quota": 10,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "golden_fallback_policy": "proof_rejection_only",
+            },
+        }
+        load_summary.return_value = {
+            "account_id": account_id,
+            "account_username": "fixture_user",
+            "run_id": prior_run_id,
+            "session_termination_class": "",
+            "restart_eligibility": "eligible",
+            "auto_restart_resume_plan": embedded,
+        }
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id=account_id,
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "attempt_id": 1,
+                "resume_plan_version": 2,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V2",
+                "prior_run_id": prior_run_id,
+                "resume_plan": embedded,
+            },
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(policy["recovery_mode"], "follow60_armed_control_resume")
+        self.assertEqual(
+            policy["request_metadata"]["recovery_mode"],
+            "follow60_armed_control_resume",
+        )
+        self.assertEqual(policy["frozen_phase_plan"], embedded)
+        self.assertNotIn("resume_plan_id", policy)
+        self.assertNotIn("incident_id", policy)
+
     def test_checkpoint_payload_is_not_an_instagram_challenge(self) -> None:
         summary = {
             "account_id": "11111111-1111-4111-8111-111111111111",
