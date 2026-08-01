@@ -556,6 +556,73 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         self.assertEqual(binding["run_id"], RUN_ID)
         self.assertEqual(binding["account_id"], account_id)
 
+    def test_follow60_late_activation_certifies_binding_before_follow_tap(self) -> None:
+        account_id = TEST_CANARY_ACCOUNT_ID
+        request_row = {
+            "id": REQUEST_ID,
+            "account_id": account_id,
+            "run_id": RUN_ID,
+        }
+        run_row = {
+            "id": RUN_ID,
+            "account_id": account_id,
+            "status": "running",
+        }
+        with mock.patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", None
+        ), mock.patch(
+            "account_run_control.get_account_run_request", return_value=request_row
+        ) as get_request, mock.patch(
+            "account_run_control.get_ig_run_by_id", return_value=run_row
+        ) as get_run, mock.patch.object(runner, "log"):
+            early = runner._ensure_follow_persistence_run_binding(
+                persistence_required=False,
+                account_id=account_id,
+                run_id=RUN_ID,
+                request_id=REQUEST_ID,
+                request_linked=True,
+            )
+            self.assertIsNone(early)
+            self.assertIsNone(runner._CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING)
+
+            active = runner._ensure_follow_persistence_run_binding(
+                persistence_required=True,
+                account_id=account_id,
+                run_id=RUN_ID,
+                request_id=REQUEST_ID,
+                request_linked=True,
+            )
+            self.assertEqual(active["account_id"], account_id)
+            self.assertEqual(active["run_id"], RUN_ID)
+            self.assertEqual(active["request_id"], REQUEST_ID)
+            self.assertEqual(
+                runner._CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING,
+                active,
+            )
+            get_request.assert_called_once_with(REQUEST_ID)
+            get_run.assert_called_once_with(RUN_ID)
+
+    def test_follow60_late_activation_fails_closed_without_link(self) -> None:
+        with mock.patch.object(
+            runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", None
+        ), mock.patch(
+            "account_run_control.get_account_run_request"
+        ) as get_request, mock.patch(
+            "account_run_control.get_ig_run_by_id"
+        ) as get_run:
+            with self.assertRaisesRegex(
+                RuntimeError, "follow_persistence_run_binding_not_linked"
+            ):
+                runner._ensure_follow_persistence_run_binding(
+                    persistence_required=True,
+                    account_id=TEST_CANARY_ACCOUNT_ID,
+                    run_id=RUN_ID,
+                    request_id=REQUEST_ID,
+                    request_linked=False,
+                )
+        get_request.assert_not_called()
+        get_run.assert_not_called()
+
     def test_missing_or_mismatched_request_context_fails_before_rpc(self) -> None:
         account_id = ACCOUNT_ID
         binding = {

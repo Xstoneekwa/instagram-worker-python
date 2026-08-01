@@ -3434,6 +3434,57 @@ def _establish_follow_persistence_run_binding(
     return binding
 
 
+def _ensure_follow_persistence_run_binding(
+    *,
+    persistence_required: bool,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    request_linked: bool,
+) -> dict[str, str] | None:
+    """Certify the durable Follow binding once its runtime scope is known.
+
+    The generic Follow60 control is configured after the initial request/run
+    link.  This helper is therefore intentionally safe to call both before and
+    after canary resolution: an early Golden call is a no-op, while a later
+    active-canary call certifies the same immutable request/run/account tuple
+    before any Follow tap can be dispatched.
+    """
+    global _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING
+
+    if not persistence_required:
+        return None
+    if not request_id or not run_id or not request_linked:
+        raise RuntimeError("follow_persistence_run_binding_not_linked")
+
+    existing = dict(_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING or {})
+    if existing:
+        expected = {
+            "account_id": _normalize_required_uuid(account_id, "account_id"),
+            "run_id": _normalize_required_uuid(run_id, "run_id"),
+            "request_id": _normalize_required_uuid(request_id, "request_id"),
+        }
+        mismatches = [
+            key
+            for key, value in expected.items()
+            if str(existing.get(key) or "").strip().lower() != value.lower()
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "follow_persistence_run_binding_mismatch:"
+                + ",".join(sorted(mismatches))
+            )
+        return existing
+
+    binding = _establish_follow_persistence_run_binding(
+        account_id=account_id,
+        run_id=run_id,
+        request_id=request_id,
+    )
+    _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING = binding
+    return dict(binding)
+
+
 def _validate_follow_persistence_intent_context(
     intent: dict[str, Any] | None,
     *,
@@ -20881,14 +20932,12 @@ def _main_impl() -> int:
                 )
         if _follow_persistence_intent_enabled_for_account(account_id):
             try:
-                if not run_request_id or not run_id or not linked:
-                    raise RuntimeError("follow_persistence_run_binding_not_linked")
-                _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING = (
-                    _establish_follow_persistence_run_binding(
-                        account_id=account_id,
-                        run_id=run_id,
-                        request_id=run_request_id,
-                    )
+                _ensure_follow_persistence_run_binding(
+                    persistence_required=True,
+                    account_id=account_id,
+                    run_id=run_id,
+                    request_id=run_request_id,
+                    request_linked=bool(linked),
                 )
             except Exception as exc:
                 log(
@@ -21487,6 +21536,32 @@ def _main_impl() -> int:
             safe_to_continue_ui=True,
         )
         _follow60_canary_active = False
+
+    # Follow60 is resolved later than the initial request/run link.  Certify
+    # the persistence binding now when the canonical control has activated the
+    # canary; otherwise every eligible candidate would fail closed at the
+    # pre-tap intent boundary with follow_persistence_run_binding_missing.
+    if _follow60_canary_active:
+        try:
+            _ensure_follow_persistence_run_binding(
+                persistence_required=True,
+                account_id=account_id,
+                run_id=run_id,
+                request_id=run_request_id,
+                request_linked=bool(linked),
+            )
+        except Exception as exc:
+            log(
+                "error",
+                "follow_60s_persistence_binding_safe_stop_pre_follow",
+                account_id=account_id or None,
+                run_id=run_id or None,
+                request_id=run_request_id or None,
+                reason=str(exc)[:240],
+                safe_to_tap=False,
+                fallback_used=False,
+            )
+            return 96
 
     # P3: canonical resume plan created EARLY, before any device/UI action.
     # Covers every dispatched account_session regardless of trigger
