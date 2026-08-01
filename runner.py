@@ -20881,17 +20881,22 @@ def _main_impl() -> int:
                 package=str(config.INSTAGRAM_PACKAGE or ""),
             )
             if _prebind.valid:
+                _binding_claim = _prebind.binding
                 _control_baseline = int(_raw_control.get("baseline_follow_count") or 0)
                 _live_follow_count = supabase_client.count_successful_follows_today(
                     account_id
                 )
-                if _live_follow_count == _control_baseline:
+                if _live_follow_count == _control_baseline and _binding_claim is not None:
                     _bound_control = supabase_client.bind_follow_60s_canary_runtime_v2(
+                        control_id=_binding_claim.control_id,
                         account_id=account_id,
+                        expected_worker_sha=_binding_claim.expected_worker_sha,
+                        baseline_release_sha=_binding_claim.baseline_release_sha,
                         run_id=str(run_id or ""),
                         request_id=str(run_request_id or ""),
                         attempt_id=int(_follow60_attempt_id or 1),
                         business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                        binding_version=_binding_claim.binding_version,
                     )
                     _follow60_canary_control = {
                         **dict(_raw_control or {}),

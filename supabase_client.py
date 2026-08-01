@@ -2785,17 +2785,22 @@ def get_follow_60s_canary_control_v1(account_id: str) -> dict[str, Any]:
 
 
 def bind_follow_60s_canary_runtime_v2(
-    *, account_id: str, run_id: str, request_id: str,
-    attempt_id: int, business_session_id: str,
+    *, control_id: str, account_id: str, expected_worker_sha: str,
+    baseline_release_sha: str, run_id: str, request_id: str,
+    attempt_id: int, business_session_id: str, binding_version: str,
 ) -> dict[str, Any]:
     out = call_rpc(
         "bind_follow_60s_canary_runtime_v2",
         {
+            "p_control_id": str(control_id),
             "p_account_id": str(account_id),
+            "p_expected_worker_sha": str(expected_worker_sha),
+            "p_baseline_release_sha": str(baseline_release_sha),
+            "p_run_request_id": str(request_id),
             "p_run_id": str(run_id),
-            "p_request_id": str(request_id),
             "p_attempt_id": int(attempt_id),
             "p_business_session_id": str(business_session_id),
+            "p_binding_version": str(binding_version),
         },
     )
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
