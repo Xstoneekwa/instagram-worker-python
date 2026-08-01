@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html
 import json
 import math
@@ -17906,6 +17907,17 @@ def _stash_post_mute_sheet_closed_proof(
                             _grid.get("reveal_count_total_for_like_phase") or 0
                         ),
                         coordinate_frame=dict(_grid.get("coordinate_frame") or {}),
+                        identity_exact=bool(_grid.get("identity_exact")),
+                        profile_tabs_present=bool(
+                            _grid.get("profile_tabs_present")
+                        ),
+                        grid_selected=bool(_grid.get("grid_selected")),
+                        tabs_bottom=int(_grid.get("tabs_bottom") or 0),
+                        suggested_region_detected=bool(
+                            _grid.get("suggested_for_you_visible")
+                            or _grid.get("suggested_region_detected")
+                        ),
+                        classification_reveal_ttl_ms=3000.0,
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -18052,6 +18064,9 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 )
                 profile_grid["bounded_empty_grid_recheck"] = True
                 profile_grid["stabilization_dump_count"] = 1
+            # A clipped classification is immutable producer evidence.  It is
+            # intentionally not scrolled here: the Like consumer owns the one
+            # reveal budget, invalidates these bounds, and reacquires once.
             if str(profile_grid.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
                 from follow_60s_canary import validate_coordinate_frame_v1
 
@@ -18075,8 +18090,6 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                             "outcome": "POST_GRID_AMBIGUOUS_FINAL",
                             "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
                             "tap_safe": False,
-                            "reveal_scroll_attempted": False,
-                            "fast_vision_probe_attempted": False,
                             "rejection_reason": clipped_frame_reason,
                             "fast_vision_probe_rejection_reason": (
                                 "coordinate_frame_untrusted_before_reveal"
@@ -18084,28 +18097,10 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                         }
                     )
                 else:
-                    profile_grid = (
-                        _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
-                            d,
-                            profile_grid,
-                            ww=int(profile_ww),
-                            wh=int(profile_wh),
-                            candidate_username=cand,
-                            budget_s=1.5,
-                        )
-                    )
-                profile_grid["candidate_username"] = cand
-                profile_grid.update(
-                    _post_follow_screen_dimensions_from_hierarchy(
-                        str(profile_grid.pop("reacquired_hierarchy_xml", "") or profile_xml),
-                        raw_width=int(profile_ww),
-                        raw_height=int(profile_wh),
-                    )
-                )
-                runtime = _follow_60s_runtime_context()
-                context_out["navigation_generation"] = str(
-                    runtime.get("ui_generation") or "0"
-                )
+                    profile_grid["clipped_consumer_route"] = True
+                    profile_grid["classification_ttl_ms"] = 3000.0
+                profile_grid["reveal_scroll_attempted"] = False
+                profile_grid["reveal_count_total_for_like_phase"] = 0
             profile_grid["no_posts_positive"] = bool(
                 profile_grid.get("outcome") == "NO_POSTS_POSITIVE"
                 and profile_grid.get("identity_exact")
@@ -23138,7 +23133,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     candidate_username: str = "",
     budget_s: float = 1.5,
 ) -> dict[str, Any]:
-    """Finalize one clipped row at the producer boundary, never in the consumer.
+    """Finalize one clipped row at the Like consumer boundary.
 
     Ambiguous evidence returns immediately to Golden without a diagnostic. A
     positively identified clipped row gets exactly one reveal and one fresh XML
@@ -25104,6 +25099,20 @@ def _visual_detect_post_viewer_opened_after_tap(
     return out
 
 
+def _post_selection_suggested_surface_guard(
+    ui_hints: dict[str, Any] | None,
+    *,
+    profile_tabs_bottom_y_px: int | None,
+) -> tuple[bool, str]:
+    hints = dict(ui_hints or {})
+    suggested = bool(hints.get("suggested_for_you") or hints.get("discover_people"))
+    if not suggested:
+        return True, "suggested_region_absent"
+    if profile_tabs_bottom_y_px is None or int(profile_tabs_bottom_y_px) <= 0:
+        return False, "suggested_surface_blocks_post_selection"
+    return True, "suggested_card_excluded"
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
@@ -25364,6 +25373,51 @@ def visual_open_recent_post_from_profile(
         and int(prior_dynamic_first_row_top_px)
         < int(dynamic_first_row_search_y_min_px) - 4
     )
+
+    # Suggested/Discover cards are account cards, never candidate media.  A
+    # visual rectangle detector cannot safely distinguish them without the
+    # certified lower edge of the profile tabs.  Fail closed before selecting
+    # or tapping any dynamic row; a caller may perform one bounded reveal and
+    # reacquire a fresh structural proof.
+    suggested_selection_ok, suggested_selection_reason = (
+        _post_selection_suggested_surface_guard(
+            open_grid_ui_hints,
+            profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
+        )
+    )
+    if not suggested_selection_ok:
+        log(
+            "warning",
+            "visual_recent_post_open_blocked_suggested_surface",
+            source_profile_username=source_profile_username or "",
+            failure_reason="suggested_surface_blocks_post_selection",
+            suggested_for_you_ui_hint=bool(
+                open_grid_ui_hints.get("suggested_for_you")
+            ),
+            discover_people_ui_hint=bool(
+                open_grid_ui_hints.get("discover_people")
+            ),
+            profile_tabs_boundary_proven=False,
+            tap_x=None,
+            tap_y=None,
+        )
+        return _po_fin(
+            {
+                "ok": False,
+                "tap_x": None,
+                "tap_y": None,
+                "current_activity": act0,
+                "current_package": pkg0,
+                "profile_detected": prof0,
+                "post_detected": False,
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "suggested_surface_blocks_post_selection",
+                "suggested_region_detected": True,
+                "suggested_selection_reason": suggested_selection_reason,
+            },
+            outcome="failed",
+            failure_reason="suggested_surface_blocks_post_selection",
+        )
 
     dyn_fresh = _dynamic_first_post_grid_row_from_image(
         im,
@@ -25860,7 +25914,21 @@ def visual_open_recent_post_from_profile(
     _t_retry0: float | None = None
     opened_on_first_tap_flag = bool(post_detected)
     det_retry: dict[str, Any] = {}
-    if not post_detected and prof_still:
+    if not post_detected and prof_still and post_follow_fast:
+        retry_used = False
+        retry_strategy = "fresh_evidence_required"
+        log(
+            "warning",
+            "visual_recent_post_open_retry_blocked_without_fresh_evidence",
+            source_profile_username=source_profile_username or "",
+            selected_col=col,
+            selected_row=row,
+            failure_reason="post_selection_retry_requires_fresh_evidence",
+            first_tap_coords=first_tap_coords,
+            tap_x=None,
+            tap_y=None,
+        )
+    elif not post_detected and prof_still:
         retry_used = True
         retry_strategy = "same_cell_more_central_point"
         _t_retry0 = time.perf_counter()
@@ -26104,6 +26172,11 @@ def visual_open_recent_post_from_profile(
             failure_reason=None,
         )
 
+    final_open_failure_reason = (
+        "post_selection_retry_requires_fresh_evidence"
+        if post_follow_fast and prof_still and not retry_used
+        else "post_viewer_not_detected"
+    )
     if post_follow_fast:
         try:
             log(
@@ -26117,7 +26190,7 @@ def visual_open_recent_post_from_profile(
                 if retry_used
                 else None,
                 viewer_detection_signals_seen=viewer_signals[:24],
-                failure_reason="post_viewer_not_detected",
+                failure_reason=final_open_failure_reason,
                 source_profile_username=source_profile_username or "",
             )
         except Exception:
@@ -26139,7 +26212,7 @@ def visual_open_recent_post_from_profile(
         profile_detected=prof0,
         post_detected=False,
         source_profile_username=source_profile_username or "",
-        failure_reason="post_viewer_not_detected",
+        failure_reason=final_open_failure_reason,
     )
     return _po_fin(
         {
@@ -26158,10 +26231,10 @@ def visual_open_recent_post_from_profile(
             "profile_detected": prof0,
             "post_detected": False,
             "source_profile_username": source_profile_username or "",
-            "failure_reason": "post_viewer_not_detected",
+            "failure_reason": final_open_failure_reason,
         },
         outcome="failed",
-        failure_reason="post_viewer_not_detected",
+        failure_reason=final_open_failure_reason,
     )
 
 
@@ -28917,6 +28990,26 @@ def _visual_post_viewer_context_guard_for_like(
     return False, "post_viewer_context_insufficient", meta
 
 
+def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
+    ctx = dict(context or {})
+    material = "\0".join(
+        str(ctx.get(key) or "")
+        for key in (
+            "account_id",
+            "run_id",
+            "request_id",
+            "action_id",
+            "candidate_username",
+            "package",
+            "activity",
+            "viewer_type",
+            "stage_nonce",
+            "created_at_monotonic",
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
 def visual_like_open_post(
     d: u2.Device,
     *,
@@ -28924,6 +29017,7 @@ def visual_like_open_post(
     expected_profile_context: dict[str, Any] | None = None,
     post_opened_via_profile_grid: bool = False,
     post_open_context: dict[str, Any] | None = None,
+    expected_stage_binding: dict[str, Any] | None = None,
     expected_follower_username: str | None = None,
     likes_perf_like_accum: dict[str, Any] | None = None,
     likes_perf_phase_t0: float | None = None,
@@ -29246,6 +29340,88 @@ def visual_like_open_post(
             and str(open_ctx.get("viewer_detect_path") or "")
             in {"phase_a2_exact_like_desc_fast", "phase_a_like_unlike_fast"}
         )
+        stage_ctx = (
+            dict(open_ctx.get("post_open_context_v1") or {})
+            if isinstance(open_ctx.get("post_open_context_v1"), dict)
+            else {}
+        )
+        stage_ctx_now = time.perf_counter()
+        try:
+            stage_ctx_age_ms = max(
+                0.0,
+                (stage_ctx_now - float(stage_ctx.get("created_at_monotonic") or 0.0))
+                * 1000.0,
+            )
+        except (TypeError, ValueError):
+            stage_ctx_age_ms = float("inf")
+        stage_ctx_hash_ok = bool(
+            stage_ctx
+            and hmac.compare_digest(
+                str(stage_ctx.get("proof_hash") or ""),
+                _post_open_context_v1_proof_hash(stage_ctx),
+            )
+        )
+        expected_binding = dict(expected_stage_binding or {})
+        stage_binding_ok = bool(
+            not expected_binding
+            or all(
+                str(stage_ctx.get(key) or "")
+                == str(expected_binding.get(key) or "")
+                for key in ("account_id", "run_id", "request_id", "action_id")
+            )
+        )
+        stage_scoped_open_context_ok = bool(
+            post_opened_via_profile_grid
+            and _normalize_handle(
+                str(stage_ctx.get("candidate_username") or "")
+            )
+            == _normalize_handle(expected_follower_username)
+            and str(stage_ctx.get("package") or "")
+            == str(meta0.get("current_package") or "")
+            and "InstagramMainActivity"
+            in str(stage_ctx.get("activity") or "")
+            and str(stage_ctx.get("viewer_type") or "") == "Posts"
+            and bool(stage_ctx.get("v5_positive"))
+            and not bool(stage_ctx.get("story_or_highlight_detected"))
+            and bool(stage_ctx.get("post_identity_confirmed"))
+            and stage_ctx_hash_ok
+            and stage_binding_ok
+            and stage_ctx_age_ms <= 3000.0
+        )
+        stage_context_rejection_reason = ""
+        if stage_ctx and not stage_scoped_open_context_ok:
+            if _normalize_handle(str(stage_ctx.get("candidate_username") or "")) != _normalize_handle(expected_follower_username):
+                stage_context_rejection_reason = "candidate_mismatch"
+            elif bool(stage_ctx.get("story_or_highlight_detected")):
+                stage_context_rejection_reason = "story_or_highlight_detected"
+            elif stage_ctx_age_ms > 3000.0:
+                stage_context_rejection_reason = "stage_context_stale"
+            elif not stage_ctx_hash_ok:
+                stage_context_rejection_reason = "proof_hash_mismatch"
+            elif not stage_binding_ok:
+                stage_context_rejection_reason = "run_action_binding_mismatch"
+            else:
+                stage_context_rejection_reason = "positive_viewer_contract_missing"
+        log(
+            "info",
+            "like_context_validation",
+            expected_follower_username=expected_follower_username,
+            context_present=bool(stage_ctx),
+            context_version=str(stage_ctx.get("version") or ""),
+            status="used" if stage_scoped_open_context_ok else "rejected",
+            rejection_reason=stage_context_rejection_reason,
+            proof_age_ms=(
+                round(stage_ctx_age_ms, 2)
+                if math.isfinite(stage_ctx_age_ms)
+                else None
+            ),
+            proof_hash_ok=stage_ctx_hash_ok,
+            run_action_binding_ok=stage_binding_ok,
+            v5_positive=bool(stage_ctx.get("v5_positive")),
+            story_or_highlight_detected=bool(
+                stage_ctx.get("story_or_highlight_detected")
+            ),
+        )
         min_ctx = float(
             getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72)
             or 0.72
@@ -29257,11 +29433,15 @@ def visual_like_open_post(
                 or ""
             )
             if exp_ctx.get("ok") is False or not exp_fp0:
-                if legacy_safe_open_context_ok:
+                if legacy_safe_open_context_ok or stage_scoped_open_context_ok:
                     if _lkperf is not None:
                         _lkperf["post_open_context_guard_ms"] = 0.0
                         _lkperf["post_open_context_guard_source"] = (
-                            "legacy_safe_open_viewer_proof"
+                            (
+                                "stage_scoped_post_open_context_v1"
+                                if stage_scoped_open_context_ok
+                                else "legacy_safe_open_viewer_proof"
+                            )
                         )
                     try:
                         log(
@@ -29276,6 +29456,8 @@ def visual_like_open_post(
                                 open_ctx.get("viewer_detect_path") or ""
                             ),
                             detect_reason=str(open_ctx.get("detect_reason") or ""),
+                            stage_context_age_ms=round(stage_ctx_age_ms, 2),
+                            stage_context_hash_ok=stage_ctx_hash_ok,
                             like_button_bounds=like_button_bounds,
                             tap_x=tap_x,
                             tap_y=tap_y,
@@ -29319,7 +29501,10 @@ def visual_like_open_post(
                         "liked_verified": False,
                         "verification_method": "profile_context_lock",
                     }
-            if legacy_safe_open_context_ok and (exp_ctx.get("ok") is False or not exp_fp0):
+            if (
+                (legacy_safe_open_context_ok or stage_scoped_open_context_ok)
+                and (exp_ctx.get("ok") is False or not exp_fp0)
+            ):
                 pass
             elif exp_ctx.get("ok") is False or not exp_fp0:
                 meta_ctx = _followers_current_pkg_activity(d)
@@ -29356,7 +29541,11 @@ def visual_like_open_post(
                     "verification_method": "profile_context_lock",
                 }
             pkg_ctx = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
-            if bool(post_opened_via_profile_grid) and not legacy_safe_open_context_ok:
+            if (
+                bool(post_opened_via_profile_grid)
+                and not legacy_safe_open_context_ok
+                and not stage_scoped_open_context_ok
+            ):
                 _guard_perf: dict[str, Any] = {}
                 po_ok, po_why, po_meta = _visual_post_viewer_context_guard_for_like(
                     d,
@@ -29471,7 +29660,7 @@ def visual_like_open_post(
                     )
                 except Exception:
                     pass
-            elif legacy_safe_open_context_ok:
+            elif legacy_safe_open_context_ok or stage_scoped_open_context_ok:
                 try:
                     log(
                         "info",
@@ -29489,6 +29678,11 @@ def visual_like_open_post(
                         tap_x=tap_x,
                         tap_y=tap_y,
                         already_liked=False,
+                        context_source=(
+                            "stage_scoped_post_open_context_v1"
+                            if stage_scoped_open_context_ok
+                            else "legacy_safe_open_viewer_proof"
+                        ),
                     )
                 except Exception:
                     pass
@@ -42641,6 +42835,18 @@ def post_follow_controlled_return_to_followers_list(
             current_screen_guess = str(det_reuse.get("current_screen_guess") or "")
             log(
                 "info",
+                "return_ct_fastpath_status",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand or None,
+                status="used",
+                proof_age_ms=det_age_ms,
+                final_ct_exact=True,
+                fallback_used=False,
+                duration_saved_estimate_ms=3200.0,
+            )
+            log(
+                "info",
                 "return_ct_fast_proof_reused",
                 visual_candidate_id=vcid,
                 source_profile_username=src,
@@ -42693,6 +42899,19 @@ def post_follow_controlled_return_to_followers_list(
                 action_bar_title=action_bar_title,
             )
             return True, "compact_safe_back_then_list", None
+        log(
+            "info",
+            "return_ct_fastpath_status",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand or None,
+            status="rejected",
+            rejection_reason=reuse_reason,
+            proof_age_ms=det_age_ms,
+            final_ct_exact=False,
+            fallback_used=True,
+            duration_saved_estimate_ms=0.0,
+        )
         log(
             "info",
             "return_ct_fast_proof_rejected",
@@ -49555,7 +49774,92 @@ def run_post_follow_post_likes_phase(
                     "reveal_count_total_for_like_phase": (
                         _grid_ev.reveal_count_total_for_like_phase
                     ),
+                    "coordinate_frame": dict(_grid_ev.coordinate_frame or {}),
+                    "identity_exact": bool(_grid_ev.identity_exact),
+                    "profile_tabs_present": bool(
+                        _grid_ev.profile_tabs_present
+                    ),
+                    "grid_selected": bool(_grid_ev.grid_selected),
+                    "tabs_bottom": int(_grid_ev.tabs_bottom or 0),
+                    "suggested_region_detected": bool(
+                        _grid_ev.suggested_region_detected
+                    ),
+                    "candidate_username": cand,
                 }
+                if str(_candidate_grid.get("outcome") or "") == (
+                    "POST_ROW_POSITIVE_BUT_CLIPPED"
+                ):
+                    reveal_ttl_ms = float(
+                        _grid_ev.classification_reveal_ttl_ms or 3000.0
+                    )
+                    classification_valid = bool(
+                        float(_grid_age or 0.0) <= reveal_ttl_ms
+                    )
+                    log(
+                        "info",
+                        "follow_60s_clipped_consumer_route",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        proof_age_ms=round(float(_grid_age or 0.0), 2),
+                        classification_ttl_ms=reveal_ttl_ms,
+                        classification_ttl_status=(
+                            "valid_for_reveal"
+                            if classification_valid
+                            else "stale_for_reveal"
+                        ),
+                        tap_ttl_status="old_bounds_forbidden",
+                        reveal_count_before=int(
+                            _candidate_grid.get(
+                                "reveal_count_total_for_like_phase"
+                            )
+                            or 0
+                        ),
+                    )
+                    if classification_valid:
+                        _candidate_grid = (
+                            _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                                d,
+                                _candidate_grid,
+                                ww=int(_grid_ww),
+                                wh=int(_grid_wh),
+                                candidate_username=cand,
+                                budget_s=1.5,
+                            )
+                        )
+                        log(
+                            "info",
+                            "follow_60s_postgrid_after_reveal",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            outcome=str(
+                                _candidate_grid.get("outcome") or ""
+                            ),
+                            reveal_performed=bool(
+                                _candidate_grid.get("reveal_scroll_attempted")
+                            ),
+                            reveal_count_total_for_like_phase=int(
+                                _candidate_grid.get(
+                                    "reveal_count_total_for_like_phase"
+                                )
+                                or 0
+                            ),
+                            fresh_reacquisition=bool(
+                                _candidate_grid.get("reacquire_dump_count")
+                            ),
+                            old_bounds_invalidated=True,
+                        )
+                    else:
+                        _candidate_grid.update(
+                            {
+                                "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                                "rejection_reason": (
+                                    "classification_ttl_expired_before_reveal"
+                                ),
+                                "reveal_count_total_for_like_phase": 0,
+                            }
+                        )
                 if str(_candidate_grid.get("outcome") or "") in {
                     "POST_ROW_POSITIVE_SAFE",
                     "NO_POSTS_POSITIVE",
@@ -52453,6 +52757,70 @@ def run_post_follow_post_likes_phase(
                 outcome="skipped_no_like_button",
             )
 
+        # Bind the V5-positive viewer to this exact candidate/stage.  This is
+        # an authorization alternative to a pre-open profile screenshot, not
+        # a bypass: Story/Highlight, identity, package/activity and freshness
+        # remain mandatory and are revalidated immediately before Like.
+        _post_ctx_created_at = time.perf_counter()
+        _post_ctx_meta = _followers_current_pkg_activity(d)
+        _post_ctx_nonce = hashlib.sha256(
+            (
+                f"{account_id or ''}\0{run_id or ''}\0{vcid}\0{cand}\0"
+                f"{_post_ctx_created_at:.9f}"
+            ).encode("utf-8", errors="replace")
+        ).hexdigest()[:24]
+        _post_ctx = {
+            "version": "PostOpenContextV1",
+            "account_id": str(account_id or ""),
+            "candidate_username": cand,
+            "candidate_profile_id": str(
+                (candidate_profile_context or {}).get("candidate_profile_id")
+                or ""
+            ),
+            "source_target_id": str(
+                (candidate_profile_context or {}).get("source_target_id")
+                or ""
+            ),
+            "run_id": str(run_id or ""),
+            "request_id": str(
+                (candidate_profile_context or {}).get("request_id") or ""
+            ),
+            "action_id": str(vcid or ""),
+            "package": str(_post_ctx_meta.get("current_package") or pkg),
+            "activity": str(_post_ctx_meta.get("current_activity") or ""),
+            "viewer_type": "Posts",
+            "open_method": str(open_out.get("open_strategy") or "golden"),
+            "source_cell_fingerprint": str(
+                ((_canary_grid_evidence or {}).get("post_bounds_source") or "")
+            ),
+            "v5_positive": True,
+            "post_identity_confirmed": bool(post_identity_confirmed),
+            "story_or_highlight_detected": False,
+            "created_at_monotonic": _post_ctx_created_at,
+            "navigation_generation": str(
+                (open_out.get("post_open_stage_provenance") or {}).get(
+                    "navigation_generation_at_tap"
+                )
+                or ""
+            ),
+            "stage_nonce": _post_ctx_nonce,
+        }
+        _post_ctx["proof_hash"] = _post_open_context_v1_proof_hash(_post_ctx)
+        open_out["post_open_context_v1"] = _post_ctx
+        log(
+            "info",
+            "follow_60s_post_open_context_created",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            context_version="PostOpenContextV1",
+            v5_positive=True,
+            story_or_highlight_detected=False,
+            stage_nonce_hash=hashlib.sha256(
+                _post_ctx_nonce.encode("utf-8")
+            ).hexdigest()[:16],
+        )
+
         t_al_run0 = time.perf_counter()
         al_pre = visual_post_already_liked(
             d,
@@ -52555,6 +52923,14 @@ def run_post_follow_post_likes_phase(
             expected_profile_context=profile_baseline,
             post_opened_via_profile_grid=True,
             post_open_context=open_out,
+            expected_stage_binding={
+                "account_id": str(account_id or ""),
+                "run_id": str(run_id or ""),
+                "request_id": str(
+                    (candidate_profile_context or {}).get("request_id") or ""
+                ),
+                "action_id": str(vcid or ""),
+            },
             expected_follower_username=cand,
             likes_perf_like_accum=_like_accum,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import time
 import unittest
 from contextlib import ExitStack
@@ -951,6 +952,22 @@ def _probe_sequence_from_visible_fn(
 
 
 class PostFollowLikeSamsungFastTest(unittest.TestCase):
+    def test_suggested_surface_without_tabs_boundary_blocks_every_post_tap(self) -> None:
+        ok, reason = nav._post_selection_suggested_surface_guard(
+            {"suggested_for_you": True, "discover_people": False},
+            profile_tabs_bottom_y_px=None,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "suggested_surface_blocks_post_selection")
+
+    def test_suggested_surface_with_certified_tabs_excludes_cards_but_allows_grid(self) -> None:
+        ok, reason = nav._post_selection_suggested_surface_guard(
+            {"suggested_for_you": True, "discover_people": False},
+            profile_tabs_bottom_y_px=900,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "suggested_card_excluded")
+
     def test_early_profile_transition_uses_clone_compatible_header_before_username_band(self) -> None:
         d = FakeCloneHeaderDevice()
         with mock.patch.object(
@@ -5603,6 +5620,12 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(reused)
         self.assertTrue(reused[-1].get("reused"))
         self.assertEqual(reused[-1].get("action_bar_title"), "reveaustral")
+        fast_status = [
+            kw for event, kw in logs if event == "return_ct_fastpath_status"
+        ]
+        self.assertTrue(fast_status)
+        self.assertEqual(fast_status[-1].get("status"), "used")
+        self.assertTrue(fast_status[-1].get("final_ct_exact"))
         self.assertNotIn(
             "post_follow_return_ct_post_back_det_reuse_rejected",
             [event for event, _kw in logs],
@@ -6959,6 +6982,102 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertNotIn(
             "visual_profile_context_verify_skipped_for_legacy_safe_open", log_events
         )
+        device.click.assert_not_called()
+
+    def test_visual_like_accepts_fresh_v5_stage_scoped_context_without_baseline(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        now = time.perf_counter()
+        stage = {
+            "candidate_username": "allaround.agency",
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+            "viewer_type": "Posts",
+            "stage_nonce": "nonce-1",
+            "created_at_monotonic": now,
+            "v5_positive": True,
+            "post_identity_confirmed": True,
+            "story_or_highlight_detected": False,
+        }
+        stage["proof_hash"] = nav._post_open_context_v1_proof_hash(stage)
+        heart_bounds = {"left": 43, "top": 1538, "right": 115, "bottom": 1671}
+
+        def _shot(_d: object, path: str) -> None:
+            from PIL import Image
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        nav._VISUAL_POST_LIKE_TAPS_RECORDED = 0
+        with mock.patch.object(nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True), \
+             mock.patch.object(nav.config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", True, create=True), \
+             mock.patch.object(nav.config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1, create=True), \
+             mock.patch.object(nav, "_followers_current_pkg_activity", return_value={
+                 "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+                 "current_package": "com.instagram.android",
+             }), mock.patch.object(nav, "screenshot", side_effect=_shot), \
+             mock.patch.object(nav, "_visual_post_like_heart_crop_bounds", return_value=(heart_bounds, "ui_bounds_like_exact")), \
+             mock.patch.object(nav, "_visual_image_cell_luma_variance", return_value=1800.0), \
+             mock.patch.object(nav, "visual_target_profile_lock_verify", return_value={"ok": True}), \
+             mock.patch.object(nav, "visual_post_already_liked", return_value={"already_liked": False}), \
+             mock.patch.object(nav, "visual_verify_same_profile_context") as verify_ctx, \
+             mock.patch.object(nav, "_clear_post_follow_open_like_proof_stash"):
+            out = nav.visual_like_open_post(
+                device,
+                source_profile_username="ct",
+                expected_profile_context={"ok": False},
+                post_opened_via_profile_grid=True,
+                post_open_context={"post_open_context_v1": stage},
+                expected_follower_username="allaround.agency",
+            )
+        verify_ctx.assert_not_called()
+        self.assertTrue(out.get("real_tap_sent"))
+        device.click.assert_called_once()
+
+    def test_visual_like_rejects_stage_context_for_wrong_candidate(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        now = time.perf_counter()
+        stage = {
+            "candidate_username": "wrong.account",
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+            "viewer_type": "Posts",
+            "stage_nonce": "nonce-2",
+            "created_at_monotonic": now,
+            "v5_positive": True,
+            "post_identity_confirmed": True,
+            "story_or_highlight_detected": False,
+        }
+        stage["proof_hash"] = nav._post_open_context_v1_proof_hash(stage)
+        heart_bounds = {"left": 43, "top": 1538, "right": 115, "bottom": 1671}
+
+        def _shot(_d: object, path: str) -> None:
+            from PIL import Image
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        nav._VISUAL_POST_LIKE_TAPS_RECORDED = 0
+        with mock.patch.object(nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True), \
+             mock.patch.object(nav.config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", True, create=True), \
+             mock.patch.object(nav.config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1, create=True), \
+             mock.patch.object(nav, "_followers_current_pkg_activity", return_value={
+                 "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+                 "current_package": "com.instagram.android",
+             }), mock.patch.object(nav, "screenshot", side_effect=_shot), \
+             mock.patch.object(nav, "_visual_post_like_heart_crop_bounds", return_value=(heart_bounds, "ui_bounds_like_exact")), \
+             mock.patch.object(nav, "_visual_image_cell_luma_variance", return_value=1800.0), \
+             mock.patch.object(nav, "visual_target_profile_lock_verify", return_value={"ok": True}), \
+             mock.patch.object(nav, "visual_post_already_liked", return_value={"already_liked": False}), \
+             mock.patch.object(nav, "_clear_post_follow_open_like_proof_stash"):
+            out = nav.visual_like_open_post(
+                device,
+                source_profile_username="ct",
+                expected_profile_context={"ok": False},
+                post_opened_via_profile_grid=True,
+                post_open_context={"post_open_context_v1": stage},
+                expected_follower_username="allaround.agency",
+            )
+        self.assertFalse(out.get("real_tap_sent"))
         device.click.assert_not_called()
 
     def test_like_open_skips_direct_tap_when_cell_not_tap_safe(self) -> None:

@@ -401,6 +401,12 @@ class PostGridEvidence:
     screen_inset_bottom: int = 0
     reveal_count_total_for_like_phase: int = 0
     coordinate_frame: dict[str, Any] = field(default_factory=dict)
+    identity_exact: bool = False
+    profile_tabs_present: bool = False
+    grid_selected: bool = False
+    tabs_bottom: int = 0
+    suggested_region_detected: bool = False
+    classification_reveal_ttl_ms: float = 3000.0
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -1064,6 +1070,10 @@ def stash_post_grid_evidence(
     screen_inset_bottom: int = 0,
     reveal_count_total_for_like_phase: int = 0,
     coordinate_frame: CoordinateFrameV1 | dict[str, Any] | None = None,
+    identity_exact: bool = False, profile_tabs_present: bool = False,
+    grid_selected: bool = False, tabs_bottom: int = 0,
+    suggested_region_detected: bool = False,
+    classification_reveal_ttl_ms: float = 3000.0,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -1138,6 +1148,14 @@ def stash_post_grid_evidence(
             0, int(reveal_count_total_for_like_phase or 0)
         ),
         coordinate_frame=typed_frame,
+        identity_exact=bool(identity_exact),
+        profile_tabs_present=bool(profile_tabs_present),
+        grid_selected=bool(grid_selected),
+        tabs_bottom=max(0, int(tabs_bottom or 0)),
+        suggested_region_detected=bool(suggested_region_detected),
+        classification_reveal_ttl_ms=max(
+            1.0, float(classification_reveal_ttl_ms or 3000.0)
+        ),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")

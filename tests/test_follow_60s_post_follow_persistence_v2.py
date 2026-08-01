@@ -382,6 +382,94 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
             **common,
         ))
 
+    def test_clipped_classification_ttl_accepts_1350_1450_1700ms_for_reveal_only(self) -> None:
+        for age_ms in (1350.0, 1450.0, 1700.0):
+            configure_canary(
+                canary,
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                account_username=TEST_CANARY_USERNAME,
+                run_id=f"run-clipped-{int(age_ms)}",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+            with mock.patch.object(canary.time, "monotonic", return_value=100.0):
+                ev = canary.stash_post_grid_evidence(
+                    candidate_username="candidate",
+                    package_name="com.instagram.android",
+                    activity_name="InstagramMainActivity",
+                    navigation_generation="7",
+                    viewport_fingerprint="viewport-1",
+                    outcome=canary.POST_ROW_POSITIVE_BUT_CLIPPED,
+                    mute_sheet_closed=True,
+                    mute_posts_verified=True,
+                    mute_stories_verified=True,
+                    profile_identity_method="exact_profile",
+                    screen_width=1080,
+                    screen_height=2340,
+                    grid_tab_state="selected",
+                    post_count_positive=True,
+                    physical_post_cells=[{"left": 0, "top": 2200, "right": 360, "bottom": 2330}],
+                    first_post_bounds={"left": 0, "top": 2200, "right": 360, "bottom": 2330},
+                    ttl_ms=3000.0,
+                    classification_reveal_ttl_ms=3000.0,
+                )
+            self.assertIsNotNone(ev)
+            with mock.patch.object(
+                canary.time, "monotonic", return_value=100.0 + age_ms / 1000.0
+            ):
+                consumed, measured_age, reason = canary.consume_post_grid_evidence(
+                    candidate_username="candidate",
+                    package="com.instagram.android",
+                    activity="InstagramMainActivity",
+                    navigation_generation="7",
+                    viewport_fingerprint="viewport-1",
+                    screen_size=(1080, 2340),
+                )
+            self.assertEqual(reason, "")
+            self.assertIsNotNone(consumed)
+            self.assertAlmostEqual(measured_age, age_ms, delta=0.5)
+            self.assertEqual(
+                consumed.outcome, canary.POST_ROW_POSITIVE_BUT_CLIPPED
+            )
+
+    def test_clipped_classification_reveal_is_rejected_after_navigation(self) -> None:
+        configure_canary(
+            canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
+            run_id="run-clipped-navigation",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        canary.stash_post_grid_evidence(
+            candidate_username="candidate",
+            package_name="com.instagram.android",
+            activity_name="InstagramMainActivity",
+            outcome=canary.POST_ROW_POSITIVE_BUT_CLIPPED,
+            mute_sheet_closed=True,
+            mute_posts_verified=True,
+            mute_stories_verified=True,
+            profile_identity_method="exact_profile",
+            screen_width=1080,
+            screen_height=2340,
+            grid_tab_state="selected",
+            post_count_positive=True,
+            physical_post_cells=[{"left": 0, "top": 2200, "right": 360, "bottom": 2330}],
+            first_post_bounds={"left": 0, "top": 2200, "right": 360, "bottom": 2330},
+            ttl_ms=3000.0,
+            navigation_generation="7",
+            viewport_fingerprint="viewport-1",
+        )
+        canary.invalidate("back_navigation")
+        consumed, _, reason = canary.consume_post_grid_evidence(
+            candidate_username="candidate",
+            package="com.instagram.android",
+            activity="InstagramMainActivity",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNone(consumed)
+        self.assertEqual(reason, "missing_evidence")
+
     def test_clipped_row_gets_one_reveal_one_xml_and_no_happy_path_screenshot(self) -> None:
         device = mock.MagicMock()
         device.dump_hierarchy.return_value = """<hierarchy>

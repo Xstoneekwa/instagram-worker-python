@@ -539,6 +539,90 @@ class RepositoryAndControllerTests(unittest.TestCase):
         self.assertEqual(rpc.calls, [])
         self.assertEqual(events[0][0], "v2_failed_open")
 
+    def test_52c_first_pass_evaluated_prefix_commits_without_false_depth(self):
+        rpc = FakeRpc(
+            row=checkpoint_row(
+                checkpoint_version=3,
+                shadow_last_safe_depth=0,
+                shadow_last_safe_anchor="",
+                shadow_anchor_fingerprint="",
+                shadow_visible_anchor_hashes=[],
+            )
+        )
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); self.assertTrue(ctl.claim())
+        handles = ["done.one", "done.two", "not.evaluated"]
+        ctl.observe_viewport(
+            handles,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+            list_moved=False,
+        )
+        terminal = {"done.one", "done.two"}
+        self.assertEqual(
+            ctl.note_first_pass_evaluated_prefix(
+                handles,
+                terminally_handled=lambda handle: handle in terminal,
+            ),
+            2,
+        )
+        self.assertTrue(ctl.flush_verified_progress(boundary="safe_stop"))
+        self.assertEqual(ctl.reached_depth, 0)
+        name, params = [item for item in rpc.calls if item[0].startswith("commit_")][-1]
+        self.assertEqual(
+            name, "commit_target_followers_resume_first_pass_progress_v5"
+        )
+        self.assertEqual(params["p_commit_context"]["evaluated_count"], 2)
+        self.assertNotIn("done.one", json.dumps(params))
+        self.assertNotIn("not.evaluated", json.dumps(params))
+
+    def test_52d_first_pass_prefix_stops_at_first_unhandled_row(self):
+        rpc = FakeRpc(row=checkpoint_row(checkpoint_version=3, shadow_last_safe_depth=0))
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); self.assertTrue(ctl.claim())
+        handles = ["done.one", "gap", "done.three"]
+        ctl.observe_viewport(
+            handles,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+            list_moved=False,
+        )
+        terminal = {"done.one", "done.three"}
+        self.assertEqual(
+            ctl.note_first_pass_evaluated_prefix(
+                handles,
+                terminally_handled=lambda handle: handle in terminal,
+            ),
+            1,
+        )
+        self.assertEqual(ctl.first_pass_evaluated_handles, ("done.one",))
+
+    def test_52e_second_pass_skips_only_committed_prefix(self):
+        prefix = ["done.one", "done.two"]
+        row = checkpoint_row(
+            checkpoint_version=3,
+            last_safe_depth=0,
+            last_safe_anchor=resume.anchor_hash(prefix[-1]),
+            anchor_fingerprint=resume.viewport_fingerprint(prefix),
+            last_visible_anchor_hashes=list(resume.bounded_anchor_hashes(prefix)),
+            shadow_last_safe_depth=0,
+        )
+        ctl = self.controller(
+            FakeRpc(row=row), flags=resume.ResumeFlags(False, True)
+        )
+        plan = ctl.load_and_plan(); self.assertFalse(plan.use_legacy_navigation)
+        self.assertTrue(ctl.claim())
+        viewport = prefix + ["not.evaluated"]
+        ctl.observe_viewport(
+            viewport,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+            list_moved=False,
+        )
+        cursor, reason = ctl.enforce_cursor_for_viewport(viewport)
+        self.assertEqual(cursor, 2)
+        self.assertTrue(reason.startswith("anchor_found"))
+
     def test_52c_release_is_idempotent_and_calls_rpc_once(self):
         rpc = FakeRpc(row=checkpoint_row())
         ctl = self.controller(rpc)
@@ -1007,6 +1091,34 @@ class ReplayAndStaticSafetyTests(unittest.TestCase):
 
 
 class RunnerResumeProvenanceTests(unittest.TestCase):
+    def test_first_pass_v5_migration_is_additive_service_role_only(self):
+        root = Path(__file__).resolve().parents[1]
+        sql = (root / "supabase" / "migrations" / "20260802003000_target_followers_resume_first_pass_progress_v5.sql").read_text()
+        self.assertIn(
+            "commit_target_followers_resume_first_pass_progress_v5", sql
+        )
+        self.assertIn("depth_unchanged', true", sql)
+        self.assertIn("evaluated_prefix_divergence", sql)
+        self.assertIn("grant execute", sql.lower())
+        self.assertIn("to service_role", sql.lower())
+        self.assertIn("from public, anon, authenticated, service_role", sql.lower())
+        self.assertNotIn("grant execute on function public.commit_target_followers_resume_first_pass_progress_v5(\n  uuid,uuid,text,uuid,text,bigint,jsonb,text,text,jsonb,text,integer\n) to anon", sql.lower())
+
+    def test_runner_syncs_first_pass_prefix_before_terminal_flush(self):
+        source = inspect.getsource(runner)
+        self.assertIn(
+            "target_followers_resume_controller.note_first_pass_evaluated_prefix(",
+            source,
+        )
+        self.assertLess(
+            source.rindex(
+                "target_followers_resume_controller.note_first_pass_evaluated_prefix("
+            ),
+            source.rindex(
+                "target_followers_resume_controller.flush_verified_progress("
+            ),
+        )
+
     def test_direct_followers_engine_keeps_follow_and_ct_request_channels_separate(self):
         tree = ast.parse(inspect.getsource(runner._main_impl))
         calls = [

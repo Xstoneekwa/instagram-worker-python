@@ -14383,6 +14383,20 @@ def _run_followers_list_engine_session(
                         recoverable=True,
                         ambiguous_surface=False,
                     )
+                    target_followers_resume_controller.note_first_pass_evaluated_prefix(
+                        _v2_handles,
+                        terminally_handled=lambda handle: (
+                            _norm_ig_handle(handle)
+                            in _RUNTIME_SEEN_FOLLOWER_USERNAMES
+                            or _norm_ig_handle(handle)
+                            in _RUNTIME_INTERACTED_USERNAMES
+                            or _norm_ig_handle(handle)
+                            in _RUNTIME_SKIPPED_USERNAMES
+                            or _norm_ig_handle(handle)
+                            in _RUNTIME_FOLLOWED_USERNAMES
+                        ),
+                        reason="viewport_contiguous_terminal_prefix",
+                    )
                     if _v2_verdict.verified:
                         target_followers_resume_controller.commit_verified_progress(
                             cursor_handle=(
@@ -20578,10 +20592,28 @@ def _run_followers_list_engine_session(
         try:
             if target_followers_resume_controller is not None:
                 try:
-                    if sys.exc_info()[0] is not None:
-                        target_followers_resume_controller.abandon_before_release(
-                            reason="run_terminal_before_checkpoint_flush"
+                    if target_followers_resume_controller.current_viewport is not None:
+                        target_followers_resume_controller.note_first_pass_evaluated_prefix(
+                            target_followers_resume_controller.current_viewport.handles,
+                            terminally_handled=lambda handle: (
+                                _norm_ig_handle(handle)
+                                in _RUNTIME_SEEN_FOLLOWER_USERNAMES
+                                or _norm_ig_handle(handle)
+                                in _RUNTIME_INTERACTED_USERNAMES
+                                or _norm_ig_handle(handle)
+                                in _RUNTIME_SKIPPED_USERNAMES
+                                or _norm_ig_handle(handle)
+                                in _RUNTIME_FOLLOWED_USERNAMES
+                            ),
+                            reason="terminal_contiguous_terminal_prefix",
                         )
+                    if sys.exc_info()[0] is not None:
+                        if not target_followers_resume_controller.flush_verified_progress(
+                            boundary="safe_stop"
+                        ):
+                            target_followers_resume_controller.abandon_before_release(
+                                reason="run_terminal_before_checkpoint_flush"
+                            )
                     else:
                         _v2_flush_boundary = "clean_terminal"
                         if is_follow_target_rotation_pending(

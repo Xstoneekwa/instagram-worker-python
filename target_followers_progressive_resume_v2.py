@@ -56,6 +56,7 @@ EVENTS = frozenset(
         "lease_renewed",
         "lease_reclaimed",
         "checkpoint_committed",
+        "ct_resume_first_pass_progress",
         "checkpoint_flush_completed",
         "checkpoint_not_committed",
         "checkpoint_conflict",
@@ -727,6 +728,69 @@ class ResumeRepository:
             )
         ) or {"ok": False, "reason": "empty_commit_response"}
 
+    def commit_first_pass_progress(
+        self,
+        *,
+        account_id: str,
+        target_id: str,
+        run_id: str,
+        mode: str,
+        expected_version: int,
+        observation: ViewportObservation,
+        evaluated_anchor_hashes: Sequence[str],
+        source_request_id: str,
+        source_attempt_id: int,
+        release_sha: str,
+        reason: str,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    ) -> dict[str, Any]:
+        """Commit a proven evaluated prefix without inventing scroll depth."""
+        request_id = _clean_id(source_request_id)
+        try:
+            request_id = str(uuid.UUID(request_id))
+        except (ValueError, AttributeError, TypeError):
+            return {"ok": False, "reason": "commit_context_invalid"}
+        canonical_release_sha = str(release_sha or "").strip().lower()
+        anchors = tuple(str(item) for item in evaluated_anchor_hashes[:MAX_ANCHORS])
+        try:
+            attempt_id = int(source_attempt_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "commit_context_invalid"}
+        if (
+            attempt_id < 1
+            or not _FULL_RELEASE_SHA_RE.fullmatch(canonical_release_sha)
+            or not anchors
+            or any(not item.startswith("a3:") for item in anchors)
+            or not observation.fingerprint.startswith("v3:")
+        ):
+            return {"ok": False, "reason": "commit_context_invalid"}
+        return self._one(
+            self._rpc(
+                "commit_target_followers_resume_first_pass_progress_v5",
+                {
+                    "p_account_id": account_id,
+                    "p_target_id": target_id,
+                    "p_surface": SURFACE_FOLLOWERS,
+                    "p_run_id": run_id,
+                    "p_mode": mode,
+                    "p_expected_version": int(expected_version),
+                    "p_commit_context": {
+                        "source_request_id": request_id,
+                        "source_attempt_id": attempt_id,
+                        "release_sha": canonical_release_sha,
+                        "evaluated_count": len(anchors),
+                    },
+                    "p_last_safe_anchor": anchors[-1],
+                    "p_anchor_fingerprint": observation.fingerprint,
+                    "p_evaluated_anchor_hashes": list(anchors),
+                    "p_reason": _bounded_reason(reason, "first_pass_evaluated_prefix"),
+                    "p_lease_seconds": max(
+                        300, min(MAX_LEASE_SECONDS, int(lease_seconds))
+                    ),
+                },
+            )
+        ) or {"ok": False, "reason": "empty_commit_response"}
+
     def renew(
         self,
         *,
@@ -803,6 +867,14 @@ class ProgressiveResumeController:
     last_new_unique_rows: int = 0
     last_observed_scroll_index: int = 0
     last_verified_commit_context: LegacyScrollEvidence | None = None
+    first_pass_evaluated_handles: tuple[str, ...] = field(default=(), repr=False)
+    first_pass_evaluated_anchor_hashes: tuple[str, ...] = field(
+        default=(), repr=False
+    )
+    first_pass_observation: ViewportObservation | None = field(
+        default=None, repr=False
+    )
+    first_pass_commit_count: int = 0
     last_no_commit_reason: str = "no_safe_progress"
     source_request_id: str = ""
     source_attempt_id: int = 1
@@ -1210,6 +1282,142 @@ class ProgressiveResumeController:
         )
         return verdict
 
+    def note_first_pass_evaluated_prefix(
+        self,
+        visible_handles: Iterable[object],
+        *,
+        terminally_handled: Callable[[str], bool],
+        reason: str = "first_pass_evaluated_prefix",
+    ) -> int:
+        """Stage only the contiguous, positively handled viewport prefix.
+
+        This never changes ``reached_depth``.  A gap ends the prefix so a
+        second pass can never skip an unexamined row.
+        """
+        if (
+            not self.flags.enabled
+            or not self._lease_is_valid()
+            or self.current_viewport is None
+            or self.reached_depth != 0
+            or self.checkpoint_depth_before != 0
+            or not self.current_viewport.followers_surface_confirmed
+            or not self.current_viewport.expected_target_confirmed
+            or self.current_viewport.ambiguous_surface
+        ):
+            return 0
+        normalized = normalize_visible_handles(visible_handles)
+        if normalized != self.current_viewport.handles:
+            return 0
+        prefix: list[str] = []
+        for handle in normalized[:MAX_ANCHORS]:
+            if not bool(terminally_handled(handle)):
+                break
+            prefix.append(handle)
+        if len(prefix) <= len(self.first_pass_evaluated_handles):
+            return len(self.first_pass_evaluated_handles)
+        observation = ViewportObservation.build(
+            prefix,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+            list_moved=False,
+            recoverable=True,
+            ambiguous_surface=False,
+            hmac_secret=self.hmac_secret,
+        )
+        if not observation.fingerprint or not observation.anchor_hashes:
+            return len(self.first_pass_evaluated_handles)
+        self.first_pass_evaluated_handles = tuple(prefix)
+        self.first_pass_evaluated_anchor_hashes = observation.anchor_hashes
+        self.first_pass_observation = observation
+        self._event(
+            "ct_resume_first_pass_progress",
+            reason=reason,
+            evaluated_count=len(prefix),
+            evaluated_anchor_count=len(observation.anchor_hashes),
+            anchor_hash=observation.anchor_hashes[-1],
+            anchor_fingerprint=observation.fingerprint,
+            depth_unchanged=True,
+            commit_eligibility=True,
+        )
+        return len(prefix)
+
+    def commit_first_pass_progress(
+        self, *, reason: str = "first_pass_evaluated_prefix"
+    ) -> bool:
+        if (
+            self._safe_stop
+            or not self._claimed
+            or self.claimed_version is None
+            or self.first_pass_observation is None
+            or not self.first_pass_evaluated_anchor_hashes
+            or self.reached_depth != 0
+            or self.checkpoint_depth_before != 0
+        ):
+            return False
+        if not self._renew_if_due():
+            self._note_no_commit("lease_invalid", operation="first_pass_commit")
+            return False
+        started = time.perf_counter()
+        response = self.repository.commit_first_pass_progress(
+            account_id=self.account_id,
+            target_id=self.target_id,
+            run_id=self.run_id,
+            mode=self.flags.mode,
+            expected_version=int(self.claimed_version),
+            observation=self.first_pass_observation,
+            evaluated_anchor_hashes=self.first_pass_evaluated_anchor_hashes,
+            source_request_id=self.source_request_id,
+            source_attempt_id=self.source_attempt_id,
+            release_sha=self.release_sha,
+            reason=reason,
+        )
+        rpc_duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        if not response.get("ok") or response.get("provenance_persisted") is not True:
+            self._event(
+                "checkpoint_conflict",
+                reason=str(response.get("reason") or "first_pass_commit_rejected"),
+                operation="first_pass_commit",
+                rpc_duration_ms=rpc_duration_ms,
+            )
+            return False
+        try:
+            commit_event_id = str(uuid.UUID(str(response.get("commit_event_id") or "")))
+        except (ValueError, AttributeError, TypeError):
+            self._event(
+                "checkpoint_conflict",
+                reason="commit_provenance_event_missing_or_invalid",
+                operation="first_pass_commit",
+            )
+            return False
+        self.claimed_version = int(
+            response.get("optimistic_version") or self.claimed_version + 1
+        )
+        self.lease_expires_at = (
+            _parse_timestamp(response.get("lease_expires_at"))
+            or self.lease_expires_at
+        )
+        self.first_pass_commit_count += 1
+        self.commit_count += 1
+        self._event(
+            "checkpoint_committed",
+            reason=reason,
+            reached_depth=0,
+            first_pass_evaluated_count=len(self.first_pass_evaluated_handles),
+            first_pass_boundary=True,
+            optimistic_version=self.claimed_version,
+            commit_event_id=commit_event_id,
+            provenance_persisted=True,
+            ct_resume_commit_reason=reason,
+            ct_resume_checkpoint_after={
+                "depth": 0,
+                "evaluated_count": len(self.first_pass_evaluated_handles),
+                "anchor_count": len(self.first_pass_evaluated_anchor_hashes),
+                "optimistic_version": self.claimed_version,
+            },
+            rpc_duration_ms=rpc_duration_ms,
+        )
+        return True
+
     def note_scroll_sent(self, *, previous_viewport_complete: bool) -> bool:
         if not self.flags.enabled or self.current_viewport is None or self._safe_stop:
             return False
@@ -1450,6 +1658,16 @@ class ProgressiveResumeController:
             observed_scroll_index=commit_context.observed_scroll_index,
             viewport_fingerprint_before=commit_context.fingerprint_before,
             viewport_fingerprint_after=commit_context.fingerprint_after,
+            ct_resume_commit_reason=reason,
+            ct_resume_checkpoint_after={
+                "depth": self.reached_depth,
+                "anchor_count": len(
+                    self.current_viewport.anchor_hashes
+                    if self.current_viewport is not None
+                    else ()
+                ),
+                "optimistic_version": self.claimed_version,
+            },
         )
         self.last_verified_commit_context = None
         return True
@@ -1499,6 +1717,28 @@ class ProgressiveResumeController:
                 commit_performed=True,
             )
             return True
+        if (
+            self.reached_depth == 0
+            and self.checkpoint_depth_before == 0
+            and self.first_pass_observation is not None
+            and self.first_pass_evaluated_anchor_hashes
+            and self.first_pass_commit_count == 0
+        ):
+            if self.commit_first_pass_progress(
+                reason=f"first_pass_{clean_boundary}"
+            ):
+                self._event(
+                    "checkpoint_flush_completed",
+                    reason=clean_boundary,
+                    flush_boundary=clean_boundary,
+                    committed_depth=0,
+                    first_pass_evaluated_count=len(
+                        self.first_pass_evaluated_handles
+                    ),
+                    commit_performed=True,
+                )
+                return True
+            return False
         if self.commit_count > 0 or self.last_committed_depth > self.checkpoint_depth_before:
             self._event(
                 "checkpoint_flush_completed",
