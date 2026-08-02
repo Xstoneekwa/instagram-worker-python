@@ -22730,6 +22730,87 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
     return out
 
 
+def _finalize_grid_classification_transport(
+    evidence: dict[str, Any],
+    *,
+    structural_state: dict[str, Any],
+    profile_identity_exact: bool,
+    posts_tab_selected: bool,
+    ww: int,
+    wh: int,
+    suggested_region_bottom: int = 0,
+) -> dict[str, Any]:
+    """Freeze only the structural fields exported by GridClassificationProof.
+
+    The XML parser mutates ``structural_state`` while walking the hierarchy.
+    Building the transport before that walk leaves stale booleans in the
+    consumer.  This explicit boundary prevents that class of split-brain proof
+    without copying private parser fields wholesale.
+    """
+    final = dict(evidence or {})
+    physical_cells = [
+        dict(cell) for cell in (final.get("physical_cells") or [])
+        if isinstance(cell, dict)
+    ]
+    outcome = str(final.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL")
+    reason = str(final.get("rejection_reason") or "")
+    suggested_detected = bool(
+        structural_state.get("suggested_overlay_visible")
+        or final.get("suggested_region_detected")
+    )
+    try:
+        from follow_60s_canary import runtime_context as _grid_runtime_context
+
+        ui_generation = str(
+            _grid_runtime_context().get("ui_generation") or ""
+        )
+    except Exception:
+        ui_generation = ""
+    final.update(
+        {
+            "profile_tabs_present": bool(
+                structural_state.get("profile_tabs_present")
+            ),
+            "posts_tab_selected": bool(posts_tab_selected),
+            "grid_selected": bool(posts_tab_selected),
+            "suggested_detected": suggested_detected,
+            "suggested_region_detected": suggested_detected,
+            "suggested_region_bounds": (
+                {"bottom": int(suggested_region_bottom)}
+                if int(suggested_region_bottom or 0) > 0
+                else None
+            ),
+            "physical_cell_count": len(physical_cells),
+            "media_band_detected": bool(
+                physical_cells or final.get("clipped_detected")
+            ),
+            "profile_identity_exact": bool(profile_identity_exact),
+            "identity_exact": bool(profile_identity_exact),
+            "reels_tab_selected": bool(
+                structural_state.get("reels_selected")
+            ),
+            "tagged_tab_selected": bool(
+                structural_state.get("tagged_selected")
+            ),
+            "grid_visible": outcome in {
+                "POST_ROW_POSITIVE_SAFE",
+                "POST_ROW_POSITIVE_BUT_CLIPPED",
+                "NO_POSTS_POSITIVE",
+            },
+            "classification": outcome,
+            "reason": reason,
+            "ui_generation": ui_generation,
+            "viewport": {"width": int(ww), "height": int(wh)},
+            "frame": {
+                "source": "xml_parser_viewport",
+                "width": int(ww),
+                "height": int(wh),
+            },
+        }
+    )
+    return final
+
+
 def _post_follow_post_grid_evidence_from_xml(
     hierarchy_xml: str,
     *,
@@ -22750,22 +22831,36 @@ def _post_follow_post_grid_evidence_from_xml(
         ).hexdigest()[:20] if xml else "",
         **base,
     }
+    identity_exact = bool(profile_identity_exact)
+    grid_selected = bool(base.get("grid_selected"))
+    suggested_bounds_bottom = 0
+
+    def _finalize() -> dict[str, Any]:
+        return _finalize_grid_classification_transport(
+            out,
+            structural_state=base,
+            profile_identity_exact=identity_exact,
+            posts_tab_selected=grid_selected,
+            ww=int(ww),
+            wh=int(wh),
+            suggested_region_bottom=suggested_bounds_bottom,
+        )
+
     if not xml:
         out["rejection_reason"] = "final_mute_close_xml_missing"
-        return out
+        return _finalize()
     if bool(base.get("loading_visible")):
         out["rejection_reason"] = "profile_grid_loading"
-        return out
+        return _finalize()
     if bool(base.get("private_profile_visible")):
         out["rejection_reason"] = "private_profile_surface"
-        return out
+        return _finalize()
     try:
         root = ET.fromstring(xml)
     except Exception:
         out["rejection_reason"] = "final_mute_close_xml_parse_failed"
-        return out
+        return _finalize()
     expected = _normalize_handle(candidate_username)
-    identity_exact = bool(profile_identity_exact)
     tabs_bottom = 0
     raw_cells: list[dict[str, int]] = []
     raw_clipped_cells: list[dict[str, int]] = []
@@ -22775,8 +22870,6 @@ def _post_follow_post_grid_evidence_from_xml(
     grid_tab_marker = False
     grid_tab_order = -1
     suggested_marker_order = -1
-    suggested_bounds_bottom = 0
-    grid_selected = bool(base.get("grid_selected"))
     post_count_positive = False
 
     def _label_has_exact_handle(value: str) -> bool:
@@ -22932,7 +23025,7 @@ def _post_follow_post_grid_evidence_from_xml(
         out["rejection_reason"] = ""
         out["visible_post_count"] = 0
         out["physical_cells"] = []
-        return out
+        return _finalize()
     structural_tabs_without_bounds = bool(
         identity_exact
         and bool(base.get("profile_tabs_present"))
@@ -22949,7 +23042,7 @@ def _post_follow_post_grid_evidence_from_xml(
             "candidate_identity_not_exact" if not identity_exact
             else "profile_tabs_bounds_missing"
         )
-        return out
+        return _finalize()
     if tabs_bottom > 0:
         below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
         clipped_candidates = list(raw_clipped_cells)
@@ -23031,7 +23124,7 @@ def _post_follow_post_grid_evidence_from_xml(
             if post_count_positive and bool(base.get("profile_tabs_present"))
             else "post_grid_ambiguous"
         )
-        return out
+        return _finalize()
     # A physical post row below the canonical tabs container is a positive grid
     # state even when this Instagram build omits selected=true on the grid icon.
     grid_selected = bool(
@@ -23047,7 +23140,7 @@ def _post_follow_post_grid_evidence_from_xml(
     if not grid_selected:
         out["evidence_status"] = "POST_GRID_AMBIGUOUS_FINAL"
         out["rejection_reason"] = "selected_grid_not_proven"
-        return out
+        return _finalize()
     candidate = below[0]
     if bool(out.get("clipped_detected")):
         out["outcome"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
@@ -23058,7 +23151,7 @@ def _post_follow_post_grid_evidence_from_xml(
         out["tap_safe"] = False
         out["grid_exposure"] = "positive_but_clipped_at_exploitable_bottom"
         out["clipped_reason"] = "positive_media_strip_requires_one_reveal"
-        return out
+        return _finalize()
     safe = _post_follow_likes_evaluate_top_left_post_target(
         candidate, reason="xml_thumbnail_top_left", ww=int(ww), wh=int(wh),
         y_min_px=int(tabs_bottom),
@@ -23090,7 +23183,7 @@ def _post_follow_post_grid_evidence_from_xml(
         out["clipped_reason"] = str(
             safe.get("failure_reason") or "positive_post_row_clipped"
         )
-    return out
+    return _finalize()
 
 
 def _post_follow_screen_dimensions_from_hierarchy(
@@ -29186,6 +29279,38 @@ def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
     return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _authoritative_stage_binding_v2(
+    binding: dict[str, Any] | None,
+    *,
+    expected_candidate_username: str,
+    expected_action_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Validate and freeze the runner-owned Follow60 stage identity."""
+    raw = dict(binding or {})
+    required = ("account_id", "run_id", "request_id", "action_id")
+    if not all(str(raw.get(key) or "").strip() for key in required):
+        return None, "liketapcontext_stage_binding_missing"
+    candidate = _normalize_handle(str(raw.get("candidate_username") or ""))
+    expected_candidate = _normalize_handle(expected_candidate_username)
+    if candidate and candidate != expected_candidate:
+        return None, "liketapcontext_candidate_binding_mismatch"
+    if str(raw.get("action_id") or "") != str(expected_action_id or ""):
+        return None, "liketapcontext_action_id_binding_mismatch"
+    return {
+        "version": "ExpectedStageBindingV2",
+        "account_id": str(raw.get("account_id") or ""),
+        "run_id": str(raw.get("run_id") or ""),
+        "request_id": str(raw.get("request_id") or ""),
+        "action_id": str(raw.get("action_id") or ""),
+        "attempt_id": int(raw.get("attempt_id") or 0),
+        "business_session_id": str(raw.get("business_session_id") or ""),
+        "control_id": str(raw.get("control_id") or ""),
+        "worker_sha": str(raw.get("worker_sha") or ""),
+        "candidate_username": expected_candidate,
+        "source_target_id": str(raw.get("source_target_id") or ""),
+    }, ""
+
+
 def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
     ctx = dict(context or {})
     material = "\0".join(
@@ -29360,6 +29485,20 @@ def _validate_like_tap_context_v2(
     if int(ctx.get("canonical_generation") or 0) != current_generation:
         return False, "liketapcontext_generation_mismatch", age_ms
     return True, "", age_ms
+
+
+def _liketapcontext_rejection_reason(
+    context: dict[str, Any] | None,
+    *,
+    create_reason: str,
+    validation_reason: str,
+) -> str:
+    """Keep a pre-instantiation rejection from being masked by validation."""
+    create = str(create_reason or "")
+    validation = str(validation_reason or "")
+    if context is None and create:
+        return create
+    return validation or create or "liketapcontext_rejected"
 
 
 def _follow_60s_safe_bounds_for_like(
@@ -30174,16 +30313,24 @@ def visual_like_open_post(
                 )
             )
             if not valid_v2:
-                failure_v2 = str(
-                    validation_reason_v2
-                    or like_tap_context_reject
-                    or "liketapcontext_rejected"
+                create_reason_v2 = str(like_tap_context_reject or "")
+                validation_reason_observed_v2 = str(
+                    validation_reason_v2 or ""
+                )
+                failure_v2 = _liketapcontext_rejection_reason(
+                    like_tap_context_v2,
+                    create_reason=create_reason_v2,
+                    validation_reason=validation_reason_observed_v2,
                 )
                 log(
                     "warning",
                     "follow_60s_like_tap_context_v2_rejected",
                     expected_follower_username=str(expected_follower_username or ""),
                     rejection_reason=failure_v2,
+                    liketapcontext_create_reason=create_reason_v2,
+                    liketapcontext_validation_reason=(
+                        validation_reason_observed_v2
+                    ),
                     proof_age_ms=round(float(age_v2 or 0.0), 2),
                     real_tap_sent=False,
                     fallback_used=False,
@@ -30200,6 +30347,10 @@ def visual_like_open_post(
                     "current_package": meta1.get("current_package"),
                     "source_profile_username": source_profile_username or "",
                     "failure_reason": failure_v2,
+                    "liketapcontext_create_reason": create_reason_v2,
+                    "liketapcontext_validation_reason": (
+                        validation_reason_observed_v2
+                    ),
                     "dry_run": False,
                 })
             # The exact Like node from the same fresh XML is authoritative.
@@ -49479,6 +49630,7 @@ def run_post_follow_post_likes_phase(
     run_id: str | None = None,
     commercial_policy_evidence: Any | None = None,
     candidate_profile_context: dict[str, Any] | None = None,
+    expected_stage_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -49494,6 +49646,25 @@ def run_post_follow_post_likes_phase(
     cand = str(follower_username or "").strip().lstrip("@")
     vcid = str(visual_candidate_id or "").strip()
     fs_after = str(follow_state_after or "").strip()
+    authoritative_binding, authoritative_binding_reason = (
+        _authoritative_stage_binding_v2(
+            expected_stage_binding,
+            expected_candidate_username=cand,
+            expected_action_id=vcid,
+        )
+        if expected_stage_binding is not None
+        else (None, "")
+    )
+    if expected_stage_binding is not None and authoritative_binding is None:
+        log(
+            "error",
+            "follow60_stage_binding_missing_or_invalid",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            reason=authoritative_binding_reason,
+            like_device_actions_blocked=True,
+        )
     follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
     pending_rq = fs_after == "requested"
     _clear_post_follow_open_like_proof_stash()
@@ -53184,6 +53355,7 @@ def run_post_follow_post_likes_phase(
         # an authorization alternative to a pre-open profile screenshot, not
         # a bypass: Story/Highlight, identity, package/activity and freshness
         # remain mandatory and are revalidated immediately before Like.
+        authoritative_binding_for_context = dict(authoritative_binding or {})
         _post_ctx_created_at = time.perf_counter()
         _post_ctx_meta = _followers_current_pkg_activity(d)
         _post_ctx_nonce = hashlib.sha256(
@@ -53194,7 +53366,7 @@ def run_post_follow_post_likes_phase(
         ).hexdigest()[:24]
         _post_ctx = {
             "version": "PostOpenContextV1",
-            "account_id": str(account_id or ""),
+            "account_id": str(authoritative_binding_for_context.get("account_id") or account_id or ""),
             "candidate_username": cand,
             "candidate_profile_id": str(
                 (candidate_profile_context or {}).get("candidate_profile_id")
@@ -53204,11 +53376,9 @@ def run_post_follow_post_likes_phase(
                 (candidate_profile_context or {}).get("source_target_id")
                 or ""
             ),
-            "run_id": str(run_id or ""),
-            "request_id": str(
-                (candidate_profile_context or {}).get("request_id") or ""
-            ),
-            "action_id": str(vcid or ""),
+            "run_id": str(authoritative_binding_for_context.get("run_id") or run_id or ""),
+            "request_id": str(authoritative_binding_for_context.get("request_id") or ""),
+            "action_id": str(authoritative_binding_for_context.get("action_id") or ""),
             "package": str(_post_ctx_meta.get("current_package") or pkg),
             "activity": str(_post_ctx_meta.get("current_activity") or ""),
             "viewer_type": "Posts",
@@ -53346,14 +53516,7 @@ def run_post_follow_post_likes_phase(
             expected_profile_context=profile_baseline,
             post_opened_via_profile_grid=True,
             post_open_context=open_out,
-            expected_stage_binding={
-                "account_id": str(account_id or ""),
-                "run_id": str(run_id or ""),
-                "request_id": str(
-                    (candidate_profile_context or {}).get("request_id") or ""
-                ),
-                "action_id": str(vcid or ""),
-            },
+            expected_stage_binding=dict(authoritative_binding or {}),
             expected_follower_username=cand,
             likes_perf_like_accum=_like_accum,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
@@ -54027,6 +54190,7 @@ def run_visual_candidate_post_follow_phase(
     candidate_pick: dict[str, Any] | None = None,
     bound_commercial_policy_revision: str | None = None,
     stage_persist_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+    expected_stage_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -54351,25 +54515,54 @@ def run_visual_candidate_post_follow_phase(
         action_bar_title=str(det_use.get("action_bar_title") or "")[:120],
     )
 
-    context_account_id = ""
-    context_run_id = ""
-    try:
-        import supabase_client as _candidate_context_sc
-
-        context_account_id = str(
-            getattr(_candidate_context_sc, "_LOG_CONTEXT_ACCOUNT_ID", "") or ""
-        ).strip()
-        context_run_id = str(
-            getattr(_candidate_context_sc, "_LOG_CONTEXT_RUN_ID", "") or ""
-        ).strip()
-    except Exception:
-        pass
     pick_context = dict(candidate_pick or {})
+    stage_binding, stage_binding_reason = _authoritative_stage_binding_v2(
+        expected_stage_binding,
+        expected_candidate_username=cand,
+        expected_action_id=vcid,
+    )
+    if expected_stage_binding is not None and stage_binding is None:
+        log(
+            "error",
+            "follow60_stage_binding_missing_or_invalid",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            reason=stage_binding_reason,
+            like_device_actions_blocked=True,
+            return_ct_still_required=True,
+        )
+    binding_context = dict(stage_binding or {})
+    if expected_stage_binding is None:
+        # Preserve the legacy Golden metadata path. Follow60 never uses this
+        # branch: its binding is supplied explicitly by runner.
+        try:
+            import supabase_client as _candidate_context_sc
+
+            binding_context["account_id"] = str(
+                getattr(_candidate_context_sc, "_LOG_CONTEXT_ACCOUNT_ID", "")
+                or ""
+            ).strip()
+            binding_context["run_id"] = str(
+                getattr(_candidate_context_sc, "_LOG_CONTEXT_RUN_ID", "")
+                or ""
+            ).strip()
+        except Exception:
+            pass
     candidate_profile_context = {
-        "account_id": context_account_id,
-        "run_id": context_run_id,
+        "account_id": str(binding_context.get("account_id") or ""),
+        "run_id": str(binding_context.get("run_id") or ""),
+        "request_id": str(binding_context.get("request_id") or ""),
+        "action_id": str(binding_context.get("action_id") or ""),
+        "attempt_id": int(binding_context.get("attempt_id") or 0),
+        "business_session_id": str(
+            binding_context.get("business_session_id") or ""
+        ),
+        "control_id": str(binding_context.get("control_id") or ""),
+        "worker_sha": str(binding_context.get("worker_sha") or ""),
         "target_id": str(
-            pick_context.get("target_id")
+            binding_context.get("source_target_id")
+            or pick_context.get("target_id")
             or pick_context.get("source_target_id")
             or ""
         ).strip(),
@@ -54770,6 +54963,7 @@ def run_visual_candidate_post_follow_phase(
                     if isinstance(post_mute_checkpoint, dict)
                     else candidate_profile_context
                 ),
+                expected_stage_binding=dict(stage_binding or {}),
             )
             if int(likes_out.get("liked_count") or 0) > 0:
                 _persist_verified_stage(

@@ -19846,6 +19846,30 @@ def _run_followers_list_engine_session(
                         device_actions_blocked_before_post_follow=True,
                     )
                     return 96
+                _pf_expected_stage_binding = None
+                if _follow60_canary_active:
+                    _pf_expected_stage_binding = {
+                        "account_id": str(account_id or ""),
+                        "run_id": str(run_id or ""),
+                        "request_id": str(run_request_id or ""),
+                        "action_id": str(_pf_log_vcid or ""),
+                        "attempt_id": int(follow60_attempt_id or 1),
+                        "business_session_id": str(business_session_id or ""),
+                        "control_id": str(
+                            _follow60_canary_control.get("control_id")
+                            or _follow60_canary_control.get("id")
+                            or ""
+                        ),
+                        "worker_sha": str(
+                            os.environ.get("WORKER_GIT_SHA") or ""
+                        ),
+                        "candidate_username": str(follower_un or ""),
+                        "source_target_id": str(
+                            (pick or {}).get("target_id")
+                            or (pick or {}).get("source_target_id")
+                            or ""
+                        ) if isinstance(pick, dict) else "",
+                    }
                 _pf = run_visual_candidate_post_follow_phase(
                     d,
                     pkg=pkg,
@@ -19862,6 +19886,7 @@ def _run_followers_list_engine_session(
                     candidate_pick=pick if isinstance(pick, dict) else None,
                     bound_commercial_policy_revision=session_commercial_policy_revision,
                     stage_persist_callback=_pf_stage_persist_callback,
+                    expected_stage_binding=_pf_expected_stage_binding,
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
