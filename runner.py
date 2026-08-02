@@ -19847,7 +19847,7 @@ def _run_followers_list_engine_session(
                     )
                     return 96
                 _pf_expected_stage_binding = None
-                if _follow60_canary_active:
+                if follow60_canary_active:
                     _pf_expected_stage_binding = {
                         "account_id": str(account_id or ""),
                         "run_id": str(run_id or ""),
@@ -19856,8 +19856,8 @@ def _run_followers_list_engine_session(
                         "attempt_id": int(follow60_attempt_id or 1),
                         "business_session_id": str(business_session_id or ""),
                         "control_id": str(
-                            _follow60_canary_control.get("control_id")
-                            or _follow60_canary_control.get("id")
+                            (follow60_canary_control or {}).get("control_id")
+                            or (follow60_canary_control or {}).get("id")
                             or ""
                         ),
                         "worker_sha": str(

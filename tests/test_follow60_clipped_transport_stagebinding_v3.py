@@ -234,6 +234,9 @@ class Follow60ClippedTransportStageBindingV3Tests(unittest.TestCase):
         nav_source = inspect.getsource(nav.run_visual_candidate_post_follow_phase)
         self.assertIn('"request_id": str(run_request_id or "")', runner_source)
         self.assertIn("expected_stage_binding=_pf_expected_stage_binding", runner_source)
+        self.assertIn("if follow60_canary_active:", runner_source)
+        self.assertNotIn("_follow60_canary_active", runner_source)
+        self.assertNotIn("_follow60_canary_control", runner_source)
         self.assertIn('"request_id": str(binding_context.get("request_id") or "")', nav_source)
         self.assertNotIn("_LOG_CONTEXT_REQUEST_ID", nav_source)
 
