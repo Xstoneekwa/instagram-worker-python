@@ -1,0 +1,13 @@
+<hierarchy>
+  <node resource-id="profile_header_container">
+    <node text="photosens_by_sand" />
+    <node content-desc="101posts" />
+  </node>
+  <node text="Suggested for you" />
+  <node resource-id="profile_highlights_tray" content-desc="Story highlights" />
+  <node resource-id="profile_tabs_container">
+    <node resource-id="profile_tab_icon_view" content-desc="Grid view" selected="true" />
+    <node resource-id="profile_tab_icon_view" content-desc="Reels" selected="false" />
+    <node resource-id="profile_tab_icon_view" content-desc="Tagged" selected="false" />
+  </node>
+</hierarchy>

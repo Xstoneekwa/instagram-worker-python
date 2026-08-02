@@ -1,0 +1,14 @@
+<hierarchy>
+  <node resource-id="profile_header_container">
+    <node text="secourscatholique_laseyne" />
+    <node text="134" /><node text="Posts" />
+  </node>
+  <node resource-id="profile_tabs_container" bounds="[0,590][1080,740]">
+    <node resource-id="profile_tab_icon_view" content-desc="Grid view" selected="true" bounds="[0,590][360,740]" />
+    <node resource-id="profile_tab_icon_view" content-desc="Reels" selected="false" bounds="[360,590][720,740]" />
+    <node resource-id="profile_tab_icon_view" content-desc="Tagged" selected="false" bounds="[720,590][1080,740]" />
+  </node>
+  <node resource-id="media_grid_cell" class="android.widget.ImageView" content-desc="Post thumbnail" bounds="[0,780][360,1140]" />
+  <node resource-id="media_grid_cell" class="android.widget.ImageView" content-desc="Post thumbnail" bounds="[360,780][720,1140]" />
+  <node resource-id="media_grid_cell" class="android.widget.ImageView" content-desc="Post thumbnail" bounds="[720,780][1080,1140]" />
+</hierarchy>

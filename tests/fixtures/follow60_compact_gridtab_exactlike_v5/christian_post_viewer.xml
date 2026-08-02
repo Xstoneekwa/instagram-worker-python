@@ -1,0 +1,5 @@
+<hierarchy>
+  <node text="Posts" />
+  <node text="christian_candidate" />
+  <node resource-id="com.instagram.android:id/row_feed_button_like" content-desc="Like" clickable="true" bounds="[34,354][126,424]" />
+</hierarchy>

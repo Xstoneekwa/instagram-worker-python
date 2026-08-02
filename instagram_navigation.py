@@ -22640,6 +22640,15 @@ _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES = (
     "投稿がありません",
 )
 _POST_FOLLOW_FAST_NO_POSTS_MAX_CONTEXT_AGE_MS = 5000.0
+_POST_FOLLOW_COMPACT_POST_COUNT_RE = re.compile(
+    r"^\s*([0-9][0-9.,]*)\s*(posts?)\s*$",
+    re.IGNORECASE,
+)
+_POST_FOLLOW_POSTS_LABEL_RE = re.compile(
+    r"^\s*(posts?|publications?|publicaci[oó]n(?:es)?|"
+    r"beitr[aä]ge|pubblicazioni)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any]:
@@ -22656,6 +22665,10 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         "suggested_overlay_visible": False,
         "posts_count_zero_exact": False,
         "posts_count_positive": False,
+        "posts_count_value": None,
+        "posts_count_source": "",
+        "posts_tab_selected": False,
+        "posts_tab_source": "",
         "empty_state_subtree_detected": False,
     }
     if not text:
@@ -22707,6 +22720,48 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             for key in ("text", "content-desc", "resource-id")
         ).strip()
 
+    def _node_values(node: ET.Element) -> tuple[str, str, str]:
+        attrs = node.attrib or {}
+        return tuple(
+            html.unescape(str(attrs.get(key) or "")).strip()
+            for key in ("text", "content-desc", "resource-id")
+        )
+
+    def _compact_post_count(value: str) -> int | None:
+        match = _POST_FOLLOW_COMPACT_POST_COUNT_RE.fullmatch(str(value or ""))
+        if not match:
+            return None
+        digits = re.sub(r"[^0-9]", "", str(match.group(1) or ""))
+        return int(digits) if digits else None
+
+    def _set_post_count(value: int, source: str, *, priority: int) -> None:
+        current_priority = int(out.get("_posts_count_source_priority") or -1)
+        if current_priority > int(priority):
+            return
+        out["posts_count_value"] = max(0, int(value))
+        out["posts_count_source"] = str(source or "")
+        out["_posts_count_source_priority"] = int(priority)
+        out["posts_count_zero_exact"] = int(value) == 0
+        out["posts_count_positive"] = int(value) > 0
+
+    def _ancestor_has_profile_header(node: ET.Element) -> bool:
+        current: ET.Element | None = node
+        for _ in range(5):
+            if current is None:
+                break
+            values = " ".join(_node_values(current)).lower()
+            if any(
+                token in values
+                for token in (
+                    "profile_header",
+                    "profile header",
+                    "header_count_container",
+                )
+            ):
+                return True
+            current = parent_by_id.get(id(current))
+        return False
+
     # Instagram frequently exposes the value and the "Posts" label as sibling
     # nodes.  Only a structural pair in the same small container is accepted;
     # a generic zero elsewhere on the profile is never a no-posts proof.
@@ -22714,22 +22769,87 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         local_nodes = [container, *list(container)]
         labels = [_node_label(node) for node in local_nodes]
         has_posts_label = any(
-            re.fullmatch(
-                r"(?i)\s*(posts?|publications?|publicaci[oó]n(?:es)?|"
-                r"beitr[aä]ge|pubblicazioni)\s*",
-                label,
-            )
+            _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(label)
             for label in labels
         )
         if not has_posts_label:
             continue
-        if any(re.fullmatch(r"\s*0\s*", label) for label in labels):
-            out["posts_count_zero_exact"] = True
-        if any(
-            re.fullmatch(r"\s*[1-9][0-9.,]*\s*", label)
-            for label in labels
-        ):
-            out["posts_count_positive"] = True
+        for label in labels:
+            if not re.fullmatch(r"\s*[0-9][0-9.,]*\s*", label):
+                continue
+            digits = re.sub(r"[^0-9]", "", label)
+            if digits:
+                _set_post_count(
+                    int(digits),
+                    "profile_post_count_value_label_pair",
+                    priority=20,
+                )
+                break
+
+    # Newer Instagram builds compact the value and label into values such as
+    # ``101posts``.  Accept that only on the official counter resource or
+    # inside a structurally proven profile-header subtree.  A generic
+    # ``101posts`` elsewhere remains non-authoritative.
+    for node in root.iter():
+        text_value, desc_value, resource_value = _node_values(node)
+        resource_lower = resource_value.lower()
+        official_counter_resource = any(
+            token in resource_lower
+            for token in (
+                "profile_header_post_count",
+                "profile_header_posts_count",
+            )
+        )
+        for field_name, value in (("text", text_value), ("content_desc", desc_value)):
+            compact_value = _compact_post_count(value)
+            if compact_value is None:
+                continue
+            if official_counter_resource:
+                _set_post_count(
+                    compact_value,
+                    "profile_post_count_resource_compact",
+                    priority=40,
+                )
+                break
+            if _ancestor_has_profile_header(node):
+                _set_post_count(
+                    compact_value,
+                    "profile_post_count_accessibility_compact",
+                    priority=30,
+                )
+                break
+
+    structural_grid_node_ids: set[int] = set()
+    for container in root.iter():
+        container_label = " ".join(_node_values(container)).lower()
+        if "profile_tabs_container" not in container_label:
+            continue
+        out["profile_tabs_present"] = True
+        for descendant in container.iter():
+            text_value, desc_value, resource_value = _node_values(descendant)
+            resource_lower = resource_value.lower()
+            labels_lower = {
+                text_value.strip().lower(),
+                desc_value.strip().lower(),
+            }
+            is_official_grid_icon = bool(
+                "profile_tab_icon_view" in resource_lower
+                and "grid view" in labels_lower
+            )
+            if not is_official_grid_icon:
+                continue
+            structural_grid_node_ids.add(id(descendant))
+            selected = str(
+                (descendant.attrib or {}).get("selected") or ""
+            ).lower() == "true" or str(
+                (descendant.attrib or {}).get("checked") or ""
+            ).lower() == "true"
+            if selected:
+                out["grid_selected"] = True
+                out["posts_tab_selected"] = True
+                out["posts_tab_source"] = (
+                    "profile_tab_icon_grid_view_selected"
+                )
 
     empty_marker_nodes: list[ET.Element] = []
     for node in root.iter():
@@ -22777,6 +22897,9 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             for token in ("profile_tab_grid", "profile tab grid", "grid tab", "posts tab")
         ):
             out["grid_selected"] = True
+            out["posts_tab_selected"] = True
+            if not out.get("posts_tab_source"):
+                out["posts_tab_source"] = "legacy_posts_grid_tab_selected"
         if is_reels_tab:
             out["reels_selected"] = True
         if is_tagged_tab:
@@ -22791,6 +22914,8 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         for anchor in (parent_by_id.get(id(marker)) or marker,)
         for descendant in anchor.iter()
     }
+    out["structural_grid_node_ids"] = structural_grid_node_ids
+    out.pop("_posts_count_source_priority", None)
     return out
 
 
@@ -22855,6 +22980,9 @@ def _finalize_grid_classification_transport(
             ),
             "tagged_tab_selected": bool(
                 structural_state.get("tagged_selected")
+            ),
+            "reels_or_tagged_selected": bool(
+                structural_state.get("reels_or_tagged_selected")
             ),
             "grid_visible": outcome in {
                 "POST_ROW_POSITIVE_SAFE",
@@ -22938,9 +23066,34 @@ def _post_follow_post_grid_evidence_from_xml(
     post_count_positive = bool(base.get("posts_count_positive"))
     posts_count_zero_exact = bool(base.get("posts_count_zero_exact"))
     empty_state_node_ids = set(base.get("empty_state_node_ids") or set())
+    structural_grid_node_ids: set[int] = set()
+    structural_reels_node_ids: set[int] = set()
+    structural_tagged_node_ids: set[int] = set()
+    for tabs_container in root.iter():
+        container_resource = str(
+            (tabs_container.attrib or {}).get("resource-id") or ""
+        ).lower()
+        if "profile_tabs_container" not in container_resource:
+            continue
+        for descendant in tabs_container.iter():
+            attrs = descendant.attrib or {}
+            resource = str(attrs.get("resource-id") or "").lower()
+            if "profile_tab_icon_view" not in resource:
+                continue
+            labels = {
+                str(attrs.get("text") or "").strip().lower(),
+                str(attrs.get("content-desc") or "").strip().lower(),
+            }
+            if "grid view" in labels:
+                structural_grid_node_ids.add(id(descendant))
+            elif "reels" in labels:
+                structural_reels_node_ids.add(id(descendant))
+            elif "tagged" in labels:
+                structural_tagged_node_ids.add(id(descendant))
     # Parser-private identity set; never leak non-serializable node ids into
     # logs, receipts or the immutable GridClassificationProof transport.
     out.pop("empty_state_node_ids", None)
+    out.pop("structural_grid_node_ids", None)
     highlights_marker_order = -1
 
     def _label_has_exact_handle(value: str) -> bool:
@@ -22993,7 +23146,7 @@ def _post_follow_post_grid_evidence_from_xml(
         if re.search(r"\b([1-9][0-9.,]*)\s+(posts?|publications?)\b", label_l):
             post_count_positive = True
         is_tabs_container = "profile_tabs_container" in label_l
-        is_grid_tab = any(
+        is_grid_tab = bool(id(node) in structural_grid_node_ids) or any(
             token in label_l
             for token in (
                 "profile tab grid",
@@ -23011,6 +23164,20 @@ def _post_follow_post_grid_evidence_from_xml(
                 attrs.get("checked") or ""
             ).lower() == "true"
             grid_selected = bool(grid_selected or selected)
+            if selected and id(node) in structural_grid_node_ids:
+                base["posts_tab_selected"] = True
+                base["posts_tab_source"] = (
+                    "profile_tab_icon_grid_view_selected"
+                )
+        selected = str(attrs.get("selected") or "").lower() == "true" or str(
+            attrs.get("checked") or ""
+        ).lower() == "true"
+        if selected and id(node) in structural_reels_node_ids:
+            base["reels_selected"] = True
+            base["reels_or_tagged_selected"] = True
+        if selected and id(node) in structural_tagged_node_ids:
+            base["tagged_selected"] = True
+            base["reels_or_tagged_selected"] = True
         if bounds and (is_tabs_container or is_grid_tab):
             tabs_bottom = max(tabs_bottom, int(bounds["bottom"]))
         if not bounds:
@@ -23217,6 +23384,9 @@ def _post_follow_post_grid_evidence_from_xml(
             out["outcome"] = "POST_GRID_REVEAL_REQUIRED"
             out["evidence_status"] = "POST_GRID_REVEAL_REQUIRED"
             out["rejection_reason"] = "post_grid_below_fold_reveal_required"
+            out["post_grid_reveal_required_reason"] = (
+                "positive_posts_selected_grid_regions_isolated_no_visible_cell"
+            )
             out["tap_safe"] = False
             out["grid_exposure"] = "positive_grid_below_fold"
             out["reveal_permission_only"] = True
@@ -23477,6 +23647,9 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         reacquired["reveal_count_total_for_like_phase"] = 1
         reacquired["reacquired_hierarchy_xml"] = fresh_xml
         reacquired["old_bounds_invalidated"] = True
+        reacquired["post_reveal_classification"] = str(
+            reacquired.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL"
+        )
         out = reacquired
     except Exception:
         out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
@@ -23488,6 +23661,9 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     }:
         out["post_bounds_source"] = "single_reveal_fresh_xml_physical_cell"
         return out
+    out["post_reveal_classification"] = str(
+        out.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL"
+    )
     out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
     out["evidence_status"] = "POST_GRID_AMBIGUOUS_FINAL"
     out["fast_vision_probe_attempted"] = False
@@ -26793,6 +26969,54 @@ def _ui_proof_trusted_action_button_not_liked(
     return bool(proof.get("matched_node_clickable"))
 
 
+def _ui_proof_a2_v5_exact_like_control(
+    proof: dict[str, Any],
+    d: u2.Device,
+    *,
+    expected_state: str,
+) -> bool:
+    """Validate an exact A2/V5 Like control without the legacy Y band.
+
+    The fixed action-row band is a discovery heuristic.  Once A2/V5 has
+    certified the Posts viewer and an exact Like/Unlike node in the same XML,
+    safety is instead provided by exact semantics, left action-rail geometry,
+    header/system-navigation exclusions and the immutable snapshot contract.
+    """
+    semantic_state = _classify_like_semantic_desc(
+        str(proof.get("matched_node_content_desc") or ""),
+        str(proof.get("matched_node_text") or ""),
+    )
+    if semantic_state != str(expected_state or ""):
+        return False
+    resource_id = str(proof.get("matched_node_resource_id") or "").lower()
+    exact_description = semantic_state in {
+        "action_button_not_liked",
+        "action_button_liked",
+    }
+    reliable_resource = any(
+        token in resource_id
+        for token in (
+            "row_feed_button_like",
+            "feed_button_like",
+            "like_button",
+        )
+    )
+    if not (exact_description or reliable_resource):
+        return False
+    if not bool(proof.get("matched_node_clickable")) and not reliable_resource:
+        return False
+    bounds = proof.get("matched_node_bounds")
+    if not isinstance(bounds, dict):
+        return False
+    iw, ih = _device_window_wh(d)
+    bounds_ok, _ = _follow_60s_safe_bounds_for_like(
+        bounds,
+        screen_size=(iw, ih),
+        certified_exact_a2_v5=True,
+    )
+    return bool(bounds_ok)
+
+
 def _hierarchy_collect_like_semantic_nodes(hier: str) -> list[dict[str, Any]]:
     if not hier:
         return []
@@ -29383,6 +29607,10 @@ def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
             "package",
             "activity",
             "viewer_type",
+            "exact_like_source",
+            "exact_like_bounds_hash",
+            "exact_like_xml_fingerprint",
+            "exact_like_ui_generation",
             "stage_nonce",
             "created_at_monotonic",
         )
@@ -29430,7 +29658,8 @@ def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
             "version", "account_id", "run_id", "request_id", "action_id",
             "attempt_id", "business_session_id", "control_id", "worker_sha",
             "candidate_username", "viewer_type", "package", "activity",
-            "like_bounds_hash", "xml_fingerprint", "canonical_generation",
+            "like_bounds_hash", "exact_like_source", "xml_fingerprint",
+            "canonical_generation",
             "v5_positive", "story_or_highlight_detected",
             "already_liked", "one_shot_nonce", "consumed",
             "created_at_monotonic",
@@ -29485,30 +29714,96 @@ def _create_like_tap_context_v2(
         xml, expected_username=expected_follower_username
     )
     story_detected = bool(identity.get("story_or_highlight_detected"))
-    trusted_nodes = [
-        node for node in _hierarchy_collect_like_semantic_nodes(xml)
-        if _ui_proof_trusted_action_button_not_liked(node, d)
+    semantic_nodes = _hierarchy_collect_like_semantic_nodes(xml)
+    exact_nodes = [
+        node
+        for node in semantic_nodes
+        if _ui_proof_a2_v5_exact_like_control(
+            node, d, expected_state="action_button_not_liked"
+        )
         and isinstance(node.get("matched_node_bounds"), dict)
     ]
     if story_detected:
         return None, "liketapcontext_story_or_highlight_detected"
-    if any(_ui_proof_trusted_action_button_liked(node, d) for node in _hierarchy_collect_like_semantic_nodes(xml)):
+    if any(
+        _ui_proof_a2_v5_exact_like_control(
+            node, d, expected_state="action_button_liked"
+        )
+        for node in semantic_nodes
+    ):
         return None, "liketapcontext_already_liked"
-    if not trusted_nodes:
-        return None, "liketapcontext_exact_like_missing"
-    chosen = max(
-        trusted_nodes,
-        key=lambda node: int(
-            (node.get("matched_node_bounds") or {}).get("bottom") or 0
-        ),
+    stage_context = dict(
+        (post_open_context or {}).get("post_open_context_v1") or {}
     )
+    transported_exact_proof = dict(
+        stage_context.get("exact_like_proof") or {}
+    )
+    snapshot_fingerprint = hashlib.sha256(
+        xml.encode("utf-8", errors="replace")
+    ).hexdigest()[:20]
+    transported_proof_valid = False
+    if transported_exact_proof:
+        if not hmac.compare_digest(
+            str(stage_context.get("proof_hash") or ""),
+            _post_open_context_v1_proof_hash(stage_context),
+        ):
+            return None, "liketapcontext_post_open_hash_mismatch"
+        if str(stage_context.get("exact_like_xml_fingerprint") or "") != snapshot_fingerprint:
+            return None, "liketapcontext_post_open_xml_mismatch"
+        if _normalize_handle(
+            str(stage_context.get("candidate_username") or "")
+        ) != _normalize_handle(expected_follower_username):
+            return None, "liketapcontext_post_open_candidate_mismatch"
+        if not all(
+            str(stage_context.get(key) or "")
+            == str((expected_stage_binding or {}).get(key) or "")
+            for key in ("account_id", "run_id", "request_id", "action_id")
+        ):
+            return None, "liketapcontext_post_open_binding_mismatch"
+        if str(stage_context.get("package") or "") != str(expected_package or ""):
+            return None, "liketapcontext_post_open_package_mismatch"
+        if not bool(stage_context.get("v5_positive")) or bool(
+            stage_context.get("story_or_highlight_detected")
+        ):
+            return None, "liketapcontext_post_open_v5_rejected"
+        if not _ui_proof_a2_v5_exact_like_control(
+            transported_exact_proof,
+            d,
+            expected_state="action_button_not_liked",
+        ):
+            return None, "liketapcontext_post_open_exact_like_invalid"
+        transported_proof_valid = True
+    if transported_proof_valid:
+        chosen = transported_exact_proof
+        exact_like_source = str(
+            stage_context.get("exact_like_source")
+            or chosen.get("matched_node_resource_id")
+            or chosen.get("matched_node_content_desc")
+            or "post_open_context_v1"
+        )
+    elif exact_nodes:
+        chosen = max(
+            exact_nodes,
+            key=lambda node: int(
+                (node.get("matched_node_bounds") or {}).get("bottom") or 0
+            ),
+        )
+        exact_like_source = str(
+            chosen.get("matched_node_resource_id")
+            or chosen.get("matched_node_content_desc")
+            or "fresh_xml_exact_like"
+        )
+    else:
+        return None, "liketapcontext_exact_like_missing"
     like_bounds = dict(chosen.get("matched_node_bounds") or {})
     try:
         ww, wh = d.window_size()
     except Exception:
         return None, "liketapcontext_window_missing"
     bounds_ok, bounds_reason = _follow_60s_safe_bounds_for_like(
-        like_bounds, screen_size=(int(ww), int(wh))
+        like_bounds,
+        screen_size=(int(ww), int(wh)),
+        certified_exact_a2_v5=True,
     )
     if not bounds_ok:
         return None, f"liketapcontext_{bounds_reason}"
@@ -29550,6 +29845,10 @@ def _create_like_tap_context_v2(
         )
     except Exception:
         return None, "liketapcontext_runtime_generation_missing"
+    if transported_proof_valid and int(
+        stage_context.get("exact_like_ui_generation") or 0
+    ) != canonical_generation:
+        return None, "liketapcontext_generation_changed"
     created_at = time.monotonic()
     one_shot_nonce = hashlib.sha256(
         (
@@ -29579,14 +29878,16 @@ def _create_like_tap_context_v2(
         "activity": activity,
         "like_bounds": like_bounds,
         "like_bounds_hash": bounds_hash,
-        "xml_fingerprint": hashlib.sha256(
-            xml.encode("utf-8", errors="replace")
-        ).hexdigest()[:20],
+        "xml_fingerprint": snapshot_fingerprint,
         "canonical_generation": canonical_generation,
         "navigation_generation": canonical_generation,
         "v5_positive": True,
         "story_or_highlight_detected": False,
         "already_liked": False,
+        "exact_like_source": exact_like_source,
+        "exact_like_bounds": dict(like_bounds),
+        "like_bounds_rejection_reason": "",
+        "exact_like_transport_used": bool(transported_proof_valid),
         "candidate_identity_source": (
             "fresh_xml_exact_header"
             if identity.get("candidate_username_exact_in_snapshot")
@@ -29637,6 +29938,8 @@ def _validate_like_tap_context_v2(
         ctx.get("story_or_highlight_detected")
     ):
         return False, "liketapcontext_v5_rejected", age_ms
+    if not str(ctx.get("exact_like_source") or ""):
+        return False, "liketapcontext_exact_like_source_missing", age_ms
     if bool(ctx.get("already_liked")):
         return False, "liketapcontext_already_liked", age_ms
     if bool(ctx.get("consumed")):
@@ -29665,6 +29968,17 @@ def _validate_like_tap_context_v2(
         return False, "liketapcontext_runtime_generation_missing", age_ms
     if int(ctx.get("canonical_generation") or 0) != current_generation:
         return False, "liketapcontext_generation_changed", age_ms
+    try:
+        window_size = d.window_size() if d is not None else (1080, 2400)
+    except Exception:
+        return False, "liketapcontext_window_missing", age_ms
+    bounds_ok, bounds_reason = _follow_60s_safe_bounds_for_like(
+        ctx.get("like_bounds"),
+        screen_size=(int(window_size[0]), int(window_size[1])),
+        certified_exact_a2_v5=True,
+    )
+    if not bounds_ok:
+        return False, f"liketapcontext_{bounds_reason}", age_ms
     return True, "", age_ms
 
 
@@ -29686,6 +30000,7 @@ def _follow_60s_safe_bounds_for_like(
     bounds: dict[str, Any] | None,
     *,
     screen_size: tuple[int, int],
+    certified_exact_a2_v5: bool = False,
 ) -> tuple[bool, str]:
     """Like-specific geometry: exact positive bounds inside the live viewport."""
     if not isinstance(bounds, dict):
@@ -29699,6 +30014,26 @@ def _follow_60s_safe_bounds_for_like(
         return False, "like_bounds_parse_failed"
     if not (0 <= left < right <= width and 0 <= top < bottom <= height):
         return False, "like_bounds_geometry_invalid"
+    if certified_exact_a2_v5:
+        center_x = (left + right) // 2
+        if not (
+            int(width * _VISUAL_POST_HEART_ROI_LEFT_RATIO)
+            <= center_x
+            <= int(width * _VISUAL_POST_HEART_ROI_RIGHT_RATIO)
+        ):
+            return False, "like_bounds_outside_left_action_rail"
+        # Exclude the action bar/status area and the Instagram/system bottom
+        # navigation.  This is a broad safety envelope, not a media-dependent
+        # action-row band; valid Like controls may move vertically inside it.
+        if top < int(height * 0.08):
+            return False, "like_bounds_in_header"
+        if bottom > int(height * 0.945):
+            return False, "like_bounds_in_system_navigation"
+        if (right - left) > int(width * 0.22) or (bottom - top) > int(
+            height * 0.12
+        ):
+            return False, "like_bounds_control_size_invalid"
+        return True, ""
     if not _bounds_center_in_heart_action_band(
         {"left": left, "top": top, "right": right, "bottom": bottom},
         iw=width, ih=height,
@@ -30600,6 +30935,19 @@ def visual_like_open_post(
                 story_or_highlight_detected=False,
                 snapshot_source=str(
                     like_tap_context_v2.get("snapshot_source") or ""
+                ),
+                exact_like_source=str(
+                    like_tap_context_v2.get("exact_like_source") or ""
+                ),
+                exact_like_bounds=dict(
+                    like_tap_context_v2.get("exact_like_bounds") or {}
+                ),
+                exact_like_transport_used=bool(
+                    like_tap_context_v2.get("exact_like_transport_used")
+                ),
+                like_bounds_rejection_reason=str(
+                    like_tap_context_v2.get("like_bounds_rejection_reason")
+                    or ""
                 ),
                 reacquisition_used=bool(
                     like_tap_context_v2.get("snapshot_source")
@@ -49601,10 +49949,22 @@ def _post_open_snapshot_audit_signals(
         }
 
     semantic_nodes = _hierarchy_collect_like_semantic_nodes(snapshot_xml)
-    trusted_liked = any(_ui_proof_trusted_action_button_liked(node, d) for node in semantic_nodes)
-    trusted_not_liked = any(
-        _ui_proof_trusted_action_button_not_liked(node, d) for node in semantic_nodes
-    )
+    exact_liked_nodes = [
+        node
+        for node in semantic_nodes
+        if _ui_proof_a2_v5_exact_like_control(
+            node, d, expected_state="action_button_liked"
+        )
+    ]
+    exact_not_liked_nodes = [
+        node
+        for node in semantic_nodes
+        if _ui_proof_a2_v5_exact_like_control(
+            node, d, expected_state="action_button_not_liked"
+        )
+    ]
+    trusted_liked = bool(exact_liked_nodes)
+    trusted_not_liked = bool(exact_not_liked_nodes)
     proof_is_not_liked = proof_method.endswith(
         _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX
     ) or proof_method in _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_EXACT_SIGNALS
@@ -49616,6 +49976,30 @@ def _post_open_snapshot_audit_signals(
         }
     if not proof_is_not_liked and not trusted_not_liked:
         return {"ok": False, "reason": "snapshot_like_signal_ambiguous"}
+
+    exact_like_proof = (
+        dict(exact_not_liked_nodes[0]) if exact_not_liked_nodes else None
+    )
+    exact_like_bounds = dict(
+        (exact_like_proof or {}).get("matched_node_bounds") or {}
+    )
+    exact_like_source = str(
+        (exact_like_proof or {}).get("matched_node_resource_id")
+        or (exact_like_proof or {}).get("matched_node_content_desc")
+        or proof_method
+        or ""
+    )
+    try:
+        from follow_60s_canary import runtime_context as _post_open_runtime_context
+
+        exact_like_ui_generation = int(
+            _post_open_runtime_context().get("ui_generation") or 0
+        )
+    except Exception:
+        exact_like_ui_generation = 0
+    snapshot_fingerprint = hashlib.sha256(
+        str(snapshot_xml or "").encode("utf-8", errors="replace")
+    ).hexdigest()[:20]
 
     return {
         "ok": True,
@@ -49643,6 +50027,11 @@ def _post_open_snapshot_audit_signals(
         "stage_provenance_age_ms": provenance_contract.get(
             "stage_provenance_age_ms"
         ),
+        "exact_like_proof": exact_like_proof,
+        "exact_like_source": exact_like_source,
+        "exact_like_bounds": exact_like_bounds or None,
+        "exact_like_xml_fingerprint": snapshot_fingerprint,
+        "exact_like_ui_generation": exact_like_ui_generation,
     }
 
 
@@ -53634,6 +54023,22 @@ def run_post_follow_post_likes_phase(
                 f"{_post_ctx_created_at:.9f}"
             ).encode("utf-8", errors="replace")
         ).hexdigest()[:24]
+        _post_ctx_exact_like_proof = dict(
+            post_open_audit.get("exact_like_proof") or {}
+        )
+        _post_ctx_exact_like_bounds = dict(
+            post_open_audit.get("exact_like_bounds") or {}
+        )
+        _post_ctx_exact_like_bounds_hash = (
+            hashlib.sha256(
+                "|".join(
+                    str(_post_ctx_exact_like_bounds.get(key) or 0)
+                    for key in ("left", "top", "right", "bottom")
+                ).encode("utf-8")
+            ).hexdigest()[:20]
+            if _post_ctx_exact_like_bounds
+            else ""
+        )
         _post_ctx = {
             "version": "PostOpenContextV1",
             "account_id": str(authoritative_binding_for_context.get("account_id") or account_id or ""),
@@ -53659,6 +54064,18 @@ def run_post_follow_post_likes_phase(
             "v5_positive": True,
             "post_identity_confirmed": bool(post_identity_confirmed),
             "story_or_highlight_detected": False,
+            "exact_like_proof": _post_ctx_exact_like_proof or None,
+            "exact_like_source": str(
+                post_open_audit.get("exact_like_source") or ""
+            ),
+            "exact_like_bounds": _post_ctx_exact_like_bounds or None,
+            "exact_like_bounds_hash": _post_ctx_exact_like_bounds_hash,
+            "exact_like_xml_fingerprint": str(
+                post_open_audit.get("exact_like_xml_fingerprint") or ""
+            ),
+            "exact_like_ui_generation": int(
+                post_open_audit.get("exact_like_ui_generation") or 0
+            ),
             "created_at_monotonic": _post_ctx_created_at,
             "navigation_generation": str(
                 (open_out.get("post_open_stage_provenance") or {}).get(
@@ -53679,6 +54096,11 @@ def run_post_follow_post_likes_phase(
             context_version="PostOpenContextV1",
             v5_positive=True,
             story_or_highlight_detected=False,
+            exact_like_source=str(_post_ctx.get("exact_like_source") or ""),
+            exact_like_bounds=dict(_post_ctx.get("exact_like_bounds") or {}),
+            exact_like_ui_generation=int(
+                _post_ctx.get("exact_like_ui_generation") or 0
+            ),
             stage_nonce_hash=hashlib.sha256(
                 _post_ctx_nonce.encode("utf-8")
             ).hexdigest()[:16],
