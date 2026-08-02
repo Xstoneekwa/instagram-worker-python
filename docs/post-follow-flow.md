@@ -104,20 +104,22 @@ Voir aussi [recovery-engine.md](recovery-engine.md).
 
 ## Rex Follow 60 — PostGridEvidence V2 et reçus durables
 
-Le canary `rex_gen_boost_ai` peut produire, à la fermeture finale de la feuille
-Mute, une preuve immuable `PostGridEvidence` entièrement typée. Le producteur
+Le canary Follow 60 peut produire, à la fermeture finale de la feuille
+Mute, une preuve immuable `GridClassificationProof` entièrement typée. Le producteur
 croise identité exacte du profil, package/activity, état Grid/Reels/Tagged,
 géométrie physique, génération navigation/scroll, viewport et vérification des
 deux Mutes. Ses seuls verdicts sont `POST_ROW_POSITIVE_SAFE`,
 `POST_ROW_POSITIVE_BUT_CLIPPED`, `POST_GRID_AMBIGUOUS_FINAL` et
 `NO_POSTS_POSITIVE`.
 
-Une ligne coupée autorise au producteur un reveal borné, une seule nouvelle
-acquisition XML, puis au plus une Vision si le profil, la grille et le nombre de
-posts sont déjà positivement prouvés mais que les bounds restent absentes. Le
-consommateur ne relance aucune investigation : une ambiguïté finale part
-directement vers Golden une fois. Avant un tap direct, une `FreshUiProof`
-tap-scoped est créée puis revalidée. Après toute ouverture, rapide ou Golden,
+La classification n'autorise jamais un tap. Une ligne coupée autorise au
+consommateur exactement un reveal borné, invalide les anciennes bounds, puis
+exige une seule nouvelle acquisition XML et une nouvelle classification. Il
+n'existe aucun diagnostic Vision intermédiaire : si la nouvelle classification
+n'est pas `POST_ROW_POSITIVE_SAFE`, le chemin part directement vers Golden une
+fois. Avant un tap direct, une `FreshTapProof` one-shot est créée depuis cette
+même hiérarchie fraîche, son fingerprint exact et son repère canonique, puis
+consommée sous un TTL distinct. Après toute ouverture, rapide ou Golden,
 le garde Story/Highlight V5 reste obligatoire ; une capture supplémentaire
 n'est permise que sur rejet avant l'unique Back/recovery.
 
@@ -157,3 +159,26 @@ Reels/Tagged peut recevoir une seule observation de stabilisation bornée à
 ambiguïté va directement au Golden. Une ligne de posts positivement prouvée
 mais coupée conserve un seul reveal, une seule acquisition fraîche, puis le
 garde Story/Highlight V5 obligatoire avant tout Like.
+
+### GridClassificationProof / FreshTapProof / LikeTapContextV2
+
+Les générations de preuve PostGrid appartiennent à un domaine unique : la
+génération UI canonique du runtime Follow 60. Les générations issues d'un
+contexte candidat restent de la provenance descriptive et ne peuvent ni
+invalider ni autoriser la classification. L'absence de bounds de l'onglet Posts
+peut être compensée uniquement par un ordre XML structurel positif : identité
+exacte, onglet Posts sélectionné, zone Suggested séparée, puis bande média
+partielle. Les cartes Suggested ne sont jamais des cellules média.
+
+Le TTL de classification/reveal et le TTL de tap sont séparés. Une
+`GridClassificationProof` peut justifier le reveal sans fournir de coordonnées
+cliquables. Seule une `FreshTapProof`, liée au même XML, fingerprint, repère,
+package/activity et génération canonique, autorise le tap de cellule.
+
+`PostOpenContextV1` conserve la continuité de l'ouverture, mais n'autorise plus
+le Like. Juste avant le tap Like, `LikeTapContextV2` est construit depuis un XML
+frais et doit lier le compte, le run, la request, l'action, le candidat exact,
+les bounds exactes du contrôle Like, le package/activity, la génération UI et
+le verdict positif V5. Un signal Story/Highlight gagne toujours. Le contexte
+est ensuite validé sous son propre TTL court et consommé immédiatement ; au
+moindre doute, aucun tap Like n'est envoyé.

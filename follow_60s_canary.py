@@ -150,6 +150,38 @@ class FreshUiProof:
 
 
 @dataclass(frozen=True)
+class FreshTapProof:
+    """One-shot authorization for a tap from a newly acquired hierarchy.
+
+    A classification proof may explain *what* is visible.  Only this proof may
+    authorize *where* to tap, and only while its exact runtime generation and
+    XML fingerprint remain current.
+    """
+
+    account_id: str
+    subject_username: str
+    target_username: str
+    package: str
+    activity: str
+    surface: str
+    bounds: dict[str, int]
+    xml_fingerprint: str
+    coordinate_frame: dict[str, Any]
+    canonical_generation: int
+    navigation_counter: int
+    scroll_generation: int
+    invalidation_counter: int
+    created_at_monotonic: float
+    ttl_ms: float
+    detection_source: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def xml_generation(self) -> str:
+        return f"{self.canonical_generation}:{self.xml_fingerprint}"
+
+
+@dataclass(frozen=True)
 class CandidateProfileVerdict:
     """Immutable result of the single post-Mute UI-proof consumption."""
 
@@ -363,8 +395,12 @@ def validate_coordinate_frame_v1(
 
 
 @dataclass(frozen=True)
-class PostGridEvidence:
-    """Immutable, fully typed final decision produced at Mute-sheet close."""
+class GridClassificationProof:
+    """Immutable SAFE/CLIPPED/AMBIGUOUS/NO_POSTS classification only.
+
+    ``first_post_bounds`` is diagnostic geometry.  It is deliberately not a
+    tap authorization; callers must reacquire a :class:`FreshTapProof`.
+    """
 
     account_id: str
     candidate_username: str
@@ -407,6 +443,9 @@ class PostGridEvidence:
     tabs_bottom: int = 0
     suggested_region_detected: bool = False
     classification_reveal_ttl_ms: float = 3000.0
+    canonical_generation: int = 0
+    source_navigation_generation: str = ""
+    tabs_boundary_source: str = ""
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -438,6 +477,11 @@ class PostGridEvidence:
     @property
     def visible_post_count(self) -> int:
         return len(self.physical_post_cells)
+
+
+# Compatibility name for persisted logs/tests from PostGridEvidence V2.  The
+# runtime contract is now explicitly classification-only.
+PostGridEvidence = GridClassificationProof
 
 
 @dataclass(frozen=True)
@@ -477,7 +521,8 @@ class _Runtime:
     subflags: dict[str, bool] = field(default_factory=dict)
     proofs: dict[str, FreshUiProof] = field(default_factory=dict)
     candidate_verdicts: dict[str, CandidateProfileVerdict] = field(default_factory=dict)
-    post_grid_evidence: dict[str, PostGridEvidence] = field(default_factory=dict)
+    post_grid_evidence: dict[str, GridClassificationProof] = field(default_factory=dict)
+    fresh_tap_proofs: dict[str, FreshTapProof] = field(default_factory=dict)
     next_candidate_snapshot: NextCandidateSnapshot | None = None
     proof_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     optimization_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -952,6 +997,7 @@ def invalidate(reason: str, *, bump_generation: bool = True) -> None:
     else:
         _RUNTIME.candidate_verdicts.clear()
     _RUNTIME.post_grid_evidence.clear()
+    _RUNTIME.fresh_tap_proofs.clear()
     _RUNTIME.next_candidate_snapshot = None
     log(
         "info",
@@ -979,6 +1025,7 @@ def stats() -> dict[str, Any]:
         "live_proof_count": len(_RUNTIME.proofs),
         "live_candidate_verdict_count": len(_RUNTIME.candidate_verdicts),
         "live_post_grid_evidence_count": len(_RUNTIME.post_grid_evidence),
+        "live_fresh_tap_proof_count": len(_RUNTIME.fresh_tap_proofs),
         "live_next_candidate_snapshot": _RUNTIME.next_candidate_snapshot is not None,
     }
 
@@ -1074,6 +1121,7 @@ def stash_post_grid_evidence(
     grid_selected: bool = False, tabs_bottom: int = 0,
     suggested_region_detected: bool = False,
     classification_reveal_ttl_ms: float = 3000.0,
+    tabs_boundary_source: str = "",
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -1112,14 +1160,39 @@ def stash_post_grid_evidence(
             inset_bottom=int(screen_inset_bottom or 0),
         )
         typed_frame = asdict(legacy_frame) if legacy_frame is not None else {}
-    evidence = PostGridEvidence(
+    canonical_generation = int(_RUNTIME.ui_generation)
+    if typed_frame:
+        # CoordinateFrame and classification must share the same runtime
+        # generation.  A caller-owned candidate-context token is retained only
+        # as provenance and is never used for freshness decisions.
+        typed_frame["navigation_generation"] = str(canonical_generation)
+        raw_size = typed_frame.get("raw_window_size") or (0, 0)
+        canonical_size = typed_frame.get("canonical_content_size") or (0, 0)
+        insets = dict(typed_frame.get("system_insets") or {})
+        rebuilt = build_coordinate_frame_v1(
+            source=str(typed_frame.get("source") or ""),
+            raw_width=int(raw_size[0]), raw_height=int(raw_size[1]),
+            canonical_width=int(canonical_size[0]),
+            canonical_height=int(canonical_size[1]),
+            inset_left=int(insets.get("left") or 0),
+            inset_top=int(insets.get("top") or 0),
+            inset_right=int(insets.get("right") or 0),
+            inset_bottom=int(insets.get("bottom") or 0),
+            orientation=str(typed_frame.get("orientation") or "portrait"),
+            density=float(typed_frame.get("density") or 0.0),
+            captured_at=float(typed_frame.get("captured_at") or time.monotonic()),
+            navigation_generation=str(canonical_generation),
+            scroll_generation=int(_RUNTIME.scroll_counter),
+        )
+        typed_frame = asdict(rebuilt) if rebuilt is not None else {}
+    evidence = GridClassificationProof(
         account_id=_RUNTIME.account_id, candidate_username=candidate,
         package_name=str(package_name or ""), activity_name=str(activity_name or ""),
         mute_sheet_closed=True,
         mute_posts_verified=True,
         mute_stories_verified=True,
         profile_identity_method=str(profile_identity_method or ""),
-        navigation_generation=str(navigation_generation or ""),
+        navigation_generation=str(canonical_generation),
         navigation_counter=_RUNTIME.navigation_counter,
         scroll_generation=_RUNTIME.scroll_counter,
         viewport_fingerprint=str(viewport_fingerprint or ""),
@@ -1156,6 +1229,9 @@ def stash_post_grid_evidence(
         classification_reveal_ttl_ms=max(
             1.0, float(classification_reveal_ttl_ms or 3000.0)
         ),
+        canonical_generation=canonical_generation,
+        source_navigation_generation=str(navigation_generation or ""),
+        tabs_boundary_source=str(tabs_boundary_source or ""),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
@@ -1180,9 +1256,7 @@ def consume_post_grid_evidence(
         reason = ""
         for got, want, name in ((ev.account_id, _RUNTIME.account_id, "account"),
                                 (ev.package, str(package or ""), "package"),
-                                (ev.activity, str(activity or ""), "activity"),
-                                (ev.navigation_generation, str(navigation_generation or ""), "navigation_generation"),
-                                (ev.viewport_fingerprint, str(viewport_fingerprint or ""), "viewport")):
+                                (ev.activity, str(activity or ""), "activity")):
             if want and got != want:
                 reason = f"{name}_mismatch"
                 break
@@ -1190,8 +1264,13 @@ def consume_post_grid_evidence(
             reason = "package_not_instagram_exact"
         if not reason and "InstagramMainActivity" not in ev.activity_name:
             reason = "activity_not_instagram_main"
-        if not reason and age_ms > ev.ttl_ms:
-            reason = "coordinate_frame_stale"
+        if (
+            not reason
+            and age_ms > float(ev.classification_reveal_ttl_ms or ev.ttl_ms)
+        ):
+            reason = "classification_reveal_ttl_expired"
+        if not reason and int(ev.canonical_generation) != int(_RUNTIME.ui_generation):
+            reason = "canonical_generation_mismatch"
         if not reason and ev.invalidation_counter != _RUNTIME.invalidation_counter:
             reason = "invalidation_counter_mismatch"
         if not reason and ev.navigation_counter != _RUNTIME.navigation_counter:
@@ -1203,7 +1282,7 @@ def consume_post_grid_evidence(
             frame_ok, frame_reason = validate_coordinate_frame_v1(
                 ev.coordinate_frame,
                 consumer_size=screen_size,
-                navigation_generation=str(navigation_generation or ""),
+                navigation_generation=str(_RUNTIME.ui_generation),
                 scroll_generation=_RUNTIME.scroll_counter,
                 consumer_orientation=str(screen_orientation or ""),
                 consumer_density=screen_density,
@@ -1215,23 +1294,17 @@ def consume_post_grid_evidence(
                 producer_w = int(ev.producer_screen_width or ev.screen_width)
                 producer_h = int(ev.producer_screen_height or ev.screen_height)
                 canonical_w, canonical_h = int(ev.screen_width), int(ev.screen_height)
-                fingerprint_value = str(
-                    producer_fingerprint or viewport_fingerprint or ""
-                )
-                # A producer fingerprint strengthens continuity when present.
-                # Older/Golden-compatible producers may not emit one; exact
-                # trusted coordinate-frame equality remains sufficient then.
+                # The producer fingerprint describes the classified snapshot.
+                # A candidate-context fingerprint belongs to another domain
+                # and must not reject an otherwise unchanged runtime surface.
+                fingerprint_value = str(producer_fingerprint or "")
                 fingerprint_trusted = bool(
-                    (not ev.viewport_fingerprint and not fingerprint_value)
-                    or (
-                        bool(fingerprint_value)
-                        and fingerprint_value == ev.viewport_fingerprint
-                    )
+                    not fingerprint_value
+                    or fingerprint_value == ev.viewport_fingerprint
                 )
-                if not fingerprint_trusted:
+                if fingerprint_value and not fingerprint_trusted:
                     reason = "coordinate_frame_untrusted"
-                else:
-                    dimensions_reason = frame_reason
+                dimensions_reason = frame_reason if not reason else reason
                 log(
                     "info",
                     "follow_60s_post_grid_screen_dimensions_checked",
@@ -1256,15 +1329,131 @@ def consume_post_grid_evidence(
                 )
         if not reason and ev.outcome == NO_POSTS_POSITIVE and not ev.no_posts_positive:
             reason = "no_posts_not_positive"
-        if not reason and ev.outcome == POST_ROW_POSITIVE_SAFE:
-            ok, bounds_reason = safe_bounds(
-                ev.first_post_cell_bounds,
-                screen_size=(int(ev.screen_width), int(ev.screen_height)),
-            )
-            if not ok:
-                reason = bounds_reason
+        # Classification never authorizes a tap.  SAFE bounds are intentionally
+        # not accepted here; FreshTapProof owns final geometry/freshness.
     _count("post_grid_evidence", "rejected" if reason else "reused")
     return (None if reason else ev), age_ms, reason
+
+
+def stash_fresh_tap_proof(
+    purpose: str,
+    *,
+    subject_username: str,
+    target_username: str,
+    package: str,
+    activity: str,
+    surface: str,
+    bounds: dict[str, int],
+    hierarchy_xml: str,
+    coordinate_frame: CoordinateFrameV1 | dict[str, Any],
+    detection_source: str,
+    ttl_ms: float = 450.0,
+    metadata: dict[str, Any] | None = None,
+) -> FreshTapProof | None:
+    """Create a one-shot tap proof from a newly classified hierarchy."""
+    if not enabled("like_fresh_cell_bounds"):
+        return None
+    xml = str(hierarchy_xml or "")
+    ok, _ = safe_bounds(bounds, screen_size=(
+        int((coordinate_frame.raw_width if isinstance(coordinate_frame, CoordinateFrameV1)
+             else (coordinate_frame or {}).get("raw_window_size", (0, 0))[0]) or 0),
+        int((coordinate_frame.raw_height if isinstance(coordinate_frame, CoordinateFrameV1)
+             else (coordinate_frame or {}).get("raw_window_size", (0, 0))[1]) or 0),
+    ))
+    if not xml or not ok:
+        return None
+    frame = asdict(coordinate_frame) if isinstance(coordinate_frame, CoordinateFrameV1) else dict(coordinate_frame or {})
+    frame_ok, _ = validate_coordinate_frame_v1(
+        frame,
+        consumer_size=tuple(int(v) for v in frame.get("raw_window_size", (0, 0))),
+        navigation_generation=str(_RUNTIME.ui_generation),
+        scroll_generation=_RUNTIME.scroll_counter,
+    )
+    if not frame_ok:
+        return None
+    key = str(purpose or "")
+    proof = FreshTapProof(
+        account_id=_RUNTIME.account_id,
+        subject_username=str(subject_username or "").strip().lstrip("@").lower(),
+        target_username=str(target_username or "").strip().lstrip("@").lower(),
+        package=str(package or ""), activity=str(activity or ""),
+        surface=str(surface or ""), bounds=dict(bounds),
+        xml_fingerprint=xml_fingerprint(xml), coordinate_frame=frame,
+        canonical_generation=int(_RUNTIME.ui_generation),
+        navigation_counter=int(_RUNTIME.navigation_counter),
+        scroll_generation=int(_RUNTIME.scroll_counter),
+        invalidation_counter=int(_RUNTIME.invalidation_counter),
+        created_at_monotonic=time.monotonic(),
+        ttl_ms=max(1.0, float(ttl_ms)),
+        detection_source=str(detection_source or ""),
+        metadata=dict(metadata or {}),
+    )
+    _RUNTIME.fresh_tap_proofs[key] = proof
+    _count("fresh_tap_proof", "stashed")
+    return proof
+
+
+def consume_fresh_tap_proof(
+    purpose: str,
+    *,
+    subject_username: str,
+    target_username: str,
+    package: str,
+    activity: str,
+    surface: str,
+    screen_size: tuple[int, int],
+    hierarchy_xml: str,
+    consume_once: bool = True,
+) -> tuple[FreshTapProof | None, float, str]:
+    """Validate the last tap boundary in the canonical runtime domain."""
+    key = str(purpose or "")
+    proof = _RUNTIME.fresh_tap_proofs.get(key) if enabled("like_fresh_cell_bounds") else None
+    age_ms = 0.0
+    reason = "missing_fresh_tap_proof"
+    if proof is not None:
+        age_ms = max(0.0, (time.monotonic() - proof.created_at_monotonic) * 1000.0)
+        reason = ""
+        expected = (
+            (proof.account_id, _RUNTIME.account_id, "account"),
+            (proof.subject_username, str(subject_username or "").strip().lstrip("@").lower(), "subject"),
+            (proof.target_username, str(target_username or "").strip().lstrip("@").lower(), "target"),
+            (proof.package, str(package or ""), "package"),
+            (proof.activity, str(activity or ""), "activity"),
+            (proof.surface, str(surface or ""), "surface"),
+        )
+        for got, want, label in expected:
+            if want and got != want:
+                reason = f"{label}_mismatch"
+                break
+        if not reason and age_ms > proof.ttl_ms:
+            reason = "tap_ttl_expired"
+        if not reason and proof.xml_fingerprint != xml_fingerprint(hierarchy_xml):
+            reason = "tap_xml_fingerprint_mismatch"
+        if not reason and proof.canonical_generation != _RUNTIME.ui_generation:
+            reason = "tap_canonical_generation_mismatch"
+        if not reason and proof.navigation_counter != _RUNTIME.navigation_counter:
+            reason = "tap_navigation_counter_mismatch"
+        if not reason and proof.scroll_generation != _RUNTIME.scroll_counter:
+            reason = "tap_scroll_generation_mismatch"
+        if not reason and proof.invalidation_counter != _RUNTIME.invalidation_counter:
+            reason = "tap_invalidation_counter_mismatch"
+        if not reason:
+            frame_ok, frame_reason = validate_coordinate_frame_v1(
+                proof.coordinate_frame,
+                consumer_size=screen_size,
+                navigation_generation=str(_RUNTIME.ui_generation),
+                scroll_generation=_RUNTIME.scroll_counter,
+            )
+            if not frame_ok:
+                reason = frame_reason
+        if not reason:
+            bounds_ok, bounds_reason = safe_bounds(proof.bounds, screen_size=screen_size)
+            if not bounds_ok:
+                reason = bounds_reason
+    if consume_once:
+        _RUNTIME.fresh_tap_proofs.pop(key, None)
+    _count("fresh_tap_proof", "rejected" if reason else "reused")
+    return (None if reason else proof), age_ms, reason
 
 
 def stash_next_candidate_snapshot(

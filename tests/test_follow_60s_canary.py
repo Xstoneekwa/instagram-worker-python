@@ -595,7 +595,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 self.assertIsNone(evidence)
                 self.assertEqual(reason, expected)
 
-    def test_post_grid_dimensions_reject_fingerprint_mismatch_as_untrusted(self) -> None:
+    def test_grid_classification_ignores_candidate_context_fingerprint_domain(self) -> None:
         self._stash_dimension_evidence(
             candidate="fingerprint",
             raw_height=2340,
@@ -610,8 +610,9 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             viewport_fingerprint="different-viewport",
             screen_size=(1080, 2340),
         )
-        self.assertIsNone(evidence)
-        self.assertEqual(reason, "viewport_mismatch")
+        self.assertIsInstance(evidence, canary.GridClassificationProof)
+        self.assertEqual(reason, "")
+        self.assertEqual(evidence.viewport_fingerprint, "viewport-v2")
 
     def test_terminal_outcome_is_unique_per_candidate_and_feature(self) -> None:
         self.assertTrue(

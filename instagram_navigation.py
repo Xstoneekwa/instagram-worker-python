@@ -17918,6 +17918,9 @@ def _stash_post_mute_sheet_closed_proof(
                             or _grid.get("suggested_region_detected")
                         ),
                         classification_reveal_ttl_ms=3000.0,
+                        tabs_boundary_source=str(
+                            _grid.get("tabs_boundary_source") or ""
+                        ),
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -22766,8 +22769,13 @@ def _post_follow_post_grid_evidence_from_xml(
     tabs_bottom = 0
     raw_cells: list[dict[str, int]] = []
     raw_clipped_cells: list[dict[str, int]] = []
+    media_cells_with_order: list[tuple[int, dict[str, int]]] = []
+    clipped_cells_with_order: list[tuple[int, dict[str, int]]] = []
     fully_exploitable_bottom = int(wh)
     grid_tab_marker = False
+    grid_tab_order = -1
+    suggested_marker_order = -1
+    suggested_bounds_bottom = 0
     grid_selected = bool(base.get("grid_selected"))
     post_count_positive = False
 
@@ -22789,7 +22797,7 @@ def _post_follow_post_grid_evidence_from_xml(
         area_b = float((int(b["right"]) - int(b["left"])) * (int(b["bottom"]) - int(b["top"])))
         return intersection / max(1.0, min(area_a, area_b))
 
-    for node in root.iter():
+    for node_order, node in enumerate(root.iter()):
         attrs = node.attrib or {}
         label = " ".join(
             str(attrs.get(k) or "")
@@ -22799,6 +22807,20 @@ def _post_follow_post_grid_evidence_from_xml(
             identity_exact = True
         bounds = _parse_ui_bounds_str(attrs.get("bounds"))
         label_l = label.lower()
+        is_suggested_marker = any(
+            token in label_l
+            for token in (
+                "suggested for you", "discover people",
+                "suggestions pour vous", "découvrir des personnes",
+                "sugerencias para ti",
+            )
+        )
+        if is_suggested_marker:
+            suggested_marker_order = max(suggested_marker_order, node_order)
+            if bounds:
+                suggested_bounds_bottom = max(
+                    suggested_bounds_bottom, int(bounds["bottom"])
+                )
         if re.search(r"\b([1-9][0-9.,]*)\s+(posts?|publications?)\b", label_l):
             post_count_positive = True
         is_tabs_container = "profile_tabs_container" in label_l
@@ -22815,6 +22837,7 @@ def _post_follow_post_grid_evidence_from_xml(
             base["profile_tabs_present"] = True
         if is_grid_tab:
             grid_tab_marker = True
+            grid_tab_order = max(grid_tab_order, node_order)
             selected = str(attrs.get("selected") or "").lower() == "true" or str(
                 attrs.get("checked") or ""
             ).lower() == "true"
@@ -22869,15 +22892,24 @@ def _post_follow_post_grid_evidence_from_xml(
         }
         if int(ww * 0.08) <= height <= int(ww * 0.48):
             raw_cells.append(cell)
+            media_cells_with_order.append((node_order, cell))
         elif int(ww * 0.015) <= height < int(ww * 0.08):
             # Retain only a narrow structural candidate.  It is never tap-safe
             # in this capture and can only authorize one viewport-derived
             # reveal after the complete positive profile/grid contract below.
             raw_clipped_cells.append(cell)
+            clipped_cells_with_order.append((node_order, cell))
     out["identity_exact"] = identity_exact
     out["tabs_bottom"] = tabs_bottom
     out["grid_tab_marker"] = grid_tab_marker
     out["post_count_positive"] = bool(post_count_positive)
+    out["suggested_region_detected"] = bool(
+        base.get("suggested_overlay_visible") or suggested_marker_order >= 0
+    )
+    out["suggested_region_separate"] = bool(
+        suggested_marker_order < 0
+        or (grid_tab_order >= 0 and grid_tab_order > suggested_marker_order)
+    )
     out["fully_exploitable_bottom"] = int(fully_exploitable_bottom)
     out["reels_tab_state"] = (
         "selected" if bool(base.get("reels_selected")) else "not_selected"
@@ -22901,17 +22933,45 @@ def _post_follow_post_grid_evidence_from_xml(
         out["visible_post_count"] = 0
         out["physical_cells"] = []
         return out
-    if not (identity_exact and tabs_bottom > 0):
+    structural_tabs_without_bounds = bool(
+        identity_exact
+        and bool(base.get("profile_tabs_present"))
+        and grid_tab_marker
+        and grid_tab_order >= 0
+        and (
+            suggested_marker_order < 0
+            or grid_tab_order > suggested_marker_order
+        )
+        and not bool(base.get("reels_or_tagged_selected"))
+    )
+    if not (identity_exact and (tabs_bottom > 0 or structural_tabs_without_bounds)):
         out["rejection_reason"] = (
             "candidate_identity_not_exact" if not identity_exact
             else "profile_tabs_bounds_missing"
         )
         return out
-    below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
+    if tabs_bottom > 0:
+        below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
+        clipped_candidates = list(raw_clipped_cells)
+    else:
+        # Missing tab bounds are common in the dominant post-Mute layout.  XML
+        # order gives a structural boundary: genuine grid media must occur
+        # after the exact Posts tab, while Suggested cards occur before it.
+        below = [
+            cell for order, cell in media_cells_with_order
+            if order > grid_tab_order
+            and (suggested_bounds_bottom <= 0 or int(cell["top"]) >= suggested_bounds_bottom)
+        ]
+        clipped_candidates = [
+            cell for order, cell in clipped_cells_with_order
+            if order > grid_tab_order
+            and (suggested_bounds_bottom <= 0 or int(cell["top"]) >= suggested_bounds_bottom)
+        ]
+        out["tabs_boundary_source"] = "xml_order_after_posts_tab"
     clipped_below = [
         cell
-        for cell in raw_clipped_cells
-        if int(cell["top"]) >= tabs_bottom - 4
+        for cell in clipped_candidates
+        if (tabs_bottom <= 0 or int(cell["top"]) >= tabs_bottom - 4)
         and int(cell["bottom"]) >= int(fully_exploitable_bottom) - max(6, int(wh * 0.006))
         and int(cell["top"]) < int(fully_exploitable_bottom)
     ]
@@ -22919,17 +22979,28 @@ def _post_follow_post_grid_evidence_from_xml(
     # contract.  This prevents suggestion/highlight/avatar images from being
     # promoted merely because they have a third-column width.
     if (
-        not below
-        and clipped_below
+        clipped_below
         and identity_exact
         and bool(base.get("profile_tabs_present"))
         and bool(grid_selected)
         and bool(post_count_positive)
         and not bool(base.get("reels_or_tagged_selected"))
     ):
-        below = clipped_below
+        if not below:
+            below = clipped_below
         out["clipped_detected"] = True
         out["clipped_detection_reason"] = "positive_media_strip_at_exploitable_bottom"
+
+    # A normal-width first row can also be clipped by the app viewport.  It is
+    # classification-positive but never tap-safe until the one reveal and a
+    # fresh hierarchy reacquisition complete.
+    if below and any(
+        int(cell["top"]) < fully_exploitable_bottom
+        and int(cell["bottom"]) >= fully_exploitable_bottom - max(6, int(wh * 0.006))
+        for cell in below
+    ):
+        out["clipped_detected"] = True
+        out["clipped_detection_reason"] = "positive_media_band_partial_at_viewport_boundary"
     below.sort(key=lambda cell: (int(cell["top"]), int(cell["left"])))
     deduped: list[dict[str, int]] = []
     for cell in below:
@@ -23161,7 +23232,9 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         tabs_bottom = int(out.get("tabs_bottom") or 0)
     except (TypeError, ValueError):
         tabs_bottom = 0
-    if tabs_bottom <= 0:
+    if tabs_bottom <= 0 and str(out.get("tabs_boundary_source") or "") != (
+        "xml_order_after_posts_tab"
+    ):
         out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
         return out
 
@@ -23202,6 +23275,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         reacquired["reacquire_dump_count"] = 1
         reacquired["reveal_count_total_for_like_phase"] = 1
         reacquired["reacquired_hierarchy_xml"] = fresh_xml
+        reacquired["old_bounds_invalidated"] = True
         out = reacquired
     except Exception:
         out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
@@ -23218,6 +23292,108 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     )
     out["golden_fallback_reason"] = "clipped_reacquisition_not_tap_safe"
     return out
+
+
+def _post_follow_create_fresh_tap_proof_from_grid(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    candidate_username: str,
+    pkg: str,
+    hierarchy_xml: str = "",
+    detection_source: str = "post_grid_fresh_reacquisition",
+    ttl_ms: float = 450.0,
+) -> dict[str, Any]:
+    """Reacquire SAFE grid geometry and issue the only tap authorization.
+
+    GridClassificationProof bounds are never reused here.  The XML, coordinate
+    frame, fingerprint and bounds all come from this final boundary.
+    """
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        return {"ok": False, "reason": "tap_window_size_missing"}
+    xml = str(hierarchy_xml or "")
+    dump_count = 0
+    if not xml:
+        try:
+            xml = str(d.dump_hierarchy(compressed=False) or "")
+            dump_count = 1
+        except Exception:
+            return {"ok": False, "reason": "tap_fresh_xml_missing", "dump_count": 1}
+    classified = _post_follow_post_grid_evidence_from_xml(
+        xml,
+        candidate_username=candidate_username,
+        ww=int(ww), wh=int(wh),
+        profile_identity_exact=True,
+    )
+    if str(classified.get("outcome") or "") != "POST_ROW_POSITIVE_SAFE":
+        return {
+            "ok": False,
+            "reason": str(classified.get("rejection_reason") or "fresh_grid_not_safe"),
+            "classification": classified,
+            "dump_count": dump_count,
+        }
+    bounds = classified.get("post_bounds")
+    if not isinstance(bounds, dict):
+        return {"ok": False, "reason": "fresh_tap_bounds_missing", "dump_count": dump_count}
+    dimensions = _post_follow_screen_dimensions_from_hierarchy(
+        xml, raw_width=int(ww), raw_height=int(wh)
+    )
+    frame = dict(dimensions.get("coordinate_frame") or {})
+    if not frame:
+        return {"ok": False, "reason": "fresh_tap_frame_untrusted", "dump_count": dump_count}
+    meta = _followers_current_pkg_activity(d)
+    try:
+        from follow_60s_canary import (
+            consume_fresh_tap_proof,
+            stash_fresh_tap_proof,
+        )
+        purpose = "post_grid_fresh_tap"
+        stash_fresh_tap_proof(
+            purpose,
+            subject_username=source_profile_username,
+            target_username=candidate_username,
+            package=str(meta.get("current_package") or pkg),
+            activity=str(meta.get("current_activity") or ""),
+            surface="candidate_profile_post_grid",
+            bounds=dict(bounds), hierarchy_xml=xml,
+            coordinate_frame=frame,
+            detection_source=detection_source,
+            ttl_ms=float(ttl_ms),
+            metadata={
+                "classification": "POST_ROW_POSITIVE_SAFE",
+                "viewport_fingerprint": str(classified.get("viewport_fingerprint") or ""),
+            },
+        )
+        proof, age_ms, reason = consume_fresh_tap_proof(
+            purpose,
+            subject_username=source_profile_username,
+            target_username=candidate_username,
+            package=str(meta.get("current_package") or pkg),
+            activity=str(meta.get("current_activity") or ""),
+            surface="candidate_profile_post_grid",
+            screen_size=(int(ww), int(wh)),
+            hierarchy_xml=xml,
+            consume_once=True,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"fresh_tap_proof_error:{type(exc).__name__}",
+            "dump_count": dump_count,
+        }
+    return {
+        "ok": proof is not None,
+        "reason": str(reason or ""),
+        "proof": proof,
+        "proof_age_ms": float(age_ms or 0.0),
+        "bounds": dict(proof.bounds) if proof is not None else None,
+        "hierarchy_xml": xml,
+        "viewport_fingerprint": str(classified.get("viewport_fingerprint") or ""),
+        "coordinate_frame": frame,
+        "dump_count": dump_count,
+    }
 
 
 def _evaluate_post_follow_fast_no_posts_evidence(
@@ -29010,6 +29186,207 @@ def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
     return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
+    ctx = dict(context or {})
+    material = "\0".join(
+        str(ctx.get(key) or "")
+        for key in (
+            "version", "account_id", "run_id", "request_id", "action_id",
+            "candidate_username", "viewer_type", "package", "activity",
+            "like_bounds_hash", "xml_fingerprint", "canonical_generation",
+            "v5_positive", "story_or_highlight_detected",
+            "created_at_monotonic",
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _create_like_tap_context_v2(
+    d: u2.Device,
+    *,
+    expected_package: str,
+    expected_follower_username: str,
+    expected_stage_binding: dict[str, Any],
+    post_open_context: dict[str, Any],
+    ttl_ms: float = 600.0,
+) -> tuple[dict[str, Any] | None, str]:
+    """Build the final V5-positive Like authorization from one fresh XML."""
+    xml = _dump_post_viewer_hierarchy(d)
+    if not xml:
+        return None, "liketapcontext_fresh_xml_missing"
+    meta = _followers_current_pkg_activity(d)
+    package = str(meta.get("current_package") or "")
+    activity = str(meta.get("current_activity") or "")
+    identity = _post_open_hierarchy_identity_signals(
+        xml, expected_username=expected_follower_username
+    )
+    story_detected = bool(identity.get("story_or_highlight_detected"))
+    trusted_nodes = [
+        node for node in _hierarchy_collect_like_semantic_nodes(xml)
+        if _ui_proof_trusted_action_button_not_liked(node, d)
+        and isinstance(node.get("matched_node_bounds"), dict)
+    ]
+    if story_detected:
+        return None, "liketapcontext_story_or_highlight_detected"
+    if not trusted_nodes:
+        return None, "liketapcontext_exact_like_missing"
+    chosen = max(
+        trusted_nodes,
+        key=lambda node: int(
+            (node.get("matched_node_bounds") or {}).get("bottom") or 0
+        ),
+    )
+    like_bounds = dict(chosen.get("matched_node_bounds") or {})
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        return None, "liketapcontext_window_missing"
+    bounds_ok, bounds_reason = _follow_60s_safe_bounds_for_like(
+        like_bounds, screen_size=(int(ww), int(wh))
+    )
+    if not bounds_ok:
+        return None, f"liketapcontext_{bounds_reason}"
+    stage_provenance = dict(
+        (post_open_context or {}).get("post_open_stage_provenance") or {}
+    )
+    provenance = _post_open_stage_provenance_contract(
+        stage_provenance,
+        expected_username=expected_follower_username,
+        expected_package=expected_package,
+        current_activity=activity,
+        snapshot_captured_at_monotonic=time.perf_counter(),
+    )
+    candidate_continuity = bool(
+        identity.get("candidate_username_exact_in_snapshot")
+        or provenance.get("stage_provenance_confirmed")
+    )
+    v5_positive = bool(
+        package == str(expected_package or "")
+        and "instagram" in activity.lower()
+        and "mainactivity" in activity.lower()
+        and bool(identity.get("posts_action_bar_in_snapshot"))
+        and candidate_continuity
+        and not story_detected
+    )
+    if not v5_positive:
+        return None, "liketapcontext_v5_positive_contract_missing"
+    binding = dict(expected_stage_binding or {})
+    if not all(str(binding.get(key) or "") for key in (
+        "account_id", "run_id", "request_id", "action_id"
+    )):
+        return None, "liketapcontext_stage_binding_missing"
+    try:
+        from follow_60s_canary import runtime_context as _follow_60_runtime_context
+        canonical_generation = int(
+            _follow_60_runtime_context().get("ui_generation") or 0
+        )
+    except Exception:
+        return None, "liketapcontext_runtime_generation_missing"
+    created_at = time.monotonic()
+    bounds_hash = hashlib.sha256(
+        "|".join(str(like_bounds.get(key) or 0) for key in (
+            "left", "top", "right", "bottom"
+        )).encode("utf-8")
+    ).hexdigest()[:20]
+    context = {
+        "version": "LikeTapContextV2",
+        "account_id": str(binding.get("account_id") or ""),
+        "run_id": str(binding.get("run_id") or ""),
+        "request_id": str(binding.get("request_id") or ""),
+        "action_id": str(binding.get("action_id") or ""),
+        "candidate_username": _normalize_handle(expected_follower_username),
+        "viewer_type": "Posts",
+        "package": package,
+        "activity": activity,
+        "like_bounds": like_bounds,
+        "like_bounds_hash": bounds_hash,
+        "xml_fingerprint": hashlib.sha256(
+            xml.encode("utf-8", errors="replace")
+        ).hexdigest()[:20],
+        "canonical_generation": canonical_generation,
+        "v5_positive": True,
+        "story_or_highlight_detected": False,
+        "candidate_identity_source": (
+            "fresh_xml_exact_header"
+            if identity.get("candidate_username_exact_in_snapshot")
+            else "tap_scoped_post_open_provenance"
+        ),
+        "created_at_monotonic": created_at,
+        "ttl_ms": max(1.0, float(ttl_ms)),
+    }
+    context["proof_hash"] = _like_tap_context_v2_proof_hash(context)
+    return context, ""
+
+
+def _validate_like_tap_context_v2(
+    context: dict[str, Any] | None,
+    *,
+    expected_stage_binding: dict[str, Any],
+    expected_follower_username: str,
+) -> tuple[bool, str, float]:
+    ctx = dict(context or {})
+    if str(ctx.get("version") or "") != "LikeTapContextV2":
+        return False, "liketapcontext_version_missing", 0.0
+    age_ms = max(
+        0.0,
+        (time.monotonic() - float(ctx.get("created_at_monotonic") or 0.0))
+        * 1000.0,
+    )
+    if age_ms > float(ctx.get("ttl_ms") or 0.0):
+        return False, "liketapcontext_ttl_expired", age_ms
+    if not hmac.compare_digest(
+        str(ctx.get("proof_hash") or ""),
+        _like_tap_context_v2_proof_hash(ctx),
+    ):
+        return False, "liketapcontext_hash_mismatch", age_ms
+    for key in ("account_id", "run_id", "request_id", "action_id"):
+        if str(ctx.get(key) or "") != str(expected_stage_binding.get(key) or ""):
+            return False, f"liketapcontext_{key}_mismatch", age_ms
+    if _normalize_handle(str(ctx.get("candidate_username") or "")) != _normalize_handle(
+        expected_follower_username
+    ):
+        return False, "liketapcontext_candidate_mismatch", age_ms
+    if not bool(ctx.get("v5_positive")) or bool(
+        ctx.get("story_or_highlight_detected")
+    ):
+        return False, "liketapcontext_v5_rejected", age_ms
+    try:
+        from follow_60s_canary import runtime_context as _follow_60_runtime_context
+        current_generation = int(
+            _follow_60_runtime_context().get("ui_generation") or 0
+        )
+    except Exception:
+        return False, "liketapcontext_runtime_generation_missing", age_ms
+    if int(ctx.get("canonical_generation") or 0) != current_generation:
+        return False, "liketapcontext_generation_mismatch", age_ms
+    return True, "", age_ms
+
+
+def _follow_60s_safe_bounds_for_like(
+    bounds: dict[str, Any] | None,
+    *,
+    screen_size: tuple[int, int],
+) -> tuple[bool, str]:
+    """Like-specific geometry: exact positive bounds inside the live viewport."""
+    if not isinstance(bounds, dict):
+        return False, "like_bounds_missing"
+    try:
+        left, top, right, bottom = (
+            int(bounds[key]) for key in ("left", "top", "right", "bottom")
+        )
+        width, height = int(screen_size[0]), int(screen_size[1])
+    except (KeyError, TypeError, ValueError):
+        return False, "like_bounds_parse_failed"
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        return False, "like_bounds_geometry_invalid"
+    if not _bounds_center_in_heart_action_band(
+        {"left": left, "top": top, "right": right, "bottom": bottom},
+        iw=width, ih=height,
+    ):
+        return False, "like_bounds_outside_action_band"
+    return True, ""
+
+
 def visual_like_open_post(
     d: u2.Device,
     *,
@@ -29034,6 +29411,13 @@ def visual_like_open_post(
     dry = bool(getattr(config, "VISUAL_POST_LIKE_DRY_RUN", True))
     effective_dry = (not real_visual) and dry
     meta0 = _followers_current_pkg_activity(d)
+    try:
+        from follow_60s_canary import enabled as _follow_60_enabled_for_like
+        like_tap_context_v2_required = bool(
+            _follow_60_enabled_for_like("like_fresh_cell_bounds")
+        )
+    except Exception:
+        like_tap_context_v2_required = False
     _lkperf = likes_perf_like_accum
     t_like_fn0 = time.perf_counter() if _lkperf is not None else None
 
@@ -29386,7 +29770,10 @@ def visual_like_open_post(
             and bool(stage_ctx.get("post_identity_confirmed"))
             and stage_ctx_hash_ok
             and stage_binding_ok
-            and stage_ctx_age_ms <= 3000.0
+            and (
+                stage_ctx_age_ms <= 3000.0
+                or like_tap_context_v2_required
+            )
         )
         stage_context_rejection_reason = ""
         if stage_ctx and not stage_scoped_open_context_ok:
@@ -29394,7 +29781,7 @@ def visual_like_open_post(
                 stage_context_rejection_reason = "candidate_mismatch"
             elif bool(stage_ctx.get("story_or_highlight_detected")):
                 stage_context_rejection_reason = "story_or_highlight_detected"
-            elif stage_ctx_age_ms > 3000.0:
+            elif stage_ctx_age_ms > 3000.0 and not like_tap_context_v2_required:
                 stage_context_rejection_reason = "stage_context_stale"
             elif not stage_ctx_hash_ok:
                 stage_context_rejection_reason = "proof_hash_mismatch"
@@ -29735,7 +30122,6 @@ def visual_like_open_post(
                         ),
                     }
 
-    _VISUAL_POST_LIKE_TAPS_RECORDED += 1
     meta1 = _followers_current_pkg_activity(d)
 
     if effective_dry:
@@ -29767,6 +30153,79 @@ def visual_like_open_post(
         }
 
     if real_visual:
+        like_tap_context_v2: dict[str, Any] | None = None
+        if like_tap_context_v2_required:
+            like_tap_context_v2, like_tap_context_reject = (
+                _create_like_tap_context_v2(
+                    d,
+                    expected_package=str(
+                        getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+                    ),
+                    expected_follower_username=str(expected_follower_username or ""),
+                    expected_stage_binding=dict(expected_stage_binding or {}),
+                    post_open_context=dict(post_open_context or {}),
+                )
+            )
+            valid_v2, validation_reason_v2, age_v2 = (
+                _validate_like_tap_context_v2(
+                    like_tap_context_v2,
+                    expected_stage_binding=dict(expected_stage_binding or {}),
+                    expected_follower_username=str(expected_follower_username or ""),
+                )
+            )
+            if not valid_v2:
+                failure_v2 = str(
+                    validation_reason_v2
+                    or like_tap_context_reject
+                    or "liketapcontext_rejected"
+                )
+                log(
+                    "warning",
+                    "follow_60s_like_tap_context_v2_rejected",
+                    expected_follower_username=str(expected_follower_username or ""),
+                    rejection_reason=failure_v2,
+                    proof_age_ms=round(float(age_v2 or 0.0), 2),
+                    real_tap_sent=False,
+                    fallback_used=False,
+                )
+                return _lk_fin({
+                    "ok": False,
+                    "already_liked": False,
+                    "real_tap_sent": False,
+                    "like_button_bounds": like_button_bounds,
+                    "tap_x": tap_x,
+                    "tap_y": tap_y,
+                    "confidence": confidence,
+                    "current_activity": meta1.get("current_activity"),
+                    "current_package": meta1.get("current_package"),
+                    "source_profile_username": source_profile_username or "",
+                    "failure_reason": failure_v2,
+                    "dry_run": False,
+                })
+            # The exact Like node from the same fresh XML is authoritative.
+            like_button_bounds = dict(like_tap_context_v2.get("like_bounds") or {})
+            tap_x = (
+                int(like_button_bounds["left"]) + int(like_button_bounds["right"])
+            ) // 2
+            tap_y = (
+                int(like_button_bounds["top"]) + int(like_button_bounds["bottom"])
+            ) // 2
+            log(
+                "info",
+                "follow_60s_like_tap_context_v2_created",
+                expected_follower_username=str(expected_follower_username or ""),
+                context_version="LikeTapContextV2",
+                proof_age_ms=round(float(age_v2 or 0.0), 2),
+                xml_fingerprint=str(
+                    like_tap_context_v2.get("xml_fingerprint") or ""
+                ),
+                canonical_generation=like_tap_context_v2.get(
+                    "canonical_generation"
+                ),
+                v5_positive=True,
+                story_or_highlight_detected=False,
+            )
+        _VISUAL_POST_LIKE_TAPS_RECORDED += 1
         log(
             "info",
             "visual_post_like_real_before_tap",
@@ -49734,17 +50193,10 @@ def run_post_follow_post_likes_phase(
             _grid_ev, _grid_age, _grid_reject = _consume_post_grid_evidence(
                 candidate_username=cand, package=str(_expected_ctx.get("package") or pkg),
                 activity=str(_expected_ctx.get("activity") or ""),
-                navigation_generation=str(_expected_ctx.get("navigation_generation") or ""),
-                viewport_fingerprint=str(
-                    _expected_ctx.get("viewport_fingerprint") or ""
-                ),
                 screen_size=(int(_grid_ww), int(_grid_wh)),
                 screen_dimensions_source="consumer_live_window_size",
                 screen_orientation=(
                     "landscape" if int(_grid_ww) > int(_grid_wh) else "portrait"
-                ),
-                producer_fingerprint=str(
-                    _expected_ctx.get("viewport_fingerprint") or ""
                 ),
             )
             if _grid_ev is not None:
@@ -49781,6 +50233,9 @@ def run_post_follow_post_likes_phase(
                     ),
                     "grid_selected": bool(_grid_ev.grid_selected),
                     "tabs_bottom": int(_grid_ev.tabs_bottom or 0),
+                    "tabs_boundary_source": str(
+                        _grid_ev.tabs_boundary_source or ""
+                    ),
                     "suggested_region_detected": bool(
                         _grid_ev.suggested_region_detected
                     ),
@@ -51096,43 +51551,28 @@ def run_post_follow_post_likes_phase(
             _meta_before = _followers_current_pkg_activity(d)
             _tap_proof = None
             _tap_proof_age_ms = 0.0
-            _tap_proof_reject = "fresh_ui_proof_missing"
-            try:
-                from follow_60s_canary import (
-                    consume as _consume_follow_60s_tap_proof,
-                    stash as _stash_follow_60s_tap_proof,
-                )
-
-                _stash_follow_60s_tap_proof(
-                    "post_grid_direct_cell_tap",
-                    subject_username=src,
-                    target_username=cand,
-                    package=str(_meta_before.get("current_package") or pkg),
-                    activity=str(_meta_before.get("current_activity") or ""),
-                    surface="candidate_profile_post_grid",
-                    detection_source=str(
-                        _canary_grid_evidence.get("post_bounds_source")
-                        or "post_grid_evidence_v2"
-                    ),
-                    ttl_ms=450.0,
-                    bounds=_fresh_bounds,
-                    metadata={"canonical_outcome": "POST_ROW_POSITIVE_SAFE"},
-                )
-                _tap_proof, _tap_proof_age_ms, _tap_proof_reject = (
-                    _consume_follow_60s_tap_proof(
-                        "post_grid_direct_cell_tap",
-                        subject_username=src,
-                        target_username=cand,
-                        package=str(_meta_before.get("current_package") or pkg),
-                        activity=str(_meta_before.get("current_activity") or ""),
-                        surface="candidate_profile_post_grid",
-                        consume_once=True,
-                    )
-                )
-            except Exception as _tap_proof_exc:
-                _tap_proof_reject = (
-                    f"fresh_ui_proof_error:{type(_tap_proof_exc).__name__}"
-                )
+            _tap_proof_reject = "fresh_tap_proof_missing"
+            _fresh_tap_result = _post_follow_create_fresh_tap_proof_from_grid(
+                d,
+                source_profile_username=src,
+                candidate_username=cand,
+                pkg=pkg,
+                hierarchy_xml=str(
+                    _canary_grid_evidence.get("reacquired_hierarchy_xml") or ""
+                ),
+                detection_source=str(
+                    _canary_grid_evidence.get("post_bounds_source")
+                    or "grid_classification_fresh_reacquisition"
+                ),
+                ttl_ms=450.0,
+            )
+            _tap_proof = _fresh_tap_result.get("proof")
+            _tap_proof_age_ms = float(
+                _fresh_tap_result.get("proof_age_ms") or 0.0
+            )
+            _tap_proof_reject = str(
+                _fresh_tap_result.get("reason") or _tap_proof_reject
+            )
             _tap_freshness = (
                 _fresh_ui_proof_age_at_tap(_tap_proof)
                 if _tap_proof is not None
@@ -52133,51 +52573,27 @@ def run_post_follow_post_likes_phase(
         if isinstance(direct_cell, dict):
             try:
                 from follow_60s_canary import (
-                    consume as _consume_follow_60s_proof,
                     enabled as _follow_60s_canary_enabled,
                     record_outcome as _record_follow_60s_outcome,
-                    stash as _stash_follow_60s_proof,
                 )
 
                 if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
-                    _cell_meta = _followers_current_pkg_activity(d)
-                    _cell_bounds = {
-                        key: int(direct_cell.get(key) or 0)
-                        for key in ("left", "top", "right", "bottom")
-                    }
-                    _cell_screen = d.window_size()
-                    _stash_follow_60s_proof(
-                        "like_post_cell",
-                        subject_username=src,
-                        target_username=cand,
-                        package=str(_cell_meta.get("current_package") or pkg),
-                        activity=str(_cell_meta.get("current_activity") or ""),
-                        surface="candidate_profile_post_grid",
-                        bounds=_cell_bounds,
+                    _fresh_direct = _post_follow_create_fresh_tap_proof_from_grid(
+                        d,
+                        source_profile_username=src,
+                        candidate_username=cand,
+                        pkg=pkg,
                         detection_source=str(
-                            grid_out.get("direct_post_cell_source") or ""
+                            grid_out.get("direct_post_cell_source")
+                            or "standard_grid_fresh_reacquisition"
                         ),
                         ttl_ms=1250.0,
-                        metadata={
-                            "visual_candidate_id": vcid,
-                            "grid_exposure": grid_out.get(
-                                "direct_post_grid_exposure"
-                            ),
-                        },
                     )
-                    _cell_proof, _cell_age_ms, _cell_reject = (
-                        _consume_follow_60s_proof(
-                            "like_post_cell",
-                            subject_username=src,
-                            target_username=cand,
-                            package=str(_cell_meta.get("current_package") or pkg),
-                            activity=str(_cell_meta.get("current_activity") or ""),
-                            surface="candidate_profile_post_grid",
-                            require_safe_bounds=True,
-                            screen_size=(int(_cell_screen[0]), int(_cell_screen[1])),
-                            consume_once=True,
-                        )
+                    _cell_proof = _fresh_direct.get("proof")
+                    _cell_age_ms = float(
+                        _fresh_direct.get("proof_age_ms") or 0.0
                     )
+                    _cell_reject = str(_fresh_direct.get("reason") or "")
                     if _cell_proof is None:
                         direct_cell = None
                         _record_follow_60s_outcome(
@@ -52198,6 +52614,13 @@ def run_post_follow_post_likes_phase(
                             fallback="visual_open_recent_post_from_profile",
                         )
                     else:
+                        direct_cell = dict(_cell_proof.bounds)
+                        direct_cell["center_x"] = (
+                            int(direct_cell["left"]) + int(direct_cell["right"])
+                        ) // 2
+                        direct_cell["center_y"] = (
+                            int(direct_cell["top"]) + int(direct_cell["bottom"])
+                        ) // 2
                         direct_cell_proof = _cell_proof
                         direct_cell_proof_age_ms = float(_cell_age_ms or 0.0)
             except Exception as _cell_proof_exc:

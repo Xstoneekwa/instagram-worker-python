@@ -56,6 +56,41 @@ def _typed_safe_grid_evidence() -> mock.MagicMock:
     return evidence
 
 
+def _fresh_tap_proof(*, created_at_monotonic: float | None = None) -> canary.FreshTapProof:
+    frame = {
+        "version": "coordinate_frame_v1",
+        "raw_width": 1080,
+        "raw_height": 2340,
+        "canonical_width": 1080,
+        "canonical_height": 2340,
+        "inset_top": 0,
+        "inset_bottom": 0,
+        "source": "raw_window_exact",
+    }
+    return canary.FreshTapProof(
+        account_id=TEST_CANARY_ACCOUNT_ID,
+        subject_username="ct",
+        target_username="cand",
+        package="com.instagram.android",
+        activity="profile",
+        surface="candidate_profile_post_grid",
+        bounds={"left": 0, "top": 900, "right": 360, "bottom": 1260},
+        xml_fingerprint="fresh-grid",
+        coordinate_frame=frame,
+        canonical_generation=0,
+        navigation_counter=0,
+        scroll_generation=0,
+        invalidation_counter=0,
+        created_at_monotonic=(
+            time.monotonic()
+            if created_at_monotonic is None
+            else float(created_at_monotonic)
+        ),
+        ttl_ms=1250.0,
+        detection_source="fresh_test_hierarchy",
+    )
+
+
 def _test_post_identity_contract(*_args: object, **kwargs: object) -> dict[str, object]:
     story_detected = bool(kwargs.get("story_detected"))
     like_surface_ok = bool(kwargs.get("like_surface_ok"))
@@ -2060,6 +2095,18 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         },
                     )
                 )
+                fresh_tap = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_follow_create_fresh_tap_proof_from_grid",
+                        return_value={
+                            "ok": True,
+                            "reason": "",
+                            "proof": _fresh_tap_proof(),
+                            "proof_age_ms": 1.0,
+                        },
+                    )
+                )
                 stack.enter_context(
                     mock.patch.object(
                         nav,
@@ -2149,6 +2196,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             )
 
         vision_probe.assert_not_called()
+        fresh_tap.assert_called_once()
         device.click.assert_called_once_with(180, 1080)
         legacy_open.assert_not_called()
         golden_open.assert_not_called()
@@ -2258,19 +2306,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             package="com.instagram.android",
             resume_policy=None,
         )
-        proof = canary.FreshUiProof(
-            account_id=TEST_CANARY_ACCOUNT_ID,
-            subject_username="ct",
-            target_username="cand",
-            package="com.instagram.android",
-            activity="profile",
-            surface="candidate_profile_post_grid",
-            bounds={"left": 0, "top": 900, "right": 360, "bottom": 1260},
-            xml_generation="1:fresh",
-            created_at_monotonic=98.0,
-            detection_source="fresh_canary_post_grid_evidence",
-            ttl_ms=1250.0,
-        )
+        proof = _fresh_tap_proof(created_at_monotonic=98.0)
         try:
             with ExitStack() as stack:
                 _patch_like_phase_common(stack, contract_ctx=contract_ctx)
@@ -2346,11 +2382,16 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         },
                     )
                 )
-                consume_proof = stack.enter_context(
+                create_tap_proof = stack.enter_context(
                     mock.patch.object(
-                        canary,
-                        "consume",
-                        return_value=(proof, 1000.0, ""),
+                        nav,
+                        "_post_follow_create_fresh_tap_proof_from_grid",
+                        return_value={
+                            "ok": True,
+                            "reason": "",
+                            "proof": proof,
+                            "proof_age_ms": 1000.0,
+                        },
                     )
                 )
                 original_freshness = nav._fresh_ui_proof_age_at_tap
@@ -2489,7 +2530,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 resume_policy=None,
             )
 
-        consume_proof.assert_called_once()
+        create_tap_proof.assert_called_once()
         self.assertEqual(len(freshness_rows), 1)
         self.assertFalse(freshness_rows[0]["valid"])
         self.assertEqual(freshness_rows[0]["age_ms"], 2000.0)
