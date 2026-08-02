@@ -44,8 +44,22 @@ def _timestamp(value: Any) -> datetime | None:
     raw = _text(value)
     if not raw:
         return None
+    normalized = raw.replace("Z", "+00:00")
+    # Python 3.9's datetime.fromisoformat accepts fractional seconds only with
+    # exactly 3 or 6 digits. PostgreSQL legitimately emits any precision from
+    # 1 to 6 digits after trimming trailing zeroes (for example ``.14751``).
+    # Normalize that fraction to microseconds before parsing so a valid
+    # Supabase timestamptz cannot fail the canary preflight nondeterministically.
+    timezone_sign_index = max(normalized.rfind("+"), normalized.rfind("-"))
+    if timezone_sign_index > normalized.find("T"):
+        timestamp_part = normalized[:timezone_sign_index]
+        timezone_part = normalized[timezone_sign_index:]
+        if "." in timestamp_part:
+            prefix, fraction = timestamp_part.rsplit(".", 1)
+            if fraction.isdigit() and 1 <= len(fraction) <= 6:
+                normalized = f"{prefix}.{fraction.ljust(6, '0')}{timezone_part}"
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
     if parsed.tzinfo is None:

@@ -87,6 +87,32 @@ class Follow60GenericControlV2Tests(unittest.TestCase):
             canary._RUNTIME = canary._Runtime()
             self.assertFalse(self._configure(control=control))
 
+    def test_postgres_variable_fractional_timestamp_precision_is_valid(self):
+        current = datetime(2026, 8, 2, 13, 1, 0, tzinfo=timezone.utc)
+        for precision in range(1, 7):
+            control = bound_control()
+            fraction = "147510"[:precision]
+            control["metadata_safe"]["baseline_captured_at"] = (
+                f"2026-08-02T12:57:08.{fraction}+00:00"
+            )
+            control["metadata_safe"]["armed_at"] = (
+                f"2026-08-02T12:58:08.{fraction}+00:00"
+            )
+            control["metadata_safe"]["expires_at"] = (
+                f"2026-08-02T14:00:00.{fraction}+00:00"
+            )
+            verdict = validate_armed_control(
+                control,
+                account_id=TEST_CANARY_ACCOUNT_ID,
+                account_username=TEST_CANARY_USERNAME,
+                active_worker_sha=TEST_WORKER_SHA,
+                run_type="account_session",
+                package="com.instagram.android",
+                now=current,
+            )
+            with self.subTest(precision=precision):
+                self.assertTrue(verdict.valid, verdict.reason)
+
     def test_username_mismatch_is_golden(self):
         control = bound_control(expected_username="different_account")
         self.assertFalse(self._configure(control=control))
