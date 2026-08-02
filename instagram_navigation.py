@@ -29689,12 +29689,70 @@ def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
             "xml_hash",
             "exact_like_xml_fingerprint",
             "exact_like_ui_generation",
+            "post_open_ui_generation",
             "navigation_generation",
             "stage_nonce",
             "created_at_monotonic",
         )
     ) + "\0" + exact_like_proof_material
     return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _post_open_context_v1_bridge_contract(
+    context: dict[str, Any] | None,
+    *,
+    expected_package: str,
+    expected_follower_username: str,
+    expected_stage_binding: dict[str, Any],
+    current_package: str,
+    current_activity: str,
+    canonical_generation: int,
+) -> tuple[bool, str]:
+    """Validate immutable V5 identity before rebuilding only the Like node."""
+    ctx = dict(context or {})
+    if str(ctx.get("version") or "") != "PostOpenContextV1":
+        return False, "liketapcontext_post_open_version_missing"
+    if not hmac.compare_digest(
+        str(ctx.get("proof_hash") or ""),
+        _post_open_context_v1_proof_hash(ctx),
+    ):
+        return False, "liketapcontext_post_open_hash_mismatch"
+    if _normalize_handle(str(ctx.get("candidate_username") or "")) != _normalize_handle(
+        expected_follower_username
+    ):
+        return False, "liketapcontext_post_open_candidate_mismatch"
+    for key in (
+        "account_id", "run_id", "request_id", "action_id", "attempt_id",
+        "business_session_id", "control_id", "worker_sha",
+    ):
+        expected = str((expected_stage_binding or {}).get(key) or "")
+        if expected and str(ctx.get(key) or "") != expected:
+            return False, "liketapcontext_post_open_binding_mismatch"
+    if str(ctx.get("package") or "") != str(expected_package or ""):
+        return False, "liketapcontext_post_open_package_mismatch"
+    if str(current_package or "") != str(ctx.get("package") or ""):
+        return False, "liketapcontext_post_open_live_package_mismatch"
+    if str(current_activity or "") != str(ctx.get("activity") or ""):
+        return False, "liketapcontext_post_open_live_activity_mismatch"
+    if "instagram" not in str(current_activity or "").lower() or "mainactivity" not in str(
+        current_activity or ""
+    ).lower():
+        return False, "liketapcontext_post_open_viewer_mismatch"
+    if str(ctx.get("viewer_type") or "") != "Posts":
+        return False, "liketapcontext_post_open_viewer_mismatch"
+    if not bool(ctx.get("v5_positive")) or not bool(ctx.get("post_identity_confirmed")):
+        return False, "liketapcontext_post_open_v5_rejected"
+    if bool(ctx.get("story_or_highlight_detected")):
+        return False, "liketapcontext_story_or_highlight_detected"
+    if not str(ctx.get("stage_nonce") or ""):
+        return False, "liketapcontext_post_open_stage_nonce_missing"
+    if not str(ctx.get("source_cell_fingerprint") or ""):
+        return False, "liketapcontext_post_open_source_fingerprint_missing"
+    if not str(ctx.get("navigation_generation") or ""):
+        return False, "liketapcontext_post_open_navigation_generation_missing"
+    if int(ctx.get("post_open_ui_generation") or 0) != int(canonical_generation or 0):
+        return False, "liketapcontext_generation_changed"
+    return True, ""
 
 
 def _authoritative_stage_binding_v2(
@@ -29799,6 +29857,25 @@ def _create_like_tap_context_v2(
     snapshot_fingerprint = hashlib.sha256(
         xml.encode("utf-8", errors="replace")
     ).hexdigest()[:20]
+    try:
+        from follow_60s_canary import runtime_context as _follow_60_runtime_context
+        canonical_generation = int(
+            _follow_60_runtime_context().get("ui_generation") or 0
+        )
+    except Exception:
+        return None, "liketapcontext_runtime_generation_missing"
+    bridge_valid = False
+    bridge_reason = ""
+    if stage_context:
+        bridge_valid, bridge_reason = _post_open_context_v1_bridge_contract(
+            stage_context,
+            expected_package=expected_package,
+            expected_follower_username=expected_follower_username,
+            expected_stage_binding=expected_stage_binding,
+            current_package=package,
+            current_activity=activity,
+            canonical_generation=canonical_generation,
+        )
     transported_proof_valid = False
     if transported_exact_proof:
         if not hmac.compare_digest(
@@ -29917,14 +29994,20 @@ def _create_like_tap_context_v2(
             snapshot_captured_at_monotonic=time.perf_counter(),
         )
         candidate_continuity = bool(
-            identity.get("candidate_username_exact_in_snapshot")
+            bridge_valid
+            or identity.get("candidate_username_exact_in_snapshot")
             or provenance.get("stage_provenance_confirmed")
         )
+        if stage_context and not bridge_valid:
+            return None, bridge_reason or "liketapcontext_post_open_bridge_rejected"
         v5_positive = bool(
             package == str(expected_package or "")
             and "instagram" in activity.lower()
             and "mainactivity" in activity.lower()
-            and bool(identity.get("posts_action_bar_in_snapshot"))
+            and (
+                bridge_valid
+                or bool(identity.get("posts_action_bar_in_snapshot"))
+            )
             and candidate_continuity
             and not story_detected
         )
@@ -29935,13 +30018,6 @@ def _create_like_tap_context_v2(
         "account_id", "run_id", "request_id", "action_id"
     )):
         return None, "liketapcontext_stage_binding_missing"
-    try:
-        from follow_60s_canary import runtime_context as _follow_60_runtime_context
-        canonical_generation = int(
-            _follow_60_runtime_context().get("ui_generation") or 0
-        )
-    except Exception:
-        return None, "liketapcontext_runtime_generation_missing"
     if transported_proof_valid and int(
         stage_context.get("exact_like_ui_generation") or 0
     ) != canonical_generation:
@@ -30006,11 +30082,14 @@ def _create_like_tap_context_v2(
         "snapshot_age_ms_at_creation": round(float(snapshot_age_ms), 2),
         "snapshot_source": snapshot_source,
         "like_context_source": (
-            "A2/V5" if transported_proof_valid else "reacquired"
+            "A2/V5" if transported_proof_valid else "PostOpenContextV1/V5"
+            if bridge_valid else "reacquired"
         ),
         "like_context_transport": (
             "PostOpenContextV1_immutable"
             if transported_proof_valid
+            else "PostOpenContextV1_single_xml_bridge"
+            if bridge_valid
             else "single_reacquisition"
         ),
         "create_reason": "",
@@ -30939,17 +31018,24 @@ def visual_like_open_post(
                     allow_fresh_dump=False,
                 )
             )
-            valid_v2, validation_reason_v2, age_v2 = (
-                _validate_like_tap_context_v2(
-                    like_tap_context_v2,
-                    expected_stage_binding=dict(expected_stage_binding or {}),
-                    expected_follower_username=str(expected_follower_username or ""),
-                    d=d,
-                    expected_package=str(
-                        getattr(config, "INSTAGRAM_PACKAGE", "") or ""
-                    ),
+            if like_tap_context_v2 is None:
+                valid_v2, validation_reason_v2, age_v2 = (
+                    False,
+                    str(like_tap_context_reject or ""),
+                    0.0,
                 )
-            )
+            else:
+                valid_v2, validation_reason_v2, age_v2 = (
+                    _validate_like_tap_context_v2(
+                        like_tap_context_v2,
+                        expected_stage_binding=dict(expected_stage_binding or {}),
+                        expected_follower_username=str(expected_follower_username or ""),
+                        d=d,
+                        expected_package=str(
+                            getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+                        ),
+                    )
+                )
             initial_create_reason_v2 = str(like_tap_context_reject or "")
             initial_validation_reason_v2 = str(validation_reason_v2 or "")
             if not valid_v2:
@@ -30970,19 +31056,26 @@ def visual_like_open_post(
                         force_fresh_dump=True,
                     )
                 )
-                valid_v2, validation_reason_v2, age_v2 = (
-                    _validate_like_tap_context_v2(
-                        like_tap_context_v2,
-                        expected_stage_binding=dict(expected_stage_binding or {}),
-                        expected_follower_username=str(
-                            expected_follower_username or ""
-                        ),
-                        d=d,
-                        expected_package=str(
-                            getattr(config, "INSTAGRAM_PACKAGE", "") or ""
-                        ),
+                if like_tap_context_v2 is None:
+                    valid_v2, validation_reason_v2, age_v2 = (
+                        False,
+                        str(like_tap_context_reject or ""),
+                        0.0,
                     )
-                )
+                else:
+                    valid_v2, validation_reason_v2, age_v2 = (
+                        _validate_like_tap_context_v2(
+                            like_tap_context_v2,
+                            expected_stage_binding=dict(expected_stage_binding or {}),
+                            expected_follower_username=str(
+                                expected_follower_username or ""
+                            ),
+                            d=d,
+                            expected_package=str(
+                                getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+                            ),
+                        )
+                    )
             if not valid_v2:
                 create_reason_v2 = str(like_tap_context_reject or "")
                 validation_reason_observed_v2 = str(
@@ -50332,6 +50425,41 @@ def _post_open_surface_audits(
                 (stash or {}).get("post_open_stage_provenance") or {}
             ),
         }
+        semantic_nodes = _hierarchy_collect_like_semantic_nodes(fresh_hierarchy)
+        exact_not_liked_nodes = [
+            node
+            for node in semantic_nodes
+            if _ui_proof_a2_v5_exact_like_control(
+                node, d, expected_state="action_button_not_liked"
+            )
+        ]
+        if like_surface_ok and exact_not_liked_nodes:
+            exact_like_proof = dict(exact_not_liked_nodes[0])
+            exact_like_bounds = dict(
+                exact_like_proof.get("matched_node_bounds") or {}
+            )
+            try:
+                from follow_60s_canary import runtime_context as _post_open_runtime_context
+                exact_like_ui_generation = int(
+                    _post_open_runtime_context().get("ui_generation") or 0
+                )
+            except Exception:
+                exact_like_ui_generation = 0
+            out.update(
+                {
+                    "exact_like_proof": exact_like_proof,
+                    "exact_like_source": str(
+                        exact_like_proof.get("matched_node_resource_id")
+                        or exact_like_proof.get("matched_node_content_desc")
+                        or "fresh_v5_exact_like"
+                    ),
+                    "exact_like_bounds": exact_like_bounds or None,
+                    "exact_like_xml_fingerprint": hashlib.sha256(
+                        fresh_hierarchy.encode("utf-8", errors="replace")
+                    ).hexdigest()[:20],
+                    "exact_like_ui_generation": exact_like_ui_generation,
+                }
+            )
 
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
     log(
@@ -54205,6 +54333,38 @@ def run_post_follow_post_likes_phase(
         _post_ctx_snapshot_xml = str(
             post_open_audit.get("snapshot_xml") or ""
         )
+        try:
+            from follow_60s_canary import runtime_context as _post_ctx_runtime_context
+            _post_ctx_ui_generation = int(
+                _post_ctx_runtime_context().get("ui_generation") or 0
+            )
+        except Exception:
+            _post_ctx_ui_generation = 0
+        _post_ctx_stage_provenance = dict(
+            open_out.get("post_open_stage_provenance")
+            or post_open_audit.get("post_open_stage_provenance")
+            or {}
+        )
+        _post_ctx_navigation_generation = str(
+            _post_ctx_stage_provenance.get("navigation_generation_at_tap")
+            or _post_ctx_stage_provenance.get("navigation_generation_before")
+            or _post_ctx_ui_generation
+        )
+        _post_ctx_source_cell_material = json.dumps(
+            {
+                "candidate": cand,
+                "open_method": str(open_out.get("open_strategy") or "golden"),
+                "post_bounds_source": str(
+                    ((_canary_grid_evidence or {}).get("post_bounds_source") or "")
+                ),
+                "post_bounds": dict(
+                    _post_ctx_stage_provenance.get("post_bounds") or {}
+                ),
+                "navigation_generation": _post_ctx_navigation_generation,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         _post_ctx = {
             "version": "PostOpenContextV1",
             "account_id": str(authoritative_binding_for_context.get("account_id") or account_id or ""),
@@ -54231,9 +54391,9 @@ def run_post_follow_post_likes_phase(
             "activity": str(_post_ctx_meta.get("current_activity") or ""),
             "viewer_type": "Posts",
             "open_method": str(open_out.get("open_strategy") or "golden"),
-            "source_cell_fingerprint": str(
-                ((_canary_grid_evidence or {}).get("post_bounds_source") or "")
-            ),
+            "source_cell_fingerprint": hashlib.sha256(
+                _post_ctx_source_cell_material.encode("utf-8", errors="replace")
+            ).hexdigest()[:20],
             "v5_positive": True,
             "post_identity_confirmed": bool(post_identity_confirmed),
             "story_or_highlight_detected": False,
@@ -54256,13 +54416,9 @@ def run_post_follow_post_likes_phase(
             "exact_like_ui_generation": int(
                 post_open_audit.get("exact_like_ui_generation") or 0
             ),
+            "post_open_ui_generation": _post_ctx_ui_generation,
             "created_at_monotonic": _post_ctx_created_at,
-            "navigation_generation": str(
-                (open_out.get("post_open_stage_provenance") or {}).get(
-                    "navigation_generation_at_tap"
-                )
-                or ""
-            ),
+            "navigation_generation": _post_ctx_navigation_generation,
             "stage_nonce": _post_ctx_nonce,
         }
         _post_ctx["proof_hash"] = _post_open_context_v1_proof_hash(_post_ctx)

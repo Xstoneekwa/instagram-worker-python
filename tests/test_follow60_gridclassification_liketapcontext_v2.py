@@ -288,11 +288,7 @@ class LikeTapContextV2Tests(unittest.TestCase):
                 expected_package=PKG,
                 expected_follower_username="candidate",
                 expected_stage_binding=self._binding(),
-                post_open_context={
-                    "post_open_context_v1": {
-                        "created_at_monotonic": time.monotonic() - 30.0
-                    }
-                },
+                post_open_context={},
             )
         self.assertEqual(reason, "")
         self.assertEqual(ctx["version"], "LikeTapContextV2")
