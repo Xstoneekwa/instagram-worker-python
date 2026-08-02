@@ -232,6 +232,54 @@ def _follow60_evaluation_barrier_due(
     )
 
 
+def _follow60_evaluation_terminal_contract(
+    *,
+    barrier_due: bool,
+    cycle_complete: bool,
+    canonical_count_match: bool,
+    follow_verified: bool,
+    mute_posts_verified: bool,
+    mute_stories_verified: bool,
+    like_terminal_safe: bool,
+    return_ct_exact: bool,
+    critical_receipts_acknowledged: bool,
+    critical_outbox_pending: int,
+    action_in_progress: bool,
+    next_candidate_started: bool,
+) -> dict[str, Any]:
+    """Fail-closed proof for the evaluation-only successful terminal."""
+
+    checks = {
+        "barrier_due": bool(barrier_due),
+        "cycle_complete": bool(cycle_complete),
+        "canonical_count_match": bool(canonical_count_match),
+        "follow_verified": bool(follow_verified),
+        "mute_posts_verified": bool(mute_posts_verified),
+        "mute_stories_verified": bool(mute_stories_verified),
+        "like_terminal_safe": bool(like_terminal_safe),
+        "return_ct_exact": bool(return_ct_exact),
+        "critical_receipts_acknowledged": bool(critical_receipts_acknowledged),
+        "critical_outbox_empty": int(critical_outbox_pending or 0) == 0,
+        "no_action_in_progress": not bool(action_in_progress),
+        "no_next_candidate_started": not bool(next_candidate_started),
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    return {
+        "ok": not failed,
+        "terminal_status": (
+            "completed_waiting_operator_evaluation" if not failed else ""
+        ),
+        "reason": (
+            "follow60_evaluation_barrier_terminal_ready"
+            if not failed
+            else f"follow60_evaluation_barrier_unsafe:{failed[0]}"
+        ),
+        "checks": checks,
+        "failed_checks": failed,
+        "critical_outbox_pending": int(critical_outbox_pending or 0),
+    }
+
+
 
 
 def _pre_follow_gap_log(
@@ -11437,6 +11485,7 @@ def _run_followers_list_engine_session(
         *,
         stage_receipts_enabled: bool,
         cycle_complete: bool,
+        cycle_evidence: dict[str, Any] | None = None,
     ) -> bool:
         from follow_60s_canary_binding_v2 import parse_control
 
@@ -11452,7 +11501,8 @@ def _run_followers_list_engine_session(
             return False
         expected_barrier_total = int(control.get("baseline_follow_count") or 0) + evaluation_increment
         canonical_barrier_total = supabase_client.count_successful_follows_today(account_id)
-        if canonical_barrier_total != expected_barrier_total:
+        canonical_count_match = canonical_barrier_total == expected_barrier_total
+        if not canonical_count_match:
             log(
                 "error", "follow_60s_evaluation_barrier_count_mismatch",
                 expected=expected_barrier_total,
@@ -11463,6 +11513,42 @@ def _run_followers_list_engine_session(
                 device_actions_blocked=True,
             )
             device_action_latch.request_stop(reason="evaluation_barrier_count_mismatch")
+            raise SystemExit(95)
+        evidence = dict(cycle_evidence or {})
+        terminal_contract = _follow60_evaluation_terminal_contract(
+            barrier_due=True,
+            cycle_complete=bool(cycle_complete),
+            canonical_count_match=bool(canonical_count_match),
+            follow_verified=bool(evidence.get("follow_verified")),
+            mute_posts_verified=bool(evidence.get("mute_posts_verified")),
+            mute_stories_verified=bool(evidence.get("mute_stories_verified")),
+            like_terminal_safe=bool(evidence.get("like_terminal_safe")),
+            return_ct_exact=bool(evidence.get("return_ct_exact")),
+            critical_receipts_acknowledged=bool(
+                evidence.get("critical_receipts_acknowledged")
+            ),
+            critical_outbox_pending=int(evidence.get("critical_outbox_pending") or 0),
+            action_in_progress=bool(evidence.get("action_in_progress")),
+            next_candidate_started=bool(evidence.get("next_candidate_started")),
+        )
+        if not bool(terminal_contract.get("ok")):
+            log(
+                "error",
+                "follow_60s_evaluation_barrier_terminal_contract_rejected",
+                expected=expected_barrier_total,
+                canonical=canonical_barrier_total,
+                terminal_status="",
+                terminal_reason=terminal_contract.get("reason"),
+                failed_checks=terminal_contract.get("failed_checks"),
+                checks=terminal_contract.get("checks"),
+                critical_outbox_pending=terminal_contract.get(
+                    "critical_outbox_pending"
+                ),
+                device_actions_blocked=True,
+            )
+            device_action_latch.request_stop(
+                reason="evaluation_barrier_terminal_contract_rejected"
+            )
             raise SystemExit(95)
         barrier_out = supabase_client.mark_follow_60s_canary_barrier_v1(
             account_id=account_id,
@@ -11481,6 +11567,12 @@ def _run_followers_list_engine_session(
             completed_new_cycles=int(follow60_completed_cycle_count),
             cycle_complete=bool(cycle_complete),
             no_eleventh_candidate=True,
+            terminal_status=terminal_contract.get("terminal_status"),
+            terminal_reason=terminal_contract.get("reason"),
+            critical_receipts_acknowledged=True,
+            critical_outbox_pending=0,
+            action_in_progress=False,
+            next_candidate_started=False,
         )
         # The DB transition above atomically installs the evaluation hold and
         # blocks Auto Restart. Return through normal orchestration so cleanup,
@@ -20627,11 +20719,66 @@ def _run_followers_list_engine_session(
                 if _follow60_wait_at_evaluation_barrier_if_reached(
                     stage_receipts_enabled=bool(_follow60_stage_receipts),
                     cycle_complete=True,
+                    cycle_evidence={
+                        "follow_verified": bool(_pf.get("follow_success_verified")),
+                        "mute_posts_verified": bool(
+                            (_pf.get("stage_persist_results") or {}).get(
+                                "mute_posts_verified"
+                            )
+                        ),
+                        "mute_stories_verified": bool(
+                            (_pf.get("stage_persist_results") or {}).get(
+                                "mute_stories_verified"
+                            )
+                        ),
+                        "like_terminal_safe": bool(
+                            (
+                                int((_pf.get("likes") or {}).get("liked_count") or 0)
+                                > 0
+                                and (_pf.get("stage_persist_results") or {}).get(
+                                    "like_verified"
+                                ) is True
+                            )
+                            or (
+                                str(
+                                    (_pf.get("likes") or {}).get("phase_outcome")
+                                    or ""
+                                )
+                                == "skipped"
+                                and (_pf.get("likes") or {}).get("ok") is True
+                            )
+                        ),
+                        "return_ct_exact": bool(
+                            _pf.get("return_ok") is True
+                            and (_pf.get("stage_persist_results") or {}).get(
+                                "return_ct_exact"
+                            ) is True
+                        ),
+                        "critical_receipts_acknowledged": bool(
+                            _critical_persist_ok
+                            and _follow60_composite_flush.get("ok") is True
+                        ),
+                        "critical_outbox_pending": int(
+                            _follow60_composite_flush.get("pending") or 0
+                        ),
+                        "action_in_progress": False,
+                        "next_candidate_started": False,
+                    },
                 ):
                     _publish_followers_session_summary(
                         exit_code=0,
                         follow_session_outcome="evaluation_barrier_reached",
                         follow_stop_reason="follow60_evaluation_barrier_reached",
+                        follow60_evaluation_terminal_status=(
+                            "completed_waiting_operator_evaluation"
+                        ),
+                        follow60_evaluation_terminal_reason=(
+                            "follow60_evaluation_barrier_terminal_ready"
+                        ),
+                        critical_receipts_acknowledged=True,
+                        critical_outbox_pending=0,
+                        action_in_progress=False,
+                        next_candidate_started=False,
                     )
                     return 0
 

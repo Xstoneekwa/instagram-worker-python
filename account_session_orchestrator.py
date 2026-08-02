@@ -1128,6 +1128,42 @@ def _run_follow_target_rotation(
             extra_diagnostics=summary,
         )
         attempts[-1]["follow_outcome"] = dict(summary.get("follow_outcome") or {})
+        if summary_reason in {
+            "evaluation_barrier_reached",
+            "follow60_evaluation_barrier_reached",
+        }:
+            final_reason = "follow60_evaluation_barrier_reached"
+            final_exit_code = 0
+            final_summary.update(
+                {
+                    "exit_code": 0,
+                    "follow_session_outcome": "evaluation_barrier_reached",
+                    "follow_stop_reason": final_reason,
+                    "follow60_evaluation_terminal_status": (
+                        "completed_waiting_operator_evaluation"
+                    ),
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "current_target": source_profile,
+                    "rotation_attempts": attempts,
+                    "target_rotation_allowed": False,
+                    "no_next_candidate": True,
+                }
+            )
+            log(
+                "info",
+                "follow60_evaluation_barrier_rotation_blocked",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                completed_new_cycles=summary.get("follows_completed_count"),
+                terminal_status="completed_waiting_operator_evaluation",
+                no_next_candidate=True,
+                no_next_target=True,
+            )
+            break
         if summary_reason == "global_follow_cap_reached":
             final_reason = "global_follow_cap_reached"
             final_exit_code = 0
@@ -1836,6 +1872,7 @@ def _blocked_class_from_markers(*parts: Any) -> str | None:
 
 _TERMINAL_PHASE_STATUSES = {
     "completed",
+    "completed_waiting_operator_evaluation",
     "candidates_exhausted",
     "quota_reached",
     "partial_resumable",
@@ -2108,6 +2145,11 @@ def _session_termination_class(
         return "unknown" if session_status != "failed" else "recoverable_failure"
     if str(follow_session_outcome or "").strip() == "no_followable_candidates_all_targets":
         return "completed"
+    if str(follow_session_outcome or "").strip() in {
+        "evaluation_barrier_reached",
+        "follow60_evaluation_barrier_reached",
+    }:
+        return "completed_waiting_operator_evaluation"
     if follow_exit_code == 0:
         if follow_quota_remaining is not None and follow_quota_remaining > 0:
             return "partial_resumable"
@@ -2152,7 +2194,12 @@ def _restart_eligibility(
         and str(unfollow_outcome.get("last_safe_checkpoint") or "").strip()
     ):
         return "eligible", "unfollow_partial_resumable"
-    if session_termination_class == "completed":
+    if session_termination_class in {
+        "completed",
+        "completed_waiting_operator_evaluation",
+    }:
+        if session_termination_class == "completed_waiting_operator_evaluation":
+            return "not_needed", "waiting_operator_evaluation"
         return "not_needed", "session_completed"
     if session_termination_class == "partial_safe_but_continued":
         if follow_quota_remaining is not None and follow_quota_remaining > 0:

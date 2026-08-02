@@ -22,6 +22,12 @@ RESUMABLE_PHASE_REASONS = frozenset(
         "target_budget_reached",
     }
 )
+EVALUATION_BARRIER_REASONS = frozenset(
+    {
+        "evaluation_barrier_reached",
+        "follow60_evaluation_barrier_reached",
+    }
+)
 CRITICAL_MARKERS = (
     "account_mismatch",
     "active_instagram_account_mismatch",
@@ -107,6 +113,14 @@ def build_follow_outcome(
         # Missing a local scroll anchor is not itself a dangerous surface.  The
         # boundary becomes actionable only after the CT switcher proves it.
         boundary = bool(safe_boundary)
+    elif reason in EVALUATION_BARRIER_REASONS:
+        phase_status = "completed_waiting_operator_evaluation"
+        scope = "follow_phase"
+        current_ct_status = "completed"
+        safe_next_step = "wait_operator_evaluation"
+        suggested_next_action = "wait_operator_evaluation"
+        suggested_resume_strategy = "operator_evaluation_required"
+        boundary = True
     elif reason in GLOBAL_COMPLETION_REASONS or all_targets_exhausted:
         phase_status = "completed"
         scope = "follow_phase"
@@ -155,7 +169,10 @@ def build_follow_outcome(
         "phase_status": phase_status,
         "scope": scope,
         "stable_reason": reason,
-        "completed": phase_status == "completed",
+        "completed": phase_status in {
+            "completed",
+            "completed_waiting_operator_evaluation",
+        },
         "partial": phase_status.startswith("partial_"),
         "resumable": phase_status == "partial_resumable",
         "verified_actions": verified,
