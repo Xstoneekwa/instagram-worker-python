@@ -133,6 +133,8 @@ def _classify_http_error(exc: error.HTTPError, detail: str) -> str:
         or "function" in detail_lower and "does not exist" in detail_lower
     ):
         return "supabase_rpc_not_available"
+    if exc.code in {400, 409, 422, 500} and "follow_persistence_" in detail_lower:
+        return "supabase_rpc_business_rule_rejected"
     return base_reason
 
 
@@ -175,6 +177,7 @@ def _request_urlopen(
                 "supabase_auth_403",
                 "supabase_schema_payload_incompatible",
                 "supabase_rpc_not_available",
+                "supabase_rpc_business_rule_rejected",
             } or attempt >= retry_limit:
                 raise rest_exc from exc
             last_exc = rest_exc

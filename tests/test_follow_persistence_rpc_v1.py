@@ -88,6 +88,21 @@ def canonical_evidence(action_id: str) -> dict:
 
 
 class FollowPersistenceContractTest(unittest.TestCase):
+    def test_follow_business_rule_http_error_is_exact_and_not_retryable(self) -> None:
+        exc = error.HTTPError(
+            "https://example.invalid/rest/v1/rpc/persist_verified_follow_success_v1",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(b'{"message":"follow_persistence_active_interaction_exists"}'),
+        )
+        self.assertEqual(
+            supabase_client._classify_http_error(
+                exc, '{"message":"follow_persistence_active_interaction_exists"}'
+            ),
+            "supabase_rpc_business_rule_rejected",
+        )
+
     def test_flag_defaults_off_and_accepts_explicit_true(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(follow_persistence_rpc.rpc_v1_enabled())

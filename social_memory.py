@@ -215,6 +215,18 @@ def evaluate_follow_eligibility(
                 detail,
             )
 
+        persistent_active, persistent_reason, persistent_detail = (
+            db_row_persistent_active_follow_connection(db_row)
+        )
+        if persistent_active:
+            return FollowEligibility(
+                False,
+                "persistent_active_follow_connection",
+                "social_memory_follow_blocked",
+                ACTIVE_FOLLOWING,
+                {**detail, **persistent_detail, "persistent_reason": persistent_reason},
+            )
+
         life = (
             str(_row_pick(db_row, "interaction_lifecycle_state") or "").strip().lower()
         )
