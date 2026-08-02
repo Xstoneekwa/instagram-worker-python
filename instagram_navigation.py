@@ -23692,6 +23692,21 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
             wh=int(wh),
             profile_identity_exact=True,
         )
+        if str(reacquired.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
+            reacquired = _post_follow_post_reveal_safe_first_row_contract(
+                d,
+                reacquired,
+                hierarchy_xml=fresh_xml,
+                candidate_username=(
+                    candidate_username
+                    or str(out.get("candidate_username") or "")
+                ),
+                expected_package=str(
+                    getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+                ),
+                ww=int(ww),
+                wh=int(wh),
+            )
         reacquired["reveal_scroll_attempted"] = True
         reacquired["reveal_scroll_ok"] = True
         reacquired["reveal_distance_px"] = reveal.get("scroll_distance_px")
@@ -23734,6 +23749,154 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     return out
 
 
+def _post_follow_post_reveal_safe_first_row_contract(
+    d: u2.Device,
+    classified: dict[str, Any] | None,
+    *,
+    hierarchy_xml: str,
+    candidate_username: str,
+    expected_package: str,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    """Promote only a fully visible first row from the one fresh reveal XML."""
+    out = dict(classified or {})
+    out.setdefault("post_reveal_safe_reason", "")
+    if str(out.get("outcome") or "") != "POST_ROW_POSITIVE_BUT_CLIPPED":
+        return out
+    required = (
+        bool(out.get("identity_exact")),
+        bool(out.get("profile_tabs_present")),
+        bool(out.get("grid_selected")),
+        bool(out.get("post_count_positive")),
+        not bool(out.get("reels_or_tagged_selected")),
+        not bool(out.get("loading_visible")),
+        not bool(out.get("private_profile_visible")),
+        not bool(out.get("suggested_region_detected")),
+        not bool(out.get("highlights_region_detected")),
+    )
+    if not all(required):
+        out["post_reveal_safe_rejection_reason"] = (
+            "post_reveal_positive_surface_contract_missing"
+        )
+        return out
+    xml = str(hierarchy_xml or "")
+    lower_xml = xml.lower()
+    if any(
+        token in lower_xml
+        for token in (
+            "story_viewer", "reel_viewer", "highlight_viewer",
+            "story viewer", "highlight viewer",
+        )
+    ):
+        out["post_reveal_safe_rejection_reason"] = "story_highlight_marker_present"
+        return out
+    meta = _followers_current_pkg_activity(d)
+    package = str(meta.get("current_package") or "")
+    activity = str(meta.get("current_activity") or "")
+    if package != str(expected_package or ""):
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_package_mismatch"
+        return out
+    if "instagram" not in activity.lower() or "mainactivity" not in activity.lower():
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_activity_mismatch"
+        return out
+    if _normalize_handle(str(out.get("candidate_username") or candidate_username)) != _normalize_handle(
+        candidate_username
+    ):
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_candidate_mismatch"
+        return out
+    dimensions = _post_follow_screen_dimensions_from_hierarchy(
+        xml,
+        raw_width=int(ww),
+        raw_height=int(wh),
+    )
+    frame = dict(dimensions.get("coordinate_frame") or {})
+    if not bool(dimensions.get("screen_dimensions_trusted")) or not frame:
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_frame_untrusted"
+        return out
+    try:
+        from follow_60s_canary import runtime_context as _post_reveal_runtime_context
+        generation = int(_post_reveal_runtime_context().get("ui_generation") or 0)
+    except Exception:
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_generation_missing"
+        return out
+    cells = [
+        dict(cell)
+        for cell in (out.get("physical_cells") or [])
+        if isinstance(cell, dict)
+    ]
+    if not cells:
+        out["post_reveal_safe_rejection_reason"] = "post_reveal_physical_cell_missing"
+        return out
+    tabs_bottom = int(out.get("tabs_bottom") or 0)
+    exploitable_bottom = int(
+        out.get("fully_exploitable_bottom") or dimensions.get("screen_height") or wh
+    )
+    slack = max(6, int(wh * 0.006))
+    safe_cells: list[dict[str, Any]] = []
+    for cell in cells:
+        try:
+            top = int(cell["top"])
+            bottom = int(cell["bottom"])
+            left = int(cell["left"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if top < max(0, tabs_bottom - 4) or bottom >= exploitable_bottom - slack:
+            continue
+        evaluated = _post_follow_likes_evaluate_top_left_post_target(
+            cell,
+            # Reuse the existing audited physical-XML source contract.  The
+            # dedicated post-reveal provenance is carried separately below;
+            # it must not silently widen the global safe-source allowlist.
+            reason="xml_thumbnail_top_left",
+            ww=int(ww),
+            wh=int(wh),
+            y_min_px=int(tabs_bottom),
+        )
+        if bool(evaluated.get("top_left_post_tap_safe")):
+            safe_cells.append({**cell, "_left": left, "_top": top})
+    if not safe_cells:
+        out["post_reveal_safe_rejection_reason"] = (
+            "post_reveal_fully_visible_first_row_missing"
+        )
+        return out
+    first_top = min(int(cell["_top"]) for cell in safe_cells)
+    row_slack = max(8, int(ww * 0.02))
+    first_row = [
+        cell for cell in safe_cells
+        if abs(int(cell["_top"]) - first_top) <= row_slack
+    ]
+    chosen = min(first_row, key=lambda cell: int(cell["_left"]))
+    chosen = {
+        key: int(chosen[key])
+        for key in ("left", "top", "right", "bottom", "center_x", "center_y")
+        if key in chosen
+    }
+    fingerprint = hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()
+    out.update(
+        {
+            "outcome": "POST_ROW_POSITIVE_SAFE",
+            "evidence_status": "POST_ROW_POSITIVE_SAFE",
+            "post_bounds": chosen,
+            "post_bounds_source": "single_reveal_fresh_xml_safe_first_row_v1",
+            "rejection_reason": "",
+            "tap_safe": True,
+            "candidate_clipped": False,
+            "other_row_clipped": True,
+            "post_reveal_safe_reason": (
+                "fresh_xml_exact_identity_posts_tab_safe_first_row_lower_clip_ignored"
+            ),
+            "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+            "post_reveal_xml_fingerprint": fingerprint,
+            "post_reveal_ui_generation": generation,
+            "post_reveal_coordinate_frame": frame,
+            "post_reveal_package": package,
+            "post_reveal_activity": activity,
+        }
+    )
+    return out
+
+
 def _post_follow_create_fresh_tap_proof_from_grid(
     d: u2.Device,
     *,
@@ -23767,6 +23930,16 @@ def _post_follow_create_fresh_tap_proof_from_grid(
         ww=int(ww), wh=int(wh),
         profile_identity_exact=True,
     )
+    if str(classified.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
+        classified = _post_follow_post_reveal_safe_first_row_contract(
+            d,
+            classified,
+            hierarchy_xml=xml,
+            candidate_username=candidate_username,
+            expected_package=pkg,
+            ww=int(ww),
+            wh=int(wh),
+        )
     if str(classified.get("outcome") or "") != "POST_ROW_POSITIVE_SAFE":
         return {
             "ok": False,

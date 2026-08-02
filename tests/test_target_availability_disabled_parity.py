@@ -191,6 +191,25 @@ def _without_reviewed_follow60_binding(node: ast.FunctionDef) -> ast.FunctionDef
     return ast.fix_missing_locations(RemoveReviewedFollow60Binding().visit(normalized))
 
 
+def _without_reviewed_follow60_evaluation_barrier(node: ast.FunctionDef) -> ast.FunctionDef:
+    """Remove only the reviewed Follow60 terminal evaluation barrier delta."""
+    normalized = copy.deepcopy(node)
+
+    class RemoveReviewedEvaluationBarrier(ast.NodeTransformer):
+        def visit_If(self, item):
+            if any(
+                isinstance(child, ast.Constant)
+                and child.value == "follow60_evaluation_barrier_rotation_blocked"
+                for child in ast.walk(item)
+            ):
+                return None
+            return self.generic_visit(item)
+
+    return ast.fix_missing_locations(
+        RemoveReviewedEvaluationBarrier().visit(normalized)
+    )
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -205,10 +224,12 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_follow60_binding(
-            _without_reviewed_resume_quota_bound(
-                _without_availability_or_provenance_hooks(
-                    _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_follow60_evaluation_barrier(
+            _without_reviewed_follow60_binding(
+                _without_reviewed_resume_quota_bound(
+                    _without_availability_or_provenance_hooks(
+                        _function(current_source, "_run_follow_target_rotation")
+                    )
                 )
             )
         )

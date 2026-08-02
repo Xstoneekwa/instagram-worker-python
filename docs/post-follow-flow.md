@@ -182,3 +182,27 @@ les bounds exactes du contrôle Like, le package/activity, la génération UI et
 le verdict positif V5. Un signal Story/Highlight gagne toujours. Le contexte
 est ensuite validé sous son propre TTL court et consommé immédiatement ; au
 moindre doute, aucun tap Like n'est envoyé.
+
+### Bloc A — barrière, pont V5 et première rangée post-reveal
+
+Une barrière d'évaluation Follow60 n'est terminalisée en succès opérateur que
+si le cycle qui atteint exactement la cible est complet : Follow, les deux
+Mutes requis, Like vérifié ou skip sûr, retour CT exact, reçus acquittés et
+outbox vide. Le terminal dédié `completed_waiting_operator_evaluation` ne crée
+ni incident ni reprise Auto Restart et ne lance aucun candidat supplémentaire.
+Un Stop incomplet, un crash ou une preuve manquante reste hors de ce chemin.
+
+Après ouverture d'un post, le pont immuable `PostOpenContextV1` vers
+`LikeTapContextV2` transporte les bindings account/run/request/action, le
+candidat, package/activity, le verdict V5, les fingerprints, générations,
+bounds et nonce. Quand V5 est positif mais que les champs Like exacts ne sont
+pas déjà transportés, une seule réacquisition XML est autorisée. Elle doit
+reconstruire une preuve identique et bornée ; sinon le Like échoue fermé. Aucun
+screenshot ni dump supplémentaire n'est ajouté au happy path exact.
+
+Après l'unique reveal PostGrid, `PostRevealSafeFirstRowV1` peut promouvoir la
+rangée supérieure totalement visible même si une rangée inférieure reste
+coupée. La preuve vient du même XML frais et lie identité exacte, onglet Posts,
+absence de Suggested/Story/Highlight, package/activity, repère, génération et
+fingerprint. Le tap direct produit ensuite une nouvelle `FreshTapProof` et le
+garde V5 reste obligatoire. Toute ambiguïté conserve un seul fallback Golden.

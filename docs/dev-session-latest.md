@@ -1,5 +1,16 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## Handover TODO — CT_RESUME_ANCHOR_FOUND_PREFIX_HANDLING
+
+Statut : **TODO séparé, hors Bloc A Follow60**.
+
+Auditer puis corriger dans une intervention dédiée le traitement du préfixe
+`anchor_found` de CT Resume. Le chantier devra repartir de la lignée Worker
+alors active, préserver les contrats Follow60/Post-Follow et prouver les
+bindings CT Resume V4 avant toute activation. Le Bloc A ne modifie ni le
+préfixe, ni Return CT, ni le runtime, et ne constitue pas une certification
+terrain de cette dette.
+
 ## Target Availability Gate 4B offline preparation — 2026-07-29
 
 The successor candidate starts from active Worker `9bc958b` and adds only a
