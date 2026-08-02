@@ -44,6 +44,7 @@ from unfollow_settings import UNFOLLOW_MODE_ANY, UNFOLLOW_MODES_DB_STRICT, load_
 from welcome_list_sender import get_last_welcome_list_sender_summary
 from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
+from worker_runtime_identity import WorkerRuntimeIdentity
 from account_commercial_policy import (
     commercial_policy_boundary_blocks_phase,
     load_account_commercial_policy_revision,
@@ -780,6 +781,7 @@ def _run_follow_target_rotation(
     business_session_id: str | None = None,
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -972,6 +974,7 @@ def _run_follow_target_rotation(
                 if isinstance(auto_restart_resume_policy, dict)
                 else None
             ),
+            "worker_runtime_identity": worker_runtime_identity,
         }
         if follow60_canary_active:
             call_kwargs.update(
@@ -3578,6 +3581,7 @@ def run_account_session(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
     _LAST_ACCOUNT_SESSION_SUMMARY = {}
@@ -4068,6 +4072,7 @@ def run_account_session(
                     target_followers_resume_source_request_id
                 ),
                 auto_restart_resume_policy=auto_restart_resume_policy,
+                worker_runtime_identity=worker_runtime_identity,
                 **_follow60_rotation_kwargs,
             )
             follow_t1 = time.perf_counter()
@@ -5011,6 +5016,7 @@ def dispatch_account_session(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -5037,4 +5043,5 @@ def dispatch_account_session(
         follow60_canary_control=follow60_canary_control,
         follow60_attempt_id=follow60_attempt_id,
         business_session_id=business_session_id,
+        worker_runtime_identity=worker_runtime_identity,
     )

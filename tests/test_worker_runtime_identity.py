@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from worker_runtime_identity import (
+    RUNTIME_IDENTITY_ENV,
+    WorkerRuntimeIdentity,
     WorkerRuntimeIdentityError,
+    bind_worker_runtime_identity,
     resolve_worker_runtime_identity,
+    validate_worker_runtime_identity_binding,
+    worker_runtime_identity_env,
 )
 
 
@@ -49,6 +55,67 @@ class WorkerRuntimeIdentityTest(unittest.TestCase):
         nested.mkdir()
         with self.assertRaisesRegex(WorkerRuntimeIdentityError, "root_mismatch"):
             resolve_worker_runtime_identity(nested, environ={})
+
+    def test_transport_round_trip_preserves_canonical_binding(self) -> None:
+        original = resolve_worker_runtime_identity(
+            self.root,
+            environ={"WORKER_RUNTIME_WRAPPER_PID": "123"},
+        )
+        bound = bind_worker_runtime_identity(
+            original,
+            request_id="66f92055-21ee-4a7c-a042-3a857d3f8448",
+            run_id="9bde8e78-7955-46d5-bd29-044548d2a911",
+            attempt_id=2,
+            consumer_pid=456,
+        )
+        transport_env = worker_runtime_identity_env(bound)
+        restored = resolve_worker_runtime_identity(self.root, environ=transport_env)
+        self.assertEqual(restored.worker_sha, self.head)
+        self.assertEqual(restored.release_head, self.head)
+        self.assertEqual(restored.wrapper_pid, 123)
+        self.assertEqual(restored.consumer_pid, 456)
+        self.assertEqual(restored.request_id, bound.request_id)
+        self.assertEqual(restored.run_id, bound.run_id)
+        self.assertEqual(restored.attempt_id, 2)
+        self.assertEqual(restored.verified_at, original.verified_at)
+        self.assertEqual(restored.source, "transport_verified_against_release_head")
+
+    def test_transport_sha_mismatch_has_exact_taxonomy(self) -> None:
+        identity = resolve_worker_runtime_identity(self.root, environ={})
+        env = worker_runtime_identity_env(identity)
+        payload = json.loads(env[RUNTIME_IDENTITY_ENV])
+        payload["worker_sha"] = "0" * 40
+        env[RUNTIME_IDENTITY_ENV] = json.dumps(payload)
+        with self.assertRaises(WorkerRuntimeIdentityError) as caught:
+            resolve_worker_runtime_identity(self.root, environ=env)
+        self.assertEqual(caught.exception.reason, "env_head_mismatch")
+        self.assertEqual(caught.exception.stage, "transport_verify")
+
+    def test_transport_missing_release_head_fails_closed(self) -> None:
+        identity = resolve_worker_runtime_identity(self.root, environ={})
+        env = worker_runtime_identity_env(identity)
+        payload = json.loads(env[RUNTIME_IDENTITY_ENV])
+        payload["release_head"] = ""
+        env[RUNTIME_IDENTITY_ENV] = json.dumps(payload)
+        with self.assertRaises(WorkerRuntimeIdentityError) as caught:
+            resolve_worker_runtime_identity(self.root, environ=env)
+        self.assertEqual(caught.exception.reason, "release_head_unresolved")
+
+    def test_binding_rejects_identity_without_worker_sha(self) -> None:
+        identity = WorkerRuntimeIdentity(
+            runtime_root=str(self.root),
+            worker_sha="",
+            source="test",
+            release_path=str(self.root),
+            release_head=self.head,
+        )
+        reason, _ = validate_worker_runtime_identity_binding(
+            identity,
+            request_id="request",
+            run_id="run",
+            attempt_id=1,
+        )
+        self.assertEqual(reason, "worker_sha_env_missing")
 
 
 if __name__ == "__main__":

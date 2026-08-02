@@ -1091,6 +1091,27 @@ class ReplayAndStaticSafetyTests(unittest.TestCase):
 
 
 class RunnerResumeProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def _runtime_identity(
+        sha: str,
+        *,
+        request_id: str = "30000000-0000-4000-8000-000000000002",
+        run_id: str = RUN_A,
+        attempt_id: int = 2,
+        release_head: str | None = None,
+    ):
+        module_root = str(Path(runner.__file__).resolve().parent)
+        return runner.WorkerRuntimeIdentity(
+            runtime_root=module_root,
+            worker_sha=sha,
+            source="transport_verified_against_release_head",
+            release_path=module_root,
+            release_head=release_head if release_head is not None else sha,
+            runtime_root_ok=True,
+            request_id=request_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
     def test_first_pass_v5_migration_is_additive_service_role_only(self):
         root = Path(__file__).resolve().parents[1]
         sql = (root / "supabase" / "migrations" / "20260802003000_target_followers_resume_first_pass_progress_v5.sql").read_text()
@@ -1140,85 +1161,53 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
             "run_request_id",
         )
 
-    def test_active_root_short_commit_resolves_to_matching_full_sha(self):
+    def test_certified_identity_resolves_to_matching_full_sha_without_git(self):
         full_sha = "a" * 40
-        module_root = str(Path(runner.__file__).resolve().parent)
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "PHONEFARM_ACTIVE_ROOT": module_root,
-                    "PHONEFARM_ACTIVE_COMMIT": full_sha[:7],
-                },
-                clear=False,
-            ),
-            patch.object(runner, "_full_git_commit_for_root", return_value=full_sha),
-        ):
-            self.assertEqual(runner._resolve_active_worker_release_sha(), full_sha)
+        identity = self._runtime_identity(full_sha)
+        with patch.object(runner.subprocess, "run") as git_run:
+            self.assertEqual(runner._resolve_active_worker_release_sha(identity), full_sha)
+        git_run.assert_not_called()
 
-    def test_active_root_commit_mismatch_fails_closed(self):
+    def test_certified_identity_head_mismatch_fails_closed(self):
         full_sha = "a" * 40
-        module_root = str(Path(runner.__file__).resolve().parent)
-        invalid_runtime = SimpleNamespace(
-            ok=False,
-            resolved_root="",
-            commit="",
-        )
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "PHONEFARM_ACTIVE_ROOT": module_root,
-                    "PHONEFARM_ACTIVE_COMMIT": "b" * 7,
-                },
-                clear=False,
-            ),
-            patch.object(runner, "_full_git_commit_for_root", return_value=full_sha),
-            patch(
-                "phonefarm_runtime_control.resolve_runtime_root",
-                return_value=invalid_runtime,
-            ),
-        ):
-            self.assertEqual(runner._resolve_active_worker_release_sha(), "")
+        identity = self._runtime_identity(full_sha, release_head="b" * 40)
+        self.assertEqual(runner._resolve_active_worker_release_sha(identity), "")
 
     def test_auto_restart_attempt_two_is_used_from_explicit_policy(self):
         full_sha = "c" * 40
-        with patch.object(
-            runner,
-            "_resolve_active_worker_release_sha",
-            return_value=full_sha,
-        ):
-            provenance, reason = runner._resolve_target_followers_resume_provenance(
-                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
-                auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
-            )
+        provenance, reason, diagnostics = runner._resolve_target_followers_resume_provenance(
+            target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
+            auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
+            worker_runtime_identity=self._runtime_identity(full_sha),
+            run_id=RUN_A,
+        )
         self.assertEqual(reason, "provenance_resolved")
+        self.assertEqual(diagnostics["stage"], "ct_resume_identity_binding")
         self.assertEqual(provenance["source_attempt_id"], 2)
         self.assertEqual(provenance["release_sha"], full_sha)
 
     def test_auto_restart_missing_attempt_never_falls_back_to_one(self):
-        with patch.object(
-            runner,
-            "_resolve_active_worker_release_sha",
-            return_value="d" * 40,
-        ):
-            provenance, reason = runner._resolve_target_followers_resume_provenance(
-                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
-                auto_restart_resume_policy={"phases_to_run": {"follow": True}},
-            )
+        provenance, reason, _ = runner._resolve_target_followers_resume_provenance(
+            target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
+            auto_restart_resume_policy={"phases_to_run": {"follow": True}},
+            worker_runtime_identity=self._runtime_identity("d" * 40),
+            run_id=RUN_A,
+        )
         self.assertIsNone(provenance)
         self.assertEqual(reason, "canonical_request_attempt_missing_or_invalid")
 
     def test_initial_non_restart_request_uses_attempt_one(self):
-        with patch.object(
-            runner,
-            "_resolve_active_worker_release_sha",
-            return_value="e" * 40,
-        ):
-            provenance, reason = runner._resolve_target_followers_resume_provenance(
-                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000001",
-                auto_restart_resume_policy=None,
-            )
+        request_id = "30000000-0000-4000-8000-000000000001"
+        provenance, reason, _ = runner._resolve_target_followers_resume_provenance(
+            target_followers_resume_source_request_id=request_id,
+            auto_restart_resume_policy=None,
+            worker_runtime_identity=self._runtime_identity(
+                "e" * 40,
+                request_id=request_id,
+                attempt_id=1,
+            ),
+            run_id=RUN_A,
+        )
         self.assertEqual(reason, "provenance_resolved")
         self.assertEqual(provenance["source_attempt_id"], 1)
 
@@ -1226,15 +1215,12 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
         full_sha = "f" * 40
         events = []
         rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
-        with patch.object(
-            runner,
-            "_resolve_active_worker_release_sha",
-            return_value=full_sha,
-        ):
-            provenance, reason = runner._resolve_target_followers_resume_provenance(
-                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
-                auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
-            )
+        provenance, reason, _ = runner._resolve_target_followers_resume_provenance(
+            target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
+            auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
+            worker_runtime_identity=self._runtime_identity(full_sha),
+            run_id=RUN_A,
+        )
         self.assertEqual(reason, "provenance_resolved")
         controller = resume.build_runtime_controller(
             account_id=ACCOUNT_A,

@@ -48,11 +48,16 @@ import follow_persistence_receipt_replay
 import deferred_projection_outbox
 import device_action_latch
 from worker_runtime_identity import (
+    WorkerRuntimeIdentity,
+    bind_worker_runtime_identity,
     export_worker_runtime_identity,
     resolve_worker_runtime_identity,
+    validate_worker_runtime_identity_binding,
 )
 from follow_outcome_contract import merge_follow_outcome
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
+
+_CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
 from follow_persistence_rpc import (
     action_id_hash,
     deterministic_action_id,
@@ -11029,81 +11034,90 @@ def _full_git_commit_for_root(root: Path) -> str:
     return commit if completed.returncode == 0 and _FULL_RELEASE_COMMIT_RE.fullmatch(commit) else ""
 
 
-def _resolve_active_worker_release_sha() -> str:
-    """Return the commit of the immutable release executing this module.
+def _resolve_active_worker_release_sha(
+    worker_runtime_identity: WorkerRuntimeIdentity | None = None,
+) -> str:
+    """Return the already-certified release SHA without a second Git lookup."""
 
-    The dispatcher exports both the resolved runtime root and its commit.  We
-    accept that pair only when the root is this module's directory.  Direct
-    invocations without those variables use the same canonical runtime-root
-    resolver used by dispatcher control, with the same root equality check.
-    This prevents a test worktree or stale environment variable from being
-    labelled with the active production release.
-    """
-
-    module_root = Path(__file__).resolve().parent
-    env_root = str(os.environ.get("PHONEFARM_ACTIVE_ROOT") or "").strip()
-    env_commit = str(os.environ.get("PHONEFARM_ACTIVE_COMMIT") or "").strip().lower()
-    if env_root and _RELEASE_COMMIT_RE.fullmatch(env_commit):
-        try:
-            if Path(env_root).expanduser().resolve(strict=False) == module_root:
-                full_commit = _full_git_commit_for_root(module_root)
-                if full_commit.startswith(env_commit):
-                    return full_commit
-        except (OSError, RuntimeError):
-            pass
-
-    try:
-        from phonefarm_runtime_control import resolve_runtime_root
-
-        runtime_root = resolve_runtime_root()
-        resolved_commit = str(runtime_root.commit or "").strip().lower()
-        if (
-            runtime_root.ok
-            and _RELEASE_COMMIT_RE.fullmatch(resolved_commit)
-            and Path(runtime_root.resolved_root).resolve(strict=False) == module_root
-        ):
-            full_commit = _full_git_commit_for_root(module_root)
-            if full_commit.startswith(resolved_commit):
-                return full_commit
-    except Exception:
-        pass
-    return ""
+    identity = worker_runtime_identity or _CERTIFIED_RUNTIME_IDENTITY
+    if identity is None or not identity.runtime_root_ok:
+        return ""
+    worker_sha = str(identity.worker_sha or "").strip().lower()
+    release_head = str(identity.release_head or "").strip().lower()
+    if not _FULL_RELEASE_COMMIT_RE.fullmatch(worker_sha):
+        return ""
+    if release_head != worker_sha:
+        return ""
+    return worker_sha
 
 
 def _resolve_target_followers_resume_provenance(
     *,
     target_followers_resume_source_request_id: str | None,
     auto_restart_resume_policy: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, str]:
+    worker_runtime_identity: WorkerRuntimeIdentity | None,
+    run_id: str,
+) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
     """Build fail-closed checkpoint provenance without reading the prior run."""
 
     request_id = str(target_followers_resume_source_request_id or "").strip()
     try:
         request_id = str(uuid.UUID(request_id))
     except (ValueError, AttributeError, TypeError):
-        return None, "source_request_id_missing_or_invalid"
+        return None, "source_request_id_missing_or_invalid", {
+            "stage": "ct_resume_request_binding",
+            "request_id_present": bool(request_id),
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+        }
 
     if auto_restart_resume_policy is None:
         attempt_id = 1
     else:
         raw_attempt_id = auto_restart_resume_policy.get("attempt_id")
         if isinstance(raw_attempt_id, bool):
-            return None, "canonical_request_attempt_missing_or_invalid"
+            return None, "canonical_request_attempt_missing_or_invalid", {
+                "stage": "ct_resume_attempt_binding",
+                "pid": os.getpid(),
+            }
         try:
             attempt_id = int(raw_attempt_id)
         except (TypeError, ValueError):
-            return None, "canonical_request_attempt_missing_or_invalid"
+            return None, "canonical_request_attempt_missing_or_invalid", {
+                "stage": "ct_resume_attempt_binding",
+                "pid": os.getpid(),
+            }
         if attempt_id < 1:
-            return None, "canonical_request_attempt_missing_or_invalid"
+            return None, "canonical_request_attempt_missing_or_invalid", {
+                "stage": "ct_resume_attempt_binding",
+                "pid": os.getpid(),
+            }
 
-    release_sha = _resolve_active_worker_release_sha()
+    try:
+        identity_reason, identity_diagnostics = validate_worker_runtime_identity_binding(
+            worker_runtime_identity,
+            request_id=request_id,
+            run_id=str(run_id or ""),
+            attempt_id=attempt_id,
+        )
+    except Exception as exc:
+        return None, f"identity_exception:{type(exc).__name__}", {
+            "stage": "ct_resume_identity_binding",
+            "exception_type": type(exc).__name__,
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+        }
+    if identity_reason != "identity_verified":
+        return None, identity_reason, identity_diagnostics
+
+    release_sha = _resolve_active_worker_release_sha(worker_runtime_identity)
     if not release_sha:
-        return None, "active_release_sha_unresolved"
+        return None, "release_head_unresolved", identity_diagnostics
     return {
         "source_request_id": request_id,
         "source_attempt_id": attempt_id,
         "release_sha": release_sha,
-    }, "provenance_resolved"
+    }, "provenance_resolved", identity_diagnostics
 
 
 def _run_followers_list_engine_session(
@@ -11127,6 +11141,7 @@ def _run_followers_list_engine_session(
     business_session_id: str | None = None,
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -11234,11 +11249,14 @@ def _run_followers_list_engine_session(
         (
             _target_followers_resume_provenance,
             _target_followers_resume_provenance_reason,
+            _target_followers_resume_identity_diagnostics,
         ) = _resolve_target_followers_resume_provenance(
             target_followers_resume_source_request_id=(
                 target_followers_resume_source_request_id
             ),
             auto_restart_resume_policy=auto_restart_resume_policy,
+            worker_runtime_identity=worker_runtime_identity,
+            run_id=str(run_id or ""),
         )
         if _target_followers_resume_provenance is None:
             _target_followers_resume_v2_emit(
@@ -11250,9 +11268,21 @@ def _run_followers_list_engine_session(
                     "reason": _target_followers_resume_provenance_reason,
                     "shadow": _target_followers_resume_flags.mode == "shadow",
                     "enforce": _target_followers_resume_flags.mode == "enforce",
+                    **_target_followers_resume_identity_diagnostics,
                 },
             )
         else:
+            _target_followers_resume_v2_emit(
+                "ct_resume_runtime_identity_verified",
+                {
+                    "account_id": str(account_id or ""),
+                    "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                    "run_id": str(run_id or ""),
+                    "reason": _target_followers_resume_provenance_reason,
+                    "worker_sha": _target_followers_resume_provenance.get("release_sha"),
+                    **_target_followers_resume_identity_diagnostics,
+                },
+            )
             target_followers_resume_controller = target_followers_resume_v2.build_runtime_controller(
                 account_id=str(account_id or ""),
                 target_id=str(target_id or ""),
@@ -20902,6 +20932,7 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
 
 
 def _main_impl() -> int:
+    global _CERTIFIED_RUNTIME_IDENTITY
     global _CURRENT_RUN_REQUEST_ID
     global _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
@@ -20953,6 +20984,7 @@ def _main_impl() -> int:
     )
     args = parser.parse_args()
     runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
+    _CERTIFIED_RUNTIME_IDENTITY = runtime_identity
     export_worker_runtime_identity(runtime_identity)
     log(
         "info",
@@ -23501,6 +23533,22 @@ def _main_impl() -> int:
         from auto_restart_runtime import load_resume_policy_from_env
 
         auto_restart_resume_policy = load_resume_policy_from_env()
+        _ct_resume_attempt_id: int | None = None
+        if isinstance(auto_restart_resume_policy, dict):
+            try:
+                _candidate_attempt = int(auto_restart_resume_policy.get("attempt_id"))
+                if _candidate_attempt > 0:
+                    _ct_resume_attempt_id = _candidate_attempt
+            except (TypeError, ValueError):
+                _ct_resume_attempt_id = None
+        else:
+            _ct_resume_attempt_id = 1
+        _ct_resume_runtime_identity = bind_worker_runtime_identity(
+            runtime_identity,
+            request_id=run_request_id or "",
+            run_id=run_id or "",
+            attempt_id=_ct_resume_attempt_id,
+        )
 
         _t_account_session_target = time.perf_counter()
         log(
@@ -23581,6 +23629,7 @@ def _main_impl() -> int:
             follow60_canary_control=dict(_follow60_canary_control or {}),
             follow60_attempt_id=int(_follow60_attempt_id or 1),
             business_session_id=_SESSION_SOCIAL_ID or None,
+            worker_runtime_identity=_ct_resume_runtime_identity,
         )
         if supabase_mode and run_id:
             _update_run_status_safe(
@@ -23730,6 +23779,12 @@ def _main_impl() -> int:
             follow60_attempt_id=int(_follow60_attempt_id or 1),
             business_session_id=_SESSION_SOCIAL_ID or None,
             target_followers_resume_source_request_id=run_request_id,
+            worker_runtime_identity=bind_worker_runtime_identity(
+                runtime_identity,
+                request_id=run_request_id or "",
+                run_id=run_id or "",
+                attempt_id=1,
+            ),
         )
         if supabase_mode and run_id:
             if eng_code == 97:

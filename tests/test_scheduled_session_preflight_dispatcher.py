@@ -135,6 +135,7 @@ class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
             patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
             patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
             patch.object(consumer, "_heartbeat"),
+            patch.object(consumer, "_runner_runtime_identity_env", return_value={}),
             patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
             patch.object(consumer, "_finalize_manual_run_after_subprocess"),
             patch.object(consumer, "_audit"),

@@ -56,6 +56,7 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
             "target_availability_scope_rejection_reason",
             "target_followers_resume_source_request_id",
             "auto_restart_resume_policy",
+            "worker_runtime_identity",
         }:
             normalized.args.kwonlyargs.pop(index)
             normalized.args.kw_defaults.pop(index)
@@ -74,6 +75,7 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
                     in {
                         "target_followers_resume_source_request_id",
                         "auto_restart_resume_policy",
+                        "worker_runtime_identity",
                     }
                 )
             ]

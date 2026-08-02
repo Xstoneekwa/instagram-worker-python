@@ -63,8 +63,12 @@ import supabase_client
 import deferred_projection_outbox
 import follow_persistence_receipt_replay
 from worker_runtime_identity import (
+    WorkerRuntimeIdentity,
+    WorkerRuntimeIdentityError,
+    bind_worker_runtime_identity,
     export_worker_runtime_identity,
     resolve_worker_runtime_identity,
+    worker_runtime_identity_env,
 )
 from account_protection_lists import (
     SNAPSHOT_ENV as ACCOUNT_PROTECTION_SNAPSHOT_ENV,
@@ -89,6 +93,25 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
 _last_integration_noop_proof: dict[str, Any] | None = None
+_CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
+
+
+def _runner_runtime_identity_env(request_id: str) -> dict[str, str]:
+    """Freeze the consumer-certified identity into the runner subprocess env."""
+
+    identity = _CERTIFIED_RUNTIME_IDENTITY
+    if identity is None:
+        raise WorkerRuntimeIdentityError(
+            "identity_not_propagated",
+            stage="consumer_runner_handoff",
+            diagnostics={"consumer_identity_certified": False},
+        )
+    bound = bind_worker_runtime_identity(
+        identity,
+        request_id=request_id,
+        consumer_pid=os.getpid(),
+    )
+    return worker_runtime_identity_env(bound)
 
 
 def _follow60_control_applies(
@@ -3052,6 +3075,19 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
         else runner_subprocess_env()
     )
+    runtime_identity_env = _runner_runtime_identity_env(request_id)
+    subprocess_env = {**subprocess_env, **runtime_identity_env}
+    log(
+        "info",
+        "worker_runtime_identity_propagated_to_runner",
+        account_id=account_id,
+        request_id=request_id,
+        worker_sha=runtime_identity_env.get("WORKER_GIT_SHA"),
+        runtime_root=runtime_identity_env.get("WORKER_RUNTIME_ROOT"),
+        identity_source=runtime_identity_env.get("WORKER_GIT_SHA_SOURCE"),
+        consumer_pid=os.getpid(),
+        identity_transport_present=True,
+    )
     if protection_snapshot_json:
         subprocess_env = {
             **subprocess_env,
@@ -3510,6 +3546,7 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _CERTIFIED_RUNTIME_IDENTITY
     args = list(argv or sys.argv[1:])
     machine_json_preflight = bool(
         args
@@ -3517,7 +3554,11 @@ def main(argv: list[str] | None = None) -> int:
         and "--json" in args
     )
     runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
-    export_worker_runtime_identity(runtime_identity)
+    _CERTIFIED_RUNTIME_IDENTITY = bind_worker_runtime_identity(
+        runtime_identity,
+        consumer_pid=os.getpid(),
+    )
+    export_worker_runtime_identity(_CERTIFIED_RUNTIME_IDENTITY)
     identity_log_context = (
         contextlib.redirect_stdout(sys.stderr)
         if machine_json_preflight

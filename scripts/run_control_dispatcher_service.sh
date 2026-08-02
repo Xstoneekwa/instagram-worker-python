@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+CURRENT_RELEASE_LINK="${PHONEFARM_CURRENT_SYMLINK:-/Users/admin/phonefarm-worker-current}"
 
 ENV_FILE="${RUN_CONTROL_DISPATCHER_ENV_FILE:-$ROOT_DIR/.env.run-control-dispatcher}"
 LOG_DIR="${RUN_CONTROL_DISPATCHER_LOG_DIR:-$ROOT_DIR/logs/run-control-dispatcher}"
@@ -36,6 +37,21 @@ if [[ ! "$RUNTIME_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "FAIL worker_runtime_sha_invalid root=$ROOT_DIR" >&2
   exit 2
 fi
+REQUIRE_CANONICAL_SYMLINK="${WORKER_RUNTIME_REQUIRE_CANONICAL_SYMLINK:-false}"
+if [[ "$ROOT_DIR" == /Users/admin/phonefarm-worker-releases/* ]]; then
+  REQUIRE_CANONICAL_SYMLINK=true
+fi
+if [[ "$REQUIRE_CANONICAL_SYMLINK" == "true" ]]; then
+  if [[ ! -L "$CURRENT_RELEASE_LINK" ]]; then
+    echo "FAIL worker_runtime_current_symlink_missing link=$CURRENT_RELEASE_LINK" >&2
+    exit 2
+  fi
+  CURRENT_RELEASE_ROOT="$(cd "$(dirname "$CURRENT_RELEASE_LINK")" && cd "$(readlink "$CURRENT_RELEASE_LINK")" && pwd -P)"
+  if [[ "$CURRENT_RELEASE_ROOT" != "$(cd "$ROOT_DIR" && pwd -P)" ]]; then
+    echo "FAIL worker_runtime_current_symlink_mismatch root=$ROOT_DIR current=$CURRENT_RELEASE_ROOT" >&2
+    exit 2
+  fi
+fi
 DECLARED_WORKER_GIT_SHA="$(printf '%s' "${WORKER_GIT_SHA:-}" | tr '[:upper:]' '[:lower:]')"
 if [[ -n "$DECLARED_WORKER_GIT_SHA" && "$DECLARED_WORKER_GIT_SHA" != "$RUNTIME_GIT_SHA" ]]; then
   echo "FAIL worker_runtime_declared_sha_mismatch declared=${WORKER_GIT_SHA} actual=$RUNTIME_GIT_SHA" >&2
@@ -44,6 +60,9 @@ fi
 export WORKER_RUNTIME_ROOT="$ROOT_DIR"
 export WORKER_GIT_SHA="$RUNTIME_GIT_SHA"
 export WORKER_GIT_SHA_SOURCE="runtime_release_head"
+export WORKER_RELEASE_HEAD="$RUNTIME_GIT_SHA"
+export WORKER_RUNTIME_WRAPPER_PID="$$"
+export WORKER_RUNTIME_ROOT_OK="true"
 
 _resolve_adb_path() {
   if [[ -n "${ADB_PATH:-}" && -x "${ADB_PATH}" ]]; then
@@ -595,6 +614,8 @@ Commands:
   restart     Stop then kickstart the LaunchAgent (clears pause)
   prepare-auto-restart-startup-skip
               Arm one atomic startup-only Auto Restart tick skip
+  ct-resume-identity-self-test
+              Exercise wrapper -> consumer -> runner -> CT Resume without DB/device
   fix-duplicate Kill extra consumer processes and restart cleanly
   install     Install/load the user LaunchAgent
   launchd     Print launchd status for the dispatcher
@@ -724,6 +745,9 @@ case "$cmd" in
     ;;
   prepare-auto-restart-startup-skip)
     _prepare_auto_restart_startup_skip_once
+    ;;
+  ct-resume-identity-self-test)
+    "$PYTHON_BIN" ct_resume_runtime_identity_self_test.py --stage consumer
     ;;
   fix-duplicate)
     rm -f "$PAUSE_FILE"
