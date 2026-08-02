@@ -22786,6 +22786,40 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
                 )
                 break
 
+    # Some builds wrap the value and the label one or two levels below the
+    # official profile-header counter container. Traverse that named subtree
+    # only; an arbitrary zero elsewhere must never manufacture No Posts.
+    for container in root.iter():
+        container_label = " ".join(_node_values(container)).lower()
+        if not any(
+            token in container_label
+            for token in (
+                "profile_header_count_container",
+                "profile_header_post_count",
+                "profile_header_posts_count",
+            )
+        ):
+            continue
+        descendant_labels = [
+            _node_label(descendant) for descendant in container.iter()
+        ]
+        if not any(
+            _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(label)
+            for label in descendant_labels
+        ):
+            continue
+        for label in descendant_labels:
+            if not re.fullmatch(r"\s*[0-9][0-9.,]*\s*", label):
+                continue
+            digits = re.sub(r"[^0-9]", "", label)
+            if digits:
+                _set_post_count(
+                    int(digits),
+                    "profile_post_count_official_header_subtree",
+                    priority=45,
+                )
+                break
+
     # Newer Instagram builds compact the value and label into values such as
     # ``101posts``.  Accept that only on the official counter resource or
     # inside a structurally proven profile-header subtree.  A generic
@@ -23270,6 +23304,11 @@ def _post_follow_post_grid_evidence_from_xml(
         out["evidence_status"] = "NO_POSTS_POSITIVE"
         out["grid_tab_state"] = "empty_grid_positive"
         out["rejection_reason"] = ""
+        out["no_posts_reason"] = (
+            "official_zero_post_count"
+            if posts_count_zero_exact
+            else "explicit_empty_posts_marker"
+        )
         out["visible_post_count"] = 0
         out["physical_cells"] = []
         return _finalize()
@@ -23416,7 +23455,20 @@ def _post_follow_post_grid_evidence_from_xml(
         out["rejection_reason"] = "selected_grid_not_proven"
         return _finalize()
     candidate = below[0]
-    if bool(out.get("clipped_detected")):
+    boundary_slack = max(6, int(wh * 0.006))
+    candidate_clipped = bool(
+        int(candidate["top"]) < int(fully_exploitable_bottom)
+        and int(candidate["bottom"])
+        >= int(fully_exploitable_bottom) - boundary_slack
+    ) or bool(
+        (int(candidate["bottom"]) - int(candidate["top"]))
+        < int(ww * 0.08)
+    )
+    out["candidate_clipped"] = candidate_clipped
+    out["other_row_clipped"] = bool(
+        out.get("clipped_detected") and not candidate_clipped
+    )
+    if candidate_clipped:
         out["outcome"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
         out["evidence_status"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
         out["post_bounds"] = candidate
@@ -23660,6 +23712,12 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         "NO_POSTS_POSITIVE",
     }:
         out["post_bounds_source"] = "single_reveal_fresh_xml_physical_cell"
+        out["post_reveal_safe_reason"] = (
+            "fresh_xml_exact_identity_posts_tab_physical_top_left_row"
+            if str(out.get("outcome") or "") == "POST_ROW_POSITIVE_SAFE"
+            else "fresh_xml_positive_no_posts"
+        )
+        out["golden_reason"] = ""
         return out
     out["post_reveal_classification"] = str(
         out.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL"
@@ -23671,6 +23729,8 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         out.get("rejection_reason") or "fresh_direct_post_cell_missing_after_reveal"
     )
     out["golden_fallback_reason"] = "clipped_reacquisition_not_tap_safe"
+    out["golden_reason"] = str(out["golden_fallback_reason"])
+    out["post_reveal_safe_reason"] = ""
     return out
 
 
@@ -29596,6 +29656,12 @@ def _visual_post_viewer_context_guard_for_like(
 
 def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
     ctx = dict(context or {})
+    exact_like_proof_material = json.dumps(
+        ctx.get("exact_like_proof") or {},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
     material = "\0".join(
         str(ctx.get(key) or "")
         for key in (
@@ -29603,18 +29669,31 @@ def _post_open_context_v1_proof_hash(context: dict[str, Any] | None) -> str:
             "run_id",
             "request_id",
             "action_id",
+            "attempt_id",
+            "business_session_id",
+            "control_id",
+            "worker_sha",
             "candidate_username",
+            "candidate_profile_id",
+            "source_target_id",
             "package",
             "activity",
             "viewer_type",
+            "open_method",
+            "source_cell_fingerprint",
+            "v5_positive",
+            "post_identity_confirmed",
+            "story_or_highlight_detected",
             "exact_like_source",
             "exact_like_bounds_hash",
+            "xml_hash",
             "exact_like_xml_fingerprint",
             "exact_like_ui_generation",
+            "navigation_generation",
             "stage_nonce",
             "created_at_monotonic",
         )
-    )
+    ) + "\0" + exact_like_proof_material
     return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
 
 
@@ -29657,7 +29736,8 @@ def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
         for key in (
             "version", "account_id", "run_id", "request_id", "action_id",
             "attempt_id", "business_session_id", "control_id", "worker_sha",
-            "candidate_username", "viewer_type", "package", "activity",
+            "candidate_username", "candidate_profile_id", "source_target_id",
+            "viewer_type", "package", "activity", "xml_hash",
             "like_bounds_hash", "exact_like_source", "xml_fingerprint",
             "canonical_generation",
             "v5_positive", "story_or_highlight_detected",
@@ -29710,28 +29790,6 @@ def _create_like_tap_context_v2(
     meta = _followers_current_pkg_activity(d)
     package = str(meta.get("current_package") or "")
     activity = str(meta.get("current_activity") or "")
-    identity = _post_open_hierarchy_identity_signals(
-        xml, expected_username=expected_follower_username
-    )
-    story_detected = bool(identity.get("story_or_highlight_detected"))
-    semantic_nodes = _hierarchy_collect_like_semantic_nodes(xml)
-    exact_nodes = [
-        node
-        for node in semantic_nodes
-        if _ui_proof_a2_v5_exact_like_control(
-            node, d, expected_state="action_button_not_liked"
-        )
-        and isinstance(node.get("matched_node_bounds"), dict)
-    ]
-    if story_detected:
-        return None, "liketapcontext_story_or_highlight_detected"
-    if any(
-        _ui_proof_a2_v5_exact_like_control(
-            node, d, expected_state="action_button_liked"
-        )
-        for node in semantic_nodes
-    ):
-        return None, "liketapcontext_already_liked"
     stage_context = dict(
         (post_open_context or {}).get("post_open_context_v1") or {}
     )
@@ -29750,14 +29808,24 @@ def _create_like_tap_context_v2(
             return None, "liketapcontext_post_open_hash_mismatch"
         if str(stage_context.get("exact_like_xml_fingerprint") or "") != snapshot_fingerprint:
             return None, "liketapcontext_post_open_xml_mismatch"
+        if str(stage_context.get("xml_hash") or "") and not hmac.compare_digest(
+            str(stage_context.get("xml_hash") or ""),
+            hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest(),
+        ):
+            return None, "liketapcontext_post_open_xml_hash_mismatch"
         if _normalize_handle(
             str(stage_context.get("candidate_username") or "")
         ) != _normalize_handle(expected_follower_username):
             return None, "liketapcontext_post_open_candidate_mismatch"
+        binding_keys = (
+            "account_id", "run_id", "request_id", "action_id", "attempt_id",
+            "business_session_id", "control_id", "worker_sha",
+        )
         if not all(
             str(stage_context.get(key) or "")
             == str((expected_stage_binding or {}).get(key) or "")
-            for key in ("account_id", "run_id", "request_id", "action_id")
+            for key in binding_keys
+            if str((expected_stage_binding or {}).get(key) or "")
         ):
             return None, "liketapcontext_post_open_binding_mismatch"
         if str(stage_context.get("package") or "") != str(expected_package or ""):
@@ -29781,7 +29849,37 @@ def _create_like_tap_context_v2(
             or chosen.get("matched_node_content_desc")
             or "post_open_context_v1"
         )
-    elif exact_nodes:
+        story_detected = False
+        candidate_continuity = True
+        v5_positive = True
+        identity: dict[str, Any] = {}
+    else:
+        # Only the single bounded reacquisition rebuilds semantic state. The
+        # happy path consumes the immutable V5-positive PostOpenContextV1.
+        identity = _post_open_hierarchy_identity_signals(
+            xml, expected_username=expected_follower_username
+        )
+        story_detected = bool(identity.get("story_or_highlight_detected"))
+        semantic_nodes = _hierarchy_collect_like_semantic_nodes(xml)
+        exact_nodes = [
+            node
+            for node in semantic_nodes
+            if _ui_proof_a2_v5_exact_like_control(
+                node, d, expected_state="action_button_not_liked"
+            )
+            and isinstance(node.get("matched_node_bounds"), dict)
+        ]
+        if story_detected:
+            return None, "liketapcontext_story_or_highlight_detected"
+        if any(
+            _ui_proof_a2_v5_exact_like_control(
+                node, d, expected_state="action_button_liked"
+            )
+            for node in semantic_nodes
+        ):
+            return None, "liketapcontext_already_liked"
+        if not exact_nodes:
+            return None, "liketapcontext_exact_like_missing"
         chosen = max(
             exact_nodes,
             key=lambda node: int(
@@ -29793,8 +29891,6 @@ def _create_like_tap_context_v2(
             or chosen.get("matched_node_content_desc")
             or "fresh_xml_exact_like"
         )
-    else:
-        return None, "liketapcontext_exact_like_missing"
     like_bounds = dict(chosen.get("matched_node_bounds") or {})
     try:
         ww, wh = d.window_size()
@@ -29807,30 +29903,31 @@ def _create_like_tap_context_v2(
     )
     if not bounds_ok:
         return None, f"liketapcontext_{bounds_reason}"
-    stage_provenance = dict(
-        audit.get("post_open_stage_provenance")
-        or (post_open_context or {}).get("post_open_stage_provenance")
-        or {}
-    )
-    provenance = _post_open_stage_provenance_contract(
-        stage_provenance,
-        expected_username=expected_follower_username,
-        expected_package=expected_package,
-        current_activity=activity,
-        snapshot_captured_at_monotonic=time.perf_counter(),
-    )
-    candidate_continuity = bool(
-        identity.get("candidate_username_exact_in_snapshot")
-        or provenance.get("stage_provenance_confirmed")
-    )
-    v5_positive = bool(
-        package == str(expected_package or "")
-        and "instagram" in activity.lower()
-        and "mainactivity" in activity.lower()
-        and bool(identity.get("posts_action_bar_in_snapshot"))
-        and candidate_continuity
-        and not story_detected
-    )
+    if not transported_proof_valid:
+        stage_provenance = dict(
+            audit.get("post_open_stage_provenance")
+            or (post_open_context or {}).get("post_open_stage_provenance")
+            or {}
+        )
+        provenance = _post_open_stage_provenance_contract(
+            stage_provenance,
+            expected_username=expected_follower_username,
+            expected_package=expected_package,
+            current_activity=activity,
+            snapshot_captured_at_monotonic=time.perf_counter(),
+        )
+        candidate_continuity = bool(
+            identity.get("candidate_username_exact_in_snapshot")
+            or provenance.get("stage_provenance_confirmed")
+        )
+        v5_positive = bool(
+            package == str(expected_package or "")
+            and "instagram" in activity.lower()
+            and "mainactivity" in activity.lower()
+            and bool(identity.get("posts_action_bar_in_snapshot"))
+            and candidate_continuity
+            and not story_detected
+        )
     if not v5_positive:
         return None, "liketapcontext_v5_positive_contract_missing"
     binding = dict(expected_stage_binding or {})
@@ -29873,12 +29970,21 @@ def _create_like_tap_context_v2(
         "control_id": str(binding.get("control_id") or ""),
         "worker_sha": str(binding.get("worker_sha") or ""),
         "candidate_username": _normalize_handle(expected_follower_username),
+        "candidate_profile_id": str(stage_context.get("candidate_profile_id") or ""),
+        "source_target_id": str(
+            binding.get("source_target_id")
+            or stage_context.get("source_target_id")
+            or ""
+        ),
         "viewer_type": "Posts",
         "package": package,
         "activity": activity,
         "like_bounds": like_bounds,
         "like_bounds_hash": bounds_hash,
         "xml_fingerprint": snapshot_fingerprint,
+        "xml_hash": hashlib.sha256(
+            xml.encode("utf-8", errors="replace")
+        ).hexdigest(),
         "canonical_generation": canonical_generation,
         "navigation_generation": canonical_generation,
         "v5_positive": True,
@@ -29889,7 +29995,9 @@ def _create_like_tap_context_v2(
         "like_bounds_rejection_reason": "",
         "exact_like_transport_used": bool(transported_proof_valid),
         "candidate_identity_source": (
-            "fresh_xml_exact_header"
+            "post_open_context_v1"
+            if transported_proof_valid
+            else "fresh_xml_exact_header"
             if identity.get("candidate_username_exact_in_snapshot")
             else "tap_scoped_post_open_provenance"
         ),
@@ -29897,6 +30005,15 @@ def _create_like_tap_context_v2(
         "ttl_ms": max(1.0, float(ttl_ms)),
         "snapshot_age_ms_at_creation": round(float(snapshot_age_ms), 2),
         "snapshot_source": snapshot_source,
+        "like_context_source": (
+            "A2/V5" if transported_proof_valid else "reacquired"
+        ),
+        "like_context_transport": (
+            "PostOpenContextV1_immutable"
+            if transported_proof_valid
+            else "single_reacquisition"
+        ),
+        "create_reason": "",
         "one_shot_nonce": one_shot_nonce,
         "consumed": False,
     }
@@ -30953,6 +31070,16 @@ def visual_like_open_post(
                     like_tap_context_v2.get("snapshot_source")
                     == "single_reacquisition"
                 ),
+                like_context_source=str(
+                    like_tap_context_v2.get("like_context_source") or ""
+                ),
+                like_context_transport=str(
+                    like_tap_context_v2.get("like_context_transport") or ""
+                ),
+                create_reason=str(
+                    like_tap_context_v2.get("create_reason") or ""
+                ),
+                validation_reason="",
             )
             like_tap_context_v2["consumed"] = True
             log(
@@ -51130,6 +51257,18 @@ def run_post_follow_post_likes_phase(
                                 _candidate_grid.get("reacquire_dump_count")
                             ),
                             old_bounds_invalidated=True,
+                            post_open_method=(
+                                "SAFE"
+                                if str(_candidate_grid.get("outcome") or "")
+                                == "POST_ROW_POSITIVE_SAFE"
+                                else "Golden"
+                            ),
+                            post_reveal_safe_reason=str(
+                                _candidate_grid.get("post_reveal_safe_reason") or ""
+                            ),
+                            golden_reason=str(
+                                _candidate_grid.get("golden_reason") or ""
+                            ),
                         )
                     else:
                         _candidate_grid.update(
@@ -51177,6 +51316,8 @@ def run_post_follow_post_likes_phase(
                         follower_username=cand, rejection_reason=_grid_reject,
                         proof_age_ms=round(float(_grid_age or 0.0), 2),
                         fast_diagnostic_attempted=False,
+                        post_open_method="Golden",
+                        golden_reason=_grid_reject,
                         dumps=0, screenshots=0, retries=0,
                     )
             else:
@@ -52449,6 +52590,8 @@ def run_post_follow_post_likes_phase(
                     golden_attempt_count=1,
                     fast_diagnostic_attempted=False,
                     reveal_count_total_for_like_phase=0,
+                    post_open_method="Golden",
+                    golden_reason=_tap_failure_reason,
                     ok=bool(_canary_preopened_out.get("ok")),
                     post_detected=bool(_canary_preopened_out.get("post_detected")),
                 )
@@ -52499,6 +52642,26 @@ def run_post_follow_post_likes_phase(
                     "post_open_snapshot_valid": bool(_viewer.get("post_open_snapshot_valid")),
                     "likes_perf_post_open": dict(_viewer),
                 }
+                log(
+                    "info",
+                    "follow_60s_post_grid_evidence_safe_direct_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_open_method="SAFE",
+                    post_reveal_safe_reason=str(
+                        _canary_grid_evidence.get("post_reveal_safe_reason")
+                        or "fresh_tap_proof_valid"
+                    ),
+                    fresh_tap_proof_used=True,
+                    proof_age_at_tap_ms=_tap_freshness.get("age_ms"),
+                    reveal_count_total_for_like_phase=int(
+                        _canary_grid_evidence.get(
+                            "reveal_count_total_for_like_phase"
+                        ) or 0
+                    ),
+                    ok=bool(_canary_preopened_out.get("ok")),
+                )
 
         def _run_pre_reveal_guard_before_legacy_safe() -> dict[str, Any]:
             t_pre_reveal = time.perf_counter()
@@ -54039,6 +54202,9 @@ def run_post_follow_post_likes_phase(
             if _post_ctx_exact_like_bounds
             else ""
         )
+        _post_ctx_snapshot_xml = str(
+            post_open_audit.get("snapshot_xml") or ""
+        )
         _post_ctx = {
             "version": "PostOpenContextV1",
             "account_id": str(authoritative_binding_for_context.get("account_id") or account_id or ""),
@@ -54048,12 +54214,19 @@ def run_post_follow_post_likes_phase(
                 or ""
             ),
             "source_target_id": str(
-                (candidate_profile_context or {}).get("source_target_id")
+                authoritative_binding_for_context.get("source_target_id")
+                or (candidate_profile_context or {}).get("source_target_id")
                 or ""
             ),
             "run_id": str(authoritative_binding_for_context.get("run_id") or run_id or ""),
             "request_id": str(authoritative_binding_for_context.get("request_id") or ""),
             "action_id": str(authoritative_binding_for_context.get("action_id") or ""),
+            "attempt_id": int(authoritative_binding_for_context.get("attempt_id") or 0),
+            "business_session_id": str(
+                authoritative_binding_for_context.get("business_session_id") or ""
+            ),
+            "control_id": str(authoritative_binding_for_context.get("control_id") or ""),
+            "worker_sha": str(authoritative_binding_for_context.get("worker_sha") or ""),
             "package": str(_post_ctx_meta.get("current_package") or pkg),
             "activity": str(_post_ctx_meta.get("current_activity") or ""),
             "viewer_type": "Posts",
@@ -54070,6 +54243,13 @@ def run_post_follow_post_likes_phase(
             ),
             "exact_like_bounds": _post_ctx_exact_like_bounds or None,
             "exact_like_bounds_hash": _post_ctx_exact_like_bounds_hash,
+            "xml_hash": (
+                hashlib.sha256(
+                    _post_ctx_snapshot_xml.encode("utf-8", errors="replace")
+                ).hexdigest()
+                if _post_ctx_snapshot_xml
+                else ""
+            ),
             "exact_like_xml_fingerprint": str(
                 post_open_audit.get("exact_like_xml_fingerprint") or ""
             ),
@@ -54101,6 +54281,9 @@ def run_post_follow_post_likes_phase(
             exact_like_ui_generation=int(
                 _post_ctx.get("exact_like_ui_generation") or 0
             ),
+            post_open_method=str(_post_ctx.get("open_method") or ""),
+            like_context_source="A2/V5",
+            like_context_transport="PostOpenContextV1_immutable",
             stage_nonce_hash=hashlib.sha256(
                 _post_ctx_nonce.encode("utf-8")
             ).hexdigest()[:16],

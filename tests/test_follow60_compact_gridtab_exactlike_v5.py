@@ -228,6 +228,57 @@ class ExactA2V5LikeTransportV5Tests(unittest.TestCase):
         self.assertFalse(legacy_ok)
         self.assertEqual(legacy_reason, "like_bounds_outside_action_band")
 
+    def test_immutable_postopen_bridge_does_not_reparse_v5_on_happy_path(self) -> None:
+        xml = (
+            '<hierarchy><node resource-id="com.instagram.android:id/row_feed_button_like" '
+            'content-desc="Like" clickable="true" bounds="[34,1512][126,1582]"/>'
+            '</hierarchy>'
+        )
+        post_open = self._post_open_context(xml, "candidate")
+        with mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_package": PKG, "current_activity": ACT},
+        ), mock.patch.object(
+            nav,
+            "_post_open_hierarchy_identity_signals",
+            side_effect=AssertionError("happy path must consume PostOpenContextV1"),
+        ):
+            ctx, reason = nav._create_like_tap_context_v2(
+                self.device,
+                expected_package=PKG,
+                expected_follower_username="candidate",
+                expected_stage_binding=self._binding(),
+                post_open_context=post_open,
+                allow_fresh_dump=False,
+            )
+        self.assertEqual(reason, "")
+        self.assertTrue(ctx["exact_like_transport_used"])
+        self.assertEqual(ctx["candidate_identity_source"], "post_open_context_v1")
+        self.device.dump_hierarchy.assert_not_called()
+
+    def test_tampered_immutable_exact_like_proof_is_rejected(self) -> None:
+        xml = self._xml("candidate", 1512)
+        post_open = self._post_open_context(xml, "candidate")
+        post_open["post_open_context_v1"]["exact_like_proof"][
+            "matched_node_content_desc"
+        ] = "Comment"
+        with mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_package": PKG, "current_activity": ACT},
+        ):
+            ctx, reason = nav._create_like_tap_context_v2(
+                self.device,
+                expected_package=PKG,
+                expected_follower_username="candidate",
+                expected_stage_binding=self._binding(),
+                post_open_context=post_open,
+                allow_fresh_dump=False,
+            )
+        self.assertIsNone(ctx)
+        self.assertEqual(reason, "liketapcontext_post_open_hash_mismatch")
+
     def test_story_highlight_wins_even_with_exact_like(self) -> None:
         xml = self._xml("candidate", 1512, story=True)
         with mock.patch.object(

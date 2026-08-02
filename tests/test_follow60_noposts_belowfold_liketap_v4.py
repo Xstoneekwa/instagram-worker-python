@@ -59,6 +59,51 @@ class NoPostsAndBelowFoldV4Tests(unittest.TestCase):
         self.assertFalse(out["posts_count_zero_exact"])
         self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
 
+    def test_nested_official_header_zero_is_positive_without_reveal(self) -> None:
+        xml = """<hierarchy><node text="candidate"/>
+        <node resource-id="profile_header_count_container">
+          <node><node><node text="0"/></node><node><node text="Posts"/></node></node>
+        </node>
+        <node resource-id="profile_tabs_container">
+          <node resource-id="profile_tab_icon_view" content-desc="Grid view"
+                selected="true"/>
+        </node><node resource-id="profile_empty_camera_artwork"
+                   class="android.widget.ImageView" bounds="[250,900][830,1480]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "NO_POSTS_POSITIVE")
+        self.assertEqual(
+            out["posts_count_source"],
+            "profile_post_count_official_header_subtree",
+        )
+        self.assertEqual(out["physical_cell_count"], 0)
+        self.assertFalse(out.get("reveal_scroll_attempted", False))
+
+    def test_safe_first_row_is_not_rejected_by_clipped_lower_row(self) -> None:
+        xml = """<hierarchy><node text="candidate"/>
+        <node resource-id="profile_header_count_container"><node text="8"/><node text="Posts"/></node>
+        <node resource-id="profile_tabs_container" bounds="[0,700][1080,850]">
+          <node resource-id="profile_tab_icon_view" content-desc="Grid view"
+                selected="true" bounds="[0,700][360,850]"/>
+        </node>
+        <node class="android.widget.ImageView" resource-id="profile_grid_media_0"
+              bounds="[0,900][360,1260]"/>
+        <node class="android.widget.ImageView" resource-id="profile_grid_media_1"
+              bounds="[360,900][720,1260]"/>
+        <node class="android.widget.ImageView" resource-id="profile_grid_media_2"
+              bounds="[0,1900][360,2200]"/>
+        <node resource-id="bottom_navigation" bounds="[0,2200][1080,2340]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertTrue(out["other_row_clipped"])
+        self.assertFalse(out["candidate_clipped"])
+        self.assertTrue(out["tap_safe"])
+
     def test_empty_state_artwork_never_becomes_media(self) -> None:
         xml = """<hierarchy><node text="candidate"/>
         <node content-desc="Profile tab grid" selected="true"/>
