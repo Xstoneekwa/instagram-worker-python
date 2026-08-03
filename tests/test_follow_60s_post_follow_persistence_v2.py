@@ -276,6 +276,33 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             ledger_rpc.call_args.kwargs["like_terminal_status"], "safe_skip"
         )
 
+    def test_failed_safe_continue_binds_as_safe_skip_without_inventing_like(self) -> None:
+        status, reason = nav._post_follow_like_terminal_binding(
+            {
+                "phase_outcome": "failed_safe_continue",
+                "ok": False,
+                "liked_count": 0,
+                "post_follow_likes_recoverable_failure_count": 1,
+                "skipped_reason": "suggested_surface_blocks_post_selection",
+            },
+            {"like_verified": False},
+        )
+        self.assertEqual(status, "safe_skip")
+        self.assertEqual(reason, "suggested_surface_blocks_post_selection")
+
+    def test_failed_safe_continue_cannot_mask_unacked_like(self) -> None:
+        status, reason = nav._post_follow_like_terminal_binding(
+            {
+                "phase_outcome": "failed_safe_continue",
+                "ok": False,
+                "liked_count": 1,
+                "post_follow_likes_recoverable_failure_count": 1,
+                "skipped_reason": "viewer_not_proven",
+            },
+            {"like_verified": False},
+        )
+        self.assertEqual((status, reason), ("", ""))
+
     def test_cycle_is_not_deleted_when_ledger_ack_fails(self) -> None:
         for stage in outbox.VALID_STAGES:
             self._journal(stage, {"liked_count": 1})

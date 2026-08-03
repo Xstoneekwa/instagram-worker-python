@@ -51375,6 +51375,48 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
     }
 
 
+def _post_follow_like_terminal_binding(
+    likes_out: dict[str, Any],
+    stage_persist_results: dict[str, Any],
+) -> tuple[str, str]:
+    """Return the durable terminal Like receipt for an exact Return CT.
+
+    A verified Like remains gated by its stage ACK.  A recoverable, fail-closed
+    Like phase with no Like action is a terminal safe skip, not an incomplete
+    cycle: the physical workflow has safely returned to the exact CT and may be
+    ledgered without inventing a Like.
+    """
+    liked_count = int(likes_out.get("liked_count") or 0)
+    if liked_count > 0 and stage_persist_results.get("like_verified") is True:
+        return "verified", "like_verified"
+
+    phase_outcome = str(likes_out.get("phase_outcome") or "").strip()
+    safe_skip = bool(
+        liked_count == 0
+        and (
+            (phase_outcome == "skipped" and likes_out.get("ok") is True)
+            or (
+                phase_outcome == "failed_safe_continue"
+                and int(
+                    likes_out.get("post_follow_likes_recoverable_failure_count")
+                    or 0
+                )
+                > 0
+            )
+        )
+    )
+    if safe_skip:
+        return (
+            "safe_skip",
+            str(
+                likes_out.get("skipped_reason")
+                or likes_out.get("likes_failure_kind")
+                or "like_safe_skip"
+            ),
+        )
+    return "", ""
+
+
 def _post_follow_like_perf_summary_payload(
     *,
     timings: dict[str, Any],
@@ -57153,22 +57195,9 @@ def run_visual_candidate_post_follow_phase(
     except Exception:
         pass
     if ok_ret:
-        _like_terminal_status = ""
-        _like_terminal_reason = ""
-        if (
-            int(likes_out.get("liked_count") or 0) > 0
-            and stage_persist_results.get("like_verified") is True
-        ):
-            _like_terminal_status = "verified"
-            _like_terminal_reason = "like_verified"
-        elif (
-            str(likes_out.get("phase_outcome") or "") == "skipped"
-            and likes_out.get("ok") is True
-        ):
-            _like_terminal_status = "safe_skip"
-            _like_terminal_reason = str(
-                likes_out.get("skipped_reason") or "like_safe_skip"
-            )
+        _like_terminal_status, _like_terminal_reason = (
+            _post_follow_like_terminal_binding(likes_out, stage_persist_results)
+        )
         _persist_verified_stage(
             "return_ct_exact",
             {
