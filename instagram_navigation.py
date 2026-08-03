@@ -18132,6 +18132,18 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 and not profile_grid.get("private_profile_visible")
                 and not profile_grid.get("loading_visible")
             )
+            # Preserve the foreground identity observed at the same immutable
+            # final-sheet-close boundary as the XML and candidate proof.  The
+            # SAFE consumer must not reacquire package/activity between that
+            # proof and PostOpenIntentV2 creation: an intermittent empty
+            # activity there previously discarded an otherwise complete final
+            # proof and forced the 14-16 second Golden path.
+            profile_grid["final_proof_package"] = str(
+                live_meta.get("current_package") or ""
+            )
+            profile_grid["final_proof_activity"] = str(
+                live_meta.get("current_activity") or ""
+            )
             profile_grid["source_xml_fingerprint"] = hashlib.sha256(
                 str(profile_grid_xml or "").encode("utf-8", errors="replace")
             ).hexdigest()
@@ -26199,6 +26211,41 @@ def _create_post_open_intent_from_final_proof(
         )
     except Exception:
         return None
+
+
+def _post_open_intent_surface_from_final_proof(
+    evidence: dict[str, Any] | None,
+    *,
+    expected_package: str,
+) -> tuple[str, str]:
+    """Return the package/activity bound to the terminal grid observation.
+
+    A post-reveal proof is newer than the final Mute-close proof, so it wins
+    when present.  This helper deliberately has no device access: the intent
+    dispatcher performs the single live package/activity comparison immediately
+    before the physical tap.
+    """
+    proof = dict(evidence or {})
+    package = str(
+        proof.get("post_reveal_package")
+        or proof.get("final_proof_package")
+        or proof.get("package_name")
+        or proof.get("package")
+        or ""
+    )
+    activity = str(
+        proof.get("post_reveal_activity")
+        or proof.get("final_proof_activity")
+        or proof.get("activity_name")
+        or proof.get("activity")
+        or ""
+    )
+    if package != str(expected_package or ""):
+        return "", ""
+    activity_lower = activity.lower()
+    if "instagram" not in activity_lower or "mainactivity" not in activity_lower:
+        return "", ""
+    return package, activity
 
 
 def _dispatch_post_open_intent_v2_tap(
@@ -53610,8 +53657,17 @@ def run_post_follow_post_likes_phase(
             and isinstance(_canary_grid_evidence.get("post_bounds"), dict)
         ):
             _fresh_bounds = dict(_canary_grid_evidence.get("post_bounds") or {})
-            _meta_before = _followers_current_pkg_activity(d)
             _intent_evidence = dict(_canary_grid_evidence)
+            _intent_package, _intent_activity = (
+                _post_open_intent_surface_from_final_proof(
+                    _intent_evidence,
+                    expected_package=pkg,
+                )
+            )
+            _meta_before = {
+                "current_package": _intent_package,
+                "current_activity": _intent_activity,
+            }
             _intent_fingerprint = str(
                 _canary_grid_evidence.get("post_reveal_xml_fingerprint")
                 or _canary_grid_evidence.get("source_xml_fingerprint")
@@ -53634,8 +53690,8 @@ def run_post_follow_post_likes_phase(
                 target_username=src,
                 source_branch="SAFE",
                 bounds=_fresh_bounds,
-                package=str(_meta_before.get("current_package") or pkg),
-                activity=str(_meta_before.get("current_activity") or ""),
+                package=_intent_package,
+                activity=_intent_activity,
                 evidence=_intent_evidence,
                 viewport_width=int(_intent_ww),
                 viewport_height=int(_intent_wh),

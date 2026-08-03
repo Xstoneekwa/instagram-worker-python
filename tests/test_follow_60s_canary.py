@@ -1154,6 +1154,14 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             )
         self.assertIsNotNone(out)
         self.assertEqual(out["post_grid_outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(
+            out["post_grid_metadata"]["final_proof_package"],
+            "com.instagram.android",
+        )
+        self.assertEqual(
+            out["post_grid_metadata"]["final_proof_activity"],
+            "ProfileActivity",
+        )
         device.dump_hierarchy.assert_called_once_with(compressed=False)
 
     def test_post_grid_accepts_clipped_visible_cell_but_rejects_reels_tab(self) -> None:

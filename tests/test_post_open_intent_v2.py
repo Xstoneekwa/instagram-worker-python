@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
+import instagram_navigation as nav
 import post_open_intent_v2 as intent_v2
 
 
@@ -92,6 +93,49 @@ class PostOpenIntentV2Tests(unittest.TestCase):
             invalidation_reason="planned_scroll_after_intent",
         )
         self.assertEqual(self._consume(item)[2], "planned_scroll_after_intent")
+
+    def test_safe_intent_reuses_terminal_surface_without_device_reacquisition(self):
+        package, activity = nav._post_open_intent_surface_from_final_proof(
+            {
+                "final_proof_package": "com.instagram.android",
+                "final_proof_activity": (
+                    "com.instagram.mainactivity.InstagramMainActivity"
+                ),
+            },
+            expected_package="com.instagram.android",
+        )
+        self.assertEqual(package, "com.instagram.android")
+        self.assertEqual(
+            activity,
+            "com.instagram.mainactivity.InstagramMainActivity",
+        )
+
+    def test_post_reveal_surface_supersedes_mute_close_surface(self):
+        package, activity = nav._post_open_intent_surface_from_final_proof(
+            {
+                "final_proof_package": "com.instagram.android",
+                "final_proof_activity": "stale.ProfileActivity",
+                "post_reveal_package": "com.instagram.android",
+                "post_reveal_activity": (
+                    "com.instagram.mainactivity.InstagramMainActivity"
+                ),
+            },
+            expected_package="com.instagram.android",
+        )
+        self.assertEqual(package, "com.instagram.android")
+        self.assertIn("InstagramMainActivity", activity)
+
+    def test_terminal_surface_mismatch_fails_closed(self):
+        self.assertEqual(
+            nav._post_open_intent_surface_from_final_proof(
+                {
+                    "final_proof_package": "other.package",
+                    "final_proof_activity": "other.MainActivity",
+                },
+                expected_package="com.instagram.android",
+            ),
+            ("", ""),
+        )
 
 
 if __name__ == "__main__":
