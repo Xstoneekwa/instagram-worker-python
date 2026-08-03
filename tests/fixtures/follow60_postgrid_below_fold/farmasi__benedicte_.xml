@@ -1,0 +1,10 @@
+<hierarchy rotation="0">
+  <node text="farmasi__benedicte_" resource-id="com.instagram.androig:id/action_bar_title" />
+  <node resource-id="com.instagram.androig:id/profile_header_container">
+    <node><node text="218" resource-id="com.instagram.androig:id/row_profile_header_textview_count" /></node>
+    <node><node text="posts" resource-id="com.instagram.androig:id/row_profile_header_textview_description" /></node>
+  </node>
+  <node resource-id="com.instagram.androig:id/suggested_users_carousel" bounds="[0,1080][1080,1760]" />
+  <node resource-id="com.instagram.androig:id/profile_highlights_tray" bounds="[0,1760][1080,2160]" />
+  <node resource-id="com.instagram.androig:id/bottom_navigation" bounds="[0,2200][1080,2340]" />
+</hierarchy>

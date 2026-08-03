@@ -22741,6 +22741,26 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             for key in ("text", "content-desc", "resource-id")
         )
 
+    def _node_visible_values(node: ET.Element) -> tuple[str, str]:
+        """Return user-facing values without appending resource-id metadata.
+
+        Samsung/Instagram exposes the profile count value and its ``Posts``
+        label as sibling nodes whose resource ids are non-empty.  Matching the
+        concatenated label (text + content-desc + resource-id) therefore turns
+        ``posts`` into ``posts com.instagram...:id/...`` and loses an otherwise
+        exact positive count.  Resource ids remain available to the stricter
+        official-header checks below; they must not corrupt visible values.
+        """
+        text_value, desc_value, _resource_value = _node_values(node)
+        return text_value, desc_value
+
+    def _visible_count_value(value: str) -> int | None:
+        raw = html.unescape(str(value or "")).strip()
+        if not re.fullmatch(r"[0-9][0-9\s\u00a0.,]*", raw):
+            return None
+        digits = re.sub(r"[^0-9]", "", raw)
+        return int(digits) if digits else None
+
     def _compact_post_count(value: str) -> int | None:
         match = _POST_FOLLOW_COMPACT_POST_COUNT_RE.fullmatch(str(value or ""))
         if not match:
@@ -22781,20 +22801,23 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
     # a generic zero elsewhere on the profile is never a no-posts proof.
     for container in root.iter():
         local_nodes = [container, *list(container)]
-        labels = [_node_label(node) for node in local_nodes]
+        visible_values = [
+            value
+            for node in local_nodes
+            for value in _node_visible_values(node)
+            if value
+        ]
         has_posts_label = any(
-            _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(label)
-            for label in labels
+            _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(value)
+            for value in visible_values
         )
         if not has_posts_label:
             continue
-        for label in labels:
-            if not re.fullmatch(r"\s*[0-9][0-9.,]*\s*", label):
-                continue
-            digits = re.sub(r"[^0-9]", "", label)
-            if digits:
+        for value in visible_values:
+            numeric_value = _visible_count_value(value)
+            if numeric_value is not None:
                 _set_post_count(
-                    int(digits),
+                    numeric_value,
                     "profile_post_count_value_label_pair",
                     priority=20,
                 )
@@ -22808,31 +22831,48 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         if not any(
             token in container_label
             for token in (
+                "profile_header_container",
                 "profile_header_count_container",
                 "profile_header_post_count",
                 "profile_header_posts_count",
             )
         ):
             continue
-        descendant_labels = [
-            _node_label(descendant) for descendant in container.iter()
+        descendant_values = [
+            value
+            for descendant in container.iter()
+            for value in _node_visible_values(descendant)
+            if value
         ]
-        if not any(
-            _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(label)
-            for label in descendant_labels
-        ):
+        posts_value_indexes = [
+            index
+            for index, value in enumerate(descendant_values)
+            if _POST_FOLLOW_POSTS_LABEL_RE.fullmatch(value)
+        ]
+        if not posts_value_indexes:
             continue
-        for label in descendant_labels:
-            if not re.fullmatch(r"\s*[0-9][0-9.,]*\s*", label):
-                continue
-            digits = re.sub(r"[^0-9]", "", label)
-            if digits:
-                _set_post_count(
-                    int(digits),
-                    "profile_post_count_official_header_subtree",
-                    priority=45,
-                )
-                break
+        numeric_candidates = [
+            (index, numeric_value)
+            for index, value in enumerate(descendant_values)
+            for numeric_value in [_visible_count_value(value)]
+            if numeric_value is not None
+        ]
+        if not numeric_candidates:
+            continue
+        posts_index = posts_value_indexes[0]
+        numeric_index, numeric_value = min(
+            numeric_candidates,
+            key=lambda item: (abs(int(item[0]) - int(posts_index)), item[0] > posts_index),
+        )
+        # A generic profile header also contains Followers/Following.  Only a
+        # count adjacent to the exact Posts label is authoritative here.
+        if abs(int(numeric_index) - int(posts_index)) > 2:
+            continue
+        _set_post_count(
+            numeric_value,
+            "profile_post_count_official_header_subtree",
+            priority=45,
+        )
 
     # Newer Instagram builds compact the value and label into values such as
     # ``101posts``.  Accept that only on the official counter resource or

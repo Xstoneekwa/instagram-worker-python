@@ -1,0 +1,10 @@
+<hierarchy rotation="0">
+  <node text="emberlangley" resource-id="com.instagram.androig:id/action_bar_title" />
+  <node resource-id="com.instagram.androig:id/profile_header_container">
+    <node text="2 165" resource-id="com.instagram.androig:id/row_profile_header_textview_count" />
+    <node text="posts" resource-id="com.instagram.androig:id/row_profile_header_textview_description" />
+  </node>
+  <node resource-id="com.instagram.androig:id/suggested_users_carousel" bounds="[0,900][1080,1640]" />
+  <node resource-id="com.instagram.androig:id/highlights_tray" bounds="[0,1640][1080,2030]" />
+  <node resource-id="com.instagram.androig:id/bottom_navigation" bounds="[0,2200][1080,2340]" />
+</hierarchy>
