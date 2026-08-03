@@ -223,6 +223,80 @@ def pending_count(path: Path = DEFAULT_PATH) -> int:
     return int((row or [0])[0] or 0)
 
 
+def _normalized_active_binding(active_binding: dict[str, Any] | None) -> dict[str, str]:
+    raw = dict(active_binding or {})
+    binding = {
+        "account_id": str(raw.get("account_id") or "").strip(),
+        "run_id": str(raw.get("run_id") or "").strip(),
+        "request_id": str(raw.get("request_id") or "").strip(),
+        "control_id": str(raw.get("control_id") or "").strip(),
+        "worker_sha": str(raw.get("worker_sha") or "").strip().lower(),
+    }
+    missing = [key for key, value in binding.items() if not value]
+    if missing or not re.fullmatch(r"[0-9a-f]{40}", binding["worker_sha"]):
+        raise ValueError("follow60_active_outbox_binding_missing_or_invalid")
+    return binding
+
+
+def _group_control_binding(group: list[dict[str, Any]]) -> dict[str, str]:
+    first = group[0]
+    control_ids = {
+        str(dict(row.get("payload") or {}).get("control_id") or "").strip()
+        for row in group
+    }
+    worker_shas = {
+        str(dict(row.get("payload") or {}).get("worker_sha") or "").strip().lower()
+        for row in group
+    }
+    if len(control_ids) != 1 or len(worker_shas) != 1:
+        raise ValueError("follow60_stage_binding_missing_or_invalid")
+    return {
+        "account_id": str(first.get("account_id") or "").strip(),
+        "run_id": str(first.get("original_run_id") or "").strip(),
+        "request_id": str(first.get("original_request_id") or "").strip(),
+        "control_id": next(iter(control_ids)),
+        "worker_sha": next(iter(worker_shas)),
+    }
+
+
+def _active_binding_mismatch_reason(
+    receipt_binding: dict[str, str],
+    active_binding: dict[str, str],
+) -> str:
+    for field in ("run_id", "request_id", "worker_sha"):
+        if receipt_binding[field].lower() != active_binding[field].lower():
+            return f"follow60_active_binding_{field}_mismatch"
+    return ""
+
+
+def _active_pending_count(
+    groups: list[list[dict[str, Any]]],
+    *,
+    active_binding: dict[str, str],
+    action_id_hash_value: str = "",
+) -> int:
+    total = 0
+    for group in groups:
+        if not group:
+            continue
+        first = group[0]
+        if str(first.get("account_id") or "") != active_binding["account_id"]:
+            continue
+        try:
+            receipt_binding = _group_control_binding(group)
+        except ValueError:
+            continue
+        if receipt_binding["control_id"] != active_binding["control_id"]:
+            continue
+        if _active_binding_mismatch_reason(receipt_binding, active_binding):
+            total += len(group)
+            continue
+        if action_id_hash_value and str(first.get("action_id_hash") or "") != action_id_hash_value:
+            continue
+        total += len(group)
+    return total
+
+
 def _delete_confirmed(group: list[dict[str, Any]], path: Path) -> None:
     first = group[0]
     with _connect(path) as conn:
@@ -270,10 +344,20 @@ def _mark_delivery_error(
         conn.commit()
 
 
-def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
+def flush_pending(
+    *,
+    active_binding: dict[str, Any],
+    action_id_hash_value: str = "",
+    path: Path = DEFAULT_PATH,
+) -> dict[str, Any]:
+    binding = _normalized_active_binding(active_binding)
+    action_hash = str(action_id_hash_value or "").strip().lower()
     groups = _load_groups(path)
     flushed = 0
     ledger_acks: list[dict[str, Any]] = []
+    historical_receipts = 0
+    other_account_receipts = 0
+    other_action_receipts = 0
     for group in groups:
         first = group[0]
         binding_fields = (
@@ -283,6 +367,48 @@ def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
         )
         if any(any(row[field] != first[field] for row in group) for field in binding_fields):
             return {"ok": False, "reason": "follow60_stage_binding_missing_or_invalid", "flushed": flushed}
+        if str(first["account_id"]) != binding["account_id"]:
+            other_account_receipts += len(group)
+            continue
+        try:
+            receipt_binding = _group_control_binding(group)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc), "flushed": flushed}
+        if not receipt_binding["control_id"]:
+            return {
+                "ok": False,
+                "reason": "follow60_receipt_control_id_missing",
+                "flushed": flushed,
+            }
+        if receipt_binding["control_id"] != binding["control_id"]:
+            historical_receipts += len(group)
+            log(
+                "info", "historical_outbox_receipt_excluded_from_active_binding",
+                account_id=first["account_id"],
+                original_run_id=first["original_run_id"],
+                original_request_id=first["original_request_id"],
+                action_id_hash=first["action_id_hash"],
+                receipt_control_id=receipt_binding["control_id"],
+                active_control_id=binding["control_id"],
+                stage_count=len(group),
+                preserved_pending=True,
+            )
+            continue
+        mismatch_reason = _active_binding_mismatch_reason(receipt_binding, binding)
+        if mismatch_reason:
+            return {
+                "ok": False,
+                "reason": mismatch_reason,
+                "flushed": flushed,
+                "pending": _active_pending_count(
+                    groups,
+                    active_binding=binding,
+                    action_id_hash_value=action_hash,
+                ),
+            }
+        if action_hash and str(first["action_id_hash"]).lower() != action_hash:
+            other_action_receipts += len(group)
+            continue
         _mark_delivery_attempt(group, path)
         try:
             import supabase_client
@@ -400,18 +526,36 @@ def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
     return {
         "ok": True,
         "flushed": flushed,
-        "pending": pending_count(path),
+        "pending": _active_pending_count(
+            _load_groups(path),
+            active_binding=binding,
+            action_id_hash_value=action_hash,
+        ),
+        "total_pending": pending_count(path),
+        "historical_pending": historical_receipts,
+        "other_account_pending": other_account_receipts,
+        "other_action_pending": other_action_receipts,
         "ledger_acks": ledger_acks,
         "latest_ledger_ack": ledger_acks[-1] if ledger_acks else {},
     }
 
 
-def flush_pending_bounded(*, budget_s: float = 0.55, path: Path = DEFAULT_PATH) -> dict[str, Any]:
+def flush_pending_bounded(
+    *,
+    active_binding: dict[str, Any],
+    action_id_hash_value: str = "",
+    budget_s: float = 0.55,
+    path: Path = DEFAULT_PATH,
+) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "reason": "bounded_flush_timeout"}
 
     def _run() -> None:
         result.clear()
-        result.update(flush_pending(path=path))
+        result.update(flush_pending(
+            active_binding=active_binding,
+            action_id_hash_value=action_id_hash_value,
+            path=path,
+        ))
 
     thread = threading.Thread(target=_run, name="follow60-post-follow-flush", daemon=True)
     thread.start()

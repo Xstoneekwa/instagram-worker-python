@@ -34,17 +34,22 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "attempt_id": 1,
             "business_session_id": "business-session-1",
         }
+        self.active_binding = {
+            "account_id": self.binding["account_id"],
+            "run_id": self.binding["original_run_id"],
+            "request_id": self.binding["request_id"],
+            "control_id": "00000000-0000-0000-0000-000000000104",
+            "worker_sha": "a" * 40,
+        }
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     def _journal(self, stage: str, payload: dict | None = None) -> dict:
         stage_payload = dict(payload or {})
+        stage_payload.setdefault("control_id", self.active_binding["control_id"])
+        stage_payload.setdefault("worker_sha", self.active_binding["worker_sha"])
         if stage == "return_ct_exact":
-            stage_payload.setdefault(
-                "control_id", "00000000-0000-0000-0000-000000000104"
-            )
-            stage_payload.setdefault("worker_sha", "a" * 40)
             stage_payload.setdefault("like_terminal_status", "verified")
             stage_payload.setdefault("like_terminal_reason", "like_verified")
         return outbox.journal_stage(
@@ -82,7 +87,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "supabase_client.ack_follow_60s_completed_cycle_v1",
             return_value=ledger_response,
         ) as ledger_rpc:
-            result = outbox.flush_pending(path=self.path)
+            result = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertTrue(result["ok"])
         self.assertEqual(result["pending"], 0)
         rpc.assert_called_once()
@@ -133,7 +138,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "supabase_client.persist_follow_60s_post_follow_v2",
             side_effect=RuntimeError("db_unavailable"),
         ):
-            result = outbox.flush_pending(path=self.path)
+            result = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertFalse(result["ok"])
         self.assertEqual(outbox.pending_count(self.path), 1)
         with sqlite3.connect(str(self.path)) as conn:
@@ -148,14 +153,15 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             with self.subTest(stop_after=stop_after):
                 path = Path(self.tmp.name) / f"partial-{stop_after}.sqlite3"
                 for stage in outbox.VALID_STAGES[:stop_after]:
-                    payload = {}
+                    payload = {
+                        "control_id": self.active_binding["control_id"],
+                        "worker_sha": self.active_binding["worker_sha"],
+                    }
                     if stage == "return_ct_exact":
-                        payload = {
-                            "control_id": "00000000-0000-0000-0000-000000000104",
-                            "worker_sha": "a" * 40,
+                        payload.update({
                             "like_terminal_status": "verified",
                             "like_terminal_reason": "like_verified",
-                        }
+                        })
                     outbox.journal_stage(
                         **self.binding,
                         stage=stage,
@@ -184,7 +190,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                         "revision": 1,
                     },
                 ):
-                    result = outbox.flush_pending(path=path)
+                    result = outbox.flush_pending(active_binding=self.active_binding, path=path)
                 self.assertTrue(result["ok"])
                 sent = [item["stage"] for item in rpc.call_args.kwargs["stages"]]
                 self.assertEqual(sent, list(outbox.VALID_STAGES[:stop_after]))
@@ -201,7 +207,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             return_value=inserted,
         ), mock.patch.object(outbox, "_delete_confirmed", side_effect=RuntimeError("crash")):
             with self.assertRaisesRegex(RuntimeError, "crash"):
-                outbox.flush_pending(path=self.path)
+                outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertEqual(outbox.pending_count(self.path), 1)
         duplicate = {
             "ok": True, "binding_valid": True,
@@ -211,7 +217,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "supabase_client.persist_follow_60s_post_follow_v2",
             return_value=duplicate,
         ) as rpc:
-            replay = outbox.flush_pending(path=self.path)
+            replay = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertTrue(replay["ok"])
         self.assertEqual(outbox.pending_count(self.path), 0)
         self.assertNotIn("device", rpc.call_args.kwargs)
@@ -225,7 +231,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                 "inserted_stages": [], "duplicate_stages": [],
             },
         ):
-            result = outbox.flush_pending(path=self.path)
+            result = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "rpc_stage_confirmation_incomplete")
         self.assertEqual(outbox.pending_count(self.path), 1)
@@ -269,7 +275,7 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                 "revision": 10,
             },
         ) as ledger_rpc:
-            result = outbox.flush_pending(path=self.path)
+            result = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertTrue(result["ok"])
         self.assertFalse(result["latest_ledger_ack"]["next_candidate_permitted"])
         self.assertEqual(
@@ -316,9 +322,181 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "supabase_client.ack_follow_60s_completed_cycle_v1",
             return_value={"ok": False, "reason": "ledger_unavailable"},
         ):
-            result = outbox.flush_pending(path=self.path)
+            result = outbox.flush_pending(active_binding=self.active_binding, path=self.path)
         self.assertFalse(result["ok"])
         self.assertEqual(outbox.pending_count(self.path), 4)
+
+    def _journal_bound(
+        self,
+        *,
+        path: Path,
+        control_id: str,
+        worker_sha: str | None = None,
+        account_id: str | None = None,
+        run_id: str | None = None,
+        request_id: str | None = None,
+        action_id: str | None = None,
+        stage: str = "like_verified",
+    ) -> dict:
+        return outbox.journal_stage(
+            account_id=account_id or self.binding["account_id"],
+            original_run_id=run_id or self.binding["original_run_id"],
+            request_id=request_id or self.binding["request_id"],
+            action_id=action_id or self.binding["action_id"],
+            candidate_username="candidate",
+            source_profile="source_ct",
+            attempt_id=1,
+            business_session_id="business-session-1",
+            stage=stage,
+            verified_at="2026-07-31T20:00:00+00:00",
+            payload={
+                "control_id": control_id,
+                "worker_sha": worker_sha or self.active_binding["worker_sha"],
+                "liked_count": 1,
+            },
+            path=path,
+        )
+
+    @staticmethod
+    def _rpc_success(*stages: str) -> dict:
+        return {
+            "ok": True,
+            "binding_valid": True,
+            "inserted_stages": list(stages),
+            "duplicate_stages": [],
+        }
+
+    def test_legacy_emma_three_receipts_are_preserved_and_nonblocking(self) -> None:
+        old_control = "00000000-0000-0000-0000-000000000999"
+        for stage in (
+            "mute_posts_verified", "mute_stories_verified", "return_ct_exact"
+        ):
+            self._journal_bound(path=self.path, control_id=old_control, stage=stage)
+        with mock.patch.object(outbox, "log") as log_call, mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2"
+        ) as rpc:
+            result = outbox.flush_pending(
+                active_binding=self.active_binding, path=self.path
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pending"], 0)
+        self.assertEqual(result["historical_pending"], 3)
+        self.assertEqual(result["total_pending"], 3)
+        self.assertEqual(outbox.pending_count(self.path), 3)
+        rpc.assert_not_called()
+        self.assertEqual(
+            log_call.call_args.args[:2],
+            ("info", "historical_outbox_receipt_excluded_from_active_binding"),
+        )
+
+    def test_exact_binding_replays_without_cross_account_or_history_leak(self) -> None:
+        self._journal_bound(
+            path=self.path,
+            control_id="00000000-0000-0000-0000-000000000999",
+            action_id="00000000-0000-0000-0000-000000000901",
+        )
+        self._journal_bound(
+            path=self.path,
+            control_id=self.active_binding["control_id"],
+            account_id="00000000-0000-0000-0000-000000000777",
+            action_id="00000000-0000-0000-0000-000000000902",
+        )
+        self._journal_bound(
+            path=self.path,
+            control_id=self.active_binding["control_id"],
+        )
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2",
+            return_value=self._rpc_success("like_verified"),
+        ) as rpc:
+            result = outbox.flush_pending(
+                active_binding=self.active_binding, path=self.path
+            )
+        self.assertTrue(result["ok"])
+        rpc.assert_called_once()
+        self.assertEqual(rpc.call_args.kwargs["account_id"], self.binding["account_id"])
+        self.assertEqual(result["historical_pending"], 1)
+        self.assertEqual(result["other_account_pending"], 1)
+        self.assertEqual(result["total_pending"], 2)
+
+    def test_exact_binding_rpc_error_remains_blocking(self) -> None:
+        self._journal_bound(
+            path=self.path, control_id=self.active_binding["control_id"]
+        )
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2",
+            side_effect=RuntimeError("rpc_down"),
+        ):
+            result = outbox.flush_pending(
+                active_binding=self.active_binding, path=self.path
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "rpc_down")
+        self.assertEqual(outbox.pending_count(self.path), 1)
+
+    def test_same_control_binding_mismatches_fail_closed(self) -> None:
+        cases = (
+            ("run_id", {"run_id": "00000000-0000-0000-0000-000000000201"}),
+            ("request_id", {"request_id": "00000000-0000-0000-0000-000000000202"}),
+            ("worker_sha", {"worker_sha": "b" * 40}),
+        )
+        for index, (field, overrides) in enumerate(cases):
+            with self.subTest(field=field):
+                path = Path(self.tmp.name) / f"mismatch-{index}.sqlite3"
+                self._journal_bound(
+                    path=path,
+                    control_id=self.active_binding["control_id"],
+                    **overrides,
+                )
+                with mock.patch(
+                    "supabase_client.persist_follow_60s_post_follow_v2"
+                ) as rpc:
+                    result = outbox.flush_pending(
+                        active_binding=self.active_binding, path=path
+                    )
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["reason"], f"follow60_active_binding_{field}_mismatch"
+                )
+                rpc.assert_not_called()
+                self.assertEqual(outbox.pending_count(path), 1)
+
+    def test_post_cycle_flush_is_scoped_to_current_action(self) -> None:
+        second_action = "00000000-0000-0000-0000-000000000203"
+        self._journal_bound(
+            path=self.path, control_id=self.active_binding["control_id"]
+        )
+        self._journal_bound(
+            path=self.path,
+            control_id=self.active_binding["control_id"],
+            action_id=second_action,
+        )
+        active_action_hash = outbox.action_id_hash(self.binding["action_id"])
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2",
+            return_value=self._rpc_success("like_verified"),
+        ) as rpc:
+            result = outbox.flush_pending(
+                active_binding=self.active_binding,
+                action_id_hash_value=active_action_hash,
+                path=self.path,
+            )
+        self.assertTrue(result["ok"])
+        rpc.assert_called_once()
+        self.assertEqual(result["pending"], 0)
+        self.assertEqual(result["other_action_pending"], 1)
+        self.assertEqual(result["total_pending"], 1)
+
+    def test_active_binding_is_mandatory_before_any_rpc(self) -> None:
+        self._journal_bound(
+            path=self.path, control_id=self.active_binding["control_id"]
+        )
+        with mock.patch("supabase_client.persist_follow_60s_post_follow_v2") as rpc:
+            with self.assertRaisesRegex(
+                ValueError, "follow60_active_outbox_binding_missing_or_invalid"
+            ):
+                outbox.flush_pending(active_binding={}, path=self.path)
+        rpc.assert_not_called()
 
 
 class Follow60BindingAndPostGridV2Test(unittest.TestCase):

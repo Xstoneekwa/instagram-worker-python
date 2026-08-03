@@ -3737,6 +3737,9 @@ def _drain_candidate_receipts_for_manual_stop(
     *,
     account_id: str,
     run_id: str,
+    request_id: str = "",
+    control_id: str = "",
+    worker_sha: str = "",
     budget_s: float = 8.0,
 ) -> dict[str, Any]:
     """Drain only DB persistence after the device latch, within a hard budget."""
@@ -3763,7 +3766,15 @@ def _drain_candidate_receipts_for_manual_stop(
             time_budget_seconds=max(0.1, float(budget_s) - 0.25),
         )
         post_follow: dict[str, Any] = {"ok": True, "pending": 0, "flushed": 0}
-        if bool(follow_replay.get("ok")):
+        active_binding = {
+            "account_id": str(account_id or ""),
+            "run_id": str(run_id or ""),
+            "request_id": str(request_id or ""),
+            "control_id": str(control_id or ""),
+            "worker_sha": str(worker_sha or ""),
+        }
+        binding_complete = all(active_binding.values())
+        if bool(follow_replay.get("ok")) and binding_complete:
             try:
                 import post_follow_stage_outbox
 
@@ -3772,10 +3783,18 @@ def _drain_candidate_receipts_for_manual_stop(
                     float(budget_s) - (time.monotonic() - started),
                 )
                 post_follow = post_follow_stage_outbox.flush_pending_bounded(
+                    active_binding=active_binding,
                     budget_s=remaining
                 )
             except Exception as exc:
                 post_follow = {"ok": False, "reason": type(exc).__name__}
+        elif bool(follow_replay.get("ok")):
+            post_follow = {
+                "ok": True,
+                "pending": 0,
+                "flushed": 0,
+                "reason": "post_follow_replay_not_applicable_without_active_binding",
+            }
         result.clear()
         result.update(
             {
@@ -20140,7 +20159,25 @@ def _run_followers_list_engine_session(
                     try:
                         import post_follow_stage_outbox
 
-                        _follow60_composite_flush = post_follow_stage_outbox.flush_pending()
+                        _active_outbox_binding = {
+                            "account_id": str(account_id or ""),
+                            "run_id": str(run_id or ""),
+                            "request_id": str(run_request_id or ""),
+                            "control_id": str(
+                                (follow60_canary_control or {}).get("control_id")
+                                or (follow60_canary_control or {}).get("id")
+                                or ""
+                            ),
+                            "worker_sha": str(
+                                os.environ.get("WORKER_GIT_SHA") or ""
+                            ),
+                        }
+                        _follow60_composite_flush = post_follow_stage_outbox.flush_pending(
+                            active_binding=_active_outbox_binding,
+                            action_id_hash_value=post_follow_stage_outbox.action_id_hash(
+                                str((_follow_persistence_ctx or {}).get("action_id") or "")
+                            ),
+                        )
                     except Exception as _follow60_flush_exc:
                         _follow60_composite_flush = {
                             "ok": False,
@@ -21544,9 +21581,18 @@ def _main_impl() -> int:
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
             stop_trace=stop_trace,
         )
+        try:
+            from follow_60s_canary import runtime_context as _follow60_stop_context
+
+            _stop_runtime_context = dict(_follow60_stop_context() or {})
+        except Exception:
+            _stop_runtime_context = {}
         _candidate_receipt_drain = _drain_candidate_receipts_for_manual_stop(
             account_id=account_id or "",
             run_id=run_id or "",
+            request_id=str(run_request_id or ""),
+            control_id=str(_stop_runtime_context.get("control_id") or ""),
+            worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
             budget_s=8.0,
         )
         verified_follow_ok = bool(_candidate_receipt_drain.get("ok"))
@@ -21973,7 +22019,15 @@ def _main_impl() -> int:
                     try:
                         import post_follow_stage_outbox
 
-                        _startup_replay = post_follow_stage_outbox.flush_pending()
+                        _startup_replay = post_follow_stage_outbox.flush_pending(
+                            active_binding={
+                                "account_id": str(account_id or ""),
+                                "run_id": str(run_id or ""),
+                                "request_id": str(run_request_id or ""),
+                                "control_id": str(_binding_claim.control_id or ""),
+                                "worker_sha": _worker_sha,
+                            },
+                        )
                     except Exception as _startup_replay_exc:
                         _startup_replay = {
                             "ok": False,
