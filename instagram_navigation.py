@@ -24124,7 +24124,30 @@ def _post_follow_create_fresh_tap_proof_from_grid(
             ttl_ms=float(ttl_ms),
             metadata={
                 "classification": "POST_ROW_POSITIVE_SAFE",
+                "classification_evidence": {
+                    "outcome": str(classified.get("outcome") or ""),
+                    "identity_exact": bool(classified.get("identity_exact")),
+                    "grid_selected": bool(classified.get("grid_selected")),
+                    "post_count_positive": bool(
+                        classified.get("post_count_positive")
+                    ),
+                    "tap_safe": bool(classified.get("tap_safe")),
+                },
+                "xml_hash": hashlib.sha256(
+                    xml.encode("utf-8", errors="replace")
+                ).hexdigest(),
+                "xml_fingerprint": hashlib.sha256(
+                    xml.encode("utf-8", errors="replace")
+                ).hexdigest()[:20],
+                "coordinate_frame": dict(frame),
                 "viewport_fingerprint": str(classified.get("viewport_fingerprint") or ""),
+                "cell_identity": str(
+                    (classified.get("selected_absolute_cell") or {}).get("identity")
+                    or ""
+                ),
+                "absolute_row_index": classified.get("absolute_row_index"),
+                "absolute_column_index": classified.get("absolute_column_index"),
+                "candidate_bound": True,
             },
         )
         proof, age_ms, reason = consume_fresh_tap_proof(
@@ -24153,6 +24176,8 @@ def _post_follow_create_fresh_tap_proof_from_grid(
         "hierarchy_xml": xml,
         "viewport_fingerprint": str(classified.get("viewport_fingerprint") or ""),
         "coordinate_frame": frame,
+        "classification": dict(classified),
+        "proof_metadata": dict(proof.metadata) if proof is not None else {},
         "dump_count": dump_count,
     }
 
@@ -24607,7 +24632,10 @@ _POST_FOLLOW_GRID_CELL_TAP_FRAC_Y = 0.50
 _POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_X = 0.50
 _POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_Y = 0.52
 _POST_FOLLOW_RECENT_POST_OPEN_PRE_TAP_SETTLE_S = 0.12
-_POST_FOLLOW_VIEWER_OPEN_POLL_INITIAL_S = 0.20
+# Probe the post viewer immediately. An inconclusive first probe still enters
+# the existing bounded interval/wall-cap loop; a positive proof pays no fixed
+# 200 ms sleep before V5.
+_POST_FOLLOW_VIEWER_OPEN_POLL_INITIAL_S = 0.0
 _POST_FOLLOW_VIEWER_OPEN_POLL_INTERVAL_S = 0.10
 _POST_FOLLOW_VIEWER_OPEN_POLL_MAX_S = 0.95
 _POST_FOLLOW_VIEWER_OPEN_POLL_RETRY_MAX_S = 1.05
@@ -30437,6 +30465,8 @@ def _create_like_tap_context_v2(
             if bridge_valid
             else "single_reacquisition"
         ),
+        "liketapcontext_creation_count": 1,
+        "liketapcontext_validation_count": 0,
         "create_reason": "",
         "one_shot_nonce": one_shot_nonce,
         "consumed": False,
@@ -30698,6 +30728,8 @@ def visual_like_open_post(
             )
             prevalidated_like_tap_context_age_ms = float(pre_age_ms or 0.0)
             if pre_valid:
+                pre_ctx["liketapcontext_validation_count"] = 1
+                pre_ctx["proof_hash"] = _like_tap_context_v2_proof_hash(pre_ctx)
                 prevalidated_like_tap_context_v2 = pre_ctx
             else:
                 prevalidated_like_tap_context_reason = str(pre_validation_reason or "")
@@ -31459,6 +31491,11 @@ def visual_like_open_post(
                             ),
                         )
                     )
+                    if valid_v2 and like_tap_context_v2 is not None:
+                        like_tap_context_v2["liketapcontext_validation_count"] = 1
+                        like_tap_context_v2["proof_hash"] = (
+                            _like_tap_context_v2_proof_hash(like_tap_context_v2)
+                        )
             if not valid_v2:
                 create_reason_v2 = str(like_tap_context_reject or "")
                 validation_reason_observed_v2 = str(
@@ -31556,6 +31593,12 @@ def visual_like_open_post(
                     like_tap_context_v2.get("create_reason") or ""
                 ),
                 validation_reason="",
+                liketapcontext_creation_count=int(
+                    like_tap_context_v2.get("liketapcontext_creation_count") or 0
+                ),
+                liketapcontext_validation_count=int(
+                    like_tap_context_v2.get("liketapcontext_validation_count") or 0
+                ),
             )
             like_tap_context_v2["consumed"] = True
             log(
@@ -50710,6 +50753,8 @@ def _post_open_surface_audits(
         out = {
             **snapshot_signals,
             "reused_snapshot": True,
+            "snapshot_reused": True,
+            "reprobe_count": 0,
             "extra_dump_count": 0,
             "snapshot_age_ms": snapshot_age_ms,
             "snapshot_xml": str(stash.get("post_open_snapshot_xml") or ""),
@@ -50721,6 +50766,12 @@ def _post_open_surface_audits(
             "snapshot_proof_method": str(stash.get("proof_method") or ""),
             "post_open_stage_provenance": dict(
                 stash.get("post_open_stage_provenance") or {}
+            ),
+            "candidate_bound_provenance_source": str(
+                (stash.get("post_open_stage_provenance") or {}).get(
+                    "candidate_bound_provenance_source"
+                )
+                or ""
             ),
         }
     else:
@@ -50810,6 +50861,8 @@ def _post_open_surface_audits(
             "like_surface_ok": like_surface_ok,
             "like_surface_method": like_surface_method,
             "reused_snapshot": False,
+            "snapshot_reused": False,
+            "reprobe_count": 1,
             "extra_dump_count": 1,
             "snapshot_age_ms": snapshot_age_ms,
             "post_identity_confirmed": like_surface_ok,
@@ -50827,6 +50880,12 @@ def _post_open_surface_audits(
             "snapshot_proof_method": str(like_surface_method_raw or ""),
             "post_open_stage_provenance": dict(
                 (stash or {}).get("post_open_stage_provenance") or {}
+            ),
+            "candidate_bound_provenance_source": str(
+                ((stash or {}).get("post_open_stage_provenance") or {}).get(
+                    "candidate_bound_provenance_source"
+                )
+                or ""
             ),
         }
         semantic_nodes = _hierarchy_collect_like_semantic_nodes(fresh_hierarchy)
@@ -50870,6 +50929,11 @@ def _post_open_surface_audits(
         "info",
         "post_open_audits_completed",
         reused_snapshot=bool(out.get("reused_snapshot")),
+        snapshot_reused=bool(out.get("snapshot_reused")),
+        reprobe_count=int(out.get("reprobe_count") or 0),
+        candidate_bound_provenance_source=str(
+            out.get("candidate_bound_provenance_source") or ""
+        ),
         extra_dump_count=int(out.get("extra_dump_count") or 0),
         elapsed_ms=out["elapsed_ms"],
     )
@@ -54292,6 +54356,21 @@ def run_post_follow_post_likes_phase(
                         "scroll_generation_at_tap": "",
                         "invalidated": False,
                         "pre_tap_evidence": direct_pre_tap_evidence,
+                        "candidate_bound_provenance_source": str(
+                            getattr(direct_cell_proof, "detection_source", "")
+                            or cell_source
+                        ),
+                        "fresh_tap_proof_metadata": dict(
+                            getattr(direct_cell_proof, "metadata", {}) or {}
+                        ),
+                        "stage_binding": {
+                            key: (authoritative_binding or {}).get(key)
+                            for key in (
+                                "account_id", "run_id", "request_id", "action_id",
+                                "attempt_id", "business_session_id", "control_id",
+                                "worker_sha", "source_target_id",
+                            )
+                        },
                     }
                     freshness_at_tap = _fresh_ui_proof_age_at_tap(
                         direct_cell_proof

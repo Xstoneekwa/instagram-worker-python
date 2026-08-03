@@ -40,7 +40,7 @@ class CompactCountAndGridTabV5Tests(unittest.TestCase):
         self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
         self.assertEqual(
             out["post_grid_reveal_required_reason"],
-            "positive_posts_selected_grid_regions_isolated_no_visible_cell",
+            "positive_posts_suggested_or_highlights_grid_below_fold",
         )
 
     def test_audrey_compact_count_and_exact_nested_grid_require_reveal(self) -> None:
