@@ -232,6 +232,26 @@ def _follow60_evaluation_barrier_due(
     )
 
 
+def _follow60_startup_replay_decision(
+    ledger_ack: dict[str, Any] | None,
+) -> str:
+    """Classify replay before installing components or touching the device."""
+    ledger = dict(ledger_ack or {})
+    if not ledger:
+        return "continue"
+    if (
+        not bool(ledger.get("ok"))
+        or str(ledger.get("schema") or "")
+        != "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1"
+    ):
+        return "invalid"
+    if bool(ledger.get("barrier_reached")) or not bool(
+        ledger.get("next_candidate_permitted", True)
+    ):
+        return "stop_at_barrier"
+    return "continue"
+
+
 def _follow60_evaluation_terminal_contract(
     *,
     barrier_due: bool,
@@ -11486,34 +11506,38 @@ def _run_followers_list_engine_session(
         stage_receipts_enabled: bool,
         cycle_complete: bool,
         cycle_evidence: dict[str, Any] | None = None,
+        ledger_ack: dict[str, Any] | None = None,
     ) -> bool:
-        from follow_60s_canary_binding_v2 import parse_control
-
-        control = dict(follow60_canary_control or {})
-        evaluation_increment = int(parse_control(control).max_new_cycles or 0)
+        ledger = dict(ledger_ack or {})
+        ledger_count = int(ledger.get("new_cycle_count") or 0)
+        evaluation_increment = int(ledger.get("max_cycles") or 0)
+        if cycle_complete and (
+            not bool(ledger.get("ok"))
+            or str(ledger.get("schema") or "")
+            != "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1"
+        ):
+            log(
+                "error",
+                "follow_60s_run_scoped_ledger_missing",
+                cycle_complete=True,
+                ledger_ack=ledger,
+                device_actions_blocked=True,
+            )
+            device_action_latch.request_stop(reason="run_scoped_cycle_ledger_missing")
+            raise SystemExit(95)
         if not _follow60_evaluation_barrier_due(
             canary_active=bool(follow60_canary_active),
             stage_receipts_enabled=bool(stage_receipts_enabled),
             cycle_complete=bool(cycle_complete),
-            completed_new_cycles=int(follow60_completed_cycle_count),
+            completed_new_cycles=ledger_count,
             max_new_cycles=evaluation_increment,
         ):
             return False
-        expected_barrier_total = int(control.get("baseline_follow_count") or 0) + evaluation_increment
-        canonical_barrier_total = supabase_client.count_successful_follows_today(account_id)
-        canonical_count_match = canonical_barrier_total == expected_barrier_total
-        if not canonical_count_match:
-            log(
-                "error", "follow_60s_evaluation_barrier_count_mismatch",
-                expected=expected_barrier_total,
-                canonical=canonical_barrier_total,
-                local_new_follows=int(_RUNTIME_FOLLOW_COUNT),
-                completed_new_cycles=int(follow60_completed_cycle_count),
-                cycle_complete=bool(cycle_complete),
-                device_actions_blocked=True,
-            )
-            device_action_latch.request_stop(reason="evaluation_barrier_count_mismatch")
-            raise SystemExit(95)
+        expected_barrier_total = int(ledger.get("barrier_target") or 0)
+        canonical_barrier_total = expected_barrier_total
+        canonical_count_match = bool(ledger.get("barrier_reached")) and not bool(
+            ledger.get("next_candidate_permitted", True)
+        )
         evidence = dict(cycle_evidence or {})
         terminal_contract = _follow60_evaluation_terminal_contract(
             barrier_due=True,
@@ -11550,21 +11574,15 @@ def _run_followers_list_engine_session(
                 reason="evaluation_barrier_terminal_contract_rejected"
             )
             raise SystemExit(95)
-        barrier_out = supabase_client.mark_follow_60s_canary_barrier_v1(
-            account_id=account_id,
-            run_id=run_id,
-            request_id=run_request_id,
-            canonical_follow_count=canonical_barrier_total,
-        )
-        if not bool(barrier_out.get("ok")):
-            device_action_latch.request_stop(reason="evaluation_barrier_rpc_failed")
-            raise SystemExit(95)
         log(
             "info", "follow_60s_ten_new_follows_barrier_reached",
             TEN_NEW_FOLLOWS_REACHED_READY_FOR_LIAM_STOP="YES",
             canonical_follow_count=canonical_barrier_total,
             local_new_follows=int(_RUNTIME_FOLLOW_COUNT),
-            completed_new_cycles=int(follow60_completed_cycle_count),
+            completed_new_cycles=ledger_count,
+            ledger_revision=int(ledger.get("revision") or 0),
+            cycle_was_new=bool(ledger.get("cycle_was_new")),
+            next_candidate_permitted=False,
             cycle_complete=bool(cycle_complete),
             no_eleventh_candidate=True,
             terminal_status=terminal_contract.get("terminal_status"),
@@ -19984,6 +20002,14 @@ def _run_followers_list_engine_session(
                                 verified_at=datetime.now(timezone.utc).isoformat(),
                                 payload={
                                     **dict(payload or {}),
+                                    "control_id": str(
+                                        (follow60_canary_control or {}).get("control_id")
+                                        or (follow60_canary_control or {}).get("id")
+                                        or ""
+                                    ),
+                                    "worker_sha": str(
+                                        os.environ.get("WORKER_GIT_SHA") or ""
+                                    ).lower(),
                                     "visual_candidate_id": _pf_log_vcid,
                                 },
                             )
@@ -20761,10 +20787,16 @@ def _run_followers_list_engine_session(
 
             if not bool((follow_out or {}).get("skipped_tap")):
                 if follow60_canary_active and _follow60_stage_receipts:
-                    # This point is reached only after verified Follow,
-                    # verified-or-safe-skip Post-Follow, exact Return CT and
-                    # the critical stage persistence ACK.
-                    follow60_completed_cycle_count += 1
+                    # Observability only. Continuation authority comes solely
+                    # from the transactionally returned run-scoped ledger.
+                    _ledger_ack = dict(
+                        _follow60_composite_flush.get("latest_ledger_ack") or {}
+                    )
+                    follow60_completed_cycle_count = int(
+                        _ledger_ack.get("new_cycle_count") or 0
+                    )
+                else:
+                    _ledger_ack = {}
                 if _follow60_wait_at_evaluation_barrier_if_reached(
                     stage_receipts_enabled=bool(_follow60_stage_receipts),
                     cycle_complete=True,
@@ -20813,6 +20845,7 @@ def _run_followers_list_engine_session(
                         "action_in_progress": False,
                         "next_candidate_started": False,
                     },
+                    ledger_ack=_ledger_ack,
                 ):
                     _publish_followers_session_summary(
                         exit_code=0,
@@ -21965,6 +21998,46 @@ def _main_impl() -> int:
                             device_actions_started=False,
                         )
                         return 96
+
+                    _startup_ledger_ack = dict(
+                        _startup_replay.get("latest_ledger_ack") or {}
+                    )
+                    _startup_replay_decision = _follow60_startup_replay_decision(
+                        _startup_ledger_ack
+                    )
+                    if _startup_replay_decision == "invalid":
+                        log(
+                            "error", "follow60_stage_outbox_replay_ledger_invalid",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            ledger_schema=str(
+                                _startup_ledger_ack.get("schema") or ""
+                            ),
+                            device_actions_started=False,
+                        )
+                        return 96
+                    if _startup_replay_decision == "stop_at_barrier":
+                        log(
+                            "info", "follow60_replay_barrier_reached_before_ui",
+                            account_id=account_id, run_id=run_id or None,
+                            request_id=run_request_id or None,
+                            control_id=str(_binding_claim.control_id or ""),
+                            completed_new_cycles=int(
+                                _startup_ledger_ack.get("new_cycle_count") or 0
+                            ),
+                            barrier_target=int(
+                                _startup_ledger_ack.get("barrier_target") or 0
+                            ),
+                            ledger_revision=int(
+                                _startup_ledger_ack.get("revision") or 0
+                            ),
+                            next_candidate_permitted=False,
+                            device_actions_started=False,
+                        )
+                        device_action_latch.request_stop(
+                            reason="evaluation_barrier_reached_during_replay"
+                        )
+                        return 0
 
                     _install_follow60_activation_components(
                         opening_composite=acquire_pre_follow_mono_capture,

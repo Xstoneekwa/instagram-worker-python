@@ -39,11 +39,19 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
         self.tmp.cleanup()
 
     def _journal(self, stage: str, payload: dict | None = None) -> dict:
+        stage_payload = dict(payload or {})
+        if stage == "return_ct_exact":
+            stage_payload.setdefault(
+                "control_id", "00000000-0000-0000-0000-000000000104"
+            )
+            stage_payload.setdefault("worker_sha", "a" * 40)
+            stage_payload.setdefault("like_terminal_status", "verified")
+            stage_payload.setdefault("like_terminal_reason", "like_verified")
         return outbox.journal_stage(
             **self.binding,
             stage=stage,
             verified_at="2026-07-31T20:00:00+00:00",
-            payload=payload or {},
+            payload=stage_payload,
             path=self.path,
         )
 
@@ -57,10 +65,23 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             "inserted_stages": list(outbox.VALID_STAGES),
             "duplicate_stages": [],
         }
+        ledger_response = {
+            "ok": True,
+            "schema": "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+            "cycle_was_new": True,
+            "new_cycle_count": 1,
+            "max_cycles": 10,
+            "barrier_reached": False,
+            "next_candidate_permitted": True,
+            "revision": 1,
+        }
         with mock.patch(
             "supabase_client.persist_follow_60s_post_follow_v2",
             return_value=response,
-        ) as rpc:
+        ) as rpc, mock.patch(
+            "supabase_client.ack_follow_60s_completed_cycle_v1",
+            return_value=ledger_response,
+        ) as ledger_rpc:
             result = outbox.flush_pending(path=self.path)
         self.assertTrue(result["ok"])
         self.assertEqual(result["pending"], 0)
@@ -71,6 +92,8 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
         self.assertEqual(kwargs["business_session_id"], "business-session-1")
         self.assertIs(kwargs["cycle_complete"], True)
         self.assertEqual([item["stage"] for item in kwargs["stages"]], list(outbox.VALID_STAGES))
+        ledger_rpc.assert_called_once()
+        self.assertEqual(result["latest_ledger_ack"]["new_cycle_count"], 1)
 
     def test_receipt_schema_contains_every_durable_contract_field(self) -> None:
         receipt = self._journal("mute_posts_verified", {"proof_type": "toggle_state_exact"})
@@ -125,10 +148,19 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
             with self.subTest(stop_after=stop_after):
                 path = Path(self.tmp.name) / f"partial-{stop_after}.sqlite3"
                 for stage in outbox.VALID_STAGES[:stop_after]:
+                    payload = {}
+                    if stage == "return_ct_exact":
+                        payload = {
+                            "control_id": "00000000-0000-0000-0000-000000000104",
+                            "worker_sha": "a" * 40,
+                            "like_terminal_status": "verified",
+                            "like_terminal_reason": "like_verified",
+                        }
                     outbox.journal_stage(
                         **self.binding,
                         stage=stage,
                         verified_at="2026-07-31T20:00:00+00:00",
+                        payload=payload,
                         path=path,
                     )
                 response = {
@@ -140,7 +172,18 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                 with mock.patch(
                     "supabase_client.persist_follow_60s_post_follow_v2",
                     return_value=response,
-                ) as rpc:
+                ) as rpc, mock.patch(
+                    "supabase_client.ack_follow_60s_completed_cycle_v1",
+                    return_value={
+                        "ok": True,
+                        "schema": "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+                        "new_cycle_count": 1,
+                        "max_cycles": 10,
+                        "barrier_reached": False,
+                        "next_candidate_permitted": True,
+                        "revision": 1,
+                    },
+                ):
                     result = outbox.flush_pending(path=path)
                 self.assertTrue(result["ok"])
                 sent = [item["stage"] for item in rpc.call_args.kwargs["stages"]]
@@ -197,6 +240,58 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                 verified_at="2026-07-31T20:00:00+00:00",
                 path=self.path,
             )
+
+    def test_safe_skip_cycle_is_ledgered_after_composite_ack(self) -> None:
+        self._journal("mute_posts_verified")
+        self._journal("mute_stories_verified")
+        self._journal("return_ct_exact", {
+            "control_id": "00000000-0000-0000-0000-000000000104",
+            "worker_sha": "a" * 40,
+            "like_terminal_status": "safe_skip",
+            "like_terminal_reason": "post_like_skipped_no_posts_yet",
+        })
+        response = {
+            "ok": True,
+            "binding_valid": True,
+            "inserted_stages": [
+                "mute_posts_verified", "mute_stories_verified", "return_ct_exact"
+            ],
+            "duplicate_stages": [],
+        }
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2", return_value=response,
+        ), mock.patch(
+            "supabase_client.ack_follow_60s_completed_cycle_v1",
+            return_value={
+                "ok": True, "schema": "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+                "new_cycle_count": 10, "max_cycles": 10,
+                "barrier_reached": True, "next_candidate_permitted": False,
+                "revision": 10,
+            },
+        ) as ledger_rpc:
+            result = outbox.flush_pending(path=self.path)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["latest_ledger_ack"]["next_candidate_permitted"])
+        self.assertEqual(
+            ledger_rpc.call_args.kwargs["like_terminal_status"], "safe_skip"
+        )
+
+    def test_cycle_is_not_deleted_when_ledger_ack_fails(self) -> None:
+        for stage in outbox.VALID_STAGES:
+            self._journal(stage, {"liked_count": 1})
+        response = {
+            "ok": True, "binding_valid": True,
+            "inserted_stages": list(outbox.VALID_STAGES), "duplicate_stages": [],
+        }
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2", return_value=response,
+        ), mock.patch(
+            "supabase_client.ack_follow_60s_completed_cycle_v1",
+            return_value={"ok": False, "reason": "ledger_unavailable"},
+        ):
+            result = outbox.flush_pending(path=self.path)
+        self.assertFalse(result["ok"])
+        self.assertEqual(outbox.pending_count(self.path), 4)
 
 
 class Follow60BindingAndPostGridV2Test(unittest.TestCase):

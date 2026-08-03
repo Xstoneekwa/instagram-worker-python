@@ -273,6 +273,7 @@ def _mark_delivery_error(
 def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
     groups = _load_groups(path)
     flushed = 0
+    ledger_acks: list[dict[str, Any]] = []
     for group in groups:
         first = group[0]
         binding_fields = (
@@ -327,6 +328,66 @@ def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
                 "reason": "rpc_stage_confirmation_incomplete",
                 "flushed": flushed,
             }
+        if any(bool(row["cycle_complete"]) for row in group):
+            return_row = next(
+                (row for row in group if row["stage"] == "return_ct_exact"), None
+            )
+            return_payload = dict((return_row or {}).get("payload") or {})
+            like_verified = "like_verified" in expected_stages
+            like_terminal_status = (
+                "verified" if like_verified
+                else str(return_payload.get("like_terminal_status") or "")
+            )
+            like_terminal_reason = (
+                "like_verified" if like_verified
+                else str(return_payload.get("like_terminal_reason") or "")
+            )
+            control_id = str(return_payload.get("control_id") or "").strip()
+            worker_sha = str(return_payload.get("worker_sha") or "").strip().lower()
+            if (
+                return_row is None
+                or like_terminal_status not in {"verified", "safe_skip"}
+                or not like_terminal_reason
+                or not control_id
+                or not re.fullmatch(r"[0-9a-f]{40}", worker_sha)
+            ):
+                _mark_delivery_error(group, path, "cycle_ledger_binding_incomplete")
+                return {
+                    "ok": False,
+                    "reason": "cycle_ledger_binding_incomplete",
+                    "flushed": flushed,
+                }
+            try:
+                ledger_out = supabase_client.ack_follow_60s_completed_cycle_v1(
+                    control_id=control_id,
+                    account_id=first["account_id"],
+                    run_id=first["original_run_id"],
+                    request_id=first["original_request_id"],
+                    action_id=first["action_id"],
+                    action_id_hash_value=first["action_id_hash"],
+                    attempt_id=first["attempt_id"],
+                    business_session_id=first["business_session_id"],
+                    candidate_username=first["candidate_username"],
+                    source_profile=first["source_profile"],
+                    worker_sha=worker_sha,
+                    like_terminal_status=like_terminal_status,
+                    like_terminal_reason=like_terminal_reason,
+                )
+            except Exception as exc:
+                _mark_delivery_error(group, path, type(exc).__name__)
+                return {"ok": False, "reason": str(exc)[:240], "flushed": flushed}
+            if not bool(ledger_out.get("ok")):
+                _mark_delivery_error(
+                    group, path, ledger_out.get("reason") or "cycle_ledger_not_confirmed"
+                )
+                return {
+                    "ok": False,
+                    "reason": str(
+                        ledger_out.get("reason") or "cycle_ledger_not_confirmed"
+                    ),
+                    "flushed": flushed,
+                }
+            ledger_acks.append(dict(ledger_out))
         _delete_confirmed(group, path)
         flushed += 1
         log(
@@ -336,7 +397,13 @@ def flush_pending(*, path: Path = DEFAULT_PATH) -> dict[str, Any]:
             candidate_username=first["candidate_username"],
             inserted_stages=out.get("inserted_stages"), duplicate_stages=out.get("duplicate_stages"),
         )
-    return {"ok": True, "flushed": flushed, "pending": pending_count(path)}
+    return {
+        "ok": True,
+        "flushed": flushed,
+        "pending": pending_count(path),
+        "ledger_acks": ledger_acks,
+        "latest_ledger_ack": ledger_acks[-1] if ledger_acks else {},
+    }
 
 
 def flush_pending_bounded(*, budget_s: float = 0.55, path: Path = DEFAULT_PATH) -> dict[str, Any]:

@@ -56738,9 +56738,32 @@ def run_visual_candidate_post_follow_phase(
     except Exception:
         pass
     if ok_ret:
+        _like_terminal_status = ""
+        _like_terminal_reason = ""
+        if (
+            int(likes_out.get("liked_count") or 0) > 0
+            and stage_persist_results.get("like_verified") is True
+        ):
+            _like_terminal_status = "verified"
+            _like_terminal_reason = "like_verified"
+        elif (
+            str(likes_out.get("phase_outcome") or "") == "skipped"
+            and likes_out.get("ok") is True
+        ):
+            _like_terminal_status = "safe_skip"
+            _like_terminal_reason = str(
+                likes_out.get("skipped_reason") or "like_safe_skip"
+            )
         _persist_verified_stage(
             "return_ct_exact",
-            {"return_how": str(how_ret or ""), "return_ok": True},
+            {
+                "return_how": str(how_ret or ""),
+                "return_ok": True,
+                "like_terminal_status": _like_terminal_status,
+                "like_terminal_reason": _like_terminal_reason,
+                "control_id": str(stage_binding.get("control_id") or ""),
+                "worker_sha": str(stage_binding.get("worker_sha") or "").lower(),
+            },
         )
         log(
             "info",

@@ -2782,6 +2782,44 @@ def persist_follow_60s_post_follow_v2(
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 
+def ack_follow_60s_completed_cycle_v1(
+    *,
+    control_id: str,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    action_id: str,
+    action_id_hash_value: str,
+    attempt_id: int,
+    business_session_id: str,
+    candidate_username: str,
+    source_profile: str,
+    worker_sha: str,
+    like_terminal_status: str,
+    like_terminal_reason: str,
+) -> dict[str, Any]:
+    """Atomically acknowledge one durable, run-scoped Follow60 cycle."""
+    out = call_rpc(
+        "ack_follow_60s_completed_cycle_v1",
+        {
+            "p_control_id": str(control_id),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_action_id": str(action_id),
+            "p_action_id_hash": str(action_id_hash_value),
+            "p_attempt_id": int(attempt_id),
+            "p_business_session_id": str(business_session_id),
+            "p_candidate_username": _canonical_interaction_username(candidate_username),
+            "p_source_profile": _canonical_interaction_username(source_profile),
+            "p_worker_sha": str(worker_sha).lower(),
+            "p_like_terminal_status": str(like_terminal_status),
+            "p_like_terminal_reason": str(like_terminal_reason),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def get_follow_60s_canary_control_v1(account_id: str) -> dict[str, Any]:
     out = call_rpc("get_follow_60s_canary_control_v1", {"p_account_id": str(account_id)})
     return dict(out or {}) if isinstance(out, dict) else {}

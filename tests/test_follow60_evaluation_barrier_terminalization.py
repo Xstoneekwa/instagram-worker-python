@@ -121,6 +121,40 @@ class Follow60EvaluationBarrierTerminalizationTests(unittest.TestCase):
         )
         self.assertEqual(eligibility, ("not_needed", "waiting_operator_evaluation"))
 
+    def test_startup_replay_without_cycle_continues(self):
+        self.assertEqual(runner._follow60_startup_replay_decision({}), "continue")
+
+    def test_startup_replay_below_barrier_continues(self):
+        self.assertEqual(
+            runner._follow60_startup_replay_decision({
+                "ok": True,
+                "schema": "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+                "barrier_reached": False,
+                "next_candidate_permitted": True,
+            }),
+            "continue",
+        )
+
+    def test_startup_replay_at_barrier_stops_before_ui(self):
+        self.assertEqual(
+            runner._follow60_startup_replay_decision({
+                "ok": True,
+                "schema": "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+                "barrier_reached": True,
+                "next_candidate_permitted": False,
+            }),
+            "stop_at_barrier",
+        )
+
+    def test_startup_replay_with_unknown_schema_fails_closed(self):
+        self.assertEqual(
+            runner._follow60_startup_replay_decision({
+                "ok": True,
+                "schema": "LEGACY_DAILY_COUNTER",
+            }),
+            "invalid",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
