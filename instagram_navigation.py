@@ -23843,17 +23843,29 @@ def _post_follow_post_reveal_safe_first_row_contract(
             continue
         if top < max(0, tabs_bottom - 4) or bottom >= exploitable_bottom - slack:
             continue
-        evaluated = _post_follow_likes_evaluate_top_left_post_target(
-            cell,
-            # Reuse the existing audited physical-XML source contract.  The
-            # dedicated post-reveal provenance is carried separately below;
-            # it must not silently widen the global safe-source allowlist.
-            reason="xml_thumbnail_top_left",
-            ww=int(ww),
-            wh=int(wh),
-            y_min_px=int(tabs_bottom),
+        # The generic top-left evaluator deliberately rejects rows whose top is
+        # below 58% of the viewport.  That guard is correct for an unscrolled
+        # profile probe, but it falsely rejects the common post-Mute viewport:
+        # after the one bounded reveal, the first *physical XML* row can start
+        # lower while remaining fully visible and safely above system chrome.
+        # Keep every structural/surface guard above and use the stricter
+        # post-reveal geometry envelope here instead of widening the global
+        # evaluator used by Golden and other callers.
+        left_ok = _post_follow_likes_is_top_left_grid_cell(cell, ww=int(ww))
+        cell_height = int(bottom - top)
+        cell_width = max(24, int(ww) // 3)
+        center_y = int(cell.get("center_y") or ((top + bottom) // 2))
+        post_reveal_geometry_safe = bool(
+            left_ok
+            and top >= max(int(wh * _POST_FOLLOW_LIKE_TOP_LEFT_MIN_TOP_RATIO), tabs_bottom + 16)
+            and top <= int(wh * _POST_FOLLOW_LIKE_GRID_TOO_LOW_TOP_RATIO)
+            and center_y <= int(wh * _POST_FOLLOW_LIKE_TAP_SAFE_MAX_Y_RATIO)
+            and bottom <= int(wh * _POST_FOLLOW_LIKE_TAP_SAFE_MAX_BOTTOM_Y_RATIO)
+            and cell_height >= int(
+                cell_width * _POST_FOLLOW_LIKE_MIN_CELL_HEIGHT_WIDTH_RATIO
+            )
         )
-        if bool(evaluated.get("top_left_post_tap_safe")):
+        if post_reveal_geometry_safe:
             safe_cells.append({**cell, "_left": left, "_top": top})
     if not safe_cells:
         out["post_reveal_safe_rejection_reason"] = (
@@ -26006,7 +26018,12 @@ def visual_open_recent_post_from_profile(
         ww, wh = 1080, 2400
 
     np_check = visual_profile_has_no_posts(
-        d, source_profile_username=source_profile_username
+        d,
+        source_profile_username=source_profile_username,
+        # Follow60 already reaches Golden only after structural proof rejection.
+        # Do not persist a second diagnostic screenshot on its healthy path;
+        # the single Golden image below remains the visual selection input.
+        include_visual_fallback=not post_follow_fast,
     )
     if np_check.get("no_posts_detected"):
         meta_np = _followers_current_pkg_activity(d)
@@ -26043,9 +26060,22 @@ def visual_open_recent_post_from_profile(
     shot = str(
         _SCREENSHOTS_DIR / f"visual_recent_post_grid_{int(time.time() * 1000)}.png"
     )
+    im = None
+    shot_persisted = True
     _t_open_shot0 = time.perf_counter()
+    if post_follow_fast:
+        try:
+            im = d.screenshot(format="pillow")
+            if im is None or not hasattr(im, "convert"):
+                raise RuntimeError("pillow_screenshot_unavailable")
+            im = im.convert("RGB")
+            shot_persisted = False
+        except Exception:
+            im = None
     try:
-        screenshot(d, shot)
+        if im is None:
+            screenshot(d, shot)
+            shot_persisted = True
     except Exception as e:
         log(
             "error",
@@ -26081,9 +26111,10 @@ def visual_open_recent_post_from_profile(
 
     _t_pil0 = time.perf_counter()
     try:
-        from PIL import Image
+        if im is None:
+            from PIL import Image
 
-        im = Image.open(shot).convert("RGB")
+            im = Image.open(shot).convert("RGB")
     except Exception as e:
         log(
             "error",
@@ -26115,6 +26146,10 @@ def visual_open_recent_post_from_profile(
     if lperf is not None:
         lperf["open_shot_pil_decode_ms"] = round(
             (time.perf_counter() - _t_pil0) * 1000.0, 2
+        )
+        lperf["open_shot_persisted"] = bool(shot_persisted)
+        lperf["open_shot_source"] = (
+            "memory_pillow" if not shot_persisted else "forensic_file_fallback"
         )
 
     iw, ih = im.size
@@ -26251,7 +26286,8 @@ def visual_open_recent_post_from_profile(
             delta_bottom_px=delta_bottom_px,
             fresh_row_found=fresh_row_found,
             row_source_used=row_source_used,
-            open_shot_path=shot,
+            open_shot_path=(shot if shot_persisted else None),
+            open_shot_persisted=bool(shot_persisted),
             grid_probe_screenshot_path_ref=grid_probe_screenshot_path,
             source_profile_username=source_profile_username or "",
             suggested_for_you_ui_hint=bool(

@@ -109,6 +109,47 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
         self.assertTrue(out["other_row_clipped"])
         self.assertFalse(out["candidate_clipped"])
 
+    def test_post_mute_row_below_legacy_58_percent_is_safe_when_fully_visible(self) -> None:
+        cells = [
+            {
+                "left": 0,
+                "top": 1400,
+                "right": 360,
+                "bottom": 1760,
+                "center_x": 180,
+                "center_y": 1580,
+            },
+            {
+                "left": 0,
+                "top": 2150,
+                "right": 360,
+                "bottom": 2200,
+                "center_x": 180,
+                "center_y": 2175,
+            },
+        ]
+        out = self._run(classified=self._classified(physical_cells=cells))
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(out["post_bounds"]["top"], 1400)
+
+    def test_post_reveal_row_below_safe_viewport_remains_rejected(self) -> None:
+        cells = [
+            {
+                "left": 0,
+                "top": 1780,
+                "right": 360,
+                "bottom": 2140,
+                "center_x": 180,
+                "center_y": 1960,
+            }
+        ]
+        out = self._run(classified=self._classified(physical_cells=cells))
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(
+            out["post_reveal_safe_rejection_reason"],
+            "post_reveal_fully_visible_first_row_missing",
+        )
+
     def test_fingerprint_generation_and_frame_are_bound(self) -> None:
         out = self._run()
         self.assertEqual(len(out["post_reveal_xml_fingerprint"]), 64)
