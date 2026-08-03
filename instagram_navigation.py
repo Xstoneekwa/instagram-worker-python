@@ -23816,7 +23816,10 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
             wh=int(wh),
             profile_identity_exact=True,
         )
-        if str(reacquired.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
+        if str(reacquired.get("outcome") or "") in {
+            "POST_ROW_POSITIVE_SAFE",
+            "POST_ROW_POSITIVE_BUT_CLIPPED",
+        }:
             reacquired = _post_follow_post_reveal_safe_first_row_contract(
                 d,
                 reacquired,
@@ -23888,7 +23891,10 @@ def _post_follow_post_reveal_safe_first_row_contract(
     """Promote only a fully visible first row from the one fresh reveal XML."""
     out = dict(classified or {})
     out.setdefault("post_reveal_safe_reason", "")
-    if str(out.get("outcome") or "") != "POST_ROW_POSITIVE_BUT_CLIPPED":
+    if str(out.get("outcome") or "") not in {
+        "POST_ROW_POSITIVE_SAFE",
+        "POST_ROW_POSITIVE_BUT_CLIPPED",
+    }:
         return out
     required = (
         bool(out.get("identity_exact")),

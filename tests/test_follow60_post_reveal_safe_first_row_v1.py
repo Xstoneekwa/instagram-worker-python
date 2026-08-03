@@ -19,6 +19,9 @@ ACT = "com.instagram.mainactivity.InstagramMainActivity"
 
 class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
     def setUp(self) -> None:
+        self.package_patch = mock.patch.object(nav.config, "INSTAGRAM_PACKAGE", PKG)
+        self.package_patch.start()
+        self.addCleanup(self.package_patch.stop)
         self.assertTrue(configure_canary(
             canary,
             account_id=TEST_CANARY_ACCOUNT_ID,
@@ -235,6 +238,9 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
             )
         self.device.dump_hierarchy.assert_called_once_with(compressed=False)
         self.assertEqual(out["reveal_count_total_for_like_phase"], 1)
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(len(out["post_reveal_xml_fingerprint"]), 64)
+        self.assertTrue(out["post_reveal_coordinate_frame"])
 
 
 if __name__ == "__main__":
