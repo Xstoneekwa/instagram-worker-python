@@ -29476,6 +29476,9 @@ def visual_verify_post_liked(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
+    expected_follower_username: str | None = None,
+    expected_stage_binding: dict[str, Any] | None = None,
+    post_tap_verification_context: dict[str, Any] | None = None,
     tap_x: int | None = None,
     tap_y: int | None = None,
     detect_confidence: float | None = None,
@@ -29483,10 +29486,7 @@ def visual_verify_post_liked(
     pre_tap_like_button_bounds: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """
-    After a real like tap: fast UI → post_tap PNG (prefer pre-tap heart ROI) → hierarchy → fresh screenshot.
-    The wall-clock deadline is enforced between heavy phases so multiple attempts stay meaningful.
-    """
+    """Verify one acknowledged Like tap with bounded semantic -> ROI -> XML escalation."""
     kwargs.pop("like_button_state_before", None)
     like_kw_bounds = kwargs.pop("like_button_bounds", None)
     pref_bounds = pre_tap_like_button_bounds
@@ -29494,15 +29494,36 @@ def visual_verify_post_liked(
         pref_bounds = like_kw_bounds
     if kwargs:
         _ = kwargs
-    timeout_s = float(getattr(config, "VISUAL_POST_LIKE_VERIFY_TIMEOUT_S", 3.2) or 3.2)
-    max_attempts = int(
-        getattr(config, "VISUAL_POST_LIKE_VERIFY_MAX_ATTEMPTS", 4) or 4
+    timeout_s = min(
+        3.2,
+        max(
+            0.8,
+            float(
+                getattr(config, "VISUAL_POST_LIKE_VERIFY_TIMEOUT_S", 3.2)
+                or 3.2
+            ),
+        ),
     )
-    max_attempts = max(1, min(max_attempts, 8))
+    max_attempts = min(
+        4,
+        max(
+            1,
+            int(
+                getattr(config, "VISUAL_POST_LIKE_VERIFY_MAX_ATTEMPTS", 4)
+                or 4
+            ),
+        ),
+    )
     red_strong, red_soft = _visual_post_like_verify_red_thresholds()
     meta0 = _followers_current_pkg_activity(d)
     dc = float(detect_confidence) if detect_confidence is not None else 0.0
-    post_tap_file_analyzed = False
+    expected_binding = dict(expected_stage_binding or {})
+    verify_context = dict(post_tap_verification_context or {})
+    expected_candidate = _normalize_handle(expected_follower_username or "")
+    expected_package = str(verify_context.get("package") or meta0.get("current_package") or "")
+    expected_activity = str(verify_context.get("activity") or meta0.get("current_activity") or "")
+    roi_image: Any | None = None
+    screenshot_saved_reason = ""
     fail_snap: dict[str, Any] = {
         "attempts_count": 0,
         "last_ui_candidate_method": "",
@@ -29516,11 +29537,99 @@ def visual_verify_post_liked(
         "last_heart_bounds_source": "",
         "verify_red_ratio_strong_threshold": round(red_strong, 4),
         "verify_max_attempts_cap": max_attempts,
-        "post_tap_reuse_eligible": bool(
-            post_tap_screenshot_path and str(post_tap_screenshot_path).strip()
-        ),
+        "post_tap_reuse_eligible": False,
         "verify_pre_tap_bounds_supplied": bool(pref_bounds),
+        "semantic_poll_count": 0,
+        "semantic_result": "pending",
+        "roi_screenshot_used": False,
+        "roi_result": "not_used",
+        "xml_fallback_used": False,
+        "screenshot_saved_reason": "",
     }
+
+    def _finish_success(method: str, confidence: float, *, attempt: int) -> dict[str, Any]:
+        total_ms = round((time.perf_counter() - t_verify_wall0) * 1000.0, 2)
+        log(
+            "info",
+            "visual_post_like_verify_success",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            verification_method=method,
+            confidence=round(float(confidence), 4),
+            current_activity=expected_activity,
+            current_package=expected_package,
+            source_profile_username=source_profile_username or "",
+            expected_follower_username=expected_candidate,
+            verify_attempt=attempt,
+            semantic_poll_count=fail_snap["semantic_poll_count"],
+            semantic_result=fail_snap["semantic_result"],
+            roi_screenshot_used=fail_snap["roi_screenshot_used"],
+            roi_result=fail_snap["roi_result"],
+            xml_fallback_used=fail_snap["xml_fallback_used"],
+            final_verification_source=method,
+            screenshot_saved_reason="",
+            like_verify_total_ms=total_ms,
+        )
+        return {
+            "liked_verified": True,
+            "verification_method": method,
+            "confidence": float(confidence),
+            "verify_attempts_count": int(attempt),
+            "semantic_poll_count": int(fail_snap["semantic_poll_count"]),
+            "semantic_result": str(fail_snap["semantic_result"]),
+            "roi_screenshot_used": bool(fail_snap["roi_screenshot_used"]),
+            "roi_result": str(fail_snap["roi_result"]),
+            "xml_fallback_used": bool(fail_snap["xml_fallback_used"]),
+            "screenshot_saved_reason": "",
+            "like_verify_total_ms": total_ms,
+        }
+
+    def _surface_continuity_reason() -> str:
+        live = _followers_current_pkg_activity(d)
+        if str(live.get("current_package") or "") != expected_package:
+            return "like_verify_package_changed"
+        if str(live.get("current_activity") or "") != expected_activity:
+            return "like_verify_activity_changed"
+        if expected_binding:
+            required_keys = (
+                "account_id", "run_id", "request_id", "action_id",
+                "attempt_id", "business_session_id", "control_id", "worker_sha",
+            )
+            if str(verify_context.get("version") or "") != "PostTapLikeVerifyV1":
+                return "like_verify_context_missing"
+            if not bool(verify_context.get("tap_ack")):
+                return "like_verify_tap_ack_missing"
+            for key in required_keys:
+                if str(verify_context.get(key) or "") != str(
+                    expected_binding.get(key) or ""
+                ):
+                    return f"like_verify_{key}_mismatch"
+            if _normalize_handle(
+                str(verify_context.get("candidate_username") or "")
+            ) != expected_candidate:
+                return "like_verify_candidate_mismatch"
+            if not bool(verify_context.get("v5_positive")) or bool(
+                verify_context.get("story_or_highlight_detected")
+            ):
+                return "like_verify_v5_context_rejected"
+            if dict(verify_context.get("like_bounds") or {}) != dict(
+                pref_bounds or {}
+            ):
+                return "like_verify_bounds_mismatch"
+            try:
+                from follow_60s_canary import runtime_context as _like_runtime_context
+
+                current_generation = int(
+                    _like_runtime_context().get("ui_generation") or 0
+                )
+            except Exception:
+                return "like_verify_generation_missing"
+            if current_generation != int(
+                verify_context.get("canonical_generation") or 0
+            ):
+                return "like_verify_generation_changed"
+        return ""
+
     log(
         "info",
         "visual_post_like_verify_started",
@@ -29534,287 +29643,149 @@ def visual_verify_post_liked(
         verify_timeout_s=round(timeout_s, 3),
         verify_max_attempts_cap=max_attempts,
         verify_red_ratio_strong_threshold=round(red_strong, 4),
-        post_tap_reuse_eligible=fail_snap["post_tap_reuse_eligible"],
+        post_tap_reuse_eligible=False,
         verify_pre_tap_bounds_supplied=fail_snap["verify_pre_tap_bounds_supplied"],
+        verification_order="semantic_then_roi_then_xml",
     )
 
     t_verify_wall0 = time.perf_counter()
-    ok_strict, method_strict, conf_strict, proof_strict = (
-        _ui_post_viewer_action_button_liked_strict(d)
-    )
-    if ok_strict:
-        meta_fast = _followers_current_pkg_activity(d)
-        log(
-            "info",
-            "visual_post_like_verify_success",
-            tap_x=tap_x,
-            tap_y=tap_y,
-            verification_method=method_strict,
-            confidence=round(conf_strict, 4),
-            current_activity=meta_fast.get("current_activity"),
-            current_package=meta_fast.get("current_package"),
-            source_profile_username=source_profile_username or "",
-            matched_node_resource_id=proof_strict.get("matched_node_resource_id"),
-            matched_node_content_desc=proof_strict.get("matched_node_content_desc"),
-            matched_node_bounds=proof_strict.get("matched_node_bounds"),
-            semantic_match_scope=proof_strict.get("semantic_match_scope"),
-            semantic_match_trusted_for_already_liked=proof_strict.get(
-                "semantic_match_trusted_for_already_liked"
-            ),
-            verify_attempt=0,
-            verify_early_exit_strict_ui=True,
-            like_verify_total_ms=round(
-                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
-            ),
+    continuity_reason = _surface_continuity_reason()
+    if continuity_reason:
+        fail_snap["semantic_result"] = continuity_reason
+    else:
+        not_before = time.perf_counter() + 0.25
+        semantic_deadline = min(
+            t_verify_wall0 + min(timeout_s, 0.72),
+            t_verify_wall0 + timeout_s,
         )
-        return {
-            "liked_verified": True,
-            "verification_method": method_strict,
-            "confidence": conf_strict,
-            "verify_attempts_count": 0,
-            "verify_early_exit_strict_ui": True,
-            "like_verify_total_ms": round(
-                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
-            ),
-        }
-
-    if fail_snap["post_tap_reuse_eligible"]:
-        post_tap_file_analyzed = True
-        pt_verify = _visual_post_like_verify_from_post_tap_screenshot(
-            d,
-            post_tap_screenshot_path=str(post_tap_screenshot_path),
-            pre_tap_like_button_bounds=pref_bounds,
-            tap_x=tap_x,
-            tap_y=tap_y,
-            source_profile_username=source_profile_username,
-            red_strong=red_strong,
-            red_soft=red_soft,
-            verify_attempt=0,
-            fail_snap=fail_snap,
-        )
-        if pt_verify:
-            pt_verify["verify_early_exit_strict_ui"] = False
-            pt_verify["like_verify_total_ms"] = round(
-                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+        while time.perf_counter() < not_before:
+            time.sleep(min(0.04, max(0.0, not_before - time.perf_counter())))
+        for attempt in range(1, max_attempts + 1):
+            if time.perf_counter() >= semantic_deadline:
+                break
+            fail_snap["attempts_count"] = attempt
+            fail_snap["semantic_poll_count"] = attempt
+            continuity_reason = _surface_continuity_reason()
+            if continuity_reason:
+                fail_snap["semantic_result"] = continuity_reason
+                break
+            ok_ui, method_ui, conf_ui, proof_ui = (
+                _ui_post_viewer_liked_state_for_verify(d)
             )
-            return pt_verify
-
-    deadline = time.time() + max(0.35, timeout_s)
-    poll = 0.14
-    attempt = 0
-    while attempt < max_attempts:
-        if time.time() >= deadline:
-            break
-        attempt += 1
-        fail_snap["attempts_count"] = attempt
-        meta_att = _followers_current_pkg_activity(d)
-        log(
-            "info",
-            "visual_post_like_verify_attempt",
-            attempt=attempt,
-            tap_x=tap_x,
-            tap_y=tap_y,
-            confidence=round(dc, 4),
-            verification_method="fast_ui_then_reuse_roi_then_hierarchy_then_fresh",
-            current_activity=meta_att.get("current_activity"),
-            current_package=meta_att.get("current_package"),
-            source_profile_username=source_profile_username or "",
-            verify_max_attempts_cap=max_attempts,
-            seconds_left=max(0.0, round(deadline - time.time(), 3)),
-            verify_pre_tap_bounds_supplied=bool(pref_bounds),
-        )
-
-        ok_ui, method_ui, conf_ui, proof_ui = _ui_post_viewer_liked_state_for_verify(d)
-        if proof_ui:
-            fail_snap["last_ui_candidate_method"] = str(
-                proof_ui.get("detection_method") or method_ui or ""
-            )
-            fail_snap["last_ui_matched_node_resource_id"] = str(
-                proof_ui.get("matched_node_resource_id") or ""
-            )
-            fail_snap["last_ui_matched_node_content_desc"] = str(
-                proof_ui.get("matched_node_content_desc") or ""
-            )
-            fail_snap["last_ui_matched_node_text"] = str(
-                proof_ui.get("matched_node_text") or ""
-            )
-            fail_snap["last_ui_matched_node_bounds"] = proof_ui.get(
-                "matched_node_bounds"
-            )
-        if ok_ui:
-            meta = _followers_current_pkg_activity(d)
-            log(
-                "info",
-                "visual_post_like_verify_success",
-                tap_x=tap_x,
-                tap_y=tap_y,
-                verification_method=method_ui,
-                confidence=round(conf_ui, 4),
-                current_activity=meta.get("current_activity"),
-                current_package=meta.get("current_package"),
-                source_profile_username=source_profile_username or "",
-                matched_node_resource_id=proof_ui.get("matched_node_resource_id"),
-                matched_node_content_desc=proof_ui.get("matched_node_content_desc"),
-                matched_node_bounds=proof_ui.get("matched_node_bounds"),
-                semantic_match_scope=proof_ui.get("semantic_match_scope"),
-                semantic_match_trusted_for_already_liked=proof_ui.get(
-                    "semantic_match_trusted_for_already_liked"
-                ),
-                verify_attempt=attempt,
-            )
-            return {
-                "liked_verified": True,
-                "verification_method": method_ui,
-                "confidence": conf_ui,
-                "verify_attempts_count": int(attempt),
-                "verify_early_exit_strict_ui": True,
-                "like_verify_total_ms": round(
-                    (time.perf_counter() - t_verify_wall0) * 1000.0, 2
-                ),
-            }
-
-        if time.time() >= deadline:
-            break
-
-        if not post_tap_file_analyzed and post_tap_screenshot_path:
-            post_tap_file_analyzed = True
-            pt_verify = _visual_post_like_verify_from_post_tap_screenshot(
-                d,
-                post_tap_screenshot_path=str(post_tap_screenshot_path),
-                pre_tap_like_button_bounds=pref_bounds,
-                tap_x=tap_x,
-                tap_y=tap_y,
-                source_profile_username=source_profile_username,
-                red_strong=red_strong,
-                red_soft=red_soft,
-                verify_attempt=attempt,
-                fail_snap=fail_snap,
-            )
-            if pt_verify:
-                pt_verify["verify_early_exit_strict_ui"] = False
-                pt_verify["like_verify_total_ms"] = round(
-                    (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+            if proof_ui:
+                fail_snap["last_ui_candidate_method"] = str(
+                    proof_ui.get("detection_method") or method_ui or ""
                 )
-                return pt_verify
+                fail_snap["last_ui_matched_node_resource_id"] = str(
+                    proof_ui.get("matched_node_resource_id") or ""
+                )
+                fail_snap["last_ui_matched_node_content_desc"] = str(
+                    proof_ui.get("matched_node_content_desc") or ""
+                )
+                fail_snap["last_ui_matched_node_text"] = str(
+                    proof_ui.get("matched_node_text") or ""
+                )
+                fail_snap["last_ui_matched_node_bounds"] = proof_ui.get(
+                    "matched_node_bounds"
+                )
+            if ok_ui:
+                fail_snap["semantic_result"] = "positive"
+                return _finish_success(method_ui, conf_ui, attempt=attempt)
+            fail_snap["semantic_result"] = "ambiguous"
+            if attempt < max_attempts and time.perf_counter() < semantic_deadline:
+                time.sleep(
+                    min(0.08, max(0.0, semantic_deadline - time.perf_counter()))
+                )
 
-        if time.time() >= deadline:
-            break
-
-        hier = ""
+    # Stage 2: one fresh, in-memory screenshot and the exact pre-tap Like ROI.
+    if not continuity_reason and pref_bounds and time.perf_counter() < t_verify_wall0 + timeout_s:
         try:
-            hier = str(d.dump_hierarchy(compressed=False))
-        except Exception:
-            try:
-                hier = str(d.dump_hierarchy())
-            except Exception:
-                hier = ""
-        ok_h, hier_m = _hierarchy_liked_state_for_post_verify(hier)
-        fail_snap["last_hierarchy_liked_hint"] = str(hier_m or "")
-        if ok_h:
-            meta = _followers_current_pkg_activity(d)
-            conf = 0.76 if hier_m == "hierarchy_unlike_button" else 0.74
-            log(
-                "info",
-                "visual_post_like_verify_success",
-                tap_x=tap_x,
-                tap_y=tap_y,
-                verification_method=hier_m,
-                confidence=conf,
-                current_activity=meta.get("current_activity"),
-                current_package=meta.get("current_package"),
-                source_profile_username=source_profile_username or "",
-                verify_attempt=attempt,
+            roi_image = d.screenshot(format="pillow")
+            if roi_image is None or not hasattr(roi_image, "convert"):
+                raise RuntimeError("pillow_screenshot_unavailable")
+            roi_image = roi_image.convert("RGB")
+            iw, ih = roi_image.size
+            exact_bounds = _sanitize_verify_pre_tap_heart_bounds(
+                pref_bounds, iw=iw, ih=ih
             )
-            return {
-                "liked_verified": True,
-                "verification_method": hier_m,
-                "confidence": conf,
-                "verify_attempts_count": int(attempt),
-            }
+            if exact_bounds is None:
+                fail_snap["roi_result"] = "bounds_invalid"
+            else:
+                ratio, hb_dict, _ = _visual_filled_heart_red_ratio(
+                    roi_image,
+                    iw,
+                    ih,
+                    heart_bounds=exact_bounds,
+                    d=None,
+                )
+                fail_snap["roi_screenshot_used"] = True
+                fail_snap["last_red_ratio"] = round(float(ratio), 4)
+                fail_snap["last_heart_bounds"] = hb_dict
+                fail_snap["last_heart_bounds_source"] = "pre_tap_like_button_bounds"
+                if ratio >= red_strong:
+                    fail_snap["roi_result"] = "positive"
+                    return _finish_success(
+                        "visual_exact_like_roi_positive",
+                        float(min(0.92, 0.4 + ratio * 4.0)),
+                        attempt=int(fail_snap["attempts_count"]),
+                    )
+                fail_snap["roi_result"] = (
+                    "ambiguous" if ratio >= red_soft else "negative"
+                )
+        except Exception as exc:
+            fail_snap["roi_screenshot_used"] = True
+            fail_snap["roi_result"] = f"capture_error:{type(exc).__name__}"
 
-        if time.time() >= deadline:
-            break
+    # Stage 3: exactly one hierarchy, only after semantic and ROI ambiguity.
+    if not continuity_reason and time.perf_counter() < t_verify_wall0 + timeout_s:
+        fail_snap["xml_fallback_used"] = True
+        try:
+            hierarchy = str(d.dump_hierarchy(compressed=False) or "")
+        except Exception:
+            hierarchy = ""
+        identity = _post_open_hierarchy_identity_signals(
+            hierarchy,
+            expected_username=expected_candidate,
+        )
+        ok_h, hierarchy_method = _hierarchy_liked_state_for_post_verify(hierarchy)
+        fail_snap["last_hierarchy_liked_hint"] = str(hierarchy_method or "")
+        candidate_exact = bool(
+            identity.get("candidate_username_exact_in_snapshot")
+            or not expected_candidate
+        )
+        xml_safe = bool(
+            hierarchy
+            and identity.get("posts_action_bar_in_snapshot")
+            and candidate_exact
+            and not identity.get("story_or_highlight_detected")
+            and not _surface_continuity_reason()
+        )
+        if ok_h and xml_safe:
+            return _finish_success(
+                hierarchy_method or "hierarchy_unlike_button",
+                0.76,
+                attempt=int(fail_snap["attempts_count"]),
+            )
+        if hierarchy and identity.get("story_or_highlight_detected"):
+            fail_snap["semantic_result"] = "story_or_highlight_detected"
+        elif hierarchy and not candidate_exact:
+            fail_snap["semantic_result"] = "candidate_mismatch"
+        elif hierarchy and not identity.get("posts_action_bar_in_snapshot"):
+            fail_snap["semantic_result"] = "posts_viewer_not_confirmed"
 
+    # Reuse the single ROI capture as the forensic artifact; never recapture.
+    if roi_image is not None:
         try:
             _ensure_debug_dirs()
-            shot = str(
+            forensic_path = str(
                 _SCREENSHOTS_DIR
-                / f"visual_post_verify_like_{int(time.time() * 1000)}.png"
+                / f"visual_post_verify_like_failed_{int(time.time() * 1000)}.png"
             )
-            screenshot(d, shot)
-            from PIL import Image
-
-            im = Image.open(shot).convert("RGB")
-            iw, ih = im.size
-            ratio, hb_dict, hsrc = _visual_filled_heart_red_ratio_for_verify(
-                im, iw, ih, d, preferred_heart_bounds=pref_bounds
-            )
-            fail_snap["last_red_ratio"] = round(float(ratio), 4)
-            fail_snap["last_heart_bounds"] = hb_dict
-            fail_snap["last_heart_bounds_source"] = str(hsrc or "")
-            if ratio >= red_strong:
-                conf_v = float(min(0.92, 0.4 + ratio * 4.0))
-                meta = _followers_current_pkg_activity(d)
-                log(
-                    "info",
-                    "visual_post_like_verify_success",
-                    tap_x=tap_x,
-                    tap_y=tap_y,
-                    verification_method="visual_filled_heart_red_ratio_verify",
-                    confidence=round(conf_v, 4),
-                    current_activity=meta.get("current_activity"),
-                    current_package=meta.get("current_package"),
-                    source_profile_username=source_profile_username or "",
-                    red_ratio=round(ratio, 4),
-                    heart_bounds_source=hsrc,
-                    verify_attempt=attempt,
-                )
-                return {
-                    "liked_verified": True,
-                    "verification_method": "visual_filled_heart_red_ratio_verify",
-                    "confidence": conf_v,
-                    "verify_attempts_count": int(attempt),
-                }
-            if ratio >= red_soft and ratio < red_strong:
-                try:
-                    log(
-                        "info",
-                        "visual_post_like_verify_red_ratio_below_threshold",
-                        tap_x=tap_x,
-                        tap_y=tap_y,
-                        red_ratio=round(ratio, 4),
-                        red_ratio_strong_threshold=round(red_strong, 4),
-                        red_ratio_soft_band=round(red_soft, 4),
-                        heart_bounds_source=hsrc,
-                        source_profile_username=source_profile_username or "",
-                        sample_source="fresh_screenshot",
-                    )
-                except Exception:
-                    pass
+            roi_image.save(forensic_path)
+            screenshot_saved_reason = "like_verification_failed_or_ambiguous"
         except Exception:
-            pass
-
-        if time.time() < deadline:
-            time.sleep(poll)
-
-    try:
-        el = d(resourceId="com.instagram.android:id/row_feed_button_like")
-        if el.exists(timeout=0.22):
-            diag = _ui_element_semantic_proof(el, "failure_diag_row_feed_button_like")
-            fail_snap.setdefault(
-                "last_ui_matched_node_resource_id",
-                str(diag.get("matched_node_resource_id") or ""),
-            )
-            fail_snap.setdefault(
-                "last_ui_matched_node_content_desc",
-                str(diag.get("matched_node_content_desc") or ""),
-            )
-            fail_snap.setdefault(
-                "last_ui_matched_node_bounds",
-                diag.get("matched_node_bounds"),
-            )
-    except Exception:
-        pass
+            screenshot_saved_reason = "forensic_save_failed"
+    fail_snap["screenshot_saved_reason"] = screenshot_saved_reason
 
     meta_f = _followers_current_pkg_activity(d)
     try:
@@ -29829,6 +29800,9 @@ def visual_verify_post_liked(
             current_package=meta_f.get("current_package"),
             source_profile_username=source_profile_username or "",
             **fail_snap,
+            like_verify_total_ms=round(
+                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+            ),
         )
     except Exception:
         log(
@@ -29845,6 +29819,18 @@ def visual_verify_post_liked(
         "verification_method": "none",
         "confidence": 0.0,
         "verify_attempts_count": int(fail_snap.get("attempts_count") or 0),
+        "failure_reason": str(
+            fail_snap.get("semantic_result") or "like_verification_ambiguous"
+        ),
+        "semantic_poll_count": int(fail_snap.get("semantic_poll_count") or 0),
+        "semantic_result": str(fail_snap.get("semantic_result") or ""),
+        "roi_screenshot_used": bool(fail_snap.get("roi_screenshot_used")),
+        "roi_result": str(fail_snap.get("roi_result") or ""),
+        "xml_fallback_used": bool(fail_snap.get("xml_fallback_used")),
+        "screenshot_saved_reason": screenshot_saved_reason,
+        "like_verify_total_ms": round(
+            (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+        ),
     }
 
 
@@ -31851,6 +31837,35 @@ def visual_like_open_post(
                 ).hexdigest()[:16],
                 consumption_reason="single_like_tap_authorized",
             )
+        verification_binding = dict(expected_stage_binding or {})
+        post_tap_verification_context = {
+            "version": "PostTapLikeVerifyV1",
+            **{
+                key: verification_binding.get(key)
+                for key in (
+                    "account_id", "run_id", "request_id", "action_id",
+                    "attempt_id", "business_session_id", "control_id", "worker_sha",
+                )
+            },
+            "candidate_username": _normalize_handle(
+                str(expected_follower_username or "")
+            ),
+            "package": str(meta1.get("current_package") or ""),
+            "activity": str(meta1.get("current_activity") or ""),
+            "like_bounds": dict(like_button_bounds or {}),
+            "canonical_generation": int(
+                (like_tap_context_v2 or {}).get("canonical_generation") or 0
+            ),
+            "v5_positive": bool(
+                (like_tap_context_v2 or {}).get("v5_positive")
+                if like_tap_context_v2_required
+                else True
+            ),
+            "story_or_highlight_detected": bool(
+                (like_tap_context_v2 or {}).get("story_or_highlight_detected")
+            ),
+            "tap_ack": False,
+        }
         _VISUAL_POST_LIKE_TAPS_RECORDED += 1
         log(
             "info",
@@ -31871,6 +31886,8 @@ def visual_like_open_post(
         try:
             _t_tap_dispatch0 = time.perf_counter()
             d.click(tap_x, tap_y)
+            post_tap_verification_context["tap_ack"] = True
+            post_tap_verification_context["tap_ack_monotonic"] = time.monotonic()
             if _lkperf is not None:
                 _lkperf["like_tap_dispatch_ms"] = round(
                     (time.perf_counter() - _t_tap_dispatch0) * 1000.0, 2
@@ -31966,6 +31983,9 @@ def visual_like_open_post(
             "tap_y": tap_y,
             "confidence": confidence,
             "post_tap_screenshot_path": post_shot,
+            "post_tap_verification_context": dict(
+                post_tap_verification_context
+            ),
             "current_activity": meta_post.get("current_activity"),
             "current_package": meta_post.get("current_package"),
             "source_profile_username": source_profile_username or "",
@@ -55326,6 +55346,11 @@ def run_post_follow_post_likes_phase(
             ver = visual_verify_post_liked(
                 d,
                 source_profile_username=src,
+                expected_follower_username=cand,
+                expected_stage_binding=authoritative_binding,
+                post_tap_verification_context=like_out.get(
+                    "post_tap_verification_context"
+                ),
                 tap_x=like_out.get("tap_x"),
                 tap_y=like_out.get("tap_y"),
                 detect_confidence=like_out.get("confidence"),
