@@ -23148,6 +23148,27 @@ def _post_follow_post_grid_evidence_from_xml(
         area_b = float((int(b["right"]) - int(b["left"])) * (int(b["bottom"]) - int(b["top"])))
         return intersection / max(1.0, min(area_a, area_b))
 
+    def _absolute_cell_identity(label: str, order: int) -> dict[str, Any]:
+        normalized = " ".join(str(label or "").lower().split())
+        row_match = re.search(r"\brow\s*([1-9][0-9]*)\b", normalized)
+        column_match = re.search(
+            r"\b(?:column|col)\s*([1-9][0-9]*)\b", normalized
+        )
+        media_token = "|".join(
+            part for part in normalized.split() if part not in {"post", "thumbnail"}
+        )
+        return {
+            "absolute_row_index": (
+                int(row_match.group(1)) if row_match is not None else None
+            ),
+            "absolute_column_index": (
+                int(column_match.group(1)) if column_match is not None else None
+            ),
+            "pre_reveal_cell_identity": hashlib.sha256(
+                f"{media_token}|{int(order)}".encode("utf-8", errors="replace")
+            ).hexdigest()[:20],
+        }
+
     for node_order, node in enumerate(root.iter()):
         attrs = node.attrib or {}
         label = " ".join(
@@ -23261,6 +23282,7 @@ def _post_follow_post_grid_evidence_from_xml(
             **bounds,
             "center_x": (bounds["left"] + bounds["right"]) // 2,
             "center_y": (bounds["top"] + bounds["bottom"]) // 2,
+            **_absolute_cell_identity(label, node_order),
         }
         if int(ww * 0.08) <= height <= int(ww * 0.48):
             raw_cells.append(cell)
@@ -23515,6 +23537,23 @@ def _post_follow_post_grid_evidence_from_xml(
     out["other_row_clipped"] = bool(
         out.get("clipped_detected") and not candidate_clipped
     )
+    out["initial_top_left_bounds"] = dict(candidate)
+    out["absolute_row_index"] = candidate.get("absolute_row_index")
+    out["absolute_column_index"] = candidate.get("absolute_column_index")
+    out["selected_absolute_cell"] = {
+        "row": candidate.get("absolute_row_index"),
+        "column": candidate.get("absolute_column_index"),
+        "identity": candidate.get("pre_reveal_cell_identity"),
+    }
+    out["lower_row_clipped"] = bool(out.get("other_row_clipped"))
+    direct_top_left_fully_visible = bool(
+        _post_follow_likes_is_top_left_grid_cell(candidate, ww=int(ww))
+        and int(candidate["top"]) >= max(0, int(tabs_bottom) - 4)
+        and int(candidate["bottom"]) < int(fully_exploitable_bottom) - boundary_slack
+        and (int(candidate["bottom"]) - int(candidate["top"]))
+        >= int((max(24, int(ww) // 3)) * 0.72)
+    )
+    out["top_left_fully_visible"] = direct_top_left_fully_visible
     if candidate_clipped:
         out["outcome"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
         out["evidence_status"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
@@ -23529,14 +23568,19 @@ def _post_follow_post_grid_evidence_from_xml(
         candidate, reason="xml_thumbnail_top_left", ww=int(ww), wh=int(wh),
         y_min_px=int(tabs_bottom),
     )
-    if bool(safe.get("top_left_post_tap_safe")):
+    if bool(safe.get("top_left_post_tap_safe")) or direct_top_left_fully_visible:
         out["outcome"] = "POST_ROW_POSITIVE_SAFE"
         out["evidence_status"] = "POST_ROW_POSITIVE_SAFE"
         out["post_bounds"] = candidate
         out["post_bounds_source"] = "fresh_final_mute_close_xml_physical_cell"
         out["rejection_reason"] = ""
         out["tap_safe"] = True
-        out["grid_exposure"] = safe.get("grid_exposure")
+        out["grid_exposure"] = (
+            safe.get("grid_exposure")
+            if bool(safe.get("top_left_post_tap_safe"))
+            else "stable_fully_visible_top_left_lower_clip_ignored"
+        )
+        out["row_identity_preserved"] = True
         out["physical_row_count"] = len(
             {
                 int(cell["top"]) // max(1, int(ww * 0.12))
@@ -23721,6 +23765,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
         return out
 
+    expected_absolute_cell = dict(out.get("selected_absolute_cell") or {})
     out["reveal_scroll_attempted"] = True
     out["reveal_count_total_for_like_phase"] = 1
     try:
@@ -23766,6 +23811,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 ),
                 ww=int(ww),
                 wh=int(wh),
+                expected_absolute_cell=expected_absolute_cell,
             )
         reacquired["reveal_scroll_attempted"] = True
         reacquired["reveal_scroll_ok"] = True
@@ -23818,6 +23864,7 @@ def _post_follow_post_reveal_safe_first_row_contract(
     expected_package: str,
     ww: int,
     wh: int,
+    expected_absolute_cell: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Promote only a fully visible first row from the one fresh reveal XML."""
     out = dict(classified or {})
@@ -23932,6 +23979,23 @@ def _post_follow_post_reveal_safe_first_row_contract(
             "post_reveal_fully_visible_first_row_missing"
         )
         return out
+    expected = dict(expected_absolute_cell or {})
+    expected_row = expected.get("row")
+    expected_column = expected.get("column")
+    if expected_row is not None and expected_column is not None:
+        identity_matches = [
+            cell
+            for cell in safe_cells
+            if cell.get("absolute_row_index") == expected_row
+            and cell.get("absolute_column_index") == expected_column
+        ]
+        if not identity_matches:
+            out["post_reveal_safe_rejection_reason"] = (
+                "absolute_grid_cell_identity_not_preserved"
+            )
+            out["row_identity_preserved"] = False
+            return out
+        safe_cells = identity_matches
     first_top = min(int(cell["_top"]) for cell in safe_cells)
     row_slack = max(8, int(ww * 0.02))
     first_row = [
@@ -23939,6 +24003,9 @@ def _post_follow_post_reveal_safe_first_row_contract(
         if abs(int(cell["_top"]) - first_top) <= row_slack
     ]
     chosen = min(first_row, key=lambda cell: int(cell["_left"]))
+    chosen_row = chosen.get("absolute_row_index")
+    chosen_column = chosen.get("absolute_column_index")
+    chosen_identity = chosen.get("pre_reveal_cell_identity")
     chosen = {
         key: int(chosen[key])
         for key in ("left", "top", "right", "bottom", "center_x", "center_y")
@@ -23964,6 +24031,14 @@ def _post_follow_post_reveal_safe_first_row_contract(
             "post_reveal_coordinate_frame": frame,
             "post_reveal_package": package,
             "post_reveal_activity": activity,
+            "absolute_row_index": chosen_row,
+            "absolute_column_index": chosen_column,
+            "selected_absolute_cell": {
+                "row": chosen_row,
+                "column": chosen_column,
+                "identity": chosen_identity,
+            },
+            "row_identity_preserved": True,
         }
     )
     return out
@@ -24011,6 +24086,7 @@ def _post_follow_create_fresh_tap_proof_from_grid(
             expected_package=pkg,
             ww=int(ww),
             wh=int(wh),
+            expected_absolute_cell=dict(classified.get("selected_absolute_cell") or {}),
         )
     if str(classified.get("outcome") or "") != "POST_ROW_POSITIVE_SAFE":
         return {
