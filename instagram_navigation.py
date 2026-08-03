@@ -23323,6 +23323,53 @@ def _post_follow_post_grid_evidence_from_xml(
         )
         and not bool(base.get("reels_or_tagged_selected"))
     )
+    reveal_only_unsafe_marker = any(
+        token in xml.lower()
+        for token in (
+            "story_viewer", "reel_viewer", "highlight_viewer",
+            "story viewer", "highlight viewer", "loading_spinner",
+            "progressbar", "progress_bar",
+        )
+    )
+    reveal_only_without_tabs = bool(
+        identity_exact
+        and post_count_positive
+        and (suggested_marker_order >= 0 or highlights_marker_order >= 0)
+        and not raw_cells
+        and not raw_clipped_cells
+        and not bool(base.get("empty_marker_xml"))
+        and not posts_count_zero_exact
+        and not bool(base.get("reels_or_tagged_selected"))
+        and not bool(base.get("loading_visible"))
+        and not bool(base.get("private_profile_visible"))
+        and not reveal_only_unsafe_marker
+    )
+    if reveal_only_without_tabs:
+        out.update(
+            {
+                "outcome": "POST_GRID_REVEAL_REQUIRED",
+                "evidence_status": "POST_GRID_REVEAL_REQUIRED",
+                "rejection_reason": "post_grid_below_fold_reveal_required",
+                "post_grid_reveal_required_reason": (
+                    "positive_posts_suggested_or_highlights_grid_below_fold"
+                ),
+                "reveal_required_reason": (
+                    "positive_posts_suggested_or_highlights_grid_below_fold"
+                ),
+                "tap_safe": False,
+                "grid_exposure": "positive_profile_grid_below_fold",
+                "reveal_permission_only": True,
+                "overlay_regions_isolated": True,
+                "profile_tabs_missing_at_reveal_authorization": True,
+                "post_bounds": None,
+                "initial_top_left_bounds": None,
+                "top_left_fully_visible": False,
+                "lower_row_clipped": False,
+                "absolute_row_index": None,
+                "absolute_column_index": None,
+            }
+        )
+        return _finalize()
     if not (identity_exact and (tabs_bottom > 0 or structural_tabs_without_bounds)):
         out["rejection_reason"] = (
             "candidate_identity_not_exact" if not identity_exact
@@ -23642,7 +23689,17 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     if not bool(out.get("identity_exact")):
         out["fast_vision_probe_rejection_reason"] = "candidate_identity_not_exact"
         return out
-    if not bool(out.get("profile_tabs_present")) or not bool(out.get("grid_selected")):
+    reveal_permission_only = bool(
+        initial_outcome == "POST_GRID_REVEAL_REQUIRED"
+        and out.get("reveal_permission_only")
+    )
+    if (
+        not reveal_permission_only
+        and (
+            not bool(out.get("profile_tabs_present"))
+            or not bool(out.get("grid_selected"))
+        )
+    ):
         out["fast_vision_probe_rejection_reason"] = "selected_grid_not_proven"
         return out
     if bool(out.get("loading_visible")) or bool(out.get("private_profile_visible")):
@@ -23655,8 +23712,11 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         tabs_bottom = int(out.get("tabs_bottom") or 0)
     except (TypeError, ValueError):
         tabs_bottom = 0
-    if tabs_bottom <= 0 and str(out.get("tabs_boundary_source") or "") != (
-        "xml_order_after_posts_tab"
+    if (
+        not reveal_permission_only
+        and tabs_bottom <= 0
+        and str(out.get("tabs_boundary_source") or "")
+        != "xml_order_after_posts_tab"
     ):
         out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
         return out
