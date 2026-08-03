@@ -45529,6 +45529,7 @@ def _post_follow_likes_failure_return_ct_capped(
     follower_username: str,
     visual_candidate_id: str,
     det: dict[str, Any] | None = None,
+    immediate_candidate_back_proof: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Compact return-CT after like skip with a hard wall clock cap."""
     src = str(source_profile_username or "").strip()
@@ -45560,6 +45561,7 @@ def _post_follow_likes_failure_return_ct_capped(
             max_rounds=1,
             compact_after_follow_verified_mute=True,
             compact_reason="post_like_skip_compact_return",
+            immediate_candidate_back_proof=bool(immediate_candidate_back_proof),
         )
     except Exception as e:
         ok_ret, how_ret, fail_re = (
@@ -45610,6 +45612,131 @@ def _post_follow_likes_failure_return_ct_capped(
         except Exception:
             pass
     return bool(ok_ret), str(how_ret or ""), fail_re
+
+
+def _post_follow_like_failure_surface_probe(
+    d: u2.Device,
+    *,
+    pkg: str,
+    follower_username: str,
+) -> dict[str, Any]:
+    """Classify the live surface without XML, screenshot, sleep, or navigation."""
+    meta = _followers_current_pkg_activity(d)
+    current_package = str(meta.get("current_package") or "")
+    current_activity = str(meta.get("current_activity") or "")
+    package_exact = bool(pkg and current_package == str(pkg))
+    activity_exact = bool(
+        current_activity
+        and current_activity.rsplit(".", 1)[-1]
+        in ("InstagramMainActivity", "MainActivity")
+    )
+    action_bar_title = str(_visual_read_action_bar_username(d) or "").strip()
+    candidate_exact = bool(
+        package_exact
+        and activity_exact
+        and _normalize_handle(action_bar_title)
+        == _normalize_handle(str(follower_username or ""))
+    )
+    viewer_exact = bool(
+        package_exact
+        and activity_exact
+        and _normalize_handle(action_bar_title) == "posts"
+    )
+    if candidate_exact:
+        surface = "candidate_profile_exact"
+    elif viewer_exact:
+        surface = "post_viewer_exact"
+    elif not package_exact:
+        surface = "package_mismatch"
+    elif not activity_exact:
+        surface = "activity_mismatch"
+    else:
+        surface = "ambiguous"
+    return {
+        "surface": surface,
+        "current_package": current_package,
+        "current_activity": current_activity,
+        "action_bar_title": action_bar_title,
+        "package_exact": package_exact,
+        "activity_exact": activity_exact,
+        "candidate_exact": candidate_exact,
+        "viewer_exact": viewer_exact,
+    }
+
+
+def _post_follow_like_failure_prepare_fast_return(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+) -> dict[str, Any]:
+    """Route Return CT from the actual UI surface, independently of Like outcome."""
+    first = _post_follow_like_failure_surface_probe(
+        d,
+        pkg=pkg,
+        follower_username=follower_username,
+    )
+    out: dict[str, Any] = {
+        "route": "recovery",
+        "surface_before": str(first.get("surface") or "ambiguous"),
+        "surface_after": "",
+        "viewer_back_used": False,
+        "candidate_profile_exact": False,
+    }
+    if bool(first.get("candidate_exact")):
+        out.update(
+            route="fast_candidate_profile",
+            surface_after="candidate_profile_exact",
+            candidate_profile_exact=True,
+        )
+    elif bool(first.get("viewer_exact")):
+        if not verify_app_foreground(d, pkg):
+            out["surface_after"] = "instagram_not_foreground"
+        else:
+            try:
+                d.press("back")
+                out["viewer_back_used"] = True
+            except Exception as exc:
+                out["surface_after"] = f"back_exception:{type(exc).__name__}"
+            if bool(out.get("viewer_back_used")):
+                # Selector timeouts provide a bounded transition poll; no fixed sleep.
+                for _ in range(3):
+                    after = _post_follow_like_failure_surface_probe(
+                        d,
+                        pkg=pkg,
+                        follower_username=follower_username,
+                    )
+                    out["surface_after"] = str(
+                        after.get("surface") or "ambiguous"
+                    )
+                    if bool(after.get("candidate_exact")):
+                        out.update(
+                            route="fast_viewer_back_candidate_profile",
+                            candidate_profile_exact=True,
+                        )
+                        break
+                    if str(after.get("surface") or "") in (
+                        "package_mismatch",
+                        "activity_mismatch",
+                    ):
+                        break
+    log(
+        "info",
+        "post_follow_return_ct_surface_driven_decision",
+        visual_candidate_id=str(visual_candidate_id or ""),
+        source_profile_username=str(source_profile_username or ""),
+        follower_username=str(follower_username or ""),
+        route=str(out.get("route") or "recovery"),
+        surface_before=str(out.get("surface_before") or ""),
+        surface_after=str(out.get("surface_after") or ""),
+        viewer_back_used=bool(out.get("viewer_back_used")),
+        like_outcome_informational_only=True,
+        screenshot_count=0,
+        xml_dump_count=0,
+    )
+    return out
 
 
 def _post_follow_likes_failure_light_unwind(
@@ -56811,54 +56938,88 @@ def run_visual_candidate_post_follow_phase(
     likes_recovery_t0 = time.perf_counter()
     likes_recovery_ms: float | None = None
     if likes_recoverable_failure:
-        likes_fr_kind = str(likes_out.get("likes_failure_kind") or "").strip()
-        use_light_unwind = likes_fr_kind in (
-            "post_grid_partial_suggested_overlay",
-            "post_grid_partial_suggested_overlay_fast",
-            "post_grid_not_visible_before_open",
-            "post_viewer_not_detected",
-            "post_viewer_not_detected_after_tap",
+        surface_route = _post_follow_like_failure_prepare_fast_return(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
         )
-        if use_light_unwind:
-            rec = _post_follow_likes_failure_light_unwind(
+        likes_out["post_follow_return_ct_surface_route"] = str(
+            surface_route.get("route") or "recovery"
+        )
+        likes_out["post_follow_return_ct_surface_before"] = str(
+            surface_route.get("surface_before") or ""
+        )
+        likes_out["post_follow_return_ct_surface_after"] = str(
+            surface_route.get("surface_after") or ""
+        )
+        if bool(surface_route.get("candidate_profile_exact")):
+            ok_ret, how_ret, fail_re = _post_follow_likes_failure_return_ct_capped(
                 d,
                 pkg=pkg,
                 source_profile_username=src,
                 follower_username=cand,
                 visual_candidate_id=vcid,
+                det={},
+                immediate_candidate_back_proof=True,
             )
-            likes_out["post_follow_likes_light_unwind_used"] = bool(rec.get("attempted"))
-            likes_out["post_follow_likes_light_unwind_ok"] = bool(rec.get("ok"))
-            if bool(rec.get("on_followers_list")):
-                ok_ret = True
-                how_ret = "light_unwind_on_followers_list"
-                fail_re = None
-            elif bool(rec.get("on_candidate_profile")) or bool(rec.get("ok")):
-                det_lw: dict[str, Any] = {}
-                try:
-                    det_lw = detect_followers_list_screen(d, source_profile_username=src)
-                except Exception:
-                    det_lw = {}
-                ok_ret, how_ret, fail_re = _post_follow_likes_failure_return_ct_capped(
+            rec = {
+                "attempted": True,
+                "ok": bool(ok_ret),
+                "how": str(how_ret or ""),
+                "failure_reason": str(fail_re or ""),
+                "surface_route": str(surface_route.get("route") or ""),
+            }
+        else:
+            likes_fr_kind = str(likes_out.get("likes_failure_kind") or "").strip()
+            use_light_unwind = likes_fr_kind in (
+                "post_grid_partial_suggested_overlay",
+                "post_grid_partial_suggested_overlay_fast",
+                "post_grid_not_visible_before_open",
+                "post_viewer_not_detected",
+                "post_viewer_not_detected_after_tap",
+            )
+            if use_light_unwind:
+                rec = _post_follow_likes_failure_light_unwind(
                     d,
                     pkg=pkg,
                     source_profile_username=src,
                     follower_username=cand,
                     visual_candidate_id=vcid,
-                    det=det_lw,
                 )
+                likes_out["post_follow_likes_light_unwind_used"] = bool(rec.get("attempted"))
+                likes_out["post_follow_likes_light_unwind_ok"] = bool(rec.get("ok"))
+                if bool(rec.get("on_followers_list")):
+                    ok_ret = True
+                    how_ret = "light_unwind_on_followers_list"
+                    fail_re = None
+                elif bool(rec.get("on_candidate_profile")) or bool(rec.get("ok")):
+                    det_lw: dict[str, Any] = {}
+                    try:
+                        det_lw = detect_followers_list_screen(d, source_profile_username=src)
+                    except Exception:
+                        det_lw = {}
+                    ok_ret, how_ret, fail_re = _post_follow_likes_failure_return_ct_capped(
+                        d,
+                        pkg=pkg,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        visual_candidate_id=vcid,
+                        det=det_lw,
+                    )
+                else:
+                    ok_ret = False
+                    how_ret = str(rec.get("how") or "")
+                    fail_re = "post_follow_likes_failure_light_unwind_failed"
             else:
-                ok_ret = False
-                how_ret = str(rec.get("how") or "")
-                fail_re = "post_follow_likes_failure_light_unwind_failed"
-        else:
-            rec = _post_follow_likes_failure_recover_return_ct(
-                d,
-                pkg=pkg,
-                source_profile_username=src,
-                follower_username=cand,
-                visual_candidate_id=vcid,
-            )
+                rec = _post_follow_likes_failure_recover_return_ct(
+                    d,
+                    pkg=pkg,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                )
         likes_return_recovery_used = bool(rec.get("attempted"))
         likes_return_recovery_ok = bool(rec.get("ok"))
         likes_recovery_ms = round((time.perf_counter() - likes_recovery_t0) * 1000.0, 2)
