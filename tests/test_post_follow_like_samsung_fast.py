@@ -124,6 +124,21 @@ def _like_phase_contract_ctx() -> mock.MagicMock:
     return contract_ctx
 
 
+def _stage_binding(*, action_id: str, run_id: str) -> dict[str, object]:
+    return {
+        "account_id": TEST_CANARY_ACCOUNT_ID,
+        "run_id": run_id,
+        "request_id": "44444444-4444-4444-8444-444444444444",
+        "action_id": action_id,
+        "attempt_id": 1,
+        "business_session_id": "generic-business-session",
+        "control_id": "33333333-3333-4333-8333-333333333333",
+        "worker_sha": "a" * 40,
+        "candidate_username": "cand",
+        "source_target_id": "target-test",
+    }
+
+
 def _patch_post_viewer_like_surface_gates_normal(stack: ExitStack) -> None:
     """Post-open viewer gates call u2 selectors; MagicMock makes exists() truthy by default."""
     stack.enter_context(
@@ -2060,6 +2075,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "center_y": 1080,
             },
             first_post_cell_source="test_fresh_xml",
+            source_xml_fingerprint="a" * 64,
+            absolute_row_index=0,
+            absolute_column_index=0,
             ttl_ms=3000.0,
         )
         try:
@@ -2105,6 +2123,32 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                             "proof": _fresh_tap_proof(),
                             "proof_age_ms": 1.0,
                         },
+                    )
+                )
+                def _dispatch_intent_once(
+                    current_device: object,
+                    *,
+                    intent: object,
+                    binding: dict[str, object] | None,
+                    candidate_username: str,
+                ) -> dict[str, object]:
+                    self.assertIsNotNone(intent)
+                    self.assertEqual(candidate_username, "cand")
+                    current_device.click(180, 1080)
+                    return {
+                        "ok": True,
+                        "intent_age_ms": 1.0,
+                        "post_open_stage_provenance": {
+                            "intent_version": "PostOpenIntentV2",
+                            "candidate_username": "cand",
+                        },
+                    }
+
+                intent_dispatch = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_dispatch_post_open_intent_v2_tap",
+                        side_effect=_dispatch_intent_once,
                     )
                 )
                 stack.enter_context(
@@ -2185,6 +2229,10 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     follow_success_verified=True,
                     follow_state_after="following",
                     skipped_tap=False,
+                    expected_stage_binding=_stage_binding(
+                        action_id="vc-fast",
+                        run_id="canary-fast-vision",
+                    ),
                 )
         finally:
             configure_canary(canary,
@@ -2196,7 +2244,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             )
 
         vision_probe.assert_not_called()
-        fresh_tap.assert_called_once()
+        fresh_tap.assert_not_called()
+        intent_dispatch.assert_called_once()
         device.click.assert_called_once_with(180, 1080)
         legacy_open.assert_not_called()
         golden_open.assert_not_called()
@@ -2291,14 +2340,13 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertIsNotNone(proof)
         self.assertEqual(proof_reason, "")
 
-    def test_canary_cell_proof_expired_at_tap_uses_one_golden_without_direct_tap(self) -> None:
+    def test_canary_post_open_intent_expired_at_tap_uses_one_golden_without_direct_tap(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)
         device.dump_hierarchy.return_value = "<hierarchy/>"
         contract_ctx = _like_phase_contract_ctx()
         canary_logs: list[tuple[str, dict[str, object]]] = []
         nav_logs: list[tuple[str, dict[str, object]]] = []
-        freshness_rows: list[dict[str, object]] = []
         configure_canary(canary,
             account_id=TEST_CANARY_ACCOUNT_ID,
             account_username=TEST_CANARY_USERNAME,
@@ -2306,7 +2354,6 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             package="com.instagram.android",
             resume_policy=None,
         )
-        proof = _fresh_tap_proof(created_at_monotonic=98.0)
         try:
             with ExitStack() as stack:
                 _patch_like_phase_common(stack, contract_ctx=contract_ctx)
@@ -2386,31 +2433,17 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     mock.patch.object(
                         nav,
                         "_post_follow_create_fresh_tap_proof_from_grid",
-                        return_value={
-                            "ok": True,
-                            "reason": "",
-                            "proof": proof,
-                            "proof_age_ms": 1000.0,
-                        },
                     )
                 )
-                original_freshness = nav._fresh_ui_proof_age_at_tap
-
-                def _capture_stale_at_tap(
-                    current_proof: object | None,
-                ) -> dict[str, object]:
-                    result = original_freshness(
-                        current_proof,
-                        now_monotonic=100.0,
-                    )
-                    freshness_rows.append(dict(result))
-                    return result
-
-                stack.enter_context(
+                intent_dispatch = stack.enter_context(
                     mock.patch.object(
                         nav,
-                        "_fresh_ui_proof_age_at_tap",
-                        side_effect=_capture_stale_at_tap,
+                        "_dispatch_post_open_intent_v2_tap",
+                        return_value={
+                            "ok": False,
+                            "reason": "post_open_intent_expired",
+                            "intent_age_ms": 1300.0,
+                        },
                     )
                 )
                 stack.enter_context(
@@ -2520,6 +2553,10 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     follow_success_verified=True,
                     follow_state_after="following",
                     skipped_tap=False,
+                    expected_stage_binding=_stage_binding(
+                        action_id="vc-stale-at-tap",
+                        run_id="canary-stale-at-tap",
+                    ),
                 )
         finally:
             configure_canary(canary,
@@ -2530,10 +2567,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 resume_policy=None,
             )
 
-        create_tap_proof.assert_called_once()
-        self.assertEqual(len(freshness_rows), 1)
-        self.assertFalse(freshness_rows[0]["valid"])
-        self.assertEqual(freshness_rows[0]["age_ms"], 2000.0)
+        create_tap_proof.assert_not_called()
+        intent_dispatch.assert_called_once()
         grid_probe.assert_not_called()
         legacy_open.assert_not_called()
         device.click.assert_not_called()
@@ -2548,7 +2583,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertEqual([row.get("status") for row in statuses], ["fallback"])
         self.assertEqual(
             statuses[0].get("rejection_reason"),
-            "fresh_ui_proof_stale_at_tap",
+            "post_open_intent_expired",
         )
         self.assertTrue(statuses[0].get("fallback_used"))
 

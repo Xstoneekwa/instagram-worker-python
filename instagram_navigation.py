@@ -17922,6 +17922,15 @@ def _stash_post_mute_sheet_closed_proof(
                         tabs_boundary_source=str(
                             _grid.get("tabs_boundary_source") or ""
                         ),
+                        source_xml_fingerprint=str(
+                            _grid.get("source_xml_fingerprint") or ""
+                        ),
+                        absolute_row_index=int(
+                            _grid.get("absolute_row_index") or 0
+                        ),
+                        absolute_column_index=int(
+                            _grid.get("absolute_column_index") or 0
+                        ),
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -18008,6 +18017,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
         )
         if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
             profile_ww, profile_wh = d.window_size()
+            profile_grid_xml = profile_xml
             profile_grid = _post_follow_post_grid_evidence_from_xml(
                 profile_xml,
                 candidate_username=cand,
@@ -18045,6 +18055,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
             ):
                 time.sleep(0.28)
                 stable_empty_xml = str(d.dump_hierarchy(compressed=False) or "")
+                profile_grid_xml = stable_empty_xml
                 profile_grid = _post_follow_post_grid_evidence_from_xml(
                     stable_empty_xml,
                     candidate_username=cand,
@@ -18121,6 +18132,9 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 and not profile_grid.get("private_profile_visible")
                 and not profile_grid.get("loading_visible")
             )
+            profile_grid["source_xml_fingerprint"] = hashlib.sha256(
+                str(profile_grid_xml or "").encode("utf-8", errors="replace")
+            ).hexdigest()
             context_out.update(
                 {
                     "post_grid_viewport_fingerprint": str(
@@ -26078,6 +26092,167 @@ def _post_selection_suggested_surface_guard(
     return True, "suggested_card_excluded"
 
 
+def _create_post_open_intent_from_final_proof(
+    *,
+    binding: dict[str, Any] | None,
+    candidate_username: str,
+    target_username: str,
+    source_branch: str,
+    bounds: dict[str, int],
+    package: str,
+    activity: str,
+    evidence: dict[str, Any],
+    viewport_width: int,
+    viewport_height: int,
+    xml_hash: str,
+    fingerprint: str,
+    absolute_row: int,
+    absolute_column: int,
+    candidate_bound_provenance: str,
+    ttl_ms: float = 1250.0,
+) -> Any | None:
+    """Create exactly one immutable tap intent from the terminal proof."""
+    if not isinstance(binding, dict):
+        return None
+    try:
+        from follow_60s_canary import runtime_context as _intent_runtime_context
+        from post_open_intent_v2 import create_post_open_intent_v2
+
+        runtime = _intent_runtime_context()
+        frame = dict(evidence.get("coordinate_frame") or {})
+        insets = dict(frame.get("system_insets") or {})
+        return create_post_open_intent_v2(
+            binding=binding,
+            candidate_username=candidate_username,
+            target_id=str(binding.get("source_target_id") or ""),
+            target_username=target_username,
+            package=package,
+            activity=activity,
+            source_branch=source_branch,
+            absolute_row=int(absolute_row),
+            absolute_column=int(absolute_column),
+            bounds=bounds,
+            coordinate_frame=frame,
+            viewport={"width": int(viewport_width), "height": int(viewport_height)},
+            insets=insets,
+            navigation_generation=int(runtime.get("navigation_counter") or 0),
+            scroll_generation=int(runtime.get("scroll_counter") or 0),
+            ui_generation=int(runtime.get("ui_generation") or 0),
+            xml_hash=str(xml_hash or ""),
+            fingerprint=str(fingerprint or ""),
+            post_grid_classification=str(
+                evidence.get("outcome") or evidence.get("post_grid_classification") or ""
+            ),
+            candidate_bound_provenance=candidate_bound_provenance,
+            ttl_ms=float(ttl_ms),
+        )
+    except Exception:
+        return None
+
+
+def _dispatch_post_open_intent_v2_tap(
+    d: u2.Device,
+    *,
+    intent: Any,
+    binding: dict[str, Any] | None,
+    candidate_username: str,
+) -> dict[str, Any]:
+    """Consume the one-shot intent and dispatch its sole physical tap."""
+    try:
+        from follow_60s_canary import runtime_context as _intent_runtime_context
+        from post_open_intent_v2 import consume_post_open_intent_v2
+
+        meta = _followers_current_pkg_activity(d)
+        width, height = d.window_size()
+        runtime = _intent_runtime_context()
+        accepted, age_ms, reason = consume_post_open_intent_v2(
+            intent,
+            binding=dict(binding or {}),
+            candidate_username=candidate_username,
+            package=str(meta.get("current_package") or ""),
+            activity=str(meta.get("current_activity") or ""),
+            viewport={"width": int(width), "height": int(height)},
+            navigation_generation=int(runtime.get("navigation_counter") or 0),
+            scroll_generation=int(runtime.get("scroll_counter") or 0),
+            ui_generation=int(runtime.get("ui_generation") or 0),
+        )
+        if accepted is None:
+            return {"ok": False, "reason": reason, "intent_age_ms": age_ms}
+        bounds = dict(accepted.bounds)
+        tap_x = (int(bounds["left"]) + int(bounds["right"])) // 2
+        tap_y = (int(bounds["top"]) + int(bounds["bottom"])) // 2
+        tap_dispatched_at = time.perf_counter()
+        d.click(tap_x, tap_y)
+        generation_token = (
+            f"nav:{accepted.navigation_generation}:"
+            f"scroll:{accepted.scroll_generation}:ui:{accepted.ui_generation}"
+        )
+        stage_provenance = {
+            "intent_version": accepted.version,
+            "intent_source": accepted.source_branch,
+            "intent_nonce": accepted.one_shot_nonce,
+            "evidence_kind": "post_grid_evidence_bounds",
+            "candidate_username": accepted.candidate_username,
+            "target_id": accepted.target_id,
+            "target_username": accepted.target_username,
+            "post_bounds": dict(accepted.bounds),
+            "package": accepted.package,
+            "activity": accepted.activity,
+            "created_at_monotonic": float(accepted.created_at_monotonic),
+            "cell_proof_valid_at_tap": True,
+            "cell_proof_age_at_tap_ms": round(float(age_ms), 2),
+            "cell_proof_ttl_ms": float(accepted.ttl_ms),
+            "tap_dispatched_at_monotonic": tap_dispatched_at,
+            "max_tap_to_audit_ms": 3000.0,
+            "same_stage_no_navigation_before_tap": True,
+            "navigation_generation_before": generation_token,
+            "navigation_generation_at_tap": generation_token,
+            "scroll_generation_before": generation_token,
+            "scroll_generation_at_tap": generation_token,
+            "invalidated": False,
+            "candidate_bound_provenance_source": (
+                accepted.candidate_bound_provenance
+            ),
+            "stage_binding": {
+                key: accepted.payload().get(key)
+                for key in (
+                    "account_id", "run_id", "request_id", "action_id",
+                    "attempt_id", "business_session_id", "control_id",
+                    "worker_sha", "target_id",
+                )
+            },
+        }
+        log(
+            "info", "post_open_intent_v2_consumed",
+            intent_version=accepted.version,
+            intent_source=accepted.source_branch,
+            candidate_username=accepted.candidate_username,
+            absolute_row=accepted.absolute_row,
+            absolute_column=accepted.absolute_column,
+            intent_age_ms=round(float(age_ms), 2),
+            acquisitions_count=0,
+            classifications_count=0,
+            terminal_helper_used="_dispatch_post_open_intent_v2_tap",
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "ok": True,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+            "intent_age_ms": age_ms,
+            "intent": accepted,
+            "intent_payload": accepted.payload(),
+            "post_open_stage_provenance": stage_provenance,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"post_open_intent_dispatch_error:{type(exc).__name__}",
+            "intent_age_ms": 0.0,
+        }
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
@@ -26092,6 +26267,8 @@ def visual_open_recent_post_from_profile(
     grid_probe_screenshot_path: str | None = None,
     likes_perf_phase_t0: float | None = None,
     post_follow_stash_open_like_proof: bool = False,
+    post_open_intent_binding: dict[str, Any] | None = None,
+    post_open_intent_target_username: str = "",
 ) -> dict[str, Any]:
     """
     From an open profile grid: screenshot, pick a grid cell, tap to open the post.
@@ -26675,6 +26852,55 @@ def visual_open_recent_post_from_profile(
     first_tap_coords = [tap_x, tap_y]
     retry_used = False
     retry_strategy = ""
+    golden_post_open_intent = None
+    golden_post_open_dispatch: dict[str, Any] = {}
+    if post_open_intent_binding is not None:
+        try:
+            from dataclasses import asdict as _intent_asdict
+            from follow_60s_canary import build_coordinate_frame_v1
+
+            golden_observation_hash = hashlib.sha256(
+                im.tobytes()
+            ).hexdigest()
+            golden_frame_obj = build_coordinate_frame_v1(
+                source="raw_window_exact",
+                raw_width=int(ww), raw_height=int(wh),
+                canonical_width=int(ww), canonical_height=int(wh),
+            )
+            golden_frame = (
+                _intent_asdict(golden_frame_obj)
+                if golden_frame_obj is not None
+                else {}
+            )
+            device_cell_w = max(24, int(round(cell_w * (float(ww) / float(iw)))))
+            device_cell_h = max(24, int(round(cell_h * (float(wh) / float(ih)))))
+            golden_bounds = {
+                "left": max(0, int(tap_x - (device_cell_w // 2))),
+                "top": max(0, int(tap_y - (device_cell_h // 2))),
+                "right": min(int(ww), int(tap_x + (device_cell_w // 2))),
+                "bottom": min(int(wh), int(tap_y + (device_cell_h // 2))),
+            }
+            golden_post_open_intent = _create_post_open_intent_from_final_proof(
+                binding=post_open_intent_binding,
+                candidate_username=str(expected_follower_username or ""),
+                target_username=str(post_open_intent_target_username or ""),
+                source_branch="GOLDEN",
+                bounds=golden_bounds,
+                package=str(pkg0 or pkg),
+                activity=str(act0 or ""),
+                evidence={
+                    "coordinate_frame": golden_frame,
+                    "outcome": "GOLDEN_VISUAL_CELL_SELECTED",
+                },
+                viewport_width=int(ww), viewport_height=int(wh),
+                xml_hash=golden_observation_hash,
+                fingerprint=golden_observation_hash,
+                absolute_row=int(row), absolute_column=int(col),
+                candidate_bound_provenance="golden_memory_screenshot_selected_cell",
+                ttl_ms=3000.0,
+            )
+        except Exception:
+            golden_post_open_intent = None
 
     if post_follow_fast:
         try:
@@ -26763,6 +26989,15 @@ def visual_open_recent_post_from_profile(
         pass
 
     def _send_open_tap(tx: int, ty: int) -> bool:
+        nonlocal golden_post_open_dispatch
+        if post_open_intent_binding is not None:
+            golden_post_open_dispatch = _dispatch_post_open_intent_v2_tap(
+                d,
+                intent=golden_post_open_intent,
+                binding=post_open_intent_binding,
+                candidate_username=str(expected_follower_username or ""),
+            )
+            return bool(golden_post_open_dispatch.get("ok"))
         try:
             d.click(tx, ty)
             return True
@@ -26841,6 +27076,10 @@ def visual_open_recent_post_from_profile(
         poll_label="first_tap",
         post_follow_fast=bool(post_follow_fast),
     )
+    if golden_post_open_dispatch.get("ok"):
+        det_open["post_open_stage_provenance"] = dict(
+            golden_post_open_dispatch.get("post_open_stage_provenance") or {}
+        )
     post_detected = bool(det_open.get("post_detected"))
     prof_still = bool(det_open.get("prof_still_on_candidate_profile"))
     viewer_signals = list(det_open.get("viewer_detection_signals_seen") or [])
@@ -51799,6 +52038,15 @@ def run_post_follow_post_likes_phase(
                     "tabs_boundary_source": str(
                         _grid_ev.tabs_boundary_source or ""
                     ),
+                    "source_xml_fingerprint": str(
+                        _grid_ev.source_xml_fingerprint or ""
+                    ),
+                    "absolute_row_index": int(
+                        _grid_ev.absolute_row_index or 0
+                    ),
+                    "absolute_column_index": int(
+                        _grid_ev.absolute_column_index or 0
+                    ),
                     "suggested_region_detected": bool(
                         _grid_ev.suggested_region_detected
                     ),
@@ -52762,6 +53010,8 @@ def run_post_follow_post_likes_phase(
                 selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
                 likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
                 post_follow_stash_open_like_proof=True,
+                post_open_intent_binding=authoritative_binding,
+                post_open_intent_target_username=src,
             )
             log(
                 "info",
@@ -53120,57 +53370,65 @@ def run_post_follow_post_likes_phase(
             and isinstance(_canary_grid_evidence.get("post_bounds"), dict)
         ):
             _fresh_bounds = dict(_canary_grid_evidence.get("post_bounds") or {})
-            _tx = int(_fresh_bounds.get("center_x") or (
-                int(_fresh_bounds.get("left") or 0) + int(_fresh_bounds.get("right") or 0)
-            ) // 2)
-            _ty = int(_fresh_bounds.get("center_y") or (
-                int(_fresh_bounds.get("top") or 0) + int(_fresh_bounds.get("bottom") or 0)
-            ) // 2)
             _meta_before = _followers_current_pkg_activity(d)
-            _tap_proof = None
-            _tap_proof_age_ms = 0.0
-            _tap_proof_reject = "fresh_tap_proof_missing"
-            _fresh_tap_result = _post_follow_create_fresh_tap_proof_from_grid(
-                d,
-                source_profile_username=src,
+            _intent_evidence = dict(_canary_grid_evidence)
+            _intent_fingerprint = str(
+                _canary_grid_evidence.get("post_reveal_xml_fingerprint")
+                or _canary_grid_evidence.get("source_xml_fingerprint")
+                or ""
+            )
+            _intent_frame = dict(
+                _canary_grid_evidence.get("post_reveal_coordinate_frame")
+                or _canary_grid_evidence.get("coordinate_frame")
+                or {}
+            )
+            if _intent_frame:
+                _intent_evidence["coordinate_frame"] = _intent_frame
+            try:
+                _intent_ww, _intent_wh = d.window_size()
+            except Exception:
+                _intent_ww, _intent_wh = 1080, 2340
+            _post_open_intent = _create_post_open_intent_from_final_proof(
+                binding=authoritative_binding,
                 candidate_username=cand,
-                pkg=pkg,
-                hierarchy_xml=str(
-                    _canary_grid_evidence.get("reacquired_hierarchy_xml") or ""
+                target_username=src,
+                source_branch="SAFE",
+                bounds=_fresh_bounds,
+                package=str(_meta_before.get("current_package") or pkg),
+                activity=str(_meta_before.get("current_activity") or ""),
+                evidence=_intent_evidence,
+                viewport_width=int(_intent_ww),
+                viewport_height=int(_intent_wh),
+                xml_hash=_intent_fingerprint,
+                fingerprint=_intent_fingerprint,
+                absolute_row=int(
+                    _canary_grid_evidence.get("absolute_row_index") or 0
                 ),
-                detection_source=str(
+                absolute_column=int(
+                    _canary_grid_evidence.get("absolute_column_index") or 0
+                ),
+                candidate_bound_provenance=str(
                     _canary_grid_evidence.get("post_bounds_source")
-                    or "grid_classification_fresh_reacquisition"
+                    or "final_post_grid_evidence"
                 ),
-                ttl_ms=450.0,
+                ttl_ms=1250.0,
             )
-            _tap_proof = _fresh_tap_result.get("proof")
-            _tap_proof_age_ms = float(
-                _fresh_tap_result.get("proof_age_ms") or 0.0
+            _intent_dispatch = _dispatch_post_open_intent_v2_tap(
+                d,
+                intent=_post_open_intent,
+                binding=authoritative_binding,
+                candidate_username=cand,
             )
-            _tap_proof_reject = str(
-                _fresh_tap_result.get("reason") or _tap_proof_reject
-            )
-            _tap_freshness = (
-                _fresh_ui_proof_age_at_tap(_tap_proof)
-                if _tap_proof is not None
-                else {"valid": False, "age_ms": _tap_proof_age_ms, "ttl_ms": 0.0}
-            )
-            if (
-                _tap_proof is None
-                or not isinstance(_tap_proof.bounds, dict)
-                or not bool(_tap_freshness.get("valid"))
-            ):
-                _tap_failure_reason = (
-                    "fresh_ui_proof_stale_at_tap"
-                    if _tap_proof is not None
-                    else _tap_proof_reject
+            if not bool(_intent_dispatch.get("ok")):
+                _tap_failure_reason = str(
+                    _intent_dispatch.get("reason")
+                    or "post_open_intent_creation_or_consumption_rejected"
                 )
                 try:
                     _record_follow_60s_outcome(
                         "like_fresh_cell_bounds",
                         "fallback",
-                        age_ms=_tap_freshness.get("age_ms"),
+                        age_ms=_intent_dispatch.get("intent_age_ms"),
                         reason=_tap_failure_reason,
                         fallback_used=True,
                         dumps=0,
@@ -53188,6 +53446,8 @@ def run_post_follow_post_likes_phase(
                     selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
                     likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
                     post_follow_stash_open_like_proof=True,
+                    post_open_intent_binding=authoritative_binding,
+                    post_open_intent_target_username=src,
                 )
                 log(
                     "info",
@@ -53196,8 +53456,8 @@ def run_post_follow_post_likes_phase(
                     source_profile_username=src,
                     follower_username=cand,
                     rejection_reason=_tap_failure_reason,
-                    proof_age_at_tap_ms=_tap_freshness.get("age_ms"),
-                    proof_ttl_ms=_tap_freshness.get("ttl_ms"),
+                    proof_age_at_tap_ms=_intent_dispatch.get("intent_age_ms"),
+                    proof_ttl_ms=1250.0,
                     golden_attempt_count=1,
                     fast_diagnostic_attempted=False,
                     reveal_count_total_for_like_phase=0,
@@ -53210,33 +53470,23 @@ def run_post_follow_post_likes_phase(
                 _record_follow_60s_outcome(
                     "like_fresh_cell_bounds",
                     "used",
-                    age_ms=_tap_freshness.get("age_ms"),
+                    age_ms=_intent_dispatch.get("intent_age_ms"),
                     dumps=0,
                     screenshots=0,
                     retries=0,
                     estimated_gain_ms=6500.0,
                 )
-                _fresh_bounds = dict(_tap_proof.bounds)
-                _tx = int(_fresh_bounds.get("center_x") or (
-                    int(_fresh_bounds.get("left") or 0) + int(_fresh_bounds.get("right") or 0)
-                ) // 2)
-                _ty = int(_fresh_bounds.get("center_y") or (
-                    int(_fresh_bounds.get("top") or 0) + int(_fresh_bounds.get("bottom") or 0)
-                ) // 2)
-                d.click(_tx, _ty)
-                try:
-                    from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
-                    _invalidate_follow_60s_proofs("planned_post_cell_tap")
-                except Exception:
-                    pass
                 _viewer = _visual_wait_post_viewer_opened_after_tap(
                     d, pkg=pkg, expected_follower_username=cand,
                     act_before=_meta_before.get("current_activity"), post_follow_fast=True,
                 )
+                _viewer["post_open_stage_provenance"] = dict(
+                    _intent_dispatch.get("post_open_stage_provenance") or {}
+                )
                 if bool(_viewer.get("post_detected")):
                     _stash_post_follow_open_like_proof(
                         _viewer, source_profile_username=src, follower_username=cand,
-                        proof_source="single_post_grid_evidence",
+                        proof_source="PostOpenIntentV2:SAFE",
                     )
                 _canary_preopened_out = {
                     "ok": bool(_viewer.get("post_detected")),
@@ -53251,6 +53501,9 @@ def run_post_follow_post_likes_phase(
                         "post_open_snapshot_captured_at_monotonic"
                     ),
                     "post_open_snapshot_valid": bool(_viewer.get("post_open_snapshot_valid")),
+                    "post_open_stage_provenance": dict(
+                        _intent_dispatch.get("post_open_stage_provenance") or {}
+                    ),
                     "likes_perf_post_open": dict(_viewer),
                 }
                 log(
@@ -53262,10 +53515,13 @@ def run_post_follow_post_likes_phase(
                     post_open_method="SAFE",
                     post_reveal_safe_reason=str(
                         _canary_grid_evidence.get("post_reveal_safe_reason")
-                        or "fresh_tap_proof_valid"
+                        or "post_open_intent_v2_valid"
                     ),
-                    fresh_tap_proof_used=True,
-                    proof_age_at_tap_ms=_tap_freshness.get("age_ms"),
+                    fresh_tap_proof_used=False,
+                    post_open_intent_v2_used=True,
+                    proof_age_at_tap_ms=_intent_dispatch.get("intent_age_ms"),
+                    acquisitions_count=0,
+                    classifications_count=0,
                     reveal_count_total_for_like_phase=int(
                         _canary_grid_evidence.get(
                             "reveal_count_total_for_like_phase"
@@ -54254,6 +54510,8 @@ def run_post_follow_post_likes_phase(
                 grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
                 likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
                 post_follow_stash_open_like_proof=True,
+                post_open_intent_binding=authoritative_binding,
+                post_open_intent_target_username=src,
             )
 
         if preopened_out is not None:
@@ -54297,141 +54555,100 @@ def run_post_follow_post_likes_phase(
             else:
                 try:
                     meta_before_direct = _followers_current_pkg_activity(d)
-                    direct_pre_tap_evidence = _post_open_boundary_screenshot_evidence(
-                        d,
-                        stage="before_tap_direct_cell",
-                        source_profile_username=src,
-                        follower_username=cand,
-                        visual_candidate_id=vcid,
-                        post_index=post_idx,
-                        existing_path=str(gpss or ""),
-                        capture_if_missing=False,
+                    proof_metadata = dict(
+                        getattr(direct_cell_proof, "metadata", {}) or {}
                     )
-                    navigation_token = str(
-                        getattr(direct_cell_proof, "xml_generation", "") or ""
-                    ).strip()
-                    if not navigation_token:
-                        navigation_token = hashlib.sha256(
-                            (
-                                f"{vcid}\0{cand}\0{cell_source}\0"
-                                f"{direct_cell.get('left')}\0{direct_cell.get('top')}"
-                            ).encode("utf-8", errors="replace")
-                        ).hexdigest()[:20]
-                    scroll_token = hashlib.sha256(
-                        (
-                            f"{str(grid_out.get('viewport_fingerprint') or '')}\0"
-                            f"{cell_source}\0{direct_cell.get('left')}\0"
-                            f"{direct_cell.get('top')}\0{direct_cell.get('right')}\0"
-                            f"{direct_cell.get('bottom')}"
-                        ).encode("utf-8", errors="replace")
-                    ).hexdigest()[:20]
-                    stage_provenance = {
-                        "evidence_kind": (
-                            "fresh_post_cell_proof_bounds"
-                            if direct_cell_proof is not None
-                            else ""
-                        ),
-                        "candidate_username": cand,
-                        "source_profile_username": src,
-                        "visual_candidate_id": vcid,
-                        "post_bounds": {
-                            key: int(direct_cell.get(key) or 0)
-                            for key in ("left", "top", "right", "bottom")
-                        },
-                        "package": str(
-                            meta_before_direct.get("current_package") or pkg
-                        ),
-                        "activity": str(
-                            meta_before_direct.get("current_activity") or ""
-                        ),
-                        "created_at_monotonic": float(
-                            getattr(
-                                direct_cell_proof,
-                                "created_at_monotonic",
-                                0.0,
-                            )
-                            or 0.0
-                        ),
-                        "cell_proof_valid_at_tap": False,
-                        "cell_proof_age_at_tap_ms": None,
-                        "cell_proof_age_at_consume_ms": round(
-                            max(0.0, direct_cell_proof_age_ms), 2
-                        ),
-                        "cell_proof_ttl_ms": float(
-                            getattr(direct_cell_proof, "ttl_ms", 1250.0)
-                            if direct_cell_proof is not None
-                            else 1250.0
-                        ),
-                        "tap_dispatched_at_monotonic": 0.0,
-                        "max_tap_to_audit_ms": 3000.0,
-                        "same_stage_no_navigation_before_tap": True,
-                        "navigation_generation_before": navigation_token,
-                        "navigation_generation_at_tap": "",
-                        "scroll_generation_before": scroll_token,
-                        "scroll_generation_at_tap": "",
-                        "invalidated": False,
-                        "pre_tap_evidence": direct_pre_tap_evidence,
-                        "candidate_bound_provenance_source": str(
-                            getattr(direct_cell_proof, "detection_source", "")
-                            or cell_source
-                        ),
-                        "fresh_tap_proof_metadata": dict(
-                            getattr(direct_cell_proof, "metadata", {}) or {}
-                        ),
-                        "stage_binding": {
-                            key: (authoritative_binding or {}).get(key)
-                            for key in (
-                                "account_id", "run_id", "request_id", "action_id",
-                                "attempt_id", "business_session_id", "control_id",
-                                "worker_sha", "source_target_id",
-                            )
-                        },
-                    }
-                    freshness_at_tap = _fresh_ui_proof_age_at_tap(
-                        direct_cell_proof
+                    proof_frame = dict(
+                        getattr(direct_cell_proof, "coordinate_frame", {}) or {}
                     )
-                    stage_provenance["created_at_monotonic"] = float(
-                        freshness_at_tap.get("created_at_monotonic") or 0.0
-                    )
-                    stage_provenance["cell_proof_valid_at_tap"] = bool(
-                        freshness_at_tap.get("valid")
-                    )
-                    stage_provenance["cell_proof_age_at_tap_ms"] = (
-                        freshness_at_tap.get("age_ms")
-                    )
-                    stage_provenance["cell_proof_ttl_ms"] = float(
-                        freshness_at_tap.get("ttl_ms") or 1250.0
-                    )
-                    if direct_cell_proof is not None and not bool(
-                        freshness_at_tap.get("valid")
-                    ):
+                    if authoritative_binding is None:
+                        # Non-Follow60 callers retain their historical tap path.
+                        # V5 still requires live viewer identity; no provenance is
+                        # synthesized for this compatibility branch.
+                        d.click(tx, ty)
+                        intent_dispatch = {
+                            "ok": True,
+                            "intent_age_ms": None,
+                            "post_open_stage_provenance": {},
+                            "intent_payload": None,
+                        }
+                    else:
+                        intent = _create_post_open_intent_from_final_proof(
+                            binding=authoritative_binding,
+                            candidate_username=cand,
+                            target_username=src,
+                            source_branch="SAFE",
+                            bounds={
+                                key: int(direct_cell.get(key) or 0)
+                                for key in ("left", "top", "right", "bottom")
+                            },
+                            package=str(
+                                meta_before_direct.get("current_package") or pkg
+                            ),
+                            activity=str(
+                                meta_before_direct.get("current_activity") or ""
+                            ),
+                            evidence={
+                                "outcome": "POST_ROW_POSITIVE_SAFE",
+                                "coordinate_frame": proof_frame,
+                            },
+                            viewport_width=int(d.window_size()[0]),
+                            viewport_height=int(d.window_size()[1]),
+                            xml_hash=str(proof_metadata.get("xml_hash") or ""),
+                            fingerprint=str(
+                                getattr(direct_cell_proof, "xml_fingerprint", "")
+                                or proof_metadata.get("xml_fingerprint")
+                                or ""
+                            ),
+                            absolute_row=int(
+                                proof_metadata.get("absolute_row_index") or 0
+                            ),
+                            absolute_column=int(
+                                proof_metadata.get("absolute_column_index") or 0
+                            ),
+                            candidate_bound_provenance=str(
+                                getattr(direct_cell_proof, "detection_source", "")
+                                or cell_source
+                            ),
+                            ttl_ms=float(
+                                getattr(direct_cell_proof, "ttl_ms", 1250.0)
+                                or 1250.0
+                            ),
+                        )
+                        intent_dispatch = _dispatch_post_open_intent_v2_tap(
+                            d,
+                            intent=intent,
+                            binding=authoritative_binding,
+                            candidate_username=cand,
+                        )
+                    if not bool(intent_dispatch.get("ok")):
                         _record_follow_60s_outcome(
                             "like_fresh_cell_bounds",
                             "fallback",
-                            age_ms=freshness_at_tap.get("age_ms"),
-                            reason="fresh_ui_proof_stale_at_tap",
+                            age_ms=intent_dispatch.get("intent_age_ms"),
+                            reason=str(
+                                intent_dispatch.get("reason")
+                                or "post_open_intent_rejected"
+                            ),
                             fallback_used=True,
                         )
                         log(
                             "warning",
-                            "follow_60s_like_cell_proof_stale_at_tap_fallback_golden",
+                            "follow_60s_post_open_intent_rejected_fallback_golden",
                             source_profile_username=src,
                             follower_username=cand,
-                            proof_age_at_consume_ms=round(
-                                max(0.0, direct_cell_proof_age_ms), 2
-                            ),
-                            proof_age_at_tap_ms=freshness_at_tap.get("age_ms"),
-                            proof_ttl_ms=freshness_at_tap.get("ttl_ms"),
+                            intent_age_ms=intent_dispatch.get("intent_age_ms"),
+                            rejection_reason=intent_dispatch.get("reason"),
                             fallback_used=True,
                             fallback="visual_open_recent_post_from_profile",
                         )
                         open_out = _open_recent_post_via_golden()
                     else:
-                        if direct_cell_proof is not None:
+                        if authoritative_binding is not None:
                             _record_follow_60s_outcome(
                                 "like_fresh_cell_bounds",
                                 "used",
-                                age_ms=freshness_at_tap.get("age_ms"),
+                                age_ms=intent_dispatch.get("intent_age_ms"),
                                 estimated_gain_ms=6500.0,
                             )
                         log(
@@ -54447,17 +54664,16 @@ def run_post_follow_post_likes_phase(
                             cell_source=cell_source,
                             scroll_attempts=scroll_attempts,
                             grid_exposure=grid_exposure,
-                            proof_age_at_tap_ms=freshness_at_tap.get("age_ms"),
-                            proof_ttl_ms=freshness_at_tap.get("ttl_ms"),
+                            intent_age_at_tap_ms=intent_dispatch.get(
+                                "intent_age_ms"
+                            ),
+                            terminal_helper_used=(
+                                "_dispatch_post_open_intent_v2_tap"
+                            ),
                         )
-                        stage_provenance["tap_dispatched_at_monotonic"] = (
-                            time.perf_counter()
+                        stage_provenance = dict(
+                            intent_dispatch.get("post_open_stage_provenance") or {}
                         )
-                        stage_provenance["navigation_generation_at_tap"] = (
-                            navigation_token
-                        )
-                        stage_provenance["scroll_generation_at_tap"] = scroll_token
-                        d.click(tx, ty)
                         try:
                             from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
 
@@ -54501,7 +54717,9 @@ def run_post_follow_post_likes_phase(
                             "post_open_snapshot_valid": bool(
                                 viewer_direct.get("post_open_snapshot_valid")
                             ),
-                            "post_open_pre_tap_evidence": direct_pre_tap_evidence,
+                            "post_open_intent": intent_dispatch.get(
+                                "intent_payload"
+                            ),
                             "post_open_stage_provenance": stage_provenance,
                             "likes_perf_post_open": dict(viewer_direct),
                         }
@@ -56761,8 +56979,10 @@ def run_visual_candidate_post_follow_phase(
                 "return_ok": True,
                 "like_terminal_status": _like_terminal_status,
                 "like_terminal_reason": _like_terminal_reason,
-                "control_id": str(stage_binding.get("control_id") or ""),
-                "worker_sha": str(stage_binding.get("worker_sha") or "").lower(),
+                "control_id": str((stage_binding or {}).get("control_id") or ""),
+                "worker_sha": str(
+                    (stage_binding or {}).get("worker_sha") or ""
+                ).lower(),
             },
         )
         log(

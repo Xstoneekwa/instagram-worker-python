@@ -448,6 +448,9 @@ class GridClassificationProof:
     canonical_generation: int = 0
     source_navigation_generation: str = ""
     tabs_boundary_source: str = ""
+    source_xml_fingerprint: str = ""
+    absolute_row_index: int = 0
+    absolute_column_index: int = 0
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -1124,6 +1127,9 @@ def stash_post_grid_evidence(
     suggested_region_detected: bool = False,
     classification_reveal_ttl_ms: float = 3000.0,
     tabs_boundary_source: str = "",
+    source_xml_fingerprint: str = "",
+    absolute_row_index: int = 0,
+    absolute_column_index: int = 0,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -1234,6 +1240,9 @@ def stash_post_grid_evidence(
         canonical_generation=canonical_generation,
         source_navigation_generation=str(navigation_generation or ""),
         tabs_boundary_source=str(tabs_boundary_source or ""),
+        source_xml_fingerprint=str(source_xml_fingerprint or ""),
+        absolute_row_index=max(0, int(absolute_row_index or 0)),
+        absolute_column_index=max(0, int(absolute_column_index or 0)),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
