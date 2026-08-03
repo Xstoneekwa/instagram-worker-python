@@ -79,6 +79,10 @@ def observation(handles, **overrides):
 def legacy_scroll_diag(before, after, *, surface_state="PRIMARY_ROWS_AVAILABLE"):
     overlap, new_rows = resume.viewport_continuity_counts(before, after)
     return {
+        "scroll_primitive_source": "follow",
+        "visible_primary_row_count_before": len(before),
+        "visible_primary_row_count_after": len(after),
+        "correction_scroll_count": 0,
         "viewport_fingerprint_before": resume.legacy_viewport_fingerprint(before),
         "viewport_fingerprint_after": resume.legacy_viewport_fingerprint(after),
         "overlap_count": overlap,

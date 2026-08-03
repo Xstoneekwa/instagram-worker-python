@@ -41,6 +41,8 @@ DEFAULT_STALE_AFTER_SECONDS = 14 * 24 * 60 * 60
 DEFAULT_LEASE_SECONDS = 60 * 60
 MAX_LEASE_SECONDS = 2 * 60 * 60
 RENEWAL_MARGIN_SECONDS = 10 * 60
+CT_RESUME_TARGET_OVERLAP_MIN = 1
+CT_RESUME_TARGET_OVERLAP_MAX = 2
 
 EVENTS = frozenset(
     {
@@ -78,6 +80,9 @@ NO_COMMIT_REASONS = frozenset(
         "suggestions_boundary_reached",
         "commit_conflict",
         "run_terminal_before_checkpoint_flush",
+        "ct_resume_scroll_under_progressed",
+        "ct_resume_overlap_outside_target",
+        "anchor_prefix_continuity_unproven",
     }
 )
 
@@ -487,6 +492,11 @@ class Checkpoint:
             return self.shadow_visible_anchor_hashes
         return self.anchors(mode)
 
+    def resume_fingerprint(self, mode: str) -> str:
+        if mode == "enforce" and self.promoted_shadow_ready_for_enforce():
+            return self.shadow_anchor_fingerprint
+        return self.fingerprint(mode)
+
 
 @dataclass(frozen=True)
 class ResumePlan:
@@ -600,6 +610,53 @@ def find_resume_cursor(
             continue
         break
     return cursor, "anchor_found" if cursor > first_anchor_index else "anchor_found_unhandled_prefix"
+
+
+def find_certified_checkpoint_prefix_cursor(
+    visible_handles: Sequence[object],
+    expected_anchor_hashes: Sequence[str],
+    *,
+    checkpoint_fingerprint: object,
+    checkpoint_depth: int,
+    checkpoint_version: int,
+    checkpoint_target_matches: bool,
+    checkpoint_surface_matches: bool,
+    hmac_secret: object | None = None,
+) -> tuple[int, str]:
+    """Return only the checkpoint-proven contiguous prefix carried forward.
+
+    A username is represented by its HMAC anchor.  The only skippable prefix
+    is the exact 1-2 row suffix of the checkpoint viewport that reappears as
+    the current viewport prefix, in the same order.  Social-memory status and
+    mere visual position before an anchor are deliberately insufficient.
+    """
+    handles = normalize_visible_handles(visible_handles)
+    anchors = tuple(
+        str(item)
+        for item in expected_anchor_hashes[:MAX_ANCHORS]
+        if str(item).startswith("a3:")
+    )
+    fingerprint = str(checkpoint_fingerprint or "")
+    if not handles:
+        return 0, "viewport_empty"
+    if (
+        not checkpoint_target_matches
+        or not checkpoint_surface_matches
+        or int(checkpoint_version or 0) < 3
+        or int(checkpoint_depth or 0) < 0
+        or not fingerprint.startswith("v3:")
+        or not anchors
+    ):
+        return 0, "anchor_prefix_continuity_unproven"
+    visible_hashes = tuple(anchor_hash(item, secret=hmac_secret) for item in handles)
+    for overlap in range(
+        min(CT_RESUME_TARGET_OVERLAP_MAX, len(anchors), len(visible_hashes)),
+        CT_RESUME_TARGET_OVERLAP_MIN - 1,
+        -1,
+    ):
+        if anchors[-overlap:] == visible_hashes[:overlap]:
+            return overlap, "anchor_found_certified_prefix"
+    return 0, "anchor_prefix_continuity_unproven"
 
 
 class ResumeRepository:
@@ -1066,9 +1123,19 @@ class ProgressiveResumeController:
         fingerprint_before = str(diag.get("viewport_fingerprint_before") or "")
         fingerprint_after = str(diag.get("viewport_fingerprint_after") or "")
         common = {
+            "scroll_primitive_source": str(diag.get("scroll_primitive_source") or ""),
+            "viewport_profile_count_before": int(
+                diag.get("visible_primary_row_count_before") or 0
+            ),
+            "viewport_profile_count_after": int(
+                diag.get("visible_primary_row_count_after") or 0
+            ),
             "observed_scroll_index": max(0, int(observed_scroll_index or 0)),
             "overlap_count": overlap_count,
             "new_unique_rows": new_unique_rows,
+            "new_username_count": new_unique_rows,
+            "scroll_under_progressed": bool(overlap_count > 3 and new_unique_rows <= 2),
+            "correction_scroll_count": int(diag.get("correction_scroll_count") or 0),
             "viewport_fingerprint_before": fingerprint_before,
             "viewport_fingerprint_after": fingerprint_after,
             "surface_state_after": surface_state,
@@ -1080,6 +1147,8 @@ class ProgressiveResumeController:
             return self._reject_transition("lease_invalid", **common)
         if not expected_target_confirmed:
             return self._reject_transition("target_identity_changed", **common)
+        if common["scroll_primitive_source"] != "follow":
+            return self._reject_transition("continuity_unproven", **common)
         if surface_state == _LEGACY_SUGGESTIONS_BOUNDARY:
             return self._reject_transition("suggestions_boundary_reached", **common)
         if not followers_surface_confirmed or surface_state != _LEGACY_PRIMARY_ROWS_AVAILABLE:
@@ -1088,6 +1157,14 @@ class ProgressiveResumeController:
             return self._reject_transition("continuity_unproven", **common)
         if overlap_count <= 0 or new_unique_rows <= 0:
             return self._reject_transition("continuity_unproven", **common)
+        if overlap_count > 3 and new_unique_rows <= 2:
+            return self._reject_transition("ct_resume_scroll_under_progressed", **common)
+        if not (
+            CT_RESUME_TARGET_OVERLAP_MIN
+            <= overlap_count
+            <= CT_RESUME_TARGET_OVERLAP_MAX
+        ):
+            return self._reject_transition("ct_resume_overlap_outside_target", **common)
         if (
             not fingerprint_before
             or not fingerprint_after
@@ -1166,6 +1243,26 @@ class ProgressiveResumeController:
                     "continuity_unproven",
                     **common,
                     observed_viewport_fingerprint=actual_after_fingerprint,
+                )
+            actual_overlap, actual_new_rows = viewport_continuity_counts(
+                self.current_viewport.handles if self.current_viewport else (),
+                observation.handles,
+            )
+            if (
+                actual_overlap != evidence.overlap_count
+                or actual_new_rows != evidence.new_unique_rows
+                or not (
+                    CT_RESUME_TARGET_OVERLAP_MIN
+                    <= actual_overlap
+                    <= CT_RESUME_TARGET_OVERLAP_MAX
+                )
+            ):
+                self.current_viewport = observation
+                return self._reject_transition(
+                    "continuity_unproven",
+                    **common,
+                    observed_overlap_count=actual_overlap,
+                    observed_new_username_count=actual_new_rows,
                 )
             previous = self.reached_depth
             self.reached_depth = min(MAX_DEPTH, self.reached_depth + 1)
@@ -1449,26 +1546,50 @@ class ProgressiveResumeController:
             return 0, "enforce_not_ready"
         if self.reached_depth < self.plan.planned_depth:
             return 0, "fast_forward_incomplete"
-        cursor, reason = find_resume_cursor(
+        checkpoint = self.checkpoint
+        cursor, reason = find_certified_checkpoint_prefix_cursor(
             tuple(visible_handles),
             self.plan.anchor_hashes,
-            terminally_handled=terminally_handled,
+            checkpoint_fingerprint=(
+                checkpoint.resume_fingerprint(self.flags.mode) if checkpoint else ""
+            ),
+            checkpoint_depth=self.plan.previous_depth,
+            checkpoint_version=self.plan.checkpoint_version,
+            checkpoint_target_matches=bool(
+                checkpoint
+                and checkpoint.account_id == self.account_id
+                and checkpoint.target_id == self.target_id
+            ),
+            checkpoint_surface_matches=bool(
+                checkpoint and checkpoint.surface == SURFACE_FOLLOWERS
+            ),
             hmac_secret=self.hmac_secret,
         )
         if not reason.startswith("anchor_found"):
             self._event(
                 "anchor_not_found",
                 reason=reason,
+                anchor_found=False,
+                prefix_length=0,
+                prefix_certified_count=0,
+                usernames_skipped_by_checkpoint=0,
+                scrolls_saved=0,
+                prefix_rejection_reason=reason,
                 resume_result="safe_legacy_fallback_current_viewport",
             )
             return 0, reason
         self._event(
             "anchor_found",
             reason=reason,
+            anchor_found=True,
             overlap_count=cursor,
+            prefix_length=cursor,
+            prefix_certified_count=cursor,
             physical_scrolls=self.reached_depth,
             usernames_reprocessed=max(0, len(normalize_visible_handles(visible_handles)) - cursor),
             usernames_skipped_by_checkpoint=cursor,
+            scrolls_saved=self.reached_depth,
+            prefix_rejection_reason=None,
             resume_result="enforce_applied",
         )
         return cursor, reason

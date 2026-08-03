@@ -14564,7 +14564,11 @@ def _run_followers_list_engine_session(
                         and _ff_target
                         and scroll_followers_list_forward(
                             d,
-                            scroll_profile="canonical_controlled",
+                            # CT Resume reuses the exact adaptive physical
+                            # geometry used by the normal Follow advance.  Its
+                            # stricter continuity layer below permits only one
+                            # bounded gesture for this viewport.
+                            scroll_profile="canonical_adaptive",
                             source_profile_username=source_profile_username,
                             bypass_post_tap_capture_gate=True,
                             bypass_scroll_xml_guards=True,
@@ -14577,6 +14581,7 @@ def _run_followers_list_engine_session(
                                 if target_scan_tracker.get("last_verified_scroll_overlap") is not None
                                 else None
                             ),
+                            canonical_attempt_limit=1,
                         )
                     )
                     _ff_verdict = target_followers_resume_controller.note_legacy_scroll_progress(
@@ -14602,6 +14607,23 @@ def _run_followers_list_engine_session(
                             starting_depth=_resume_plan.previous_depth,
                             physical_scrolls=scroll_used,
                             planned_depth=_resume_plan.planned_depth,
+                            scroll_primitive_source=str(
+                                _ff_diag.get("scroll_primitive_source") or ""
+                            ),
+                            viewport_profile_count_before=int(
+                                _ff_diag.get("visible_primary_row_count_before") or 0
+                            ),
+                            viewport_profile_count_after=int(
+                                _ff_diag.get("visible_primary_row_count_after") or 0
+                            ),
+                            overlap_count=int(_ff_diag.get("overlap_count") or 0),
+                            new_username_count=int(
+                                _ff_diag.get("new_primary_row_count") or 0
+                            ),
+                            scroll_under_progressed=False,
+                            correction_scroll_count=int(
+                                _ff_diag.get("correction_scroll_count") or 0
+                            ),
                         )
                         continue
                     _target_followers_resume_enforce_done = True
@@ -14613,6 +14635,25 @@ def _run_followers_list_engine_session(
                         reason=str(_ff_verdict.reason or "fast_forward_scroll_unproven"),
                         safe_legacy_fallback=True,
                         usernames_skipped_by_checkpoint=0,
+                        scroll_primitive_source=str(
+                            _ff_diag.get("scroll_primitive_source") or ""
+                        ),
+                        viewport_profile_count_before=int(
+                            _ff_diag.get("visible_primary_row_count_before") or 0
+                        ),
+                        viewport_profile_count_after=int(
+                            _ff_diag.get("visible_primary_row_count_after") or 0
+                        ),
+                        overlap_count=int(_ff_diag.get("overlap_count") or 0),
+                        new_username_count=int(
+                            _ff_diag.get("new_primary_row_count") or 0
+                        ),
+                        scroll_under_progressed=(
+                            str(_ff_verdict.reason) == "ct_resume_scroll_under_progressed"
+                        ),
+                        correction_scroll_count=int(
+                            _ff_diag.get("correction_scroll_count") or 0
+                        ),
                     )
                     # If the UI moved, never consume the pre-scroll candidate
                     # snapshot even when continuity proof was rejected.  A
@@ -14651,6 +14692,10 @@ def _run_followers_list_engine_session(
                             physical_scrolls=target_followers_resume_controller.reached_depth,
                             usernames_reprocessed=len(candidates),
                             usernames_skipped_by_checkpoint=_ff_cursor,
+                            prefix_length=_ff_cursor,
+                            prefix_certified_count=_ff_cursor,
+                            scrolls_saved=target_followers_resume_controller.reached_depth,
+                            prefix_rejection_reason=None,
                             resume_result="enforce_applied",
                         )
                     else:
@@ -14661,6 +14706,10 @@ def _run_followers_list_engine_session(
                             reason=_ff_reason,
                             safe_legacy_fallback=True,
                             usernames_skipped_by_checkpoint=0,
+                            prefix_length=0,
+                            prefix_certified_count=0,
+                            scrolls_saved=0,
+                            prefix_rejection_reason=_ff_reason,
                         )
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":

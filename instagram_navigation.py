@@ -36119,6 +36119,7 @@ def _followers_scroll_list_forward(
     target_id: str = "",
     run_id: str = "",
     previous_actual_overlap: int | None = None,
+    canonical_attempt_limit: int | None = None,
 ) -> bool:
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_REASON
@@ -36166,6 +36167,10 @@ def _followers_scroll_list_forward(
     soft_followers_scroll = profile_req in {"soft_initial", "soft_retry", "welcome_soft"}
     canonical_controlled = profile_req == "canonical_controlled"
     canonical_adaptive = profile_req == "canonical_adaptive"
+    if canonical_attempt_limit is None:
+        bounded_canonical_attempt_limit = None
+    else:
+        bounded_canonical_attempt_limit = max(1, min(3, int(canonical_attempt_limit)))
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -36216,7 +36221,14 @@ def _followers_scroll_list_forward(
             w, h = 1080, 2400
         current_xml = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "")
         short_geometry = canonical_follow_scroll_geometry(w, h)
-        max_forward_attempts = 3 if canonical_adaptive else 1
+        max_forward_attempts = (
+            bounded_canonical_attempt_limit
+            if bounded_canonical_attempt_limit is not None
+            else (3 if canonical_adaptive else 1)
+        )
+        _sd("scroll_primitive_source", "follow")
+        _sd("scroll_profile", profile_req)
+        _sd("correction_scroll_count", 0)
         _sd("max_forward_attempts", max_forward_attempts)
         _sd("short_fallback_preserved", True)
         _sd("forward_attempts", [])
@@ -36413,6 +36425,7 @@ def _followers_scroll_list_forward(
                     corrected_rows = list(corrected_surface.get("primary_row_ids") or [])
                     corrected = compare_instagram_list_viewports(before_rows, corrected_rows)
                     _sd("corrective_backstep_used", True)
+                    _sd("correction_scroll_count", 1)
                     _sd("corrective_backstep_reason", corrected.reason)
                     _sd("viewport_fingerprint_after", corrected.fingerprint_after)
                     if corrected.continuity_proved:
@@ -36897,6 +36910,7 @@ def scroll_followers_list_forward(
     target_id: str = "",
     run_id: str = "",
     previous_actual_overlap: int | None = None,
+    canonical_attempt_limit: int | None = None,
 ) -> bool:
     """Bounded scroll on the followers RecyclerView (or fallback swipe).
 
@@ -36925,6 +36939,7 @@ def scroll_followers_list_forward(
         target_id=target_id,
         run_id=run_id,
         previous_actual_overlap=previous_actual_overlap,
+        canonical_attempt_limit=canonical_attempt_limit,
     )
 
 
