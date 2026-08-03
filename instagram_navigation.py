@@ -30535,10 +30535,58 @@ def visual_like_open_post(
     except Exception:
         ww, wh = 1080, 2400
 
+    # Follow60 already transports the immutable A2/V5 snapshot and exact Like
+    # bounds in PostOpenContextV1.  Validate that evidence before any visual
+    # diagnostic: a valid context makes the legacy screenshot/heart re-detect
+    # redundant.  A rejected context still gets exactly one fresh hierarchy
+    # reacquisition at the authorization boundary below.
+    prevalidated_like_tap_context_v2: dict[str, Any] | None = None
+    prevalidated_like_tap_context_reason = ""
+    prevalidated_like_tap_context_age_ms = 0.0
+    if like_tap_context_v2_required:
+        pre_ctx, pre_create_reason = _create_like_tap_context_v2(
+            d,
+            expected_package=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+            expected_follower_username=str(expected_follower_username or ""),
+            expected_stage_binding=dict(expected_stage_binding or {}),
+            post_open_context=dict(post_open_context or {}),
+            allow_fresh_dump=False,
+        )
+        if pre_ctx is not None:
+            pre_valid, pre_validation_reason, pre_age_ms = _validate_like_tap_context_v2(
+                pre_ctx,
+                expected_stage_binding=dict(expected_stage_binding or {}),
+                expected_follower_username=str(expected_follower_username or ""),
+                d=d,
+                expected_package=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+            )
+            prevalidated_like_tap_context_age_ms = float(pre_age_ms or 0.0)
+            if pre_valid:
+                prevalidated_like_tap_context_v2 = pre_ctx
+            else:
+                prevalidated_like_tap_context_reason = str(pre_validation_reason or "")
+        else:
+            prevalidated_like_tap_context_reason = str(pre_create_reason or "")
+
     _ensure_debug_dirs()
     shot = str(_SCREENSHOTS_DIR / f"visual_post_like_{int(time.time() * 1000)}.png")
+    im = None
+    like_button_bounds = None
+    heart_bounds_source = ""
+    confidence = 0.0
+    if prevalidated_like_tap_context_v2 is not None:
+        like_button_bounds = dict(
+            prevalidated_like_tap_context_v2.get("like_bounds") or {}
+        )
+        heart_bounds_source = "PostOpenContextV1_exact_like_bounds"
+        confidence = 0.99
+        if _lkperf is not None:
+            _lkperf["like_target_screenshot_skipped"] = True
+            _lkperf["like_target_dump_count"] = 0
+            _lkperf["like_context_transport_reused"] = True
     try:
-        screenshot(d, shot)
+        if like_button_bounds is None:
+            screenshot(d, shot)
     except Exception as e:
         log(
             "error",
@@ -30568,9 +30616,10 @@ def visual_like_open_post(
         }
 
     try:
-        from PIL import Image
+        if like_button_bounds is None:
+            from PIL import Image
 
-        im = Image.open(shot).convert("RGB")
+            im = Image.open(shot).convert("RGB")
     except Exception as e:
         log(
             "error",
@@ -30599,13 +30648,14 @@ def visual_like_open_post(
             "already_liked": False,
         }
 
-    iw, ih = im.size
-    like_button_bounds, heart_bounds_source = _visual_post_like_heart_crop_bounds(
-        iw,
-        ih,
-        d=d,
-        expected_follower_username=str(expected_follower_username or ""),
-    )
+    iw, ih = (im.size if im is not None else (int(ww), int(wh)))
+    if like_button_bounds is None:
+        like_button_bounds, heart_bounds_source = _visual_post_like_heart_crop_bounds(
+            iw,
+            ih,
+            d=d,
+            expected_follower_username=str(expected_follower_username or ""),
+        )
     if like_button_bounds is None:
         fail_lbl = str(heart_bounds_source or "like_bounds_unresolved_safe_abort")
         log(
@@ -30645,10 +30695,13 @@ def visual_like_open_post(
     tap_x, tap_y = _visual_xy_image_to_device(cx, cy, iw, ih, ww, wh)
     tap_x = max(2, min(ww - 3, tap_x))
     tap_y = max(2, min(wh - 3, tap_y))
-    roi_var = _visual_image_cell_luma_variance(
-        im, lb_left, lb_top, lb_right - lb_left, lb_bottom - lb_top
-    )
-    confidence = float(min(0.95, 0.52 + min(0.42, (roi_var / 9000.0) ** 0.5 * 0.38)))
+    if im is not None:
+        roi_var = _visual_image_cell_luma_variance(
+            im, lb_left, lb_top, lb_right - lb_left, lb_bottom - lb_top
+        )
+        confidence = float(
+            min(0.95, 0.52 + min(0.42, (roi_var / 9000.0) ** 0.5 * 0.38))
+        )
 
     log(
         "info",
@@ -31213,20 +31266,13 @@ def visual_like_open_post(
         }
 
     if real_visual:
-        like_tap_context_v2: dict[str, Any] | None = None
+        like_tap_context_v2: dict[str, Any] | None = (
+            dict(prevalidated_like_tap_context_v2)
+            if prevalidated_like_tap_context_v2 is not None
+            else None
+        )
         if like_tap_context_v2_required:
-            like_tap_context_v2, like_tap_context_reject = (
-                _create_like_tap_context_v2(
-                    d,
-                    expected_package=str(
-                        getattr(config, "INSTAGRAM_PACKAGE", "") or ""
-                    ),
-                    expected_follower_username=str(expected_follower_username or ""),
-                    expected_stage_binding=dict(expected_stage_binding or {}),
-                    post_open_context=dict(post_open_context or {}),
-                    allow_fresh_dump=False,
-                )
-            )
+            like_tap_context_reject = str(prevalidated_like_tap_context_reason or "")
             if like_tap_context_v2 is None:
                 valid_v2, validation_reason_v2, age_v2 = (
                     False,
@@ -31234,17 +31280,9 @@ def visual_like_open_post(
                     0.0,
                 )
             else:
-                valid_v2, validation_reason_v2, age_v2 = (
-                    _validate_like_tap_context_v2(
-                        like_tap_context_v2,
-                        expected_stage_binding=dict(expected_stage_binding or {}),
-                        expected_follower_username=str(expected_follower_username or ""),
-                        d=d,
-                        expected_package=str(
-                            getattr(config, "INSTAGRAM_PACKAGE", "") or ""
-                        ),
-                    )
-                )
+                valid_v2 = True
+                validation_reason_v2 = ""
+                age_v2 = float(prevalidated_like_tap_context_age_ms or 0.0)
             initial_create_reason_v2 = str(like_tap_context_reject or "")
             initial_validation_reason_v2 = str(validation_reason_v2 or "")
             if not valid_v2:
