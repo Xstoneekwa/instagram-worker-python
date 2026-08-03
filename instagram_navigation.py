@@ -31514,31 +31514,16 @@ def visual_like_open_post(
         except Exception:
             pass
         _clear_post_follow_open_like_proof_stash()
-        time.sleep(1.2)
         guard_instagram_action_rate_limit(
             d,
             phase="like",
             preceding_action="like",
         )
-        post_shot = str(
-            _SCREENSHOTS_DIR / f"visual_post_like_after_tap_{int(time.time() * 1000)}.png"
-        )
-        try:
-            screenshot(d, post_shot)
-        except Exception:
-            pass
-        try:
-            d.dump_hierarchy(compressed=False)
-        except Exception:
-            try:
-                d.dump_hierarchy()
-            except Exception:
-                pass
-        try:
-            d.app_current()
-        except Exception:
-            pass
-
+        # Verification starts immediately in the caller.  Its first probe is
+        # the exact semantic Like -> Unlike transition and it already owns the
+        # bounded hierarchy/visual fallback.  Do not pay a fixed sleep plus a
+        # success-path screenshot/XML/app_current before that poll begins.
+        post_shot = None
         meta_post = _followers_current_pkg_activity(d)
         log(
             "info",
@@ -31546,8 +31531,9 @@ def visual_like_open_post(
             tap_x=tap_x,
             tap_y=tap_y,
             confidence=round(confidence, 4),
-            verification_method="post_tap_capture",
-            screenshot_path=post_shot,
+            verification_method="immediate_semantic_poll_pending",
+            screenshot_path=None,
+            happy_path_capture_skipped=True,
             current_activity=meta_post.get("current_activity"),
             current_package=meta_post.get("current_package"),
             source_profile_username=source_profile_username or "",
