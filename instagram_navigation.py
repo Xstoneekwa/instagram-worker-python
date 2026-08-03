@@ -43783,6 +43783,30 @@ def post_follow_controlled_return_to_followers_list(
             return _list_confirmed(allow_stale_candidate_action_bar=True)
         return False, det_strict
 
+    def _poll_exact_ct_after_planned_back(
+        *,
+        timeout_s: float = 0.36,
+        interval_s: float = 0.06,
+        max_attempts: int = 3,
+    ) -> tuple[bool, dict[str, Any], int, float]:
+        """Confirm the exact CT immediately, then poll only while UI is transitioning."""
+        started = time.monotonic()
+        attempts = 0
+        last_det: dict[str, Any] = {}
+        while attempts < max(1, int(max_attempts)):
+            attempts += 1
+            ok_poll, last_det = _list_confirmed()
+            elapsed_s = max(0.0, time.monotonic() - started)
+            if ok_poll:
+                return True, last_det, attempts, elapsed_s
+            if attempts >= max(1, int(max_attempts)) or elapsed_s >= max(0.0, timeout_s):
+                break
+            remaining_s = max(0.0, timeout_s - elapsed_s)
+            if remaining_s <= 0.0:
+                break
+            time.sleep(min(max(0.0, interval_s), remaining_s))
+        return False, last_det, attempts, max(0.0, time.monotonic() - started)
+
     def _over_budget(round_t0: float) -> bool:
         return (time.monotonic() - round_t0) >= budget_s
 
@@ -43889,10 +43913,16 @@ def post_follow_controlled_return_to_followers_list(
                     _invalidate_follow_60s_proofs("planned_return_back")
                 except Exception:
                     pass
-                time.sleep(0.28)
-                ok_fast, det_fast = _list_confirmed()
+                ok_fast, det_fast, ct_poll_attempts, ct_poll_elapsed_s = (
+                    _poll_exact_ct_after_planned_back()
+                )
             except Exception:
-                ok_fast, det_fast = False, {}
+                ok_fast, det_fast, ct_poll_attempts, ct_poll_elapsed_s = (
+                    False,
+                    {},
+                    0,
+                    0.0,
+                )
             if ok_fast:
                 try:
                     from follow_60s_canary import (
@@ -43959,6 +43989,9 @@ def post_follow_controlled_return_to_followers_list(
                     final_ct_exact=True,
                     action_bar_title=str(det_fast.get("action_bar_title") or "")[:120],
                     back_count=1,
+                    ct_poll_attempts=int(ct_poll_attempts),
+                    ct_poll_elapsed_ms=round(float(ct_poll_elapsed_s) * 1000.0, 2),
+                    fixed_sleep_skipped=True,
                     fallback_used=False,
                 )
                 return True, "fresh_candidate_proof_one_back_then_exact_ct", None
@@ -43969,6 +44002,8 @@ def post_follow_controlled_return_to_followers_list(
                 source_profile_username=src,
                 follower_username=cand or None,
                 rejection_reason="exact_ct_not_confirmed_after_one_back",
+                ct_poll_attempts=int(ct_poll_attempts),
+                ct_poll_elapsed_ms=round(float(ct_poll_elapsed_s) * 1000.0, 2),
                 fallback_used=True,
             )
 

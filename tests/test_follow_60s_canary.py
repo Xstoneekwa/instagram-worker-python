@@ -341,7 +341,7 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
             nav, "verify_followers_list_surface_is_ct_account", return_value=True
         ) as exact_ct, patch.object(
             nav.time, "sleep", return_value=None
-        ), patch.object(
+        ) as sleep, patch.object(
             nav, "log"
         ):
             ok, how, failure = nav.post_follow_controlled_return_to_followers_list(
@@ -363,6 +363,7 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
         device.press.assert_called_once_with("back")
         detect.assert_called_once()
         exact_ct.assert_called_once()
+        sleep.assert_not_called()
         pending = nav._post_follow_return_take_pending_visual_evidence_for_runner()
         self.assertEqual(
             pending["return_list_detection"]["action_bar_title"], "ct_source"
@@ -370,6 +371,52 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
         self.assertGreater(
             pending["return_list_detection_created_at_monotonic"], 0.0
         )
+
+    def test_exact_candidate_proof_polls_only_when_ct_is_still_transitioning(self) -> None:
+        nav._post_follow_return_take_pending_visual_evidence_for_runner()
+        device = MagicMock()
+        transitioning = {
+            "is_followers_list": False,
+            "action_bar_title": "candidate",
+        }
+        exact_ct = {
+            "is_followers_list": True,
+            "action_bar_title": "ct_source",
+            "open_detection_method": "own_unified_follow_list",
+            "candidate_username_count": 4,
+            "signals": ["selected_followers_tab", "follow_list_username"],
+        }
+        with patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav,
+            "detect_followers_list_screen",
+            side_effect=[transitioning, exact_ct],
+        ) as detect, patch.object(
+            nav,
+            "verify_followers_list_surface_is_ct_account",
+            side_effect=[False, True],
+        ), patch.object(
+            nav.time, "sleep", return_value=None
+        ) as sleep, patch.object(nav, "log"):
+            ok, how, failure = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct_source",
+                follower_username="candidate",
+                visual_candidate_id="vc-1",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+                immediate_candidate_back_proof=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(how, "fresh_candidate_proof_one_back_then_exact_ct")
+        self.assertIsNone(failure)
+        self.assertEqual(detect.call_count, 2)
+        sleep.assert_called_once_with(0.06)
 
 
 class Follow60sMuteKnownDepthTest(unittest.TestCase):
