@@ -23370,7 +23370,6 @@ def _post_follow_post_grid_evidence_from_xml(
     reveal_only_without_tabs = bool(
         identity_exact
         and post_count_positive
-        and (suggested_marker_order >= 0 or highlights_marker_order >= 0)
         and not raw_cells
         and not raw_clipped_cells
         and not bool(base.get("empty_marker_xml"))
@@ -23388,15 +23387,21 @@ def _post_follow_post_grid_evidence_from_xml(
                 "rejection_reason": "post_grid_below_fold_reveal_required",
                 "post_grid_reveal_required_reason": (
                     "positive_posts_suggested_or_highlights_grid_below_fold"
+                    if suggested_marker_order >= 0 or highlights_marker_order >= 0
+                    else "positive_posts_no_tap_safe_cell_reveal_required"
                 ),
                 "reveal_required_reason": (
                     "positive_posts_suggested_or_highlights_grid_below_fold"
+                    if suggested_marker_order >= 0 or highlights_marker_order >= 0
+                    else "positive_posts_no_tap_safe_cell_reveal_required"
                 ),
                 "tap_safe": False,
                 "grid_exposure": "positive_profile_grid_below_fold",
                 "reveal_permission_only": True,
                 "overlay_regions_isolated": True,
                 "profile_tabs_missing_at_reveal_authorization": True,
+                "visible_post_count": 0,
+                "physical_cells": [],
                 "post_bounds": None,
                 "initial_top_left_bounds": None,
                 "top_left_fully_visible": False,

@@ -31,6 +31,29 @@ class BelowFoldRevealOnlyV1Tests(unittest.TestCase):
             "positive_posts_suggested_or_highlights_grid_below_fold",
         )
 
+    def test_positive_profile_without_exported_overlay_label_authorizes_reveal_only(self) -> None:
+        """Samsung may omit Suggested/Highlights text from the hierarchy.
+
+        Exact identity plus an authoritative positive Posts count and the
+        absence of any tap-safe cell may authorize one bounded reveal only.
+        It must never manufacture tap bounds from the profile screenshot.
+        """
+        xml = """<hierarchy>
+        <node text="candidate"/>
+        <node resource-id="profile_header_count_container">
+          <node text="10"/><node text="Posts"/>
+        </node>
+        <node resource-id="bottom_navigation" bounds="[0,2200][1080,2340]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
+        self.assertTrue(out["reveal_permission_only"])
+        self.assertFalse(out["tap_safe"])
+        self.assertIsNone(out["post_bounds"])
+        self.assertEqual(out["visible_post_count"], 0)
+
     def test_zero_posts_never_authorizes_reveal(self) -> None:
         out = nav._post_follow_post_grid_evidence_from_xml(
             self._xml(posts="0 posts", extra='<node text="No Posts Yet"/>'),
