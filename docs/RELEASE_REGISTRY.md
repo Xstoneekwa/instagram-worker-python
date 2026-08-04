@@ -1,5 +1,20 @@
 # Release Registry
 
+## FOLLOW60_MAINLINE_V1_2026-08-04
+
+Functional Worker commit `5cc22fe702a1a05925aeb4c58a59e1c7306ca3aa`
+promotes the already-certified Follow60 engine to normal request-linked runs.
+Backend/DB commit `84fb4b60f3401b4047beba32b1b63fee33ce70c6`
+adds the mainline persistence and completed-cycle ledger binding while leaving
+the canary RPC branch intact. Production migration:
+`20260804231500_follow60_mainline_binding_v1`.
+
+The immutable production release and activation PIDs are recorded after the
+controlled switch in `FOLLOW60_MAINLINE_MANIFEST_V1.json`. Tag:
+`follow60-mainline-production-2026-08-04`. Golden85 rollback remains
+`/Users/admin/phonefarm-worker-releases/ff99db6-follow-persistence-rpc-v1`.
+No run, tick or device action is created by this checkpoint.
+
 ## ACCOUNT_PROTECTION_LISTS_V1_2026-07-26
 
 Parent Worker runtime: `8eec60f8301aec32597a393659357da18d38ba36`. Final code SHA: `45d3cd3e4ca1647299ed28ef324e2cc96562d046`. Immutable release: `/Users/admin/phonefarm-worker-releases/45d3cd3-account-protection-lists-v1`, selected by `/Users/admin/phonefarm-worker-current`. Activation used the one-shot startup guard and one dispatcher restart; dispatcher PID `72009`, consumer PID `72061`, with zero active request, run or device lock before and after rollout. This release adds the once-per-request canonical protection snapshot and action gates without changing caps, scheduling, Auto Login or device control. No physical run belongs to this entry.

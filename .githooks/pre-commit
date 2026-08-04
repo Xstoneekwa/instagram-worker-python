@@ -1,0 +1,2 @@
+#!/bin/zsh
+exec /usr/bin/python3 scripts/verify-follow60-mainline-lock.py

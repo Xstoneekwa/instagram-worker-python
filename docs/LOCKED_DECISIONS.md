@@ -1,5 +1,21 @@
 # Locked Decisions
 
+## FOLLOW60_MAINLINE_V1 — 2026-08-04
+
+- Follow60 is the single default production Follow engine for every normal,
+  request-linked account session, existing or future.
+- A normal run is bound to its exact `run_id`; it needs no canary control and
+  has no ten-cycle evaluation barrier.
+- The historical canary harness remains optional and explicit. It may not be
+  inherited from an inactive control, username, UUID, schedule or package.
+- PostGrid, absolute top-left, fresh tap proof, Story/Highlight V5, exact Like,
+  Return CT, outbox and completed-cycle ledger safety contracts are locked.
+- Golden85 is emergency rollback only and is never a silent normal fallback.
+- Critical source changes require `FOLLOW60_MAINLINE_LOCK_V1` and a valid,
+  short-lived, one-shot approval bound to base SHA, scope and diff hash.
+- CT Resume V4 source/tests are certified; complete second-pass field evidence
+  remains pending and must not be reported as complete.
+
 ## Target Followers Progressive Resume V2 — 2026-07-24
 
 - V2 is shadow-only for account UUID `0d299d1e-46ee-49d2-8a84-4f928f2bb182`.

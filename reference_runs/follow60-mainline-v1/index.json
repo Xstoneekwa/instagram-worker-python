@@ -1,0 +1,17 @@
+{
+  "schema": "FOLLOW60_REFERENCE_CORPUS_V1",
+  "redaction": "identifiers_and_secrets_removed",
+  "raw_artifacts_copied": false,
+  "reference": {
+    "run_id_sha256": "addfda620a4eb04872f1bf14775651f643936a2aab6e06a2754c014d0205efab",
+    "worker_sha": "4e05e1016497c15882286601f0b4fc837d691a68",
+    "completed_cycles": 10,
+    "active_outbox_pending_at_checkpoint": 0,
+    "safety_contract": "POSTGRID_TOP_LEFT_V5_RETURN_CT"
+  },
+  "hashes": {
+    "redacted_log_sha256": "79c4f905025d409fa44e158a962b4aee691352597843479ee39329848708d778",
+    "raw_intent_set_sha256": "d6b587368f4558122ac0eb82ce829bf811bc50800f98a6ee3ba3035f17d66e82",
+    "readme_sha256": "de9f4ced84b06cd791878e586eeb5ad1a8e2b6aa194bb7ae3e3e2dd415a48c49"
+  }
+}

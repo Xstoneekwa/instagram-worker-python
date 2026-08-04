@@ -1,5 +1,14 @@
 # Current Production State
 
+## Official engine — FOLLOW60_MAINLINE_V1
+
+Follow60 Mainline V1 supersedes the historical canary-only admission model as
+the normal Follow execution engine. The optional canary harness remains
+available for explicit experiments; normal accounts never require it. Runtime
+activation evidence is recorded in `FOLLOW60_MAINLINE_MANIFEST_V1.json` and
+`docs/RELEASE_REGISTRY.md`. Safety behavior in `instagram_navigation.py` is
+unchanged. See [Follow60 Mainline V1](./follow60-mainline-v1.md).
+
 ## Active addendum — account protection lists V1
 
 The 2026-07-26 checkpoint is active at Worker code SHA `45d3cd3e4ca1647299ed28ef324e2cc96562d046` in immutable release `/Users/admin/phonefarm-worker-releases/45d3cd3-account-protection-lists-v1`. It adds one canonical account-scoped protection snapshot loaded once before device access for account/outreach sessions. Interaction blacklist and Unfollow whitelist have separate action semantics; active requests keep an immutable snapshot. Backend failure blocks safely and legacy list fields are not fallbacks. Activation used one dispatcher restart and produced zero request, run, device lock or phone action. See the [scoped checkpoint](./checkpoints/2026-07-26-account-protection-lists-v1.md).
