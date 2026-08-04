@@ -17946,6 +17946,17 @@ def _stash_post_mute_sheet_closed_proof(
                         absolute_column_index=int(
                             _grid.get("absolute_column_index") or 0
                         ),
+                        reveal_permission_only=bool(
+                            _grid.get("reveal_permission_only")
+                        ),
+                        private_profile_visible=bool(
+                            _grid.get("private_profile_visible")
+                        ),
+                        loading_visible=bool(_grid.get("loading_visible")),
+                        empty_marker_xml=bool(_grid.get("empty_marker_xml")),
+                        posts_count_zero_exact=bool(
+                            _grid.get("posts_count_zero_exact")
+                        ),
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -18054,6 +18065,36 @@ def _publish_post_mute_verdict_at_final_sheet_close(
             )
             profile_grid["candidate_username"] = cand
             profile_grid.update(profile_dimensions)
+            positive_count_proof = dict(
+                context_out.get("positive_post_count_proof_v1") or {}
+            )
+            profile_grid, positive_count_reject = (
+                _authorize_post_grid_reveal_with_positive_post_count_proof_v1(
+                    profile_grid,
+                    positive_count_proof,
+                    expected_stage_binding=context_out,
+                    candidate_username=cand,
+                    live_package=str(live_meta.get("current_package") or ""),
+                    live_activity=str(live_meta.get("current_activity") or ""),
+                    current_ui_generation=int(runtime.get("ui_generation") or 0),
+                )
+            )
+            if positive_count_proof:
+                log(
+                    "info",
+                    "follow60_positive_post_count_proof_final_mute_evaluated",
+                    source_profile_username=source_profile_username,
+                    candidate_username=cand,
+                    proof_version=str(positive_count_proof.get("version") or ""),
+                    posts_count=positive_count_proof.get("posts_count"),
+                    source=str(positive_count_proof.get("source") or ""),
+                    accepted=not bool(positive_count_reject),
+                    rejection_reason=str(positive_count_reject or ""),
+                    outcome=str(profile_grid.get("outcome") or ""),
+                    reveal_only=True,
+                    tap_safe=False,
+                    extra_acquisitions=0,
+                )
             # The empty-state artwork may render one frame after the stable
             # profile shell. Re-observe only the strict empty-grid transition;
             # every other ambiguity falls through to Golden immediately.
@@ -22692,6 +22733,17 @@ _POST_FOLLOW_POSTS_LABEL_RE = re.compile(
     r"beitr[aä]ge|pubblicazioni)\s*$",
     re.IGNORECASE,
 )
+_POSITIVE_POST_COUNT_PROOF_V1 = "PositivePostCountProofV1"
+_POSITIVE_POST_COUNT_PROOF_V1_TTL_MS = 30000.0
+_POSITIVE_POST_COUNT_PROOF_V1_CONSUMED_NONCES: set[str] = set()
+_POSITIVE_POST_COUNT_OFFICIAL_SOURCES = frozenset(
+    {
+        "profile_post_count_value_label_pair",
+        "profile_post_count_official_header_subtree",
+        "profile_post_count_resource_compact",
+        "profile_post_count_accessibility_compact",
+    }
+)
 
 
 def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any]:
@@ -23034,6 +23086,330 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
     out["structural_grid_node_ids"] = structural_grid_node_ids
     out.pop("_posts_count_source_priority", None)
     return out
+
+
+def _positive_post_count_profile_fingerprint_v1(
+    *,
+    candidate_username: str,
+    target_id: str,
+    package: str,
+    activity: str,
+    posts_count: int,
+    source: str,
+    navigation_generation: str,
+    ui_generation: int,
+) -> str:
+    material = "\0".join(
+        (
+            "positive_post_count_profile_v1",
+            _normalize_handle(candidate_username),
+            str(target_id or "").strip(),
+            str(package or "").strip(),
+            str(activity or "").strip(),
+            str(max(0, int(posts_count or 0))),
+            str(source or "").strip(),
+            str(navigation_generation or "").strip(),
+            str(max(0, int(ui_generation or 0))),
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _official_positive_post_count_observation_from_pre_follow_capture(
+    *,
+    hierarchy_xml: str,
+    candidate_username: str,
+    package: str,
+    activity: str,
+    navigation_generation: str,
+    ui_generation: int,
+    captured_at_monotonic: float,
+) -> dict[str, Any] | None:
+    """Return the official profile count already present in the mono capture.
+
+    This helper performs no acquisition.  It accepts only the structured
+    profile-header sources already used by the strict No Posts parser.
+    """
+    evidence = _post_follow_fast_no_posts_xml_evidence(hierarchy_xml)
+    source = str(evidence.get("posts_count_source") or "")
+    try:
+        posts_count = int(evidence.get("posts_count_value"))
+    except (TypeError, ValueError):
+        return None
+    candidate = _normalize_handle(candidate_username)
+    if (
+        not candidate
+        or posts_count <= 0
+        or source not in _POSITIVE_POST_COUNT_OFFICIAL_SOURCES
+        or not str(package or "").strip()
+        or not str(activity or "").strip()
+    ):
+        return None
+    return {
+        "version": "OfficialPositivePostCountObservationV1",
+        "candidate_username": candidate,
+        "package": str(package or "").strip(),
+        "activity": str(activity or "").strip(),
+        "posts_count": posts_count,
+        "source": source,
+        "navigation_generation": str(navigation_generation or "").strip(),
+        "ui_generation": max(0, int(ui_generation or 0)),
+        "captured_at_monotonic": float(captured_at_monotonic or 0.0),
+        "xml_fingerprint": hashlib.sha256(
+            str(hierarchy_xml or "").encode("utf-8", errors="replace")
+        ).hexdigest(),
+    }
+
+
+def _build_positive_post_count_proof_v1(
+    observation: dict[str, Any] | None,
+    *,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    action_id: str,
+    candidate_username: str,
+    target_id: str,
+    package: str,
+    activity: str,
+    ttl_ms: float = _POSITIVE_POST_COUNT_PROOF_V1_TTL_MS,
+) -> dict[str, Any] | None:
+    obs = dict(observation or {})
+    candidate = _normalize_handle(candidate_username)
+    required_binding = {
+        "account_id": str(account_id or "").strip(),
+        "run_id": str(run_id or "").strip(),
+        "request_id": str(request_id or "").strip(),
+        "action_id": str(action_id or "").strip(),
+        "target_id": str(target_id or "").strip(),
+        "package": str(package or "").strip(),
+        "activity": str(activity or "").strip(),
+    }
+    if (
+        str(obs.get("version") or "")
+        != "OfficialPositivePostCountObservationV1"
+        or any(not value for value in required_binding.values())
+        or not candidate
+        or _normalize_handle(str(obs.get("candidate_username") or "")) != candidate
+        or str(obs.get("package") or "") != required_binding["package"]
+        or str(obs.get("activity") or "") != required_binding["activity"]
+        or str(obs.get("source") or "") not in _POSITIVE_POST_COUNT_OFFICIAL_SOURCES
+    ):
+        return None
+    try:
+        posts_count = int(obs.get("posts_count"))
+        captured_at = float(obs.get("captured_at_monotonic") or 0.0)
+        ui_generation = int(obs.get("ui_generation") or 0)
+    except (TypeError, ValueError):
+        return None
+    if posts_count <= 0 or captured_at <= 0.0:
+        return None
+    navigation_generation = str(obs.get("navigation_generation") or "").strip()
+    fingerprint = _positive_post_count_profile_fingerprint_v1(
+        candidate_username=candidate,
+        target_id=required_binding["target_id"],
+        package=required_binding["package"],
+        activity=required_binding["activity"],
+        posts_count=posts_count,
+        source=str(obs.get("source") or ""),
+        navigation_generation=navigation_generation,
+        ui_generation=ui_generation,
+    )
+    nonce_material = (
+        f"{fingerprint}:{required_binding['run_id']}:"
+        f"{required_binding['action_id']}:{time.monotonic_ns()}:{random.random()}"
+    )
+    return {
+        "version": _POSITIVE_POST_COUNT_PROOF_V1,
+        **required_binding,
+        "candidate_username": candidate,
+        "posts_count": posts_count,
+        "source": str(obs.get("source") or ""),
+        "profile_fingerprint": fingerprint,
+        "navigation_generation": navigation_generation,
+        "ui_generation": ui_generation,
+        "captured_at_monotonic": captured_at,
+        "ttl_ms": max(1.0, float(ttl_ms or 0.0)),
+        "one_shot_nonce": hashlib.sha256(
+            nonce_material.encode("utf-8", errors="replace")
+        ).hexdigest(),
+        "reveal_only": True,
+        "tap_safe": False,
+    }
+
+
+def _positive_post_count_proof_v1_reveal_rejection_reason(
+    proof: dict[str, Any] | None,
+    *,
+    expected_stage_binding: dict[str, Any] | None,
+    candidate_username: str,
+    live_package: str,
+    live_activity: str,
+    profile_grid: dict[str, Any] | None,
+    current_ui_generation: int,
+    now_monotonic: float | None = None,
+) -> str:
+    payload = dict(proof or {})
+    binding = dict(expected_stage_binding or {})
+    grid = dict(profile_grid or {})
+    if str(payload.get("version") or "") != _POSITIVE_POST_COUNT_PROOF_V1:
+        return "positive_post_count_proof_missing_or_wrong_version"
+    for key in ("account_id", "run_id", "request_id", "action_id"):
+        if not str(binding.get(key) or "") or str(payload.get(key) or "") != str(
+            binding.get(key) or ""
+        ):
+            return f"positive_post_count_proof_{key}_mismatch"
+    expected_target = str(
+        binding.get("source_target_id") or binding.get("target_id") or ""
+    ).strip()
+    if not expected_target or str(payload.get("target_id") or "") != expected_target:
+        return "positive_post_count_proof_target_id_mismatch"
+    if _normalize_handle(str(payload.get("candidate_username") or "")) != _normalize_handle(
+        candidate_username
+    ):
+        return "positive_post_count_proof_candidate_mismatch"
+    if (
+        str(payload.get("package") or "") != str(live_package or "")
+        or str(payload.get("activity") or "") != str(live_activity or "")
+    ):
+        return "positive_post_count_proof_package_activity_mismatch"
+    if payload.get("reveal_only") is not True or payload.get("tap_safe") is not False:
+        return "positive_post_count_proof_scope_invalid"
+    source = str(payload.get("source") or "")
+    if source not in _POSITIVE_POST_COUNT_OFFICIAL_SOURCES:
+        return "positive_post_count_proof_source_not_official"
+    try:
+        posts_count = int(payload.get("posts_count"))
+        captured_at = float(payload.get("captured_at_monotonic") or 0.0)
+        ttl_ms = float(payload.get("ttl_ms") or 0.0)
+        proof_ui_generation = int(payload.get("ui_generation") or 0)
+    except (TypeError, ValueError):
+        return "positive_post_count_proof_fields_invalid"
+    if posts_count <= 0:
+        return "positive_post_count_proof_posts_not_positive"
+    now = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    if captured_at <= 0.0 or ttl_ms <= 0.0 or (now - captured_at) * 1000.0 > ttl_ms:
+        return "positive_post_count_proof_stale"
+    nonce = str(payload.get("one_shot_nonce") or "")
+    if not nonce or nonce in _POSITIVE_POST_COUNT_PROOF_V1_CONSUMED_NONCES:
+        return "positive_post_count_proof_consumed"
+    expected_fingerprint = _positive_post_count_profile_fingerprint_v1(
+        candidate_username=str(payload.get("candidate_username") or ""),
+        target_id=str(payload.get("target_id") or ""),
+        package=str(payload.get("package") or ""),
+        activity=str(payload.get("activity") or ""),
+        posts_count=posts_count,
+        source=source,
+        navigation_generation=str(payload.get("navigation_generation") or ""),
+        ui_generation=proof_ui_generation,
+    )
+    if not hmac.compare_digest(
+        str(payload.get("profile_fingerprint") or ""), expected_fingerprint
+    ):
+        return "positive_post_count_proof_fingerprint_incompatible"
+    expected_navigation = str(
+        binding.get("positive_post_count_navigation_generation")
+        or payload.get("navigation_generation")
+        or ""
+    )
+    if (
+        not expected_navigation
+        or str(payload.get("navigation_generation") or "") != expected_navigation
+    ):
+        return "positive_post_count_proof_navigation_generation_mismatch"
+    expected_ui = int(
+        binding.get("positive_post_count_ui_generation")
+        if binding.get("positive_post_count_ui_generation") is not None
+        else proof_ui_generation
+    )
+    if proof_ui_generation != expected_ui or int(current_ui_generation or 0) < proof_ui_generation:
+        return "positive_post_count_proof_ui_generation_mismatch"
+    if not bool(grid.get("identity_exact")):
+        return "positive_post_count_proof_profile_identity_not_exact"
+    if (
+        bool(grid.get("private_profile_visible"))
+        or bool(grid.get("loading_visible"))
+        or bool(grid.get("reels_or_tagged_selected"))
+        or str(grid.get("reels_tab_state") or "") == "selected"
+        or str(grid.get("tagged_tab_state") or "") == "selected"
+        or bool(grid.get("empty_marker_xml"))
+        or bool(grid.get("posts_count_zero_exact"))
+        or str(grid.get("outcome") or "") == "NO_POSTS_POSITIVE"
+    ):
+        return "positive_post_count_proof_unsafe_profile_surface"
+    if grid.get("physical_cells") or grid.get("post_bounds"):
+        return "positive_post_count_proof_visible_cell_already_available"
+    if str(grid.get("outcome") or "") != "POST_GRID_AMBIGUOUS_FINAL":
+        return "positive_post_count_proof_non_ambiguous_classification"
+    tabs_unusable = bool(
+        not grid.get("profile_tabs_present")
+        or not grid.get("grid_selected")
+        or int(grid.get("tabs_bottom") or 0) <= 0
+        or str(grid.get("rejection_reason") or "")
+        in {
+            "profile_tabs_bounds_missing",
+            "post_grid_ambiguous",
+            "fresh_direct_post_cell_missing",
+        }
+    )
+    if not tabs_unusable:
+        return "positive_post_count_proof_tabs_already_usable"
+    return ""
+
+
+def _authorize_post_grid_reveal_with_positive_post_count_proof_v1(
+    profile_grid: dict[str, Any] | None,
+    proof: dict[str, Any] | None,
+    *,
+    expected_stage_binding: dict[str, Any] | None,
+    candidate_username: str,
+    live_package: str,
+    live_activity: str,
+    current_ui_generation: int,
+    now_monotonic: float | None = None,
+) -> tuple[dict[str, Any], str]:
+    out = dict(profile_grid or {})
+    reason = _positive_post_count_proof_v1_reveal_rejection_reason(
+        proof,
+        expected_stage_binding=expected_stage_binding,
+        candidate_username=candidate_username,
+        live_package=live_package,
+        live_activity=live_activity,
+        profile_grid=out,
+        current_ui_generation=current_ui_generation,
+        now_monotonic=now_monotonic,
+    )
+    if reason:
+        return out, reason
+    out.update(
+        {
+            "outcome": "POST_GRID_REVEAL_REQUIRED",
+            "evidence_status": "POST_GRID_REVEAL_REQUIRED",
+            "rejection_reason": "positive_post_count_proof_reveal_required",
+            "post_count_positive": True,
+            "posts_count_value": int(dict(proof or {}).get("posts_count") or 0),
+            "posts_count_source": str(dict(proof or {}).get("source") or ""),
+            "reveal_permission_only": True,
+            "tap_safe": False,
+            "post_bounds": None,
+            "positive_post_count_proof_version": _POSITIVE_POST_COUNT_PROOF_V1,
+        }
+    )
+    return out, ""
+
+
+def _consume_positive_post_count_proof_v1_for_reveal(
+    proof: dict[str, Any] | None,
+    **validation_kwargs: Any,
+) -> tuple[bool, str]:
+    reason = _positive_post_count_proof_v1_reveal_rejection_reason(
+        proof, **validation_kwargs
+    )
+    if reason:
+        return False, reason
+    nonce = str(dict(proof or {}).get("one_shot_nonce") or "")
+    _POSITIVE_POST_COUNT_PROOF_V1_CONSUMED_NONCES.add(nonce)
+    return True, ""
 
 
 def _finalize_grid_classification_transport(
@@ -31307,7 +31683,7 @@ def _authoritative_stage_binding_v2(
         return None, "liketapcontext_candidate_binding_mismatch"
     if str(raw.get("action_id") or "") != str(expected_action_id or ""):
         return None, "liketapcontext_action_id_binding_mismatch"
-    return {
+    frozen = {
         "version": "ExpectedStageBindingV2",
         "account_id": str(raw.get("account_id") or ""),
         "run_id": str(raw.get("run_id") or ""),
@@ -31319,7 +31695,18 @@ def _authoritative_stage_binding_v2(
         "worker_sha": str(raw.get("worker_sha") or ""),
         "candidate_username": expected_candidate,
         "source_target_id": str(raw.get("source_target_id") or ""),
-    }, ""
+    }
+    if isinstance(raw.get("positive_post_count_proof_v1"), dict):
+        frozen["positive_post_count_proof_v1"] = dict(
+            raw.get("positive_post_count_proof_v1") or {}
+        )
+        frozen["positive_post_count_navigation_generation"] = str(
+            raw.get("positive_post_count_navigation_generation") or ""
+        )
+        frozen["positive_post_count_ui_generation"] = int(
+            raw.get("positive_post_count_ui_generation") or 0
+        )
+    return frozen, ""
 
 
 def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
@@ -53204,6 +53591,17 @@ def run_post_follow_post_likes_phase(
                     "absolute_top_left_origin_proven": bool(
                         _grid_ev.absolute_top_left_origin_proven
                     ),
+                    "reveal_permission_only": bool(
+                        _grid_ev.reveal_permission_only
+                    ),
+                    "private_profile_visible": bool(
+                        _grid_ev.private_profile_visible
+                    ),
+                    "loading_visible": bool(_grid_ev.loading_visible),
+                    "empty_marker_xml": bool(_grid_ev.empty_marker_xml),
+                    "posts_count_zero_exact": bool(
+                        _grid_ev.posts_count_zero_exact
+                    ),
                     "candidate_username": cand,
                 }
                 if str(_candidate_grid.get("outcome") or "") in {
@@ -53237,6 +53635,72 @@ def run_post_follow_post_likes_phase(
                             or 0
                         ),
                     )
+                    if (
+                        classification_valid
+                        and bool(_candidate_grid.get("reveal_permission_only"))
+                    ):
+                        try:
+                            from follow_60s_canary import (
+                                runtime_context as _positive_count_runtime_context,
+                            )
+
+                            _positive_count_runtime = (
+                                _positive_count_runtime_context()
+                            )
+                        except Exception:
+                            _positive_count_runtime = {}
+                        _positive_count_proof = dict(
+                            (authoritative_binding or {}).get(
+                                "positive_post_count_proof_v1"
+                            )
+                            or {}
+                        )
+                        proof_consumed, proof_consume_reason = (
+                            _consume_positive_post_count_proof_v1_for_reveal(
+                                _positive_count_proof,
+                                expected_stage_binding=dict(
+                                    authoritative_binding or {}
+                                ),
+                                candidate_username=cand,
+                                live_package=str(
+                                    _expected_ctx.get("package") or pkg
+                                ),
+                                live_activity=str(
+                                    _expected_ctx.get("activity") or ""
+                                ),
+                                profile_grid=_candidate_grid,
+                                current_ui_generation=int(
+                                    _positive_count_runtime.get("ui_generation")
+                                    or 0
+                                ),
+                            )
+                        )
+                        log(
+                            "info",
+                            "follow60_positive_post_count_proof_reveal_consumed",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            consumed=bool(proof_consumed),
+                            rejection_reason=str(
+                                proof_consume_reason or ""
+                            ),
+                            reveal_only=True,
+                            tap_safe=False,
+                        )
+                        if not proof_consumed:
+                            classification_valid = False
+                            _candidate_grid.update(
+                                {
+                                    "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                                    "rejection_reason": str(
+                                        proof_consume_reason
+                                        or "positive_post_count_proof_reveal_rejected"
+                                    ),
+                                    "reveal_permission_only": False,
+                                    "post_bounds": None,
+                                }
+                            )
                     if classification_valid:
                         _candidate_grid = (
                             _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
@@ -57557,6 +58021,15 @@ def run_visual_candidate_post_follow_phase(
         "activity": str(det_use.get("current_activity") or ""),
         "created_at_monotonic": time.perf_counter(),
         "navigation_generation": f"{vcid}:{len(post_follow_ctx.transition_history)}",
+        "positive_post_count_proof_v1": dict(
+            binding_context.get("positive_post_count_proof_v1") or {}
+        ),
+        "positive_post_count_navigation_generation": str(
+            binding_context.get("positive_post_count_navigation_generation") or ""
+        ),
+        "positive_post_count_ui_generation": int(
+            binding_context.get("positive_post_count_ui_generation") or 0
+        ),
     }
 
     flow_on = bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False))
@@ -58932,6 +59405,7 @@ def acquire_pre_follow_mono_capture(
     requires exact identity, a profile stats surface and an exact Follow CTA.
     """
     t0 = time.perf_counter()
+    captured_at_monotonic = time.monotonic()
     xml = str(d.dump_hierarchy(compressed=False) or "")
     labels: list[str] = []
     resource_ids: list[str] = []
@@ -59011,12 +59485,26 @@ def acquire_pre_follow_mono_capture(
     try:
         from follow_60s_canary import runtime_context as _follow_60s_runtime_context
 
-        navigation_generation = str(
-            _follow_60s_runtime_context().get("ui_generation") or "0"
-        )
+        _pre_follow_runtime = dict(_follow_60s_runtime_context() or {})
+        ui_generation = int(_pre_follow_runtime.get("ui_generation") or 0)
+        navigation_generation = str(ui_generation)
     except Exception:
+        ui_generation = 0
         navigation_generation = ""
     public_ready = bool(public_ready and package_exact and current_activity)
+    structured_post_count_observation = (
+        _official_positive_post_count_observation_from_pre_follow_capture(
+            hierarchy_xml=xml,
+            candidate_username=follower_username,
+            package=current_package,
+            activity=current_activity,
+            navigation_generation=navigation_generation,
+            ui_generation=ui_generation,
+            captured_at_monotonic=captured_at_monotonic,
+        )
+        if public_ready
+        else None
+    )
     return {
         "ok": public_ready,
         "reason": "mono_capture_public_ready" if public_ready else "mono_capture_incomplete",
@@ -59037,6 +59525,9 @@ def acquire_pre_follow_mono_capture(
         "activity": current_activity,
         "package_exact": package_exact,
         "navigation_generation": navigation_generation,
+        "ui_generation": ui_generation,
+        "captured_at_monotonic": captured_at_monotonic,
+        "structured_post_count_observation": structured_post_count_observation,
         "follow_header_state": "follow" if follow_cta else "unknown",
         "action_bar_title": follower_username if exact_identity else "",
         "private_probe_payload": {
@@ -59070,6 +59561,7 @@ def build_pre_follow_observation_proof(
     private_probe_payload: dict[str, Any] | None,
     navigation_token: str,
     captured_at_mono: float | None = None,
+    structured_post_count_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fresh, non-authoritative profile evidence reusable before the terminal selector."""
     header_state = str(follow_header_state or "")
@@ -59089,6 +59581,11 @@ def build_pre_follow_observation_proof(
         "ambiguous": header_state not in ("follow", "requested", "following", "follow_back"),
         "captured_at_mono": (
             float(captured_at_mono) if captured_at_mono is not None else time.monotonic()
+        ),
+        "structured_post_count_observation": (
+            dict(structured_post_count_observation)
+            if isinstance(structured_post_count_observation, dict)
+            else None
         ),
     }
     try:

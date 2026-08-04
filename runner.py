@@ -192,6 +192,7 @@ from instagram_navigation import (
     build_pre_follow_tap_context,
     build_pre_follow_observation_proof,
     acquire_pre_follow_mono_capture,
+    _build_positive_post_count_proof_v1,
     _pre_follow_observation_proof_reuse_block_reason,
     _pre_follow_observation_proof_age_ms,
     _log_pre_follow_observation_proof_decision,
@@ -12776,7 +12777,16 @@ def _run_followers_list_engine_session(
                 follow_header_state=_hdr,
                 private_probe_payload=dict((_pre_follow_mono_capture or {}).get("private_probe_payload") or {}),
                 navigation_token=navigation_token,
-                captured_at_mono=time.monotonic(),
+                captured_at_mono=float(
+                    (_pre_follow_mono_capture or {}).get("captured_at_monotonic")
+                    or time.monotonic()
+                ),
+                structured_post_count_observation=dict(
+                    (_pre_follow_mono_capture or {}).get(
+                        "structured_post_count_observation"
+                    )
+                    or {}
+                ),
             )
         elif _xml_list_fast_trace:
             try:
@@ -12860,6 +12870,12 @@ def _run_followers_list_engine_session(
                     private_probe_payload=_private_payload_for_proof,
                     navigation_token=navigation_token,
                     captured_at_mono=_hdr_captured_at_mono,
+                    structured_post_count_observation=dict(
+                        (_pre_follow_observation_proof or {}).get(
+                            "structured_post_count_observation"
+                        )
+                        or {}
+                    ),
                 )
             log(
                 "info",
@@ -20158,6 +20174,52 @@ def _run_followers_list_engine_session(
                             or ""
                         ) if isinstance(pick, dict) else "",
                     }
+                    _positive_post_count_proof = _build_positive_post_count_proof_v1(
+                        dict(
+                            (_pre_follow_observation_proof or {}).get(
+                                "structured_post_count_observation"
+                            )
+                            or {}
+                        ),
+                        account_id=str(account_id or ""),
+                        run_id=str(run_id or ""),
+                        request_id=str(run_request_id or ""),
+                        action_id=str(_pf_log_vcid or ""),
+                        candidate_username=str(follower_un or ""),
+                        target_id=str(
+                            (pick or {}).get("target_id")
+                            or (pick or {}).get("source_target_id")
+                            or ""
+                        ) if isinstance(pick, dict) else "",
+                        package=str(pkg or ""),
+                        activity=str(
+                            dict(
+                                (_pre_follow_observation_proof or {}).get(
+                                    "structured_post_count_observation"
+                                )
+                                or {}
+                            ).get("activity")
+                            or ""
+                        ),
+                    )
+                    if _positive_post_count_proof is not None:
+                        _pf_expected_stage_binding.update(
+                            {
+                                "positive_post_count_proof_v1": dict(
+                                    _positive_post_count_proof
+                                ),
+                                "positive_post_count_navigation_generation": str(
+                                    _positive_post_count_proof.get(
+                                        "navigation_generation"
+                                    )
+                                    or ""
+                                ),
+                                "positive_post_count_ui_generation": int(
+                                    _positive_post_count_proof.get("ui_generation")
+                                    or 0
+                                ),
+                            }
+                        )
                 _pf = run_visual_candidate_post_follow_phase(
                     d,
                     pkg=pkg,

@@ -456,6 +456,11 @@ class GridClassificationProof:
     source_xml_fingerprint: str = ""
     absolute_row_index: int = 0
     absolute_column_index: int = 0
+    reveal_permission_only: bool = False
+    private_profile_visible: bool = False
+    loading_visible: bool = False
+    empty_marker_xml: bool = False
+    posts_count_zero_exact: bool = False
 
     @property
     def post_bounds(self) -> dict[str, int] | None:
@@ -1140,6 +1145,11 @@ def stash_post_grid_evidence(
     source_xml_fingerprint: str = "",
     absolute_row_index: int = 0,
     absolute_column_index: int = 0,
+    reveal_permission_only: bool = False,
+    private_profile_visible: bool = False,
+    loading_visible: bool = False,
+    empty_marker_xml: bool = False,
+    posts_count_zero_exact: bool = False,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -1260,6 +1270,11 @@ def stash_post_grid_evidence(
         source_xml_fingerprint=str(source_xml_fingerprint or ""),
         absolute_row_index=max(0, int(absolute_row_index or 0)),
         absolute_column_index=max(0, int(absolute_column_index or 0)),
+        reveal_permission_only=bool(reveal_permission_only),
+        private_profile_visible=bool(private_profile_visible),
+        loading_visible=bool(loading_visible),
+        empty_marker_xml=bool(empty_marker_xml),
+        posts_count_zero_exact=bool(posts_count_zero_exact),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
