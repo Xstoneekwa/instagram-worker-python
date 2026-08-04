@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -521,6 +522,8 @@ class NextCandidateSnapshot:
 @dataclass
 class _Runtime:
     enabled: bool = False
+    runtime_mode: str = "disabled"
+    binding_kind: str = ""
     account_id: str = ""
     account_username: str = ""
     control_id: str = ""
@@ -594,6 +597,8 @@ def configure(
     }
     _RUNTIME = _Runtime(
         enabled=enabled,
+        runtime_mode="canary" if enabled else "disabled",
+        binding_kind="canary" if enabled else "",
         account_id=str(account_id or "").strip(),
         account_username=str(account_username or "").strip().lstrip("@"),
         control_id=(binding.control_id if binding else ""),
@@ -640,6 +645,82 @@ def configure(
     return enabled
 
 
+def configure_mainline(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str,
+    request_id: str,
+    business_session_id: str,
+    package: str,
+    worker_sha: str,
+    run_type: str = "account_session",
+    resume_policy: dict[str, Any] | None = None,
+) -> bool:
+    """Enable Follow60 for a normal run without installing the canary harness.
+
+    The normal binding frontier is the immutable run id.  Canary controls,
+    baselines, expirations and evaluation barriers are deliberately absent.
+    """
+    global _RUNTIME
+    account = str(account_id or "").strip()
+    username = str(account_username or "").strip().lstrip("@")
+    run = str(run_id or "").strip()
+    request = str(request_id or "").strip()
+    session = str(business_session_id or "").strip()
+    pkg = str(package or "").strip()
+    sha = str(worker_sha or "").strip().lower()
+    normal_run = str(run_type or "").strip() == "account_session"
+    enabled = bool(
+        _env_bool("FOLLOW60_MAINLINE_ENABLED", True)
+        and account
+        and username
+        and run
+        and request
+        and session
+        and pkg
+        and normal_run
+        and re.fullmatch(r"[0-9a-f]{40}", sha)
+    )
+    policy = dict(resume_policy or {})
+    attempt_id = int(policy.get("attempt_id") or 1)
+    subflags = {
+        name: _env_bool(f"FOLLOW_60S_CANARY_{name.upper()}", True)
+        for name in _SUBFLAG_NAMES
+    }
+    _RUNTIME = _Runtime(
+        enabled=enabled,
+        runtime_mode="mainline" if enabled else "disabled",
+        binding_kind="mainline" if enabled else "",
+        account_id=account,
+        account_username=username,
+        control_id=run if enabled else "",
+        binding_version="FOLLOW60_MAINLINE_BINDING_V1" if enabled else "",
+        run_id=run,
+        attempt_id=max(1, attempt_id),
+        natural_attempt=not bool(policy),
+        package=pkg,
+        subflags=subflags,
+    )
+    log(
+        "info" if enabled else "error",
+        "follow60_mainline_runtime_configured",
+        enabled=enabled,
+        runtime_mode=_RUNTIME.runtime_mode,
+        binding_kind=_RUNTIME.binding_kind,
+        account_id=account or None,
+        run_id=run or None,
+        request_id=request or None,
+        business_session_id_present=bool(session),
+        package=pkg or None,
+        worker_sha=sha or None,
+        run_type=str(run_type or "") or None,
+        canary_control_required=False,
+        evaluation_barrier_active=False,
+    )
+    return enabled
+
+
 def install_activation_components(**components: Any) -> dict[str, bool]:
     """Install and freeze the concrete pre-device Follow60 component registry."""
     required = {
@@ -675,6 +756,7 @@ def activation_component_status() -> dict[str, bool]:
         ),
         "barrier_installed": bool(_RUNTIME.activation_components.get("barrier")),
         "control_id_loaded": bool(_RUNTIME.control_id),
+        "binding_id_loaded": bool(_RUNTIME.control_id),
         "run_bound": bool(_RUNTIME.run_id),
     }
 
@@ -697,6 +779,10 @@ def enabled_for_account(account_id: str | None) -> bool:
 def runtime_context() -> dict[str, Any]:
     return {
         "enabled": _RUNTIME.enabled,
+        "runtime_mode": _RUNTIME.runtime_mode,
+        "binding_kind": _RUNTIME.binding_kind,
+        "control_id": _RUNTIME.control_id,
+        "binding_version": _RUNTIME.binding_version,
         "account_id": _RUNTIME.account_id,
         "account_username": _RUNTIME.account_username,
         "run_id": _RUNTIME.run_id,

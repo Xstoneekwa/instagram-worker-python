@@ -11533,8 +11533,10 @@ def _run_followers_list_engine_session(
         evaluation_increment = int(ledger.get("max_cycles") or 0)
         if cycle_complete and (
             not bool(ledger.get("ok"))
-            or str(ledger.get("schema") or "")
-            != "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1"
+            or str(ledger.get("schema") or "") not in {
+                "FOLLOW60_RUN_SCOPED_CYCLE_LEDGER_V1",
+                "FOLLOW60_MAINLINE_CYCLE_LEDGER_V2",
+            }
         ):
             log(
                 "error",
@@ -20109,6 +20111,10 @@ def _run_followers_list_engine_session(
                                 verified_at=datetime.now(timezone.utc).isoformat(),
                                 payload={
                                     **dict(payload or {}),
+                                    "binding_kind": str(
+                                        (follow60_canary_control or {}).get("binding_kind")
+                                        or ("canary" if follow60_canary_active else "mainline")
+                                    ),
                                     "control_id": str(
                                         (follow60_canary_control or {}).get("control_id")
                                         or (follow60_canary_control or {}).get("id")
@@ -20151,8 +20157,12 @@ def _run_followers_list_engine_session(
                     )
                     return 96
                 _pf_expected_stage_binding = None
-                if follow60_canary_active:
+                if _follow60_stage_receipts:
                     _pf_expected_stage_binding = {
+                        "binding_kind": str(
+                            (follow60_canary_control or {}).get("binding_kind")
+                            or ("canary" if follow60_canary_active else "mainline")
+                        ),
                         "account_id": str(account_id or ""),
                         "run_id": str(run_id or ""),
                         "request_id": str(run_request_id or ""),
@@ -20294,6 +20304,10 @@ def _run_followers_list_engine_session(
                         import post_follow_stage_outbox
 
                         _active_outbox_binding = {
+                            "binding_kind": str(
+                                (follow60_canary_control or {}).get("binding_kind")
+                                or ("canary" if follow60_canary_active else "mainline")
+                            ),
                             "account_id": str(account_id or ""),
                             "run_id": str(run_id or ""),
                             "request_id": str(run_request_id or ""),
@@ -20957,9 +20971,10 @@ def _run_followers_list_engine_session(
                 _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fk_session, None)
 
             if not bool((follow_out or {}).get("skipped_tap")):
-                if follow60_canary_active and _follow60_stage_receipts:
-                    # Observability only. Continuation authority comes solely
-                    # from the transactionally returned run-scoped ledger.
+                if _follow60_stage_receipts:
+                    # The durable cycle ledger is required by both modes.
+                    # Only the optional canary harness may turn its count into
+                    # an evaluation barrier.
                     _ledger_ack = dict(
                         _follow60_composite_flush.get("latest_ledger_ack") or {}
                     )
@@ -21969,8 +21984,9 @@ def _main_impl() -> int:
         release=str(os.environ.get("WORKER_RELEASE") or ""),
     )
 
-    # Generic Follow latency canary. The canonical V2 control is the sole
-    # account selector; invalid or absent controls leave the account Golden.
+    # Follow60 is the normal Follow engine.  A canonical canary control only
+    # installs the optional evaluation harness and its run-scoped barrier.
+    _follow60_engine_active = False
     _follow60_canary_active = False
     _follow60_canary_control: dict[str, Any] = {}
     _follow60_attempt_id = 1
@@ -22005,6 +22021,7 @@ def _main_impl() -> int:
         from follow_60s_canary import (
             activation_component_status as _follow60_activation_component_status,
             configure as _configure_follow_60s_canary,
+            configure_mainline as _configure_follow60_mainline,
             install_activation_components as _install_follow60_activation_components,
             runtime_context as _follow60_runtime_context,
         )
@@ -22019,8 +22036,31 @@ def _main_impl() -> int:
             or (2 if _canary_resume_policy else 1)
         )
         _worker_sha = str(os.environ.get("WORKER_GIT_SHA") or "").strip()
-        if supabase_mode:
+        if supabase_mode and run_request_id:
             _raw_control = supabase_client.get_follow_60s_canary_control_v1(account_id)
+            _control_status = str(
+                (_raw_control or {}).get("control_status")
+                or (_raw_control or {}).get("status")
+                or ""
+            ).strip().lower()
+            _active_control_statuses = {
+                "armed", "running", "barrier_waiting_stop",
+                "waiting_operator_evaluation", "continuation_authorized",
+            }
+            if _raw_control and _control_status not in _active_control_statuses:
+                log(
+                    "info", "follow60_inactive_canary_history_ignored_for_mainline",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    control_id=str(
+                        (_raw_control or {}).get("control_id")
+                        or (_raw_control or {}).get("id")
+                        or ""
+                    ) or None,
+                    control_status=_control_status or None,
+                    history_preserved=True,
+                )
+                _raw_control = None
             _prebind = validate_armed_control(
                 _raw_control,
                 account_id=account_id,
@@ -22104,6 +22144,7 @@ def _main_impl() -> int:
                         request_id=str(run_request_id or ""),
                         business_session_id=str(_SESSION_SOCIAL_ID or ""),
                     ))
+                    _follow60_engine_active = bool(_follow60_canary_active)
                     _phase_plan = dict(
                         _canary_resume_policy.get("phases_to_run")
                         or {"follow": True, "welcome": False, "unfollow": False}
@@ -22339,6 +22380,98 @@ def _main_impl() -> int:
                 )
                 return 96
 
+        if supabase_mode and run_request_id and not _follow60_canary_active:
+            _follow60_engine_active = bool(_configure_follow60_mainline(
+                account_id=account_id,
+                account_username=account_username,
+                run_id=str(run_id or ""),
+                request_id=str(run_request_id or ""),
+                business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                package=str(config.INSTAGRAM_PACKAGE or ""),
+                worker_sha=_worker_sha,
+                run_type=dispatch_run_type,
+                resume_policy=_canary_resume_policy,
+            ))
+            if not _follow60_engine_active:
+                log(
+                    "error", "follow60_mainline_configuration_failed_pre_device",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    device_actions_started=False,
+                )
+                return 96
+            _follow60_canary_control = {
+                "control_id": str(run_id or ""),
+                "id": str(run_id or ""),
+                "binding_kind": "mainline",
+                "binding_version": "FOLLOW60_MAINLINE_BINDING_V1",
+                "worker_sha": _worker_sha,
+            }
+            _ensure_follow_persistence_run_binding(
+                persistence_required=True,
+                account_id=account_id,
+                run_id=run_id,
+                request_id=run_request_id,
+                request_linked=bool(linked),
+            )
+            _follow60_persistence_binding_ready = True
+            import post_follow_stage_outbox
+
+            _startup_replay = post_follow_stage_outbox.flush_pending(
+                active_binding={
+                    "binding_kind": "mainline",
+                    "account_id": str(account_id or ""),
+                    "run_id": str(run_id or ""),
+                    "request_id": str(run_request_id or ""),
+                    "control_id": str(run_id or ""),
+                    "worker_sha": _worker_sha,
+                },
+            )
+            if not bool(_startup_replay.get("ok")):
+                log(
+                    "error", "follow60_mainline_outbox_replay_blocked_before_ui",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    reason=str(_startup_replay.get("reason") or "replay_failed"),
+                    pending=_startup_replay.get("pending"),
+                    device_actions_started=False,
+                )
+                return 96
+
+            def _mainline_no_barrier(*_args: Any, **_kwargs: Any) -> bool:
+                return False
+
+            _install_follow60_activation_components(
+                opening_composite=acquire_pre_follow_mono_capture,
+                pre_tap_callback=build_pre_follow_tap_context,
+                post_cycle_callback=_mainline_no_barrier,
+                stage_receipts=post_follow_stage_outbox.journal_stage,
+                barrier=_mainline_no_barrier,
+            )
+            _components = _follow60_activation_component_status()
+            if not all(bool(value) for value in _components.values()):
+                log(
+                    "error", "follow60_mainline_component_installation_failed_pre_device",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    component_status=_components,
+                    device_actions_started=False,
+                )
+                return 96
+            log(
+                "info", "follow60_mainline_activation_ready",
+                account_id=account_id or None,
+                run_id=run_id or None,
+                request_id=run_request_id or None,
+                binding_kind="mainline",
+                binding_id=str(run_id or "") or None,
+                canary_control_required=False,
+                evaluation_barrier_active=False,
+            )
+
         if _follow60_canary_active:
             _follow60_attempt_id = int(
                 _follow60_runtime_context().get("attempt_id") or 1
@@ -22400,25 +22533,26 @@ def _main_impl() -> int:
             )
             return 96
         log(
-            "warning",
-            "follow_60s_canary_control_read_failed_golden_preserved",
+            "error",
+            "follow60_optional_canary_control_read_failed_mainline_safe_stop",
             account_id=account_id or None,
             run_id=run_id or None,
             request_id=run_request_id or None,
-            fallback_used=True,
-            fallback="golden_current",
+            fallback_used=False,
             error_type=type(exc).__name__,
             reason=str(exc)[:240],
             device_actions_started=False,
-            safe_to_continue_ui=True,
+            safe_to_continue_ui=False,
         )
         _follow60_canary_active = False
+        _follow60_engine_active = False
+        return 96
 
     # Follow60 is resolved later than the initial request/run link.  Certify
     # the persistence binding now when the canonical control has activated the
     # canary; otherwise every eligible candidate would fail closed at the
     # pre-tap intent boundary with follow_persistence_run_binding_missing.
-    if _follow60_canary_active and not _follow60_persistence_binding_ready:
+    if _follow60_engine_active and not _follow60_persistence_binding_ready:
         try:
             _ensure_follow_persistence_run_binding(
                 persistence_required=True,

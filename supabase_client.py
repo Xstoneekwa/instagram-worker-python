@@ -2782,6 +2782,36 @@ def persist_follow_60s_post_follow_v2(
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 
+def persist_follow60_post_follow_v3(
+    *, binding_kind: str, binding_id: str, worker_sha: str,
+    account_id: str, run_id: str, request_id: str, action_id: str,
+    action_id_hash_value: str, username: str, source_profile: str,
+    attempt_id: int, business_session_id: str, cycle_complete: bool,
+    stages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Persist verified Follow60 stages under a canary or mainline binding."""
+    out = call_rpc(
+        "persist_follow60_post_follow_v3",
+        {
+            "p_binding_kind": str(binding_kind),
+            "p_binding_id": str(binding_id),
+            "p_worker_sha": str(worker_sha).lower(),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_action_id": str(action_id),
+            "p_action_id_hash": str(action_id_hash_value),
+            "p_username": _canonical_interaction_username(username),
+            "p_source_profile": str(source_profile or ""),
+            "p_attempt_id": int(attempt_id),
+            "p_business_session_id": str(business_session_id),
+            "p_cycle_complete": bool(cycle_complete),
+            "p_stages": [dict(stage or {}) for stage in stages],
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def ack_follow_60s_completed_cycle_v1(
     *,
     control_id: str,
@@ -2803,6 +2833,36 @@ def ack_follow_60s_completed_cycle_v1(
         "ack_follow_60s_completed_cycle_v1",
         {
             "p_control_id": str(control_id),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_action_id": str(action_id),
+            "p_action_id_hash": str(action_id_hash_value),
+            "p_attempt_id": int(attempt_id),
+            "p_business_session_id": str(business_session_id),
+            "p_candidate_username": _canonical_interaction_username(candidate_username),
+            "p_source_profile": _canonical_interaction_username(source_profile),
+            "p_worker_sha": str(worker_sha).lower(),
+            "p_like_terminal_status": str(like_terminal_status),
+            "p_like_terminal_reason": str(like_terminal_reason),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def ack_follow60_completed_cycle_v2(
+    *, binding_kind: str, binding_id: str, account_id: str, run_id: str,
+    request_id: str, action_id: str, action_id_hash_value: str,
+    attempt_id: int, business_session_id: str, candidate_username: str,
+    source_profile: str, worker_sha: str, like_terminal_status: str,
+    like_terminal_reason: str,
+) -> dict[str, Any]:
+    """Acknowledge a durable cycle without imposing a mainline test barrier."""
+    out = call_rpc(
+        "ack_follow60_completed_cycle_v2",
+        {
+            "p_binding_kind": str(binding_kind),
+            "p_binding_id": str(binding_id),
             "p_account_id": str(account_id),
             "p_run_id": str(run_id),
             "p_request_id": str(request_id),

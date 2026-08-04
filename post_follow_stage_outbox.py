@@ -226,6 +226,7 @@ def pending_count(path: Path = DEFAULT_PATH) -> int:
 def _normalized_active_binding(active_binding: dict[str, Any] | None) -> dict[str, str]:
     raw = dict(active_binding or {})
     binding = {
+        "binding_kind": str(raw.get("binding_kind") or "canary").strip().lower(),
         "account_id": str(raw.get("account_id") or "").strip(),
         "run_id": str(raw.get("run_id") or "").strip(),
         "request_id": str(raw.get("request_id") or "").strip(),
@@ -233,7 +234,15 @@ def _normalized_active_binding(active_binding: dict[str, Any] | None) -> dict[st
         "worker_sha": str(raw.get("worker_sha") or "").strip().lower(),
     }
     missing = [key for key, value in binding.items() if not value]
-    if missing or not re.fullmatch(r"[0-9a-f]{40}", binding["worker_sha"]):
+    if (
+        missing
+        or binding["binding_kind"] not in {"canary", "mainline"}
+        or not re.fullmatch(r"[0-9a-f]{40}", binding["worker_sha"])
+        or (
+            binding["binding_kind"] == "mainline"
+            and binding["control_id"] != binding["run_id"]
+        )
+    ):
         raise ValueError("follow60_active_outbox_binding_missing_or_invalid")
     return binding
 
@@ -248,9 +257,15 @@ def _group_control_binding(group: list[dict[str, Any]]) -> dict[str, str]:
         str(dict(row.get("payload") or {}).get("worker_sha") or "").strip().lower()
         for row in group
     }
-    if len(control_ids) != 1 or len(worker_shas) != 1:
+    binding_kinds = {
+        str(dict(row.get("payload") or {}).get("binding_kind") or "canary")
+        .strip().lower()
+        for row in group
+    }
+    if len(control_ids) != 1 or len(worker_shas) != 1 or len(binding_kinds) != 1:
         raise ValueError("follow60_stage_binding_missing_or_invalid")
     return {
+        "binding_kind": next(iter(binding_kinds)),
         "account_id": str(first.get("account_id") or "").strip(),
         "run_id": str(first.get("original_run_id") or "").strip(),
         "request_id": str(first.get("original_request_id") or "").strip(),
@@ -263,7 +278,7 @@ def _active_binding_mismatch_reason(
     receipt_binding: dict[str, str],
     active_binding: dict[str, str],
 ) -> str:
-    for field in ("run_id", "request_id", "worker_sha"):
+    for field in ("binding_kind", "account_id", "run_id", "request_id", "worker_sha"):
         if receipt_binding[field].lower() != active_binding[field].lower():
             return f"follow60_active_binding_{field}_mismatch"
     return ""
@@ -413,16 +428,12 @@ def flush_pending(
         try:
             import supabase_client
 
-            out = supabase_client.persist_follow_60s_post_follow_v2(
-                account_id=first["account_id"],
-                run_id=first["original_run_id"],
-                request_id=first["original_request_id"],
-                action_id=first["action_id"],
+            persist_kwargs = dict(
+                account_id=first["account_id"], run_id=first["original_run_id"],
+                request_id=first["original_request_id"], action_id=first["action_id"],
                 action_id_hash_value=first["action_id_hash"],
-                username=first["candidate_username"],
-                source_profile=first["source_profile"],
-                attempt_id=first["attempt_id"],
-                business_session_id=first["business_session_id"],
+                username=first["candidate_username"], source_profile=first["source_profile"],
+                attempt_id=first["attempt_id"], business_session_id=first["business_session_id"],
                 cycle_complete=any(bool(row["cycle_complete"]) for row in group),
                 stages=[
                     {
@@ -433,6 +444,13 @@ def flush_pending(
                     for row in group
                 ],
             )
+            if binding["binding_kind"] == "mainline":
+                out = supabase_client.persist_follow60_post_follow_v3(
+                    binding_kind="mainline", binding_id=binding["control_id"],
+                    worker_sha=binding["worker_sha"], **persist_kwargs,
+                )
+            else:
+                out = supabase_client.persist_follow_60s_post_follow_v2(**persist_kwargs)
         except Exception as exc:
             _mark_delivery_error(group, path, type(exc).__name__)
             return {"ok": False, "reason": str(exc)[:240], "flushed": flushed}
@@ -484,8 +502,7 @@ def flush_pending(
                     "flushed": flushed,
                 }
             try:
-                ledger_out = supabase_client.ack_follow_60s_completed_cycle_v1(
-                    control_id=control_id,
+                ledger_kwargs = dict(
                     account_id=first["account_id"],
                     run_id=first["original_run_id"],
                     request_id=first["original_request_id"],
@@ -499,6 +516,14 @@ def flush_pending(
                     like_terminal_status=like_terminal_status,
                     like_terminal_reason=like_terminal_reason,
                 )
+                if binding["binding_kind"] == "mainline":
+                    ledger_out = supabase_client.ack_follow60_completed_cycle_v2(
+                        binding_kind="mainline", binding_id=control_id, **ledger_kwargs,
+                    )
+                else:
+                    ledger_out = supabase_client.ack_follow_60s_completed_cycle_v1(
+                        control_id=control_id, **ledger_kwargs,
+                    )
             except Exception as exc:
                 _mark_delivery_error(group, path, type(exc).__name__)
                 return {"ok": False, "reason": str(exc)[:240], "flushed": flushed}
