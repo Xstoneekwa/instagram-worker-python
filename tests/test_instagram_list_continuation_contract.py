@@ -1083,6 +1083,24 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
 
+    def test_39b_failed_scroll_gets_one_fresh_see_more_probe_before_rotation(self) -> None:
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        failure_offset = source.index("if not _scroll_forward_ok:")
+        rotation_offset = source.index(
+            '_followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"',
+            failure_offset,
+        )
+        final_probe = source[failure_offset:rotation_offset]
+        self.assertIn("followers_refresh_detect_hierarchy_cache", final_probe)
+        self.assertIn(
+            "followers_suggestions_boundary_from_cached_hierarchy",
+            final_probe,
+        )
+        self.assertIn("followers_try_expand_primary_list", final_probe)
+        self.assertIn("max_attempts=1", final_probe)
+        self.assertIn("if _post_scroll_failure_see_more_expanded", final_probe)
+        self.assertIn("continue", final_probe)
+
     def test_44_real_grouped_count_without_selected_flag_uses_committed_surface(self) -> None:
         run_rows = [
             ("myriam_flh_", "Following"),

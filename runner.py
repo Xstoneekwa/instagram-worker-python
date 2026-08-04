@@ -16752,6 +16752,78 @@ def _run_followers_list_engine_session(
                     pass
                 if not _scroll_forward_ok:
                     if _visible_window_scroll_required:
+                        # A bounded physical swipe can make the canonical
+                        # See more footer render even when depth validation
+                        # rejects the swipe.  Re-probe once from a fresh XML
+                        # before rotating CT.  This is selector-driven and
+                        # cannot loop: one probe, one expansion attempt, then
+                        # the existing safe rotation path remains authoritative.
+                        _post_scroll_failure_see_more_expanded = False
+                        try:
+                            from instagram_navigation import (
+                                followers_refresh_detect_hierarchy_cache,
+                            )
+
+                            followers_refresh_detect_hierarchy_cache(
+                                d,
+                                screen_index=int(scroll_used),
+                            )
+                            _post_scroll_failure_continuation = (
+                                followers_suggestions_boundary_from_cached_hierarchy(
+                                    previously_valid_followers_rows=True,
+                                    processed_primary_row_ids=(
+                                        _visible_window_processed_rows
+                                    ),
+                                    continuation_probe_count=1,
+                                )
+                            )
+                            if str(
+                                _post_scroll_failure_continuation.get("state")
+                                or ""
+                            ) == "EXPAND_PRIMARY_LIST_AVAILABLE":
+                                _post_scroll_failure_expansion = (
+                                    followers_try_expand_primary_list(
+                                        d,
+                                        expected_source_profile=(
+                                            source_profile_username
+                                        ),
+                                        account_id=str(account_id or ""),
+                                        target_id=str(target_id or ""),
+                                        run_id=str(run_id or ""),
+                                        processed_primary_row_ids=(
+                                            _visible_window_processed_rows
+                                        ),
+                                        max_attempts=1,
+                                    )
+                                )
+                                _post_scroll_failure_see_more_expanded = bool(
+                                    _post_scroll_failure_expansion.get(
+                                        "expanded"
+                                    )
+                                )
+                                see_more_status = str(
+                                    _post_scroll_failure_expansion.get(
+                                        "see_more_status"
+                                    )
+                                    or (
+                                        "see_more_expanded"
+                                        if _post_scroll_failure_see_more_expanded
+                                        else "see_more_failed_terminal"
+                                    )
+                                )
+                        except Exception as _final_see_more_exc:
+                            log(
+                                "warning",
+                                "instagram_list_final_see_more_probe_failed",
+                                flow="follow",
+                                account_id=str(account_id or ""),
+                                target_id=str(target_id or ""),
+                                run_id=str(run_id or ""),
+                                reason="fresh_post_scroll_failure_probe_unavailable",
+                                error_type=type(_final_see_more_exc).__name__,
+                            )
+                        if _post_scroll_failure_see_more_expanded:
+                            continue
                         _followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"
                         scroll_failure_recovery_attempts = int(
                             _main_scroll_diag.get("forward_attempt_count") or 0
