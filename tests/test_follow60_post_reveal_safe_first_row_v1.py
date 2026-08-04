@@ -95,6 +95,7 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
                 expected_package=PKG,
                 ww=1080,
                 wh=2340,
+                absolute_top_left_origin_proven=True,
             )
 
     def test_promotes_fully_visible_first_row(self) -> None:
@@ -147,7 +148,7 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
             }
         ]
         out = self._run(classified=self._classified(physical_cells=cells))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
         self.assertEqual(
             out["post_reveal_safe_rejection_reason"],
             "post_reveal_fully_visible_first_row_missing",
@@ -159,13 +160,29 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
         self.assertIn("post_reveal_ui_generation", out)
         self.assertTrue(out["post_reveal_coordinate_frame"])
 
-    def test_suggested_region_rejects(self) -> None:
-        out = self._run(classified=self._classified(suggested_region_detected=True))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+    def test_suggested_region_is_safe_only_when_structurally_separate(self) -> None:
+        accepted = self._run(classified=self._classified(
+            suggested_region_detected=True,
+            suggested_region_separate=True,
+        ))
+        rejected = self._run(classified=self._classified(
+            suggested_region_detected=True,
+            suggested_region_separate=False,
+        ))
+        self.assertEqual(accepted["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(rejected["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
-    def test_highlights_region_rejects(self) -> None:
-        out = self._run(classified=self._classified(highlights_region_detected=True))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+    def test_highlights_region_is_safe_only_when_structurally_separate(self) -> None:
+        accepted = self._run(classified=self._classified(
+            highlights_region_detected=True,
+            highlights_region_separate=True,
+        ))
+        rejected = self._run(classified=self._classified(
+            highlights_region_detected=True,
+            highlights_region_separate=False,
+        ))
+        self.assertEqual(accepted["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(rejected["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_story_marker_rejects(self) -> None:
         out = self._run(xml=self._xml(extra='<node resource-id="story_viewer_root"/>'))
@@ -173,19 +190,19 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
 
     def test_identity_mismatch_rejects(self) -> None:
         out = self._run(classified=self._classified(identity_exact=False))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_posts_tab_missing_rejects(self) -> None:
         out = self._run(classified=self._classified(profile_tabs_present=False))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_grid_not_selected_rejects(self) -> None:
         out = self._run(classified=self._classified(grid_selected=False))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_reels_or_tagged_selected_rejects(self) -> None:
         out = self._run(classified=self._classified(reels_or_tagged_selected=True))
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_package_mismatch_rejects(self) -> None:
         out = self._run(package="other.package")
@@ -213,8 +230,24 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
             "post_reveal_fully_visible_first_row_missing",
         )
 
+    def test_explicit_second_row_cannot_masquerade_as_top_left(self) -> None:
+        cells = [{
+            "left": 0, "top": 800, "right": 360, "bottom": 1160,
+            "center_x": 180, "center_y": 980,
+            "absolute_row_index": 2, "absolute_column_index": 1,
+        }]
+        out = self._run(classified=self._classified(physical_cells=cells))
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertEqual(
+            out["post_reveal_safe_rejection_reason"],
+            "absolute_top_left_not_visible_after_reveal",
+        )
+
     def test_promoter_keeps_exactly_one_reveal_and_one_dump(self) -> None:
-        before = self._classified(outcome="POST_GRID_REVEAL_REQUIRED")
+        before = self._classified(
+            outcome="POST_GRID_REVEAL_REQUIRED",
+            absolute_top_left_origin_proven=True,
+        )
         self.device.dump_hierarchy.return_value = self._xml()
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(

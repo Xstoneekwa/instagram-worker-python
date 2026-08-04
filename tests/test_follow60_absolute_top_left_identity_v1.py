@@ -69,7 +69,7 @@ class AbsoluteTopLeftIdentityV1Tests(unittest.TestCase):
                 ww=1080, wh=2340,
                 expected_absolute_cell={"row": 1, "column": 1},
             )
-        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_BUT_CLIPPED")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
         self.assertEqual(
             out["post_reveal_safe_rejection_reason"],
             "absolute_grid_cell_identity_not_preserved",

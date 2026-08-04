@@ -94,6 +94,7 @@ class Follow60ClippedTransportStageBindingV3Tests(unittest.TestCase):
             candidate_username=candidate,
             ww=width,
             wh=height,
+            profile_origin_exact=True,
         )
 
     def test_replay_cycle_1_clipped_transport_reveal_and_fresh_safe(self) -> None:
@@ -117,6 +118,19 @@ class Follow60ClippedTransportStageBindingV3Tests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 nav, "_post_follow_post_grid_evidence_from_xml",
                 return_value=dict(fresh),
+            ))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=lambda _d, classified, **_kwargs: {
+                    **classified,
+                    "outcome": "POST_ROW_POSITIVE_SAFE",
+                    "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                    "post_reveal_xml_fingerprint": "a" * 64,
+                    "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                    "post_reveal_package": "com.instagram.android",
+                    "post_reveal_activity": "InstagramMainActivity",
+                },
             ))
             invalidate = stack.enter_context(mock.patch.object(canary, "invalidate"))
             stack.enter_context(mock.patch.object(nav.time, "sleep"))

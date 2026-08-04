@@ -17918,6 +17918,21 @@ def _stash_post_mute_sheet_closed_proof(
                             _grid.get("suggested_for_you_visible")
                             or _grid.get("suggested_region_detected")
                         ),
+                        suggested_region_separate=bool(
+                            _grid.get("suggested_region_separate")
+                        ),
+                        highlights_region_detected=bool(
+                            _grid.get("highlights_region_detected")
+                        ),
+                        highlights_region_separate=bool(
+                            _grid.get("highlights_region_separate")
+                        ),
+                        profile_origin_exact=bool(
+                            _grid.get("profile_origin_exact")
+                        ),
+                        absolute_top_left_origin_proven=bool(
+                            _grid.get("absolute_top_left_origin_proven")
+                        ),
                         classification_reveal_ttl_ms=3000.0,
                         tabs_boundary_source=str(
                             _grid.get("tabs_boundary_source") or ""
@@ -18024,6 +18039,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 ww=int(profile_ww),
                 wh=int(profile_wh),
                 profile_identity_exact=True,
+                profile_origin_exact=True,
             )
             postgrid_initial_classification = str(
                 profile_grid.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL"
@@ -18062,6 +18078,7 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                     ww=int(profile_ww),
                     wh=int(profile_wh),
                     profile_identity_exact=True,
+                    profile_origin_exact=True,
                 )
                 profile_grid.update(
                     _post_follow_screen_dimensions_from_hierarchy(
@@ -23111,6 +23128,7 @@ def _post_follow_post_grid_evidence_from_xml(
     ww: int,
     wh: int,
     profile_identity_exact: bool = False,
+    profile_origin_exact: bool = False,
 ) -> dict[str, Any]:
     """Derive the Like branch from one immutable profile hierarchy."""
     xml = str(hierarchy_xml or "")
@@ -23123,6 +23141,8 @@ def _post_follow_post_grid_evidence_from_xml(
             xml.encode("utf-8", errors="replace")
         ).hexdigest()[:20] if xml else "",
         **base,
+        "profile_origin_exact": bool(profile_origin_exact),
+        "absolute_top_left_origin_proven": False,
     }
     identity_exact = bool(profile_identity_exact)
     grid_selected = bool(base.get("grid_selected"))
@@ -23372,6 +23392,10 @@ def _post_follow_post_grid_evidence_from_xml(
         suggested_marker_order < 0
         or (grid_tab_order >= 0 and grid_tab_order > suggested_marker_order)
     )
+    out["highlights_region_separate"] = bool(
+        highlights_marker_order < 0
+        or (grid_tab_order >= 0 and grid_tab_order > highlights_marker_order)
+    )
     out["fully_exploitable_bottom"] = int(fully_exploitable_bottom)
     out["reels_tab_state"] = (
         "selected" if bool(base.get("reels_selected")) else "not_selected"
@@ -23421,9 +23445,13 @@ def _post_follow_post_grid_evidence_from_xml(
     )
     reveal_only_without_tabs = bool(
         identity_exact
+        and profile_origin_exact
         and post_count_positive
-        and not raw_cells
-        and not raw_clipped_cells
+        # Raw ImageViews above an unexported Posts tab are commonly Suggested
+        # avatars or Highlights.  They are deliberately ignored here: this
+        # branch grants one bounded reveal only and never grants tap bounds.
+        # A fresh post-reveal hierarchy must still prove the real grid.
+        and not bool(base.get("profile_tabs_present"))
         and not bool(base.get("empty_marker_xml"))
         and not posts_count_zero_exact
         and not bool(base.get("reels_or_tagged_selected"))
@@ -23432,6 +23460,7 @@ def _post_follow_post_grid_evidence_from_xml(
         and not reveal_only_unsafe_marker
     )
     if reveal_only_without_tabs:
+        out["absolute_top_left_origin_proven"] = bool(profile_origin_exact)
         out.update(
             {
                 "outcome": "POST_GRID_REVEAL_REQUIRED",
@@ -23560,6 +23589,9 @@ def _post_follow_post_grid_evidence_from_xml(
             and not bool(base.get("loading_visible"))
             and not bool(base.get("private_profile_visible"))
         ):
+            out["absolute_top_left_origin_proven"] = bool(
+                profile_origin_exact
+            )
             out["outcome"] = "POST_GRID_REVEAL_REQUIRED"
             out["evidence_status"] = "POST_GRID_REVEAL_REQUIRED"
             out["rejection_reason"] = "post_grid_below_fold_reveal_required"
@@ -23616,6 +23648,13 @@ def _post_follow_post_grid_evidence_from_xml(
         "column": candidate.get("absolute_column_index"),
         "identity": candidate.get("pre_reveal_cell_identity"),
     }
+    out["absolute_top_left_origin_proven"] = bool(
+        profile_origin_exact
+        and (
+            candidate.get("absolute_row_index") in {None, 1}
+            and candidate.get("absolute_column_index") in {None, 1}
+        )
+    )
     out["lower_row_clipped"] = bool(out.get("other_row_clipped"))
     direct_top_left_fully_visible = bool(
         _post_follow_likes_is_top_left_grid_cell(candidate, ww=int(ww))
@@ -23886,6 +23925,9 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 ww=int(ww),
                 wh=int(wh),
                 expected_absolute_cell=expected_absolute_cell,
+                absolute_top_left_origin_proven=bool(
+                    out.get("absolute_top_left_origin_proven")
+                ),
             )
         reacquired["reveal_scroll_attempted"] = True
         reacquired["reveal_scroll_ok"] = True
@@ -23939,15 +23981,41 @@ def _post_follow_post_reveal_safe_first_row_contract(
     ww: int,
     wh: int,
     expected_absolute_cell: dict[str, Any] | None = None,
+    absolute_top_left_origin_proven: bool = False,
 ) -> dict[str, Any]:
     """Promote only a fully visible first row from the one fresh reveal XML."""
     out = dict(classified or {})
     out.setdefault("post_reveal_safe_reason", "")
+
+    def _reject(reason: str) -> dict[str, Any]:
+        out.update(
+            {
+                "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
+                "post_bounds": None,
+                "tap_safe": False,
+                "rejection_reason": str(reason or "post_reveal_contract_rejected"),
+                "post_reveal_safe_rejection_reason": str(
+                    reason or "post_reveal_contract_rejected"
+                ),
+                "row_identity_preserved": False,
+            }
+        )
+        return out
+
     if str(out.get("outcome") or "") not in {
         "POST_ROW_POSITIVE_SAFE",
         "POST_ROW_POSITIVE_BUT_CLIPPED",
     }:
         return out
+    suggested_isolated = bool(
+        not out.get("suggested_region_detected")
+        or out.get("suggested_region_separate")
+    )
+    highlights_isolated = bool(
+        not out.get("highlights_region_detected")
+        or out.get("highlights_region_separate")
+    )
     required = (
         bool(out.get("identity_exact")),
         bool(out.get("profile_tabs_present")),
@@ -23956,14 +24024,11 @@ def _post_follow_post_reveal_safe_first_row_contract(
         not bool(out.get("reels_or_tagged_selected")),
         not bool(out.get("loading_visible")),
         not bool(out.get("private_profile_visible")),
-        not bool(out.get("suggested_region_detected")),
-        not bool(out.get("highlights_region_detected")),
+        suggested_isolated,
+        highlights_isolated,
     )
     if not all(required):
-        out["post_reveal_safe_rejection_reason"] = (
-            "post_reveal_positive_surface_contract_missing"
-        )
-        return out
+        return _reject("post_reveal_positive_surface_contract_missing")
     xml = str(hierarchy_xml or "")
     lower_xml = xml.lower()
     if any(
@@ -23973,22 +24038,18 @@ def _post_follow_post_reveal_safe_first_row_contract(
             "story viewer", "highlight viewer",
         )
     ):
-        out["post_reveal_safe_rejection_reason"] = "story_highlight_marker_present"
-        return out
+        return _reject("story_highlight_marker_present")
     meta = _followers_current_pkg_activity(d)
     package = str(meta.get("current_package") or "")
     activity = str(meta.get("current_activity") or "")
     if package != str(expected_package or ""):
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_package_mismatch"
-        return out
+        return _reject("post_reveal_package_mismatch")
     if "instagram" not in activity.lower() or "mainactivity" not in activity.lower():
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_activity_mismatch"
-        return out
+        return _reject("post_reveal_activity_mismatch")
     if _normalize_handle(str(out.get("candidate_username") or candidate_username)) != _normalize_handle(
         candidate_username
     ):
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_candidate_mismatch"
-        return out
+        return _reject("post_reveal_candidate_mismatch")
     dimensions = _post_follow_screen_dimensions_from_hierarchy(
         xml,
         raw_width=int(ww),
@@ -23996,22 +24057,19 @@ def _post_follow_post_reveal_safe_first_row_contract(
     )
     frame = dict(dimensions.get("coordinate_frame") or {})
     if not bool(dimensions.get("screen_dimensions_trusted")) or not frame:
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_frame_untrusted"
-        return out
+        return _reject("post_reveal_frame_untrusted")
     try:
         from follow_60s_canary import runtime_context as _post_reveal_runtime_context
         generation = int(_post_reveal_runtime_context().get("ui_generation") or 0)
     except Exception:
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_generation_missing"
-        return out
+        return _reject("post_reveal_generation_missing")
     cells = [
         dict(cell)
         for cell in (out.get("physical_cells") or [])
         if isinstance(cell, dict)
     ]
     if not cells:
-        out["post_reveal_safe_rejection_reason"] = "post_reveal_physical_cell_missing"
-        return out
+        return _reject("post_reveal_physical_cell_missing")
     tabs_bottom = int(out.get("tabs_bottom") or 0)
     exploitable_bottom = int(
         out.get("fully_exploitable_bottom") or dimensions.get("screen_height") or wh
@@ -24052,10 +24110,7 @@ def _post_follow_post_reveal_safe_first_row_contract(
         if post_reveal_geometry_safe:
             safe_cells.append({**cell, "_left": left, "_top": top})
     if not safe_cells:
-        out["post_reveal_safe_rejection_reason"] = (
-            "post_reveal_fully_visible_first_row_missing"
-        )
-        return out
+        return _reject("post_reveal_fully_visible_first_row_missing")
     expected = dict(expected_absolute_cell or {})
     expected_row = expected.get("row")
     expected_column = expected.get("column")
@@ -24067,12 +24122,27 @@ def _post_follow_post_reveal_safe_first_row_contract(
             and cell.get("absolute_column_index") == expected_column
         ]
         if not identity_matches:
-            out["post_reveal_safe_rejection_reason"] = (
-                "absolute_grid_cell_identity_not_preserved"
-            )
-            out["row_identity_preserved"] = False
-            return out
+            return _reject("absolute_grid_cell_identity_not_preserved")
         safe_cells = identity_matches
+    elif absolute_top_left_origin_proven:
+        explicit_identity_cells = [
+            cell
+            for cell in safe_cells
+            if cell.get("absolute_row_index") is not None
+            or cell.get("absolute_column_index") is not None
+        ]
+        if explicit_identity_cells:
+            absolute_top_left_cells = [
+                cell
+                for cell in explicit_identity_cells
+                if cell.get("absolute_row_index") == 1
+                and cell.get("absolute_column_index") == 1
+            ]
+            if not absolute_top_left_cells:
+                return _reject("absolute_top_left_not_visible_after_reveal")
+            safe_cells = absolute_top_left_cells
+    else:
+        return _reject("absolute_top_left_origin_unproven")
     first_top = min(int(cell["_top"]) for cell in safe_cells)
     row_slack = max(8, int(ww * 0.02))
     first_row = [
@@ -24088,6 +24158,9 @@ def _post_follow_post_reveal_safe_first_row_contract(
         for key in ("left", "top", "right", "bottom", "center_x", "center_y")
         if key in chosen
     }
+    if absolute_top_left_origin_proven and chosen_row is None and chosen_column is None:
+        chosen_row = 1
+        chosen_column = 1
     fingerprint = hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()
     out.update(
         {
@@ -24116,6 +24189,10 @@ def _post_follow_post_reveal_safe_first_row_contract(
                 "identity": chosen_identity,
             },
             "row_identity_preserved": True,
+            "absolute_top_left_origin_proven": bool(
+                absolute_top_left_origin_proven
+                or (chosen_row == 1 and chosen_column == 1)
+            ),
         }
     )
     return out
@@ -52336,6 +52413,21 @@ def run_post_follow_post_likes_phase(
                     ),
                     "suggested_region_detected": bool(
                         _grid_ev.suggested_region_detected
+                    ),
+                    "suggested_region_separate": bool(
+                        _grid_ev.suggested_region_separate
+                    ),
+                    "highlights_region_detected": bool(
+                        _grid_ev.highlights_region_detected
+                    ),
+                    "highlights_region_separate": bool(
+                        _grid_ev.highlights_region_separate
+                    ),
+                    "profile_origin_exact": bool(
+                        _grid_ev.profile_origin_exact
+                    ),
+                    "absolute_top_left_origin_proven": bool(
+                        _grid_ev.absolute_top_left_origin_proven
                     ),
                     "candidate_username": cand,
                 }

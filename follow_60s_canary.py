@@ -444,6 +444,11 @@ class GridClassificationProof:
     grid_selected: bool = False
     tabs_bottom: int = 0
     suggested_region_detected: bool = False
+    suggested_region_separate: bool = False
+    highlights_region_detected: bool = False
+    highlights_region_separate: bool = False
+    profile_origin_exact: bool = False
+    absolute_top_left_origin_proven: bool = False
     classification_reveal_ttl_ms: float = 3000.0
     canonical_generation: int = 0
     source_navigation_generation: str = ""
@@ -1125,6 +1130,11 @@ def stash_post_grid_evidence(
     identity_exact: bool = False, profile_tabs_present: bool = False,
     grid_selected: bool = False, tabs_bottom: int = 0,
     suggested_region_detected: bool = False,
+    suggested_region_separate: bool = False,
+    highlights_region_detected: bool = False,
+    highlights_region_separate: bool = False,
+    profile_origin_exact: bool = False,
+    absolute_top_left_origin_proven: bool = False,
     classification_reveal_ttl_ms: float = 3000.0,
     tabs_boundary_source: str = "",
     source_xml_fingerprint: str = "",
@@ -1234,6 +1244,13 @@ def stash_post_grid_evidence(
         grid_selected=bool(grid_selected),
         tabs_bottom=max(0, int(tabs_bottom or 0)),
         suggested_region_detected=bool(suggested_region_detected),
+        suggested_region_separate=bool(suggested_region_separate),
+        highlights_region_detected=bool(highlights_region_detected),
+        highlights_region_separate=bool(highlights_region_separate),
+        profile_origin_exact=bool(profile_origin_exact),
+        absolute_top_left_origin_proven=bool(
+            absolute_top_left_origin_proven
+        ),
         classification_reveal_ttl_ms=max(
             1.0, float(classification_reveal_ttl_ms or 3000.0)
         ),

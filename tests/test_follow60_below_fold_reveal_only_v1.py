@@ -20,7 +20,8 @@ class BelowFoldRevealOnlyV1Tests(unittest.TestCase):
 
     def test_positive_profile_below_fold_authorizes_reveal_only(self) -> None:
         out = nav._post_follow_post_grid_evidence_from_xml(
-            self._xml(), candidate_username="candidate", ww=1080, wh=2340
+            self._xml(), candidate_username="candidate", ww=1080, wh=2340,
+            profile_origin_exact=True,
         )
         self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
         self.assertTrue(out["reveal_permission_only"])
@@ -46,13 +47,36 @@ class BelowFoldRevealOnlyV1Tests(unittest.TestCase):
         <node resource-id="bottom_navigation" bounds="[0,2200][1080,2340]"/>
         </hierarchy>"""
         out = nav._post_follow_post_grid_evidence_from_xml(
-            xml, candidate_username="candidate", ww=1080, wh=2340
+            xml, candidate_username="candidate", ww=1080, wh=2340,
+            profile_origin_exact=True,
         )
         self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
         self.assertTrue(out["reveal_permission_only"])
         self.assertFalse(out["tap_safe"])
         self.assertIsNone(out["post_bounds"])
         self.assertEqual(out["visible_post_count"], 0)
+
+    def test_suggested_and_highlight_imageviews_never_block_reveal_only(self) -> None:
+        xml = """<hierarchy>
+        <node text="candidate"/><node text="112 posts"/>
+        <node text="Suggested for you" bounds="[0,900][1080,980]"/>
+        <node class="android.widget.ImageView" content-desc="Suggested profile photo" bounds="[40,1000][360,1320]"/>
+        <node class="android.widget.ImageView" content-desc="Suggested profile photo" bounds="[380,1000][700,1320]"/>
+        <node text="Highlights tray" bounds="[0,1500][1080,1600]"/>
+        <node class="android.widget.ImageView" content-desc="Story highlight" bounds="[20,1620][340,1940]"/>
+        <node resource-id="bottom_navigation" bounds="[0,2200][1080,2340]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml,
+            candidate_username="candidate",
+            ww=1080,
+            wh=2340,
+            profile_origin_exact=True,
+        )
+        self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
+        self.assertTrue(out["reveal_permission_only"])
+        self.assertTrue(out["absolute_top_left_origin_proven"])
+        self.assertIsNone(out["post_bounds"])
 
     def test_zero_posts_never_authorizes_reveal(self) -> None:
         out = nav._post_follow_post_grid_evidence_from_xml(
@@ -75,7 +99,8 @@ class BelowFoldRevealOnlyV1Tests(unittest.TestCase):
 
     def test_reveal_only_runs_one_reveal_and_one_fresh_dump(self) -> None:
         before = nav._post_follow_post_grid_evidence_from_xml(
-            self._xml(), candidate_username="candidate", ww=1080, wh=2340
+            self._xml(), candidate_username="candidate", ww=1080, wh=2340,
+            profile_origin_exact=True,
         )
         device = mock.MagicMock()
         device.dump_hierarchy.return_value = "<fresh/>"
@@ -91,6 +116,19 @@ class BelowFoldRevealOnlyV1Tests(unittest.TestCase):
                 return_value={
                     "outcome": "POST_ROW_POSITIVE_SAFE",
                     "post_bounds": {"left": 0, "top": 900, "right": 360, "bottom": 1260},
+                },
+            ))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=lambda _d, classified, **_kwargs: {
+                    **classified,
+                    "outcome": "POST_ROW_POSITIVE_SAFE",
+                    "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                    "post_reveal_xml_fingerprint": "a" * 64,
+                    "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                    "post_reveal_package": "com.instagram.android",
+                    "post_reveal_activity": "InstagramMainActivity",
                 },
             ))
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(

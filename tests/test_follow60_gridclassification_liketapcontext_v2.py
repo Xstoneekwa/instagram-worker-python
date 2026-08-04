@@ -194,6 +194,7 @@ class GridClassificationAndTapProofV2Tests(unittest.TestCase):
             "reels_or_tagged_selected": False,
             "tabs_bottom": 0,
             "tabs_boundary_source": "xml_order_after_posts_tab",
+            "absolute_top_left_origin_proven": True,
             "candidate_username": "candidate",
             "post_bounds": {"left": 0, "top": 2180, "right": 360, "bottom": 2330},
         }
@@ -213,6 +214,19 @@ class GridClassificationAndTapProofV2Tests(unittest.TestCase):
                 return_value=dict(fresh_safe),
             ))
             invalidate = stack.enter_context(mock.patch.object(canary, "invalidate"))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=lambda _d, classified, **_kwargs: {
+                    **classified,
+                    "outcome": "POST_ROW_POSITIVE_SAFE",
+                    "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                    "post_reveal_xml_fingerprint": "a" * 64,
+                    "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                    "post_reveal_package": "com.instagram.android",
+                    "post_reveal_activity": "InstagramMainActivity",
+                },
+            ))
             stack.enter_context(mock.patch.object(nav.time, "sleep"))
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 device,
