@@ -23443,6 +23443,21 @@ def _post_follow_post_grid_evidence_from_xml(
             "progressbar", "progress_bar",
         )
     )
+    # Some Samsung/Instagram hierarchies export only a partial profile-tabs
+    # surface: Tagged/Reels markers make ``profile_tabs_present`` true, while
+    # the selected Grid icon and its bounds are omitted.  Treat that state like
+    # the already-certified no-tabs case for *reveal permission only*.  Exact
+    # identity, an authoritative positive Posts count and the absence of a
+    # selected non-grid tab remain mandatory.  This branch never manufactures
+    # tap bounds; the one bounded reveal must still be followed by a fresh XML
+    # proof before any post tap can be authorized.
+    partial_tabs_without_grid_boundary = bool(
+        base.get("profile_tabs_present")
+        and not grid_tab_marker
+        and tabs_bottom <= 0
+        and not bool(base.get("grid_selected"))
+        and not bool(base.get("reels_or_tagged_selected"))
+    )
     reveal_only_without_tabs = bool(
         identity_exact
         and profile_origin_exact
@@ -23451,7 +23466,10 @@ def _post_follow_post_grid_evidence_from_xml(
         # avatars or Highlights.  They are deliberately ignored here: this
         # branch grants one bounded reveal only and never grants tap bounds.
         # A fresh post-reveal hierarchy must still prove the real grid.
-        and not bool(base.get("profile_tabs_present"))
+        and (
+            not bool(base.get("profile_tabs_present"))
+            or partial_tabs_without_grid_boundary
+        )
         and not bool(base.get("empty_marker_xml"))
         and not posts_count_zero_exact
         and not bool(base.get("reels_or_tagged_selected"))
@@ -23480,7 +23498,12 @@ def _post_follow_post_grid_evidence_from_xml(
                 "grid_exposure": "positive_profile_grid_below_fold",
                 "reveal_permission_only": True,
                 "overlay_regions_isolated": True,
-                "profile_tabs_missing_at_reveal_authorization": True,
+                "profile_tabs_missing_at_reveal_authorization": bool(
+                    not base.get("profile_tabs_present")
+                ),
+                "profile_tabs_partial_at_reveal_authorization": bool(
+                    partial_tabs_without_grid_boundary
+                ),
                 "visible_post_count": 0,
                 "physical_cells": [],
                 "post_bounds": None,
