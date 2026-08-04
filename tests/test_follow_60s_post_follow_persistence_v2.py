@@ -788,12 +788,25 @@ class Follow60BindingAndPostGridV2Test(unittest.TestCase):
             "private_profile_visible": False,
             "reels_or_tagged_selected": False,
             "suggested_overlay_visible": False,
+            "absolute_top_left_origin_proven": True,
         }
         with mock.patch.object(
             nav, "_post_follow_likes_profile_scroll_swipe", return_value={"swipe_ok": True}
         ) as reveal, mock.patch.object(
             nav, "_post_follow_likes_probe_top_left_vision_cell_meta"
-        ) as vision:
+        ) as vision, mock.patch.object(
+            nav,
+            "_post_follow_post_reveal_safe_first_row_contract",
+            side_effect=lambda _d, classified, **_kwargs: {
+                **classified,
+                "outcome": canary.POST_ROW_POSITIVE_SAFE,
+                "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                "post_reveal_xml_fingerprint": "a" * 64,
+                "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                "post_reveal_package": "com.instagram.android",
+                "post_reveal_activity": "InstagramMainActivity",
+            },
+        ):
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 device, clipped, ww=1080, wh=2340, candidate_username="candidate"
             )

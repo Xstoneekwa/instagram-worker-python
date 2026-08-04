@@ -140,6 +140,7 @@ class NoPostsAndBelowFoldV4Tests(unittest.TestCase):
         evidence = nav._post_follow_post_grid_evidence_from_xml(
             _profile_shell("candidate", 24, '<node text="Suggested for you"/>'),
             candidate_username="candidate", ww=1080, wh=2340,
+            profile_origin_exact=True,
         )
         device = mock.MagicMock()
         device.dump_hierarchy.return_value = "<fresh-safe/>"
@@ -153,6 +154,19 @@ class NoPostsAndBelowFoldV4Tests(unittest.TestCase):
                 return_value={
                     "outcome": "POST_ROW_POSITIVE_SAFE",
                     "post_bounds": {"left": 0, "top": 900, "right": 360, "bottom": 1260},
+                },
+            ))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=lambda _d, classified, **_kwargs: {
+                    **classified,
+                    "outcome": "POST_ROW_POSITIVE_SAFE",
+                    "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                    "post_reveal_xml_fingerprint": "a" * 64,
+                    "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                    "post_reveal_package": "com.instagram.android",
+                    "post_reveal_activity": "InstagramMainActivity",
                 },
             ))
             stack.enter_context(mock.patch.object(canary, "invalidate"))

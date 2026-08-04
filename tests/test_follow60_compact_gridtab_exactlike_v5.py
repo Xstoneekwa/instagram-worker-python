@@ -40,7 +40,7 @@ class CompactCountAndGridTabV5Tests(unittest.TestCase):
         self.assertEqual(out["outcome"], "POST_GRID_REVEAL_REQUIRED")
         self.assertEqual(
             out["post_grid_reveal_required_reason"],
-            "positive_posts_suggested_or_highlights_grid_below_fold",
+            "positive_posts_selected_grid_regions_isolated_no_visible_cell",
         )
 
     def test_audrey_compact_count_and_exact_nested_grid_require_reveal(self) -> None:
@@ -90,6 +90,7 @@ class CompactCountAndGridTabV5Tests(unittest.TestCase):
             candidate_username="photosens_by_sand",
             ww=1080,
             wh=2340,
+            profile_origin_exact=True,
         )
         device = mock.MagicMock()
         device.dump_hierarchy.return_value = _fixture("secours_after_reveal.xml")
@@ -101,6 +102,19 @@ class CompactCountAndGridTabV5Tests(unittest.TestCase):
             ))
             invalidate = stack.enter_context(mock.patch.object(canary, "invalidate"))
             stack.enter_context(mock.patch.object(nav.time, "sleep"))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=lambda _d, classified, **_kwargs: {
+                    **classified,
+                    "outcome": "POST_ROW_POSITIVE_SAFE",
+                    "post_reveal_safe_contract": "PostRevealSafeFirstRowV1",
+                    "post_reveal_xml_fingerprint": "a" * 64,
+                    "post_reveal_coordinate_frame": {"version": "CoordinateFrameV1"},
+                    "post_reveal_package": "com.instagram.android",
+                    "post_reveal_activity": "InstagramMainActivity",
+                },
+            ))
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 device,
                 before,
