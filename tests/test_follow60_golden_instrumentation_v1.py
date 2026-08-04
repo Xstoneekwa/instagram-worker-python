@@ -15,6 +15,7 @@ def _shadow_inputs() -> dict[str, object]:
             "account_id": "account",
             "run_id": "run",
             "request_id": "request",
+            "action_id": "action",
             "worker_sha": "worker",
             "source_target_id": "target",
         },
@@ -126,6 +127,14 @@ class Follow60VisualRoiShadowV1Tests(unittest.TestCase):
                 },
                 "shadow_suggested_overlap",
             ),
+            (
+                {
+                    "ui_hints__highlights_visible": True,
+                    "evidence__highlights_region_detected": True,
+                    "evidence__highlights_region_separate": False,
+                },
+                "shadow_highlights_overlap",
+            ),
             ({"screenshot_captured_at_monotonic": 90.0}, "shadow_screenshot_stale"),
             (
                 {
@@ -175,6 +184,174 @@ class Follow60VisualRoiShadowV1Tests(unittest.TestCase):
         self.assertNotIn("d.click", evaluator_source)
         self.assertNotIn("PostOpenIntent", evaluator_source)
         self.assertNotIn("screenshot(", evaluator_source)
+
+
+class Follow60GoldenShadowEvidenceTransportV1Tests(unittest.TestCase):
+    def _transport(self, **overrides: object) -> tuple[dict, dict]:
+        base = _shadow_inputs()
+        source = dict(base["evidence"])
+        binding = dict(base["binding"])
+        hints = dict(base["ui_hints"])
+        selected = dict(base["selected_cell"])
+        ordered = list(base["ordered_candidates"])
+        candidate = "cand"
+        if "source_evidence" in overrides:
+            source = dict(overrides.pop("source_evidence") or {})
+        if "binding" in overrides:
+            binding = dict(overrides.pop("binding") or {})
+        if "ui_hints" in overrides:
+            hints = dict(overrides.pop("ui_hints") or {})
+        if "selected_cell" in overrides:
+            selected = dict(overrides.pop("selected_cell") or {})
+        if "ordered_candidates" in overrides:
+            ordered = list(overrides.pop("ordered_candidates") or [])
+        if "candidate_username" in overrides:
+            candidate = str(overrides.pop("candidate_username") or "")
+        transport = nav._transport_golden_evidence_to_visual_roi_shadow_v1(
+            binding=binding,
+            source_evidence=source,
+            candidate_username=candidate,
+            target_username="ct",
+            expected_package=str(config.INSTAGRAM_PACKAGE),
+            live_package=str(config.INSTAGRAM_PACKAGE),
+            live_activity="com.instagram.mainactivity.InstagramMainActivity",
+            golden_frame={
+                "raw_window_size": (1080, 2340),
+                "canonical_content_size": (1080, 2340),
+            },
+            golden_screenshot_hash="golden-hash",
+            golden_screenshot_captured_at_monotonic=99.5,
+            runtime={
+                "navigation_counter": 7,
+                "scroll_counter": 8,
+                "ui_generation": 9,
+            },
+            ui_hints=hints,
+            selected_cell=selected,
+            ordered_candidates=ordered,
+            profile_identity_exact=True,
+        )
+        evaluator = dict(base)
+        evaluator.update(
+            {
+                "binding": binding,
+                "evidence": transport,
+                "candidate_username": candidate,
+                "ui_hints": hints,
+                "selected_cell": selected,
+                "ordered_candidates": ordered,
+            }
+        )
+        evaluator.update(overrides)
+        return transport, nav.evaluate_visual_roi_fast_path_shadow(**evaluator)
+
+    def test_complete_golden_transport_evaluates_top_left(self) -> None:
+        transport, out = self._transport()
+        self.assertEqual(
+            transport["shadow_transport_version"],
+            "VisualRoiShadowEvidenceTransportV1",
+        )
+        self.assertTrue(out["shadow_fast_path_candidate"])
+        self.assertEqual(out["shadow_fast_path_absolute_row"], 0)
+        self.assertEqual(out["shadow_fast_path_absolute_column"], 0)
+
+    def test_explicit_candidate_mismatch_is_preserved_and_rejected(self) -> None:
+        source = dict(_shadow_inputs()["evidence"])
+        source["candidate_username"] = "other"
+        transport, out = self._transport(source_evidence=source)
+        self.assertEqual(transport["candidate_username"], "other")
+        self.assertEqual(
+            out["shadow_fast_path_rejection_reason"], "shadow_candidate_mismatch"
+        )
+
+    def test_suggested_overlap_is_rejected(self) -> None:
+        source = dict(_shadow_inputs()["evidence"])
+        source["suggested_region_separate"] = False
+        _, out = self._transport(
+            source_evidence=source,
+            ui_hints={
+                "suggested_for_you": True,
+                "profile_tabs_visible": True,
+            },
+        )
+        self.assertEqual(
+            out["shadow_fast_path_rejection_reason"], "shadow_suggested_overlap"
+        )
+
+    def test_highlight_overlap_is_rejected(self) -> None:
+        source = dict(_shadow_inputs()["evidence"])
+        source["highlights_region_detected"] = True
+        source["highlights_region_separate"] = False
+        _, out = self._transport(
+            source_evidence=source,
+            ui_hints={
+                "highlights_visible": True,
+                "profile_tabs_visible": True,
+            },
+        )
+        self.assertEqual(
+            out["shadow_fast_path_rejection_reason"], "shadow_highlights_overlap"
+        )
+
+    def test_reels_and_tagged_surfaces_are_rejected(self) -> None:
+        for key, reason in (
+            ("reels_tab_state", "shadow_reels_selected"),
+            ("tagged_tab_state", "shadow_tagged_selected"),
+        ):
+            with self.subTest(key=key):
+                source = dict(_shadow_inputs()["evidence"])
+                source[key] = "selected"
+                _, out = self._transport(source_evidence=source)
+                self.assertEqual(out["shadow_fast_path_rejection_reason"], reason)
+
+    def test_row_two_only_is_rejected(self) -> None:
+        _, out = self._transport(
+            selected_cell={
+                "row": 1,
+                "col": 0,
+                "bounds": {"left": 0, "top": 1260, "right": 360, "bottom": 1620},
+            },
+            ordered_candidates=[{"row": 1, "col": 0, "eligible": True}],
+        )
+        self.assertEqual(
+            out["shadow_fast_path_rejection_reason"], "shadow_row_2_only"
+        )
+
+    def test_unique_top_left_can_be_true_without_intent_or_tap(self) -> None:
+        _, out = self._transport()
+        self.assertTrue(out["shadow_fast_path_candidate"])
+        forbidden = {"tap_x", "tap_y", "tap_authorized", "intent", "permission"}
+        self.assertTrue(forbidden.isdisjoint(out))
+
+    def test_transport_and_evaluator_are_pure_and_non_authoritative(self) -> None:
+        transport_source = inspect.getsource(
+            nav._transport_golden_evidence_to_visual_roi_shadow_v1
+        )
+        evaluator_source = inspect.getsource(nav.evaluate_visual_roi_fast_path_shadow)
+        for forbidden in (
+            "d.click", "screenshot(", "dump_hierarchy", "PostOpenIntent", "time.sleep"
+        ):
+            self.assertNotIn(forbidden, transport_source)
+            self.assertNotIn(forbidden, evaluator_source)
+
+    def test_shadow_false_does_not_mutate_source_or_golden_inputs(self) -> None:
+        source = dict(_shadow_inputs()["evidence"])
+        original = dict(source)
+        _, out = self._transport(
+            source_evidence=source,
+            selected_cell={
+                "row": 0,
+                "col": 1,
+                "bounds": {"left": 360, "top": 900, "right": 720, "bottom": 1260},
+            },
+            ordered_candidates=[{"row": 0, "col": 1, "eligible": True}],
+        )
+        self.assertFalse(out["shadow_fast_path_candidate"])
+        self.assertEqual(source, original)
+
+    def test_transport_declares_zero_extra_acquisitions(self) -> None:
+        transport, _ = self._transport()
+        self.assertEqual(transport["shadow_transport_extra_acquisitions"], 0)
 
 
 class Follow60GoldenInstrumentationV1Tests(unittest.TestCase):

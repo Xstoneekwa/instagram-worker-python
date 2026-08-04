@@ -27146,6 +27146,188 @@ def _golden_positive_proof_audit(
     }
 
 
+def _transport_golden_evidence_to_visual_roi_shadow_v1(
+    *,
+    binding: dict[str, Any] | None,
+    source_evidence: dict[str, Any] | None,
+    candidate_username: str,
+    target_username: str,
+    expected_package: str,
+    live_package: str,
+    live_activity: str,
+    golden_frame: dict[str, Any] | None,
+    golden_screenshot_hash: str,
+    golden_screenshot_captured_at_monotonic: float,
+    runtime: dict[str, Any] | None,
+    ui_hints: dict[str, Any] | None,
+    selected_cell: dict[str, Any] | None,
+    ordered_candidates: list[dict[str, Any]] | None,
+    profile_identity_exact: bool,
+) -> dict[str, Any]:
+    """Copy already-acquired Golden artifacts into a read-only shadow proof.
+
+    This is deliberately a pure transport boundary: it performs no UI read,
+    screenshot, XML acquisition, poll, intent creation, or device action.
+    Explicit conflicting source identity is retained so the evaluator rejects
+    it rather than silently repairing it.
+    """
+    bind = dict(binding or {})
+    source = dict(source_evidence or {})
+    hints = dict(ui_hints or {})
+    runtime_ctx = dict(runtime or {})
+    selected = dict(selected_cell or {})
+    candidates = [
+        dict(item)
+        for item in list(ordered_candidates or [])
+        if isinstance(item, dict)
+    ]
+    frame_source = dict(golden_frame or {})
+    raw_size = frame_source.get("raw_window_size") or (0, 0)
+    canonical_size = frame_source.get("canonical_content_size") or (0, 0)
+    try:
+        raw_width = int(
+            frame_source.get("raw_width")
+            or (raw_size[0] if len(raw_size) > 0 else 0)
+            or (canonical_size[0] if len(canonical_size) > 0 else 0)
+        )
+        raw_height = int(
+            frame_source.get("raw_height")
+            or (raw_size[1] if len(raw_size) > 1 else 0)
+            or (canonical_size[1] if len(canonical_size) > 1 else 0)
+        )
+    except (TypeError, ValueError, IndexError):
+        raw_width, raw_height = 0, 0
+    eligible = [item for item in candidates if bool(item.get("eligible"))]
+    row = int(selected.get("row") if selected.get("row") is not None else -1)
+    column = int(
+        selected.get("col") if selected.get("col") is not None else -1
+    )
+    explicit_candidate = _normalize_handle(
+        str(source.get("candidate_username") or "")
+    )
+    expected_candidate = _normalize_handle(candidate_username)
+    candidate_bound = explicit_candidate or expected_candidate
+    positive_count_proof = dict(
+        bind.get("positive_post_count_proof_v1") or {}
+    )
+    try:
+        structured_posts_count = int(
+            positive_count_proof.get("posts_count") or 0
+        )
+    except (TypeError, ValueError):
+        structured_posts_count = 0
+    reels_selected = bool(
+        source.get("reels_or_tagged_selected")
+        or str(source.get("reels_tab_state") or "") == "selected"
+    )
+    tagged_selected = bool(
+        source.get("reels_or_tagged_selected")
+        or str(source.get("tagged_tab_state") or "") == "selected"
+    )
+    suggested_visible = bool(
+        hints.get("suggested_for_you") or hints.get("discover_people")
+    )
+    highlights_visible = bool(
+        hints.get("highlights")
+        or hints.get("highlights_visible")
+        or source.get("highlights_region_detected")
+    )
+    profile_tabs_present = bool(
+        source.get("profile_tabs_present")
+        or hints.get("profile_tabs_visible")
+    )
+    grid_selected = bool(
+        source.get("grid_selected")
+        or hints.get("grid_selected")
+        or hints.get("posts_tab_selected")
+        or (
+            profile_tabs_present
+            and bool(eligible)
+            and not reels_selected
+            and not tagged_selected
+        )
+    )
+    unique_top_left = bool(
+        len(eligible) == 1
+        and row == 0
+        and column == 0
+        and int(eligible[0].get("row") or 0) == 0
+        and int(eligible[0].get("col") or 0) == 0
+    )
+    frame = {
+        **frame_source,
+        "raw_width": raw_width,
+        "raw_height": raw_height,
+        "captured_at": float(
+            golden_screenshot_captured_at_monotonic or 0.0
+        ),
+        "navigation_generation": str(
+            runtime_ctx.get("ui_generation") or ""
+        ),
+        "scroll_generation": int(runtime_ctx.get("scroll_counter") or 0),
+        "ui_generation": int(runtime_ctx.get("ui_generation") or 0),
+    }
+    return {
+        **source,
+        "shadow_transport_version": "VisualRoiShadowEvidenceTransportV1",
+        "shadow_transport_source": "already_acquired_golden_artifacts",
+        "shadow_transport_extra_acquisitions": 0,
+        "candidate_username": candidate_bound,
+        "target_username": _normalize_handle(target_username),
+        "target_id": str(
+            bind.get("source_target_id") or bind.get("target_id") or ""
+        ),
+        "post_reveal_package": str(live_package or expected_package or ""),
+        "post_reveal_activity": str(live_activity or ""),
+        "package": str(live_package or expected_package or ""),
+        "activity": str(live_activity or ""),
+        "golden_screenshot_hash": str(golden_screenshot_hash or ""),
+        "golden_screenshot_captured_at_monotonic": float(
+            golden_screenshot_captured_at_monotonic or 0.0
+        ),
+        "coordinate_frame": frame,
+        "navigation_counter": int(
+            runtime_ctx.get("navigation_counter") or 0
+        ),
+        "scroll_generation": int(runtime_ctx.get("scroll_counter") or 0),
+        "canonical_generation": int(runtime_ctx.get("ui_generation") or 0),
+        "identity_exact": bool(profile_identity_exact),
+        "post_count_positive": bool(
+            source.get("post_count_positive")
+            or structured_posts_count > 0
+            or eligible
+        ),
+        "posts_count_value": int(
+            source.get("posts_count_value") or structured_posts_count or 0
+        ),
+        "profile_tabs_present": profile_tabs_present,
+        "grid_selected": grid_selected,
+        "reels_tab_state": (
+            "selected" if reels_selected else str(source.get("reels_tab_state") or "unselected")
+        ),
+        "tagged_tab_state": (
+            "selected" if tagged_selected else str(source.get("tagged_tab_state") or "unselected")
+        ),
+        "reels_or_tagged_selected": bool(reels_selected or tagged_selected),
+        "suggested_region_detected": suggested_visible,
+        "suggested_region_separate": bool(
+            source.get("suggested_region_separate") or not suggested_visible
+        ),
+        "highlights_region_detected": highlights_visible,
+        "highlights_region_separate": bool(
+            source.get("highlights_region_separate") or not highlights_visible
+        ),
+        "physical_cells": [dict(selected)] if selected else [],
+        "absolute_top_left_origin_proven": unique_top_left,
+        "absolute_row_index": row,
+        "absolute_column_index": column,
+        "golden_unique_eligible_cell_count": len(eligible),
+        "classification_reveal_ttl_ms": float(
+            source.get("classification_reveal_ttl_ms") or 3000.0
+        ),
+    }
+
+
 def evaluate_visual_roi_fast_path_shadow(
     *,
     binding: dict[str, Any] | None,
@@ -27184,13 +27366,19 @@ def evaluate_visual_roi_fast_path_shadow(
         "shadow_fast_path_estimated_skipped_stages": [],
         "shadow_fast_path_estimated_saving_ms": 0.0,
         "shadow_fast_path_estimated_conservative_saving_ms": 0.0,
+        "shadow_fast_path_overlap_status": "not_evaluated",
+        "shadow_fast_path_evidence_transport_version": str(
+            proof.get("shadow_transport_version") or ""
+        ),
     }
 
     def reject(reason: str) -> dict[str, Any]:
         result["shadow_fast_path_rejection_reason"] = reason
         return result
 
-    required_binding = ("account_id", "run_id", "request_id", "worker_sha")
+    required_binding = (
+        "account_id", "run_id", "request_id", "action_id", "worker_sha"
+    )
     if any(not str(bind.get(key) or "") for key in required_binding):
         return reject("shadow_account_binding_not_exact")
     if _normalize_handle(str(proof.get("candidate_username") or "")) != _normalize_handle(candidate_username):
@@ -27245,14 +27433,24 @@ def evaluate_visual_roi_fast_path_shadow(
         return reject("shadow_posts_surface_not_structurally_proven")
     if bool(proof.get("story_or_highlight_opened")):
         return reject("shadow_story_or_highlight_present")
-    if bool(proof.get("reels_or_tagged_selected")) or str(proof.get("reels_tab_state") or "") == "selected":
+    if str(proof.get("reels_tab_state") or "") == "selected":
         return reject("shadow_reels_selected")
     if str(proof.get("tagged_tab_state") or "") == "selected":
         return reject("shadow_tagged_selected")
+    if bool(proof.get("reels_or_tagged_selected")):
+        return reject("shadow_reels_or_tagged_selected")
     if bool(hints.get("suggested_for_you") or hints.get("discover_people")) and not bool(
         proof.get("suggested_region_separate")
     ):
+        result["shadow_fast_path_overlap_status"] = "suggested_overlap"
         return reject("shadow_suggested_overlap")
+    if bool(
+        hints.get("highlights")
+        or hints.get("highlights_visible")
+        or proof.get("highlights_region_detected")
+    ) and not bool(proof.get("highlights_region_separate")):
+        result["shadow_fast_path_overlap_status"] = "highlights_overlap"
+        return reject("shadow_highlights_overlap")
     screenshot_age_ms = max(0.0, (now - float(screenshot_captured_at_monotonic or 0.0)) * 1000.0)
     if screenshot_captured_at_monotonic <= 0.0 or screenshot_age_ms > float(screenshot_ttl_ms):
         return reject("shadow_screenshot_stale")
@@ -27309,6 +27507,7 @@ def evaluate_visual_roi_fast_path_shadow(
             "shadow_fast_path_estimated_skipped_stages": skipped,
             "shadow_fast_path_estimated_saving_ms": round(saving, 2),
             "shadow_fast_path_estimated_conservative_saving_ms": round(saving * 0.7, 2),
+            "shadow_fast_path_overlap_status": "clear",
         }
     )
     return result
@@ -28075,6 +28274,8 @@ def visual_open_recent_post_from_profile(
     golden_post_open_intent = None
     golden_post_open_dispatch: dict[str, Any] = {}
     golden_bounds: dict[str, int] = {}
+    golden_observation_hash = ""
+    golden_frame: dict[str, Any] = {}
     _t_intent_creation0 = time.perf_counter()
     if post_open_intent_binding is not None:
         try:
@@ -28137,9 +28338,35 @@ def visual_open_recent_post_from_profile(
                 "row": int(row),
                 "bounds": dict(golden_bounds),
             }
+            _shadow_evidence = (
+                _transport_golden_evidence_to_visual_roi_shadow_v1(
+                    binding=post_open_intent_binding,
+                    source_evidence=post_grid_existence_evidence,
+                    candidate_username=str(expected_follower_username or ""),
+                    target_username=str(post_open_intent_target_username or ""),
+                    expected_package=pkg,
+                    live_package=str(pkg0 or ""),
+                    live_activity=str(act0 or ""),
+                    golden_frame=golden_frame,
+                    golden_screenshot_hash=golden_observation_hash,
+                    golden_screenshot_captured_at_monotonic=float(
+                        golden_obs.get(
+                            "golden_screenshot_captured_at_monotonic"
+                        )
+                        or 0.0
+                    ),
+                    runtime=_shadow_runtime,
+                    ui_hints=open_grid_ui_hints,
+                    selected_cell=_shadow_selected_cell,
+                    ordered_candidates=ordered_candidates,
+                    profile_identity_exact=bool(
+                        prof0 and tv_open.get("ok")
+                    ),
+                )
+            )
             _shadow_result = evaluate_visual_roi_fast_path_shadow(
                 binding=post_open_intent_binding,
-                evidence=post_grid_existence_evidence,
+                evidence=_shadow_evidence,
                 candidate_username=str(expected_follower_username or ""),
                 target_username=str(post_open_intent_target_username or ""),
                 expected_package=pkg,
