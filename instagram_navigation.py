@@ -26356,6 +26356,7 @@ def _dispatch_post_open_intent_v2_tap(
     candidate_username: str,
 ) -> dict[str, Any]:
     """Consume the one-shot intent and dispatch its sole physical tap."""
+    _validation_started = time.perf_counter()
     try:
         from follow_60s_canary import runtime_context as _intent_runtime_context
         from post_open_intent_v2 import consume_post_open_intent_v2
@@ -26374,13 +26375,25 @@ def _dispatch_post_open_intent_v2_tap(
             scroll_generation=int(runtime.get("scroll_counter") or 0),
             ui_generation=int(runtime.get("ui_generation") or 0),
         )
+        _validation_ms = round(
+            (time.perf_counter() - _validation_started) * 1000.0, 2
+        )
         if accepted is None:
-            return {"ok": False, "reason": reason, "intent_age_ms": age_ms}
+            return {
+                "ok": False,
+                "reason": reason,
+                "intent_age_ms": age_ms,
+                "intent_final_validation_ms": _validation_ms,
+                "command_tap_ack_ms": 0.0,
+            }
         bounds = dict(accepted.bounds)
         tap_x = (int(bounds["left"]) + int(bounds["right"])) // 2
         tap_y = (int(bounds["top"]) + int(bounds["bottom"])) // 2
         tap_dispatched_at = time.perf_counter()
         d.click(tap_x, tap_y)
+        _tap_ack_ms = round(
+            (time.perf_counter() - tap_dispatched_at) * 1000.0, 2
+        )
         generation_token = (
             f"nav:{accepted.navigation_generation}:"
             f"scroll:{accepted.scroll_generation}:ui:{accepted.ui_generation}"
@@ -26442,12 +26455,18 @@ def _dispatch_post_open_intent_v2_tap(
             "intent": accepted,
             "intent_payload": accepted.payload(),
             "post_open_stage_provenance": stage_provenance,
+            "intent_final_validation_ms": _validation_ms,
+            "command_tap_ack_ms": _tap_ack_ms,
         }
     except Exception as exc:
         return {
             "ok": False,
             "reason": f"post_open_intent_dispatch_error:{type(exc).__name__}",
             "intent_age_ms": 0.0,
+            "intent_final_validation_ms": round(
+                (time.perf_counter() - _validation_started) * 1000.0, 2
+            ),
+            "command_tap_ack_ms": 0.0,
         }
 
 
@@ -26611,6 +26630,314 @@ def _post_follow_golden_can_reuse_exact_profile_lock(
     return True, "fresh_post_reveal_exact_profile_lock_reused"
 
 
+_GOLDEN_OBSERVABILITY_TIMING_FIELDS = (
+    "golden_no_posts_check_ms",
+    "golden_screenshot_capture_ms",
+    "golden_screenshot_decode_ms",
+    "golden_ui_inspection_ms",
+    "golden_surface_classification_ms",
+    "golden_dynamic_row_detection_ms",
+    "golden_absolute_top_left_validation_ms",
+    "golden_cell_selection_ms",
+    "golden_postopen_intent_creation_ms",
+    "golden_intent_final_validation_ms",
+    "golden_command_tap_ack_ms",
+    "golden_tap_to_viewer_ms",
+    "golden_viewer_to_v5_ms",
+    "golden_total_ms",
+)
+
+
+def _golden_observability_defaults(*, entered_at: float) -> dict[str, Any]:
+    """Return a complete, zero-cost-safe Golden timing envelope."""
+    out: dict[str, Any] = {
+        "golden_entered_at": float(entered_at),
+        "positive_post_grid_proof_received_at": 0.0,
+        "golden_reuse_decision_started_at": 0.0,
+        "golden_reuse_decision_finished_at": 0.0,
+        "golden_reuse_eligible": False,
+        "golden_reuse_rejection_reason": "positive_post_grid_evidence_missing",
+        "positive_proof_age_ms": 0.0,
+        "positive_proof_candidate_match": False,
+        "positive_proof_package_match": False,
+        "positive_proof_activity_match": False,
+        "positive_proof_frame_match": False,
+        "positive_proof_navigation_generation_match": False,
+        "positive_proof_scroll_generation_match": False,
+        "positive_proof_ui_generation_match": False,
+        "positive_proof_post_count_status": "missing",
+        "positive_proof_absolute_top_left_status": "missing",
+        "golden_instrumentation_overhead_ms": 0.0,
+    }
+    out.update({key: 0.0 for key in _GOLDEN_OBSERVABILITY_TIMING_FIELDS})
+    return out
+
+
+def _golden_positive_proof_audit(
+    evidence: dict[str, Any] | None,
+    *,
+    expected_follower_username: str | None,
+    expected_package: str,
+    live_package: str,
+    live_activity: str,
+    runtime: dict[str, Any] | None,
+    consumer_size: tuple[int, int],
+    now_monotonic: float,
+) -> dict[str, Any]:
+    """Describe existing proof compatibility without acquiring any UI state."""
+    proof = dict(evidence or {})
+    frame = dict(proof.get("coordinate_frame") or {})
+    captured_at = float(
+        frame.get("captured_at")
+        or proof.get("proof_received_at_monotonic")
+        or proof.get("created_at_monotonic")
+        or 0.0
+    )
+    runtime_ctx = dict(runtime or {})
+    expected = _normalize_handle(expected_follower_username or "")
+    observed = _normalize_handle(str(proof.get("candidate_username") or ""))
+    proof_package = str(
+        proof.get("post_reveal_package")
+        or proof.get("final_proof_package")
+        or proof.get("package_name")
+        or proof.get("package")
+        or ""
+    )
+    proof_activity = str(
+        proof.get("post_reveal_activity")
+        or proof.get("final_proof_activity")
+        or proof.get("activity_name")
+        or proof.get("activity")
+        or ""
+    )
+    frame_w = int(frame.get("raw_width") or frame.get("canonical_width") or 0)
+    frame_h = int(frame.get("raw_height") or frame.get("canonical_height") or 0)
+    frame_match = bool(
+        frame_w == int(consumer_size[0])
+        and frame_h == int(consumer_size[1])
+        and frame_w > 0
+        and frame_h > 0
+    )
+    nav_expected = str(runtime_ctx.get("navigation_counter") or "")
+    scroll_expected = str(runtime_ctx.get("scroll_counter") or "")
+    ui_expected = str(runtime_ctx.get("ui_generation") or "")
+    nav_observed = str(proof.get("navigation_counter") or "")
+    scroll_observed = str(
+        proof.get("scroll_generation") or frame.get("scroll_generation") or ""
+    )
+    ui_observed = str(
+        proof.get("canonical_generation")
+        or proof.get("ui_generation")
+        or frame.get("ui_generation")
+        or frame.get("navigation_generation")
+        or ""
+    )
+    ui_match = bool(ui_expected and ui_observed == ui_expected)
+    nav_match = bool(nav_expected and nav_observed == nav_expected)
+    scroll_match = bool(scroll_expected != "" and scroll_observed == scroll_expected)
+    post_count_status = (
+        "positive" if bool(proof.get("post_count_positive")) else "not_positive"
+    )
+    absolute_top_left_status = "not_proven"
+    if bool(proof.get("absolute_top_left_origin_proven")):
+        row = int(proof.get("absolute_row_index") or 0)
+        column = int(proof.get("absolute_column_index") or 0)
+        absolute_top_left_status = (
+            "proven" if (row, column) in {(0, 0), (1, 1)} else "non_top_left"
+        )
+    return {
+        "positive_post_grid_proof_received_at": captured_at,
+        "positive_proof_age_ms": round(
+            max(0.0, (float(now_monotonic) - captured_at) * 1000.0), 2
+        ) if captured_at > 0.0 else 0.0,
+        "positive_proof_candidate_match": bool(expected and observed == expected),
+        "positive_proof_package_match": bool(
+            proof_package == str(expected_package or "")
+            and str(live_package or "") == str(expected_package or "")
+        ),
+        "positive_proof_activity_match": bool(
+            "instagram" in proof_activity.lower()
+            and "mainactivity" in proof_activity.lower()
+            and "instagram" in str(live_activity or "").lower()
+            and "mainactivity" in str(live_activity or "").lower()
+        ),
+        "positive_proof_frame_match": frame_match,
+        "positive_proof_navigation_generation_match": nav_match,
+        "positive_proof_scroll_generation_match": scroll_match,
+        "positive_proof_ui_generation_match": ui_match,
+        "positive_proof_post_count_status": post_count_status,
+        "positive_proof_absolute_top_left_status": absolute_top_left_status,
+    }
+
+
+def evaluate_visual_roi_fast_path_shadow(
+    *,
+    binding: dict[str, Any] | None,
+    evidence: dict[str, Any] | None,
+    candidate_username: str,
+    target_username: str,
+    expected_package: str,
+    live_package: str,
+    live_activity: str,
+    viewport: dict[str, int] | None,
+    runtime: dict[str, Any] | None,
+    ui_hints: dict[str, Any] | None,
+    selected_cell: dict[str, Any] | None,
+    ordered_candidates: list[dict[str, Any]] | None,
+    screenshot_captured_at_monotonic: float,
+    now_monotonic: float | None = None,
+    screenshot_ttl_ms: float = 3000.0,
+    stage_timings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Pure shadow evaluator. It cannot create an intent or authorize a tap."""
+    now = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    proof = dict(evidence or {})
+    bind = dict(binding or {})
+    hints = dict(ui_hints or {})
+    cell = dict(selected_cell or {})
+    candidates = [dict(c) for c in list(ordered_candidates or []) if isinstance(c, dict)]
+    view = dict(viewport or {})
+    runtime_ctx = dict(runtime or {})
+    result: dict[str, Any] = {
+        "shadow_fast_path_candidate": False,
+        "shadow_fast_path_rejection_reason": "",
+        "shadow_fast_path_confidence": 0.0,
+        "shadow_fast_path_absolute_row": None,
+        "shadow_fast_path_absolute_column": None,
+        "shadow_fast_path_unique_cell_count": 0,
+        "shadow_fast_path_estimated_skipped_stages": [],
+        "shadow_fast_path_estimated_saving_ms": 0.0,
+        "shadow_fast_path_estimated_conservative_saving_ms": 0.0,
+    }
+
+    def reject(reason: str) -> dict[str, Any]:
+        result["shadow_fast_path_rejection_reason"] = reason
+        return result
+
+    required_binding = ("account_id", "run_id", "request_id", "worker_sha")
+    if any(not str(bind.get(key) or "") for key in required_binding):
+        return reject("shadow_account_binding_not_exact")
+    if _normalize_handle(str(proof.get("candidate_username") or "")) != _normalize_handle(candidate_username):
+        return reject("shadow_candidate_mismatch")
+    if not str(bind.get("source_target_id") or bind.get("target_id") or "") or not _normalize_handle(target_username):
+        return reject("shadow_target_not_exact")
+    proof_package = str(
+        proof.get("post_reveal_package")
+        or proof.get("final_proof_package")
+        or proof.get("package")
+        or ""
+    )
+    if proof_package != expected_package or live_package != expected_package:
+        return reject("shadow_package_mismatch")
+    proof_activity = str(
+        proof.get("post_reveal_activity")
+        or proof.get("final_proof_activity")
+        or proof.get("activity")
+        or ""
+    )
+    if proof_activity != live_activity or "mainactivity" not in live_activity.lower():
+        return reject("shadow_activity_mismatch")
+    frame = dict(proof.get("coordinate_frame") or {})
+    width, height = int(view.get("width") or 0), int(view.get("height") or 0)
+    if (
+        int(frame.get("raw_width") or frame.get("canonical_width") or 0) != width
+        or int(frame.get("raw_height") or frame.get("canonical_height") or 0) != height
+        or width <= 0
+        or height <= 0
+    ):
+        return reject("shadow_frame_mismatch")
+    nav_observed = str(proof.get("navigation_counter") or "")
+    scroll_observed = str(proof.get("scroll_generation") or frame.get("scroll_generation") or "")
+    ui_observed = str(
+        proof.get("canonical_generation")
+        or proof.get("ui_generation")
+        or frame.get("ui_generation")
+        or frame.get("navigation_generation")
+        or ""
+    )
+    if str(runtime_ctx.get("navigation_counter") or "") != nav_observed:
+        return reject("shadow_navigation_generation_mismatch")
+    if str(runtime_ctx.get("scroll_counter") or "") != scroll_observed:
+        return reject("shadow_scroll_generation_mismatch")
+    if str(runtime_ctx.get("ui_generation") or "") != ui_observed:
+        return reject("shadow_ui_generation_mismatch")
+    if bool(proof.get("private_profile_visible")) or not bool(proof.get("identity_exact")):
+        return reject("shadow_profile_not_public_exact")
+    if not bool(proof.get("post_count_positive")):
+        return reject("shadow_post_count_not_positive")
+    if not bool(proof.get("profile_tabs_present")) or not bool(proof.get("grid_selected")):
+        return reject("shadow_posts_surface_not_structurally_proven")
+    if bool(proof.get("story_or_highlight_opened")):
+        return reject("shadow_story_or_highlight_present")
+    if bool(proof.get("reels_or_tagged_selected")) or str(proof.get("reels_tab_state") or "") == "selected":
+        return reject("shadow_reels_selected")
+    if str(proof.get("tagged_tab_state") or "") == "selected":
+        return reject("shadow_tagged_selected")
+    if bool(hints.get("suggested_for_you") or hints.get("discover_people")) and not bool(
+        proof.get("suggested_region_separate")
+    ):
+        return reject("shadow_suggested_overlap")
+    screenshot_age_ms = max(0.0, (now - float(screenshot_captured_at_monotonic or 0.0)) * 1000.0)
+    if screenshot_captured_at_monotonic <= 0.0 or screenshot_age_ms > float(screenshot_ttl_ms):
+        return reject("shadow_screenshot_stale")
+    eligible = [c for c in candidates if bool(c.get("eligible"))]
+    result["shadow_fast_path_unique_cell_count"] = len(eligible)
+    if len(eligible) != 1:
+        return reject("shadow_top_left_cell_not_unique")
+    row = int(cell.get("row") if cell.get("row") is not None else -1)
+    column = int(cell.get("col") if cell.get("col") is not None else -1)
+    result["shadow_fast_path_absolute_row"] = row
+    result["shadow_fast_path_absolute_column"] = column
+    if row > 0:
+        return reject("shadow_row_2_only")
+    proof_absolute = (
+        int(proof.get("absolute_row_index") or 0),
+        int(proof.get("absolute_column_index") or 0),
+    )
+    if (
+        row != 0
+        or column != 0
+        or not bool(proof.get("absolute_top_left_origin_proven"))
+        or proof_absolute not in {(0, 0), (1, 1)}
+    ):
+        return reject("shadow_absolute_top_left_not_proven")
+    bounds = dict(cell.get("bounds") or {})
+    try:
+        bounds_left = int(bounds.get("left"))
+        bounds_top = int(bounds.get("top"))
+        bounds_right = int(bounds.get("right"))
+        bounds_bottom = int(bounds.get("bottom"))
+    except (TypeError, ValueError):
+        return reject("shadow_bounds_outside_viewport")
+    if not (
+        0 <= bounds_left < bounds_right <= width
+        and 0 <= bounds_top < bounds_bottom <= height
+    ):
+        return reject("shadow_bounds_outside_viewport")
+    proof_at = float(frame.get("captured_at") or proof.get("created_at_monotonic") or 0.0)
+    ttl_ms = float(proof.get("classification_reveal_ttl_ms") or 3000.0)
+    if proof_at <= 0.0 or max(0.0, (now - proof_at) * 1000.0) > ttl_ms:
+        return reject("shadow_positive_proof_ttl_expired")
+
+    measured = dict(stage_timings or {})
+    skipped = ["golden_profile_lock", "golden_no_posts_check"]
+    saving = sum(
+        max(0.0, float(measured.get(key) or 0.0))
+        for key in ("golden_profile_lock_ms", "golden_no_posts_check_ms")
+    )
+    result.update(
+        {
+            "shadow_fast_path_candidate": True,
+            "shadow_fast_path_rejection_reason": "",
+            "shadow_fast_path_confidence": 1.0,
+            "shadow_fast_path_estimated_skipped_stages": skipped,
+            "shadow_fast_path_estimated_saving_ms": round(saving, 2),
+            "shadow_fast_path_estimated_conservative_saving_ms": round(saving * 0.7, 2),
+        }
+    )
+    return result
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
@@ -26634,6 +26961,8 @@ def visual_open_recent_post_from_profile(
     ``selection_policy=first_row_left_to_right_recent_priority`` (post-follow likes):
     first eligible cell in row 0 left→right. Default legacy: max variance over 6 cells.
     """
+    _golden_entered_at = time.monotonic()
+    _golden_perf0 = time.perf_counter()
     global _VISUAL_POST_LIKE_TAPS_RECORDED
     _VISUAL_POST_LIKE_TAPS_RECORDED = 0
     if post_follow_stash_open_like_proof:
@@ -26653,6 +26982,11 @@ def visual_open_recent_post_from_profile(
     )
     post_follow_fast = lperf is not None
     t_po0 = time.perf_counter() if lperf is not None else None
+    golden_obs: dict[str, Any] | None = (
+        _golden_observability_defaults(entered_at=_golden_entered_at)
+        if post_follow_fast
+        else None
+    )
 
     def _po_fin(
         out: dict[str, Any],
@@ -26673,6 +27007,15 @@ def visual_open_recent_post_from_profile(
             lperf["visual_recent_post_open_outcome"] = outcome
             if failure_reason is not None:
                 lperf["failure_reason"] = failure_reason
+            if golden_obs is not None:
+                golden_obs["golden_total_ms"] = round(
+                    (time.perf_counter() - _golden_perf0) * 1000.0, 2
+                )
+                _obs_overhead0 = time.perf_counter()
+                lperf.update(dict(golden_obs))
+                lperf["golden_instrumentation_overhead_ms"] = round(
+                    (time.perf_counter() - _obs_overhead0) * 1000.0, 4
+                )
             out = {**out, "likes_perf_post_open": dict(lperf)}
         return out
 
@@ -26693,6 +27036,33 @@ def visual_open_recent_post_from_profile(
     except Exception:
         ww, wh = 1080, 2400
 
+    _reuse_started_at = time.monotonic()
+    if golden_obs is not None:
+        _obs_audit0 = time.perf_counter()
+        golden_obs["golden_reuse_decision_started_at"] = _reuse_started_at
+        try:
+            from follow_60s_canary import runtime_context as _golden_runtime_context
+
+            _golden_runtime = dict(_golden_runtime_context() or {})
+        except Exception:
+            _golden_runtime = {}
+        golden_obs.update(
+            _golden_positive_proof_audit(
+                post_grid_existence_evidence,
+                expected_follower_username=expected_follower_username,
+                expected_package=pkg,
+                live_package=str(pkg0 or ""),
+                live_activity=str(act0 or ""),
+                runtime=_golden_runtime,
+                consumer_size=(int(ww), int(wh)),
+                now_monotonic=_reuse_started_at,
+            )
+        )
+        golden_obs["golden_instrumentation_overhead_ms"] = round(
+            (time.perf_counter() - _obs_audit0) * 1000.0, 4
+        )
+    else:
+        _golden_runtime = {}
     reuse_post_existence, reuse_post_existence_reason = (
         _post_follow_golden_can_reuse_positive_post_grid_existence(
             post_grid_existence_evidence,
@@ -26712,6 +27082,22 @@ def visual_open_recent_post_from_profile(
         if post_follow_fast
         else (False, "follow60_post_open_fast_path_disabled")
     )
+    _reuse_finished_at = time.monotonic()
+    if golden_obs is not None:
+        golden_obs["golden_reuse_decision_finished_at"] = _reuse_finished_at
+        golden_obs["golden_reuse_eligible"] = bool(
+            reuse_post_existence and reuse_profile_lock
+        )
+        golden_obs["golden_reuse_rejection_reason"] = (
+            ""
+            if reuse_post_existence and reuse_profile_lock
+            else (
+                reuse_post_existence_reason
+                if not reuse_post_existence
+                else reuse_profile_lock_reason
+            )
+        )
+    _t_profile_lock0 = time.perf_counter()
     if reuse_profile_lock:
         tv_open = {"ok": True, "reason": reuse_profile_lock_reason}
         log(
@@ -26729,6 +27115,10 @@ def visual_open_recent_post_from_profile(
             d,
             source_profile_username=source_profile_username,
             action="visual_open_recent_post_from_profile",
+        )
+    if golden_obs is not None:
+        golden_obs["golden_profile_lock_ms"] = round(
+            (time.perf_counter() - _t_profile_lock0) * 1000.0, 2
         )
     if not tv_open.get("ok"):
         meta_tv = _followers_current_pkg_activity(d)
@@ -26749,6 +27139,7 @@ def visual_open_recent_post_from_profile(
             failure_reason="target_profile_lock_mismatch",
         )
 
+    _t_no_posts0 = time.perf_counter()
     if post_follow_fast and reuse_post_existence:
         np_check = {
             "no_posts_detected": False,
@@ -26780,6 +27171,10 @@ def visual_open_recent_post_from_profile(
             # Do not persist a second diagnostic screenshot on its healthy path;
             # the single Golden image below remains the visual selection input.
             include_visual_fallback=not post_follow_fast,
+        )
+    if golden_obs is not None:
+        golden_obs["golden_no_posts_check_ms"] = round(
+            (time.perf_counter() - _t_no_posts0) * 1000.0, 2
         )
     if np_check.get("no_posts_detected"):
         meta_np = _followers_current_pkg_activity(d)
@@ -26864,6 +27259,11 @@ def visual_open_recent_post_from_profile(
         lperf["open_shot_capture_ms"] = round(
             (time.perf_counter() - _t_open_shot0) * 1000.0, 2
         )
+        if golden_obs is not None:
+            golden_obs["golden_screenshot_capture_ms"] = lperf[
+                "open_shot_capture_ms"
+            ]
+            golden_obs["golden_screenshot_captured_at_monotonic"] = time.monotonic()
 
     _t_pil0 = time.perf_counter()
     try:
@@ -26903,6 +27303,10 @@ def visual_open_recent_post_from_profile(
         lperf["open_shot_pil_decode_ms"] = round(
             (time.perf_counter() - _t_pil0) * 1000.0, 2
         )
+        if golden_obs is not None:
+            golden_obs["golden_screenshot_decode_ms"] = lperf[
+                "open_shot_pil_decode_ms"
+            ]
         lperf["open_shot_persisted"] = bool(shot_persisted)
         lperf["open_shot_source"] = (
             "memory_pillow" if not shot_persisted else "forensic_file_fallback"
@@ -26931,10 +27335,16 @@ def visual_open_recent_post_from_profile(
         prior_dynamic_first_row_bottom_px = None
 
     _t_reval0 = time.perf_counter()
+    _t_ui_inspection0 = time.perf_counter()
     try:
         open_grid_ui_hints = _post_follow_likes_grid_ui_surface_hints(d)
     except Exception:
         open_grid_ui_hints = {}
+    if golden_obs is not None:
+        golden_obs["golden_ui_inspection_ms"] = round(
+            (time.perf_counter() - _t_ui_inspection0) * 1000.0, 2
+        )
+    _t_surface_classification0 = time.perf_counter()
     overlay_blocks_post_grid_top_hint = bool(
         open_grid_ui_hints.get("suggested_for_you")
         or open_grid_ui_hints.get("discover_people")
@@ -26965,6 +27375,10 @@ def visual_open_recent_post_from_profile(
             profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
         )
     )
+    if golden_obs is not None:
+        golden_obs["golden_surface_classification_ms"] = round(
+            (time.perf_counter() - _t_surface_classification0) * 1000.0, 2
+        )
     if not suggested_selection_ok:
         log(
             "warning",
@@ -26999,6 +27413,7 @@ def visual_open_recent_post_from_profile(
             failure_reason="suggested_surface_blocks_post_selection",
         )
 
+    _t_dynamic_row0 = time.perf_counter()
     dyn_fresh = _dynamic_first_post_grid_row_from_image(
         im,
         iw,
@@ -27006,6 +27421,10 @@ def visual_open_recent_post_from_profile(
         var_thr=_POST_FOLLOW_LIKES_GRID_VAR_THR,
         search_y_min_px=int(dynamic_first_row_search_y_min_px),
     )
+    if golden_obs is not None:
+        golden_obs["golden_dynamic_row_detection_ms"] = round(
+            (time.perf_counter() - _t_dynamic_row0) * 1000.0, 2
+        )
     fresh_row_found = bool(dyn_fresh.get("ok"))
     fresh_dynamic_first_row_top_px: int | None = None
     fresh_dynamic_first_row_bottom_px: int | None = None
@@ -27151,6 +27570,10 @@ def visual_open_recent_post_from_profile(
         grid_y1=grid_y1,
         selection_policy=pol,
     )
+    if golden_obs is not None:
+        golden_obs["golden_cell_selection_ms"] = round(
+            (time.perf_counter() - _t_sel0) * 1000.0, 2
+        )
 
     if chosen is None:
         log(
@@ -27202,6 +27625,7 @@ def visual_open_recent_post_from_profile(
     except Exception:
         pass
 
+    _t_absolute_top_left0 = time.perf_counter()
     candidate_row_above_profile_tabs_blocked = False
     if open_profile_tabs_bottom_y_px is not None:
         if int(y0) < int(open_profile_tabs_bottom_y_px) + int(
@@ -27247,6 +27671,11 @@ def visual_open_recent_post_from_profile(
             failure_reason="candidate_above_profile_tabs",
         )
 
+    if golden_obs is not None:
+        golden_obs["golden_absolute_top_left_validation_ms"] = round(
+            (time.perf_counter() - _t_absolute_top_left0) * 1000.0, 2
+        )
+
     if post_follow_fast:
         tap_x, tap_y = _visual_grid_cell_tap_xy_device(
             x0,
@@ -27269,6 +27698,8 @@ def visual_open_recent_post_from_profile(
     retry_strategy = ""
     golden_post_open_intent = None
     golden_post_open_dispatch: dict[str, Any] = {}
+    golden_bounds: dict[str, int] = {}
+    _t_intent_creation0 = time.perf_counter()
     if post_open_intent_binding is not None:
         try:
             from dataclasses import asdict as _intent_asdict
@@ -27316,6 +27747,74 @@ def visual_open_recent_post_from_profile(
             )
         except Exception:
             golden_post_open_intent = None
+    if golden_obs is not None:
+        golden_obs["golden_postopen_intent_creation_ms"] = round(
+            (time.perf_counter() - _t_intent_creation0) * 1000.0, 2
+        )
+        _shadow_eval0 = time.perf_counter()
+        try:
+            from follow_60s_canary import runtime_context as _golden_shadow_runtime_context
+
+            _shadow_runtime = dict(_golden_shadow_runtime_context() or {})
+            _shadow_selected_cell = {
+                "col": int(col),
+                "row": int(row),
+                "bounds": dict(golden_bounds),
+            }
+            _shadow_result = evaluate_visual_roi_fast_path_shadow(
+                binding=post_open_intent_binding,
+                evidence=post_grid_existence_evidence,
+                candidate_username=str(expected_follower_username or ""),
+                target_username=str(post_open_intent_target_username or ""),
+                expected_package=pkg,
+                live_package=str(pkg0 or ""),
+                live_activity=str(act0 or ""),
+                viewport={"width": int(ww), "height": int(wh)},
+                runtime=_shadow_runtime,
+                ui_hints=open_grid_ui_hints,
+                selected_cell=_shadow_selected_cell,
+                ordered_candidates=ordered_candidates,
+                screenshot_captured_at_monotonic=float(
+                    golden_obs.get("golden_screenshot_captured_at_monotonic") or 0.0
+                ),
+                stage_timings=golden_obs,
+            )
+        except Exception as exc:
+            _shadow_result = {
+                "shadow_fast_path_candidate": False,
+                "shadow_fast_path_rejection_reason": (
+                    f"shadow_evaluator_error:{type(exc).__name__}"
+                ),
+                "shadow_fast_path_confidence": 0.0,
+                "shadow_fast_path_absolute_row": None,
+                "shadow_fast_path_absolute_column": None,
+                "shadow_fast_path_unique_cell_count": 0,
+                "shadow_fast_path_estimated_skipped_stages": [],
+                "shadow_fast_path_estimated_saving_ms": 0.0,
+                "shadow_fast_path_estimated_conservative_saving_ms": 0.0,
+            }
+        golden_obs.update(_shadow_result)
+        try:
+            log(
+                "info",
+                "follow60_visual_roi_fast_path_shadow_evaluated",
+                source_profile_username=source_profile_username or "",
+                expected_follower_username=expected_follower_username or "",
+                tap_authorized=False,
+                intent_created=False,
+                extra_acquisitions=0,
+                **_shadow_result,
+            )
+        except Exception:
+            pass
+        golden_obs["golden_instrumentation_overhead_ms"] = round(
+            max(
+                0.0,
+                float(golden_obs.get("golden_instrumentation_overhead_ms") or 0.0)
+                + (time.perf_counter() - _shadow_eval0) * 1000.0,
+            ),
+            4,
+        )
 
     if post_follow_fast:
         try:
@@ -27412,6 +27911,23 @@ def visual_open_recent_post_from_profile(
                 binding=post_open_intent_binding,
                 candidate_username=str(expected_follower_username or ""),
             )
+            if golden_obs is not None:
+                golden_obs["golden_intent_final_validation_ms"] = max(
+                    0.0,
+                    float(
+                        golden_post_open_dispatch.get(
+                            "intent_final_validation_ms"
+                        )
+                        or 0.0
+                    ),
+                )
+                golden_obs["golden_command_tap_ack_ms"] = max(
+                    0.0,
+                    float(
+                        golden_post_open_dispatch.get("command_tap_ack_ms")
+                        or 0.0
+                    ),
+                )
             return bool(golden_post_open_dispatch.get("ok"))
         try:
             d.click(tx, ty)
@@ -27685,6 +28201,10 @@ def visual_open_recent_post_from_profile(
         lperf["tap_to_viewer_detected_ms"] = round(
             (time.perf_counter() - _t_viewer_seg0) * 1000.0, 2
         )
+        if golden_obs is not None:
+            golden_obs["golden_tap_to_viewer_ms"] = lperf[
+                "tap_to_viewer_detected_ms"
+            ]
         lperf["opened_on_first_tap"] = bool(opened_on_first_tap_flag)
         lperf["retry_used"] = bool(retry_used)
         lperf["viewer_open_poll_count"] = int(det_open.get("poll_count") or 0)
@@ -27755,6 +28275,8 @@ def visual_open_recent_post_from_profile(
         )
 
     if post_detected:
+        if golden_obs is not None:
+            golden_obs["golden_viewer_detected_at_monotonic"] = time.monotonic()
         det_final = (
             det_retry
             if retry_used and bool(det_retry.get("post_detected"))
@@ -52634,6 +53156,18 @@ def run_post_follow_post_likes_phase(
                         _grid_ev.reveal_count_total_for_like_phase
                     ),
                     "coordinate_frame": dict(_grid_ev.coordinate_frame or {}),
+                    "created_at_monotonic": float(
+                        _grid_ev.created_at_monotonic or 0.0
+                    ),
+                    "navigation_counter": int(
+                        _grid_ev.navigation_counter or 0
+                    ),
+                    "scroll_generation": int(
+                        _grid_ev.scroll_generation or 0
+                    ),
+                    "canonical_generation": int(
+                        _grid_ev.canonical_generation or 0
+                    ),
                     "identity_exact": bool(_grid_ev.identity_exact),
                     "profile_tabs_present": bool(
                         _grid_ev.profile_tabs_present
@@ -55557,6 +56091,55 @@ def run_post_follow_post_likes_phase(
             source_profile_username=src,
             follower_username=cand,
         )
+        _golden_perf_payload = dict(_likes_perf_ctx.get("post_open") or {})
+        if float(_golden_perf_payload.get("golden_entered_at") or 0.0) > 0.0:
+            _golden_obs_update0 = time.perf_counter()
+            _golden_v5_finished_at = time.monotonic()
+            _golden_viewer_at = float(
+                _golden_perf_payload.get("golden_viewer_detected_at_monotonic")
+                or 0.0
+            )
+            _golden_entered = float(
+                _golden_perf_payload.get("golden_entered_at") or 0.0
+            )
+            _golden_perf_payload["golden_viewer_to_v5_ms"] = round(
+                max(0.0, (_golden_v5_finished_at - _golden_viewer_at) * 1000.0),
+                2,
+            ) if _golden_viewer_at > 0.0 else 0.0
+            _golden_perf_payload["golden_total_ms"] = round(
+                max(0.0, (_golden_v5_finished_at - _golden_entered) * 1000.0),
+                2,
+            )
+            _golden_perf_payload["golden_instrumentation_overhead_ms"] = round(
+                max(
+                    0.0,
+                    float(
+                        _golden_perf_payload.get(
+                            "golden_instrumentation_overhead_ms"
+                        )
+                        or 0.0
+                    )
+                    + (time.perf_counter() - _golden_obs_update0) * 1000.0,
+                ),
+                4,
+            )
+            _likes_perf_ctx["post_open"] = dict(_golden_perf_payload)
+            try:
+                log(
+                    "info",
+                    "follow60_golden_stage_timings",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    extra_screenshot_count=0,
+                    extra_xml_count=0,
+                    extra_poll_count=0,
+                    extra_tap_count=0,
+                    v5_mandatory=True,
+                    **_golden_perf_payload,
+                )
+            except Exception:
+                pass
         # Carry the exact A2/V5 snapshot into the tap boundary.  This evidence
         # is immutable and stage-scoped; LikeTapContextV2 must consume it
         # before considering a single bounded reacquisition.
