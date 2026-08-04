@@ -26428,6 +26428,166 @@ def _dispatch_post_open_intent_v2_tap(
         }
 
 
+def _post_follow_golden_can_reuse_positive_post_grid_existence(
+    evidence: dict[str, Any] | None,
+    *,
+    expected_follower_username: str | None,
+) -> tuple[bool, str]:
+    """Allow Golden to skip only its duplicate *post existence* probe.
+
+    The evidence never authorizes a tap.  Golden still takes a fresh screenshot,
+    recomputes the live grid envelope, selects the absolute top-left candidate,
+    and dispatches through PostOpenIntentV2.  This predicate only recognizes a
+    fresh structural proof that at least one physical post cell exists on the
+    exact candidate profile.
+    """
+    if not isinstance(evidence, dict) or not evidence:
+        return False, "positive_post_grid_evidence_missing"
+    expected = _normalize_handle(expected_follower_username or "")
+    observed = _normalize_handle(str(evidence.get("candidate_username") or ""))
+    if not expected or observed != expected:
+        return False, "positive_post_grid_candidate_mismatch"
+    if not bool(evidence.get("identity_exact")):
+        return False, "positive_post_grid_identity_not_exact"
+    if not bool(evidence.get("profile_tabs_present")):
+        return False, "positive_post_grid_tabs_missing"
+    if not bool(evidence.get("grid_selected")):
+        return False, "positive_post_grid_tab_not_selected"
+    if not bool(evidence.get("post_count_positive")):
+        return False, "positive_post_grid_counter_not_positive"
+    if bool(evidence.get("no_posts_positive")):
+        return False, "positive_post_grid_conflicts_with_no_posts"
+    if bool(evidence.get("loading_visible")):
+        return False, "positive_post_grid_loading"
+    if bool(evidence.get("private_profile_visible")):
+        return False, "positive_post_grid_private"
+    if bool(evidence.get("reels_or_tagged_selected")):
+        return False, "positive_post_grid_non_posts_tab"
+    physical_cells = [
+        cell
+        for cell in list(evidence.get("physical_cells") or [])
+        if isinstance(cell, dict)
+    ]
+    if not physical_cells:
+        return False, "positive_post_grid_physical_cell_missing"
+
+    outcome = str(evidence.get("outcome") or "")
+    if outcome == "POST_ROW_POSITIVE_SAFE":
+        return True, "positive_safe_post_grid_physical_cell"
+    if outcome != "POST_GRID_AMBIGUOUS_FINAL":
+        return False, "positive_post_grid_outcome_not_reusable"
+
+    # An ambiguous post-reveal result may prove that posts exist while still
+    # refusing its bounds.  Reuse it only after the one canonical reveal and
+    # one fresh XML reacquisition, and only for tap-safety rejection reasons
+    # reached after physical-cell presence was established.
+    if int(evidence.get("reveal_count_total_for_like_phase") or 0) != 1:
+        return False, "positive_post_grid_reveal_count_not_one"
+    if int(evidence.get("reacquire_dump_count") or 0) != 1:
+        return False, "positive_post_grid_fresh_reacquisition_missing"
+    if not bool(evidence.get("old_bounds_invalidated")):
+        return False, "positive_post_grid_old_bounds_not_invalidated"
+    rejection_reason = str(
+        evidence.get("rejection_reason")
+        or evidence.get("post_reveal_safe_rejection_reason")
+        or ""
+    )
+    if rejection_reason not in {
+        "post_reveal_fully_visible_first_row_missing",
+        "absolute_top_left_not_visible_after_reveal",
+        "absolute_grid_cell_identity_not_preserved",
+    }:
+        return False, "positive_post_grid_rejection_not_tap_safety_only"
+    return True, "fresh_post_reveal_physical_cell_bounds_rejected"
+
+
+def _post_follow_golden_can_reuse_exact_profile_lock(
+    evidence: dict[str, Any] | None,
+    *,
+    expected_follower_username: str | None,
+    expected_package: str,
+    live_package: str,
+    live_activity: str,
+    live_profile_detected: bool,
+    consumer_size: tuple[int, int],
+) -> tuple[bool, str]:
+    """Reuse a fresh post-reveal identity proof for Golden's deep lock only.
+
+    This never authorizes a tap.  It merely avoids repeating the expensive
+    semantic target-profile lock immediately after a fresh XML proved the same
+    exact candidate, package/activity, coordinate frame, and UI generations.
+    Golden still takes and classifies its own fresh frame before creating a
+    PostOpenIntentV2.
+    """
+    existence_ok, existence_reason = (
+        _post_follow_golden_can_reuse_positive_post_grid_existence(
+            evidence,
+            expected_follower_username=expected_follower_username,
+        )
+    )
+    if not existence_ok:
+        return False, existence_reason
+    proof = dict(evidence or {})
+    expected_pkg = str(expected_package or "")
+    package = str(
+        proof.get("post_reveal_package")
+        or proof.get("final_proof_package")
+        or proof.get("package_name")
+        or proof.get("package")
+        or ""
+    )
+    activity = str(
+        proof.get("post_reveal_activity")
+        or proof.get("final_proof_activity")
+        or proof.get("activity_name")
+        or proof.get("activity")
+        or ""
+    )
+    if not live_profile_detected:
+        return False, "positive_post_grid_live_profile_missing"
+    if package != expected_pkg or str(live_package or "") != expected_pkg:
+        return False, "positive_post_grid_live_package_mismatch"
+    activity_lower = activity.lower()
+    live_activity_lower = str(live_activity or "").lower()
+    if (
+        "instagram" not in activity_lower
+        or "mainactivity" not in activity_lower
+        or "instagram" not in live_activity_lower
+        or "mainactivity" not in live_activity_lower
+    ):
+        return False, "positive_post_grid_live_activity_mismatch"
+
+    frame = dict(proof.get("coordinate_frame") or {})
+    captured_at = float(frame.get("captured_at") or 0.0)
+    age_ms = max(0.0, (time.monotonic() - captured_at) * 1000.0)
+    ttl_ms = float(proof.get("classification_reveal_ttl_ms") or 3000.0)
+    if captured_at <= 0.0 or age_ms > ttl_ms:
+        return False, "positive_post_grid_profile_lock_proof_stale"
+    try:
+        from follow_60s_canary import (
+            runtime_context as _profile_lock_runtime_context,
+            validate_coordinate_frame_v1,
+        )
+
+        runtime = _profile_lock_runtime_context()
+        frame_ok, frame_reason = validate_coordinate_frame_v1(
+            frame,
+            consumer_size=(int(consumer_size[0]), int(consumer_size[1])),
+            navigation_generation=str(runtime.get("ui_generation") or ""),
+            scroll_generation=int(runtime.get("scroll_counter") or 0),
+            consumer_orientation=(
+                "landscape"
+                if int(consumer_size[0]) > int(consumer_size[1])
+                else "portrait"
+            ),
+        )
+    except Exception:
+        return False, "positive_post_grid_profile_lock_frame_untrusted"
+    if not frame_ok:
+        return False, str(frame_reason or "positive_post_grid_profile_lock_frame_untrusted")
+    return True, "fresh_post_reveal_exact_profile_lock_reused"
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
@@ -26444,6 +26604,7 @@ def visual_open_recent_post_from_profile(
     post_follow_stash_open_like_proof: bool = False,
     post_open_intent_binding: dict[str, Any] | None = None,
     post_open_intent_target_username: str = "",
+    post_grid_existence_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     From an open profile grid: screenshot, pick a grid cell, tap to open the post.
@@ -26504,11 +26665,48 @@ def visual_open_recent_post_from_profile(
         source_profile_username=source_profile_username or "",
     )
 
-    tv_open = visual_target_profile_lock_verify(
-        d,
-        source_profile_username=source_profile_username,
-        action="visual_open_recent_post_from_profile",
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2400
+
+    reuse_post_existence, reuse_post_existence_reason = (
+        _post_follow_golden_can_reuse_positive_post_grid_existence(
+            post_grid_existence_evidence,
+            expected_follower_username=expected_follower_username,
+        )
     )
+    reuse_profile_lock, reuse_profile_lock_reason = (
+        _post_follow_golden_can_reuse_exact_profile_lock(
+            post_grid_existence_evidence,
+            expected_follower_username=expected_follower_username,
+            expected_package=pkg,
+            live_package=str(pkg0 or ""),
+            live_activity=str(act0 or ""),
+            live_profile_detected=prof0,
+            consumer_size=(int(ww), int(wh)),
+        )
+        if post_follow_fast
+        else (False, "follow60_post_open_fast_path_disabled")
+    )
+    if reuse_profile_lock:
+        tv_open = {"ok": True, "reason": reuse_profile_lock_reason}
+        log(
+            "info",
+            "visual_target_profile_lock_reused_positive_post_grid_proof",
+            source_profile_username=source_profile_username or "",
+            expected_follower_username=expected_follower_username or "",
+            current_package=pkg0,
+            current_activity=act0,
+            reuse_reason=reuse_profile_lock_reason,
+            tap_authorized=False,
+        )
+    else:
+        tv_open = visual_target_profile_lock_verify(
+            d,
+            source_profile_username=source_profile_username,
+            action="visual_open_recent_post_from_profile",
+        )
     if not tv_open.get("ok"):
         meta_tv = _followers_current_pkg_activity(d)
         return _po_fin(
@@ -26528,19 +26726,38 @@ def visual_open_recent_post_from_profile(
             failure_reason="target_profile_lock_mismatch",
         )
 
-    try:
-        ww, wh = d.window_size()
-    except Exception:
-        ww, wh = 1080, 2400
-
-    np_check = visual_profile_has_no_posts(
-        d,
-        source_profile_username=source_profile_username,
-        # Follow60 already reaches Golden only after structural proof rejection.
-        # Do not persist a second diagnostic screenshot on its healthy path;
-        # the single Golden image below remains the visual selection input.
-        include_visual_fallback=not post_follow_fast,
-    )
+    if post_follow_fast and reuse_post_existence:
+        np_check = {
+            "no_posts_detected": False,
+            "detection_method": "reused_positive_post_grid_physical_cell",
+            "confidence": 1.0,
+        }
+        log(
+            "info",
+            "visual_profile_no_posts_recheck_skipped_positive_post_grid_proof",
+            source_profile_username=source_profile_username or "",
+            expected_follower_username=expected_follower_username or "",
+            proof_outcome=str(
+                (post_grid_existence_evidence or {}).get("outcome") or ""
+            ),
+            physical_cell_count=len(
+                list(
+                    (post_grid_existence_evidence or {}).get("physical_cells")
+                    or []
+                )
+            ),
+            reuse_reason=reuse_post_existence_reason,
+            tap_authorized=False,
+        )
+    else:
+        np_check = visual_profile_has_no_posts(
+            d,
+            source_profile_username=source_profile_username,
+            # Follow60 already reaches Golden only after structural proof rejection.
+            # Do not persist a second diagnostic screenshot on its healthy path;
+            # the single Golden image below remains the visual selection input.
+            include_visual_fallback=not post_follow_fast,
+        )
     if np_check.get("no_posts_detected"):
         meta_np = _followers_current_pkg_activity(d)
         log(
@@ -52346,6 +52563,7 @@ def run_post_follow_post_likes_phase(
     _canary_grid_decision_consumed = False
     _canary_grid_golden_direct = False
     _canary_grid_golden_reason = ""
+    _canary_golden_post_existence_evidence: dict[str, Any] | None = None
     try:
         from follow_60s_canary import (
             consume_post_grid_evidence as _consume_post_grid_evidence,
@@ -52537,6 +52755,16 @@ def run_post_follow_post_likes_phase(
                 else:
                     _canary_grid_evidence = None
                     _canary_grid_golden_direct = True
+                    _reuse_exists, _reuse_exists_reason = (
+                        _post_follow_golden_can_reuse_positive_post_grid_existence(
+                            _candidate_grid,
+                            expected_follower_username=cand,
+                        )
+                    )
+                    if _reuse_exists:
+                        _canary_golden_post_existence_evidence = dict(
+                            _candidate_grid
+                        )
                     _grid_reject = str(
                         _candidate_grid.get("rejection_reason")
                         or "post_grid_ambiguous"
@@ -53391,6 +53619,9 @@ def run_post_follow_post_likes_phase(
                 post_follow_stash_open_like_proof=True,
                 post_open_intent_binding=authoritative_binding,
                 post_open_intent_target_username=src,
+                post_grid_existence_evidence=(
+                    _canary_golden_post_existence_evidence
+                ),
             )
             log(
                 "info",
@@ -53836,6 +54067,7 @@ def run_post_follow_post_likes_phase(
                     post_follow_stash_open_like_proof=True,
                     post_open_intent_binding=authoritative_binding,
                     post_open_intent_target_username=src,
+                    post_grid_existence_evidence=_canary_grid_evidence,
                 )
                 log(
                     "info",
