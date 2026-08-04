@@ -1,13 +1,13 @@
 {
   "schema": "FOLLOW60_MAINLINE_MANIFEST_V1",
   "official_name": "FOLLOW60_MAINLINE_V1",
-  "status": "source_and_db_certified_runtime_activation_pending",
+  "status": "certified_release_ready_for_controlled_activation",
   "worker_functional_sha": "5cc22fe702a1a05925aeb4c58a59e1c7306ca3aa",
   "worker_parent_sha": "4e05e1016497c15882286601f0b4fc837d691a68",
   "backend_db_sha": "84fb4b60f3401b4047beba32b1b63fee33ce70c6",
   "migration": "20260804231500_follow60_mainline_binding_v1",
   "tag": "follow60-mainline-production-2026-08-04",
-  "runtime_release": null,
+  "runtime_release": "/Users/admin/phonefarm-worker-releases/follow60-mainline-v1-20260804",
   "binding": {
     "normal": "mainline_run_scoped",
     "canary": "optional_explicit_control",
