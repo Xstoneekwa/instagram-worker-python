@@ -1,0 +1,61 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_3",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1_2.json",
+  "status": "FOLLOW60_ORDERING_V2_SHADOW_ONLY_APPROVED_PATCH",
+  "historical_manifests_immutable": true,
+  "production_runtime_unchanged": true,
+  "active_production_worker_sha": "4dce7f69ef7f80f69c15d1c7276545a74c057b16",
+  "active_production_release": "/Users/admin/phonefarm-worker-releases/4dce7f6-follow60-mainline-stop-live-v1",
+  "worker_parent_sha": "ac826ebddf118013a28f43d15daf7842bdf8db36",
+  "approved_source_sha": "549bd32b48bef24c233d142c852e8b8fbeaa1786",
+  "behavioral_ordering_v2": false,
+  "runtime_activation_authorized": false,
+  "default_enabled": false,
+  "critical_files": {
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "runner.py": "d77be4609b7bfa2707b3264fdfb5643daaf70bf95013190a37e1a37922a9fd5d",
+    "post_follow_stage_outbox.py": "b3f2dc4b2054e44c29a2d956034570a7d449d5a57a2763fb5dda38479042cbe2",
+    "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7",
+    "instagram_navigation.py": "f606a99532332c258ace5bdb05384bc584c1a7a9f8f047d5566ce6189fd347ea",
+    "follow60_ordering_v2_shadow.py": "ef1e5772232e5135a62fc2be1a2e1384e74c7232491f8981bbcbe736c8a07d4f",
+    "tests/test_follow60_ordering_v2_shadow.py": "6890ca907670af623de23a3afdc127a57d81ce5999f96991393f55690000b4f5"
+  },
+  "approved_diff": {
+    "scope": [
+      "docs/follow60-ordering-v2-shadow-v1.md",
+      "follow60_ordering_v2_shadow.py",
+      "runner.py",
+      "tests/test_follow60_ordering_v2_shadow.py"
+    ],
+    "sha256": "706b5e67f8fb67b3e2199188fb7df8a90a270ab56f480f91a4aea4870b3bc5a3",
+    "summary": "449 insertions, 0 deletions"
+  },
+  "decision": {
+    "behavioral_verdict": "NO_GO_FOLLOW60_ORDERING_V2_SOURCE",
+    "reason": "historical_runs_do_not_capture_initial_pre_follow_grid_geometry_and_like_before_follow_has_no_pre_post_durable_action_binding",
+    "delivered": "zero_acquisition_shadow_classifier_over_existing_pre_follow_mono_xml",
+    "operator_screenshots": "illustrative_only_not_run_evidence",
+    "v1_action_engine_changed": false
+  },
+  "tests": {
+    "targeted": "6/6",
+    "neighborhood": "137/137",
+    "full_worker": "2731/2731"
+  },
+  "approval": {
+    "approval_id": "3a77c735-7e10-4e6a-a392-72f189ba9caa-follow60-ordering-v2-source",
+    "approved_by": "liam",
+    "approved_at": "2026-08-05T13:37:01Z",
+    "expires_at": "2026-08-05T15:37:01Z",
+    "base_sha": "ac826ebddf118013a28f43d15daf7842bdf8db36",
+    "target_sha": "549bd32b48bef24c233d142c852e8b8fbeaa1786",
+    "scope": [
+      "docs/follow60-ordering-v2-shadow-v1.md",
+      "follow60_ordering_v2_shadow.py",
+      "runner.py",
+      "tests/test_follow60_ordering_v2_shadow.py"
+    ],
+    "diff_sha256": "706b5e67f8fb67b3e2199188fb7df8a90a270ab56f480f91a4aea4870b3bc5a3",
+    "one_shot_status": "consumed"
+  }
+}

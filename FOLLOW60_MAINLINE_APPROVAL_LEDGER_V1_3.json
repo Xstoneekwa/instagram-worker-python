@@ -1,0 +1,22 @@
+{
+  "schema": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_3",
+  "consumed_approval_ids": [
+    "3a77c735-7e10-4e6a-a392-72f189ba9caa-follow60-ordering-v2-source"
+  ],
+  "entries": [
+    {
+      "approval_id": "3a77c735-7e10-4e6a-a392-72f189ba9caa-follow60-ordering-v2-source",
+      "base_sha": "ac826ebddf118013a28f43d15daf7842bdf8db36",
+      "target_sha": "549bd32b48bef24c233d142c852e8b8fbeaa1786",
+      "consumed_at": "2026-08-05T13:37:01Z",
+      "scope": [
+        "docs/follow60-ordering-v2-shadow-v1.md",
+        "follow60_ordering_v2_shadow.py",
+        "runner.py",
+        "tests/test_follow60_ordering_v2_shadow.py"
+      ],
+      "diff_sha256": "706b5e67f8fb67b3e2199188fb7df8a90a270ab56f480f91a4aea4870b3bc5a3",
+      "runtime_activation_authorized": false
+    }
+  ]
+}
