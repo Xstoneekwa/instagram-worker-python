@@ -624,25 +624,38 @@ def _record_follow60_ordering_v2_shadow_from_existing_capture(
     candidate_username: str,
     source_profile_username: str,
     visual_candidate_id: str,
+    business_session_id: str = "",
+    attempt_id: int = 0,
+    binding_kind: str = "",
+    worker_sha: str = "",
+    target_id: str = "",
+    action_id: str = "",
+    business_evidence: dict[str, Any] | None = None,
+    expected_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Emit Ordering V2 feasibility telemetry without acquiring or changing UI state."""
+    """Start one Ordering V2 shadow context without acquiring or changing UI state."""
     try:
         from follow60_ordering_v2_shadow import (
-            classify_existing_pre_follow_capture,
+            begin_candidate_shadow,
         )
 
-        result = classify_existing_pre_follow_capture(
+        return begin_candidate_shadow(
             mono_capture,
             account_id=account_id,
             run_id=run_id,
             request_id=request_id,
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            binding_kind=binding_kind,
+            worker_sha=worker_sha,
+            target_id=target_id,
             candidate_username=candidate_username,
             source_profile_username=source_profile_username,
             visual_candidate_id=visual_candidate_id,
+            action_id=action_id or visual_candidate_id,
+            business_evidence=business_evidence,
+            expected_binding=expected_binding,
         )
-        if result is not None:
-            log("info", "follow60_ordering_v2_shadow_evaluated", **result)
-        return result
     except Exception as exc:
         # Shadow telemetry must never affect Follow60 V1.
         try:
@@ -17838,6 +17851,67 @@ def _run_followers_list_engine_session(
                                 pick, str(follower_un or "")
                             )
                         ),
+                        business_session_id=str(business_session_id or ""),
+                        attempt_id=int(follow60_attempt_id or 1),
+                        binding_kind=(
+                            "mainline"
+                            if follow60_mainline_active
+                            else "canary"
+                            if follow60_canary_active
+                            else ""
+                        ),
+                        worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+                        target_id=str(target_id or ""),
+                        action_id=str(
+                            _vcid_sm
+                            or _post_follow_visual_candidate_id(
+                                pick, str(follower_un or "")
+                            )
+                        ),
+                        business_evidence={
+                            "filter_evaluated": True,
+                            "filter_passed": True,
+                            "filter_reason": "candidate_reached_v1_follow_gate",
+                            "eligibility_passed": True,
+                            "eligibility_reason": "candidate_reached_v1_follow_gate",
+                            "follow_budget_available": bool(
+                                not _runtime_follow_cap_exceeded(_follow_max_per_run)
+                                and not _target_budget_reached()
+                            ),
+                            "configured_global_budget": int(
+                                session_global_follow_cap or 0
+                            ),
+                            "effective_global_budget": int(_follow_max_per_run or 0),
+                            "effective_target_budget": int(
+                                target_follow_budget_effective or 0
+                            ),
+                            "session_follow_count_before_candidate": int(
+                                _RUNTIME_FOLLOW_COUNT
+                            ),
+                        },
+                        expected_binding={
+                            "account_id": str(account_id or ""),
+                            "request_id": str(
+                                run_request_id or _CURRENT_RUN_REQUEST_ID or ""
+                            ),
+                            "run_id": str(run_id or ""),
+                            "business_session_id": str(business_session_id or ""),
+                            "attempt_id": int(follow60_attempt_id or 1),
+                            "binding_kind": (
+                                "mainline"
+                                if follow60_mainline_active
+                                else "canary"
+                                if follow60_canary_active
+                                else ""
+                            ),
+                            "worker_sha": str(
+                                os.environ.get("WORKER_GIT_SHA") or ""
+                            ).lower(),
+                            "target_id": str(target_id or ""),
+                            "candidate_username": _norm_ig_handle(
+                                str(follower_un or "")
+                            ),
+                        },
                     )
                 if bool(_private_fast_path.get("handled")):
                     _target_rejection_record(
@@ -21869,6 +21943,22 @@ def _main_impl() -> int:
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
             stop_trace=stop_trace,
         )
+        try:
+            from follow60_ordering_v2_shadow import (
+                PUBLIC_EVENT as _ordering_v2_public_event,
+                finalize_active_contexts as _finalize_ordering_v2_contexts,
+            )
+
+            for _shadow_terminal in _finalize_ordering_v2_contexts(
+                status="partial_manual_stop",
+                reason="manual_stop_signal",
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+            ):
+                log("info", _ordering_v2_public_event, **_shadow_terminal)
+        except Exception:
+            # Shadow terminalization is best effort and never blocks V1 Stop.
+            pass
         try:
             from follow_60s_canary import runtime_context as _follow60_stop_context
 

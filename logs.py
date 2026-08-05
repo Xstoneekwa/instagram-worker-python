@@ -56,17 +56,7 @@ def init_run_file_logging(run_id: str) -> str | None:
         return None
 
 
-def log(level: str, event: str, **fields: Any) -> None:
-    """Emit one JSON object per line (level, event, optional fields) to stdout and run file."""
-    include_null = bool(fields.pop("_include_null_fields", False))
-    payload: dict[str, Any] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "level": level,
-        "event": event,
-    }
-    for k, v in fields.items():
-        if include_null or v is not None:
-            payload[k] = v
+def _write_payload(payload: dict[str, Any]) -> None:
     line = json.dumps(payload, default=str) + "\n"
     sys.stdout.write(line)
     sys.stdout.flush()
@@ -76,3 +66,43 @@ def log(level: str, event: str, **fields: Any) -> None:
             _RUN_LOG_FILE.flush()
         except Exception:
             pass
+
+
+def log(level: str, event: str, **fields: Any) -> None:
+    """Emit one JSON object per line and feed the CPU-only Ordering V2 observer."""
+    include_null = bool(fields.pop("_include_null_fields", False))
+    payload: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "event": event,
+    }
+    observed_fields: dict[str, Any] = {}
+    for k, v in fields.items():
+        if include_null or v is not None:
+            payload[k] = v
+            observed_fields[k] = v
+    _write_payload(payload)
+
+    # The observer only reads fields already emitted by V1.  It is isolated so
+    # import, enrichment, or serialization failures can never affect V1 logs or
+    # execution.  Terminal events bypass ``log`` to prevent recursion.
+    try:
+        from follow60_ordering_v2_shadow import (
+            PUBLIC_EVENT,
+            observe_runtime_event,
+        )
+
+        terminal_events = observe_runtime_event(event, observed_fields)
+        for terminal in terminal_events:
+            if not isinstance(terminal, dict):
+                continue
+            _write_payload(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "level": "info",
+                    "event": PUBLIC_EVENT,
+                    **terminal,
+                }
+            )
+    except Exception:
+        pass
