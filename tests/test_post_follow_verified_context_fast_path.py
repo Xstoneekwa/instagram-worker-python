@@ -50,6 +50,7 @@ def _run_phase(
     skipped_tap: bool = False,
     follow_private_accounts: bool = False,
     stage_persist_callback=None,
+    mute_v2: dict | None = None,
 ) -> tuple[dict, dict]:
     logs: list[tuple[str, str, dict]] = []
     ctx = FollowContext.from_follow_verified(
@@ -58,13 +59,13 @@ def _run_phase(
         visual_candidate_id="vc-1",
         follow_state_after=follow_state_after,
     )
-    mute_v2 = {
+    mute_v2_result = dict(mute_v2 or {
         "ok": True,
         "outcome": "success",
         "posts_verified": True,
         "stories_verified": True,
         "timings_ms": {"mute_total_ms": 1.0},
-    }
+    })
     with patch.object(nav.config, "FOLLOW_PRIVATE_ACCOUNTS", follow_private_accounts, create=True), patch.object(
         nav.config,
         "ENABLE_VISUAL_FOLLOW_MUTE_FLOW",
@@ -86,7 +87,7 @@ def _run_phase(
     ) as mock_overlay, patch.object(
         nav,
         "run_mute_engine_v2",
-        return_value=mute_v2,
+        return_value=mute_v2_result,
     ) as mock_mute, patch.object(
         nav,
         "_post_mute_state_checkpoint",
@@ -189,6 +190,41 @@ class PostFollowVerifiedContextFastPathTest(unittest.TestCase):
         self.assertEqual(out["likes"]["skipped_reason"], "critical_stage_persist_failed")
         self.assertFalse(out["stage_persist_ok"])
         self.assertTrue(out["return_ok"])
+
+    def test_partial_required_mute_blocks_like_and_keeps_safe_return(self) -> None:
+        persisted: list[tuple[str, dict]] = []
+
+        def persist(stage: str, payload: dict) -> bool:
+            persisted.append((stage, dict(payload)))
+            return True
+
+        out, probes = _run_phase(
+            device=_Device(action_bar_title="candidate"),
+            stage_persist_callback=persist,
+            mute_v2={
+                "ok": True,
+                "outcome": "partial_success",
+                "partial": True,
+                "posts_verified": True,
+                "stories_verified": False,
+                "timings_ms": {"mute_total_ms": 1.0},
+            },
+        )
+
+        self.assertEqual(probes["like_calls"], 0)
+        self.assertEqual(
+            out["likes"]["skipped_reason"],
+            "required_mute_verification_incomplete",
+        )
+        self.assertEqual(out["required_mute_missing_axes"], ["stories"])
+        self.assertTrue(out["return_ok"])
+        self.assertEqual(
+            [stage for stage, _payload in persisted],
+            ["mute_posts_verified", "return_ct_exact"],
+        )
+        return_payload = persisted[-1][1]
+        self.assertFalse(return_payload["required_mute_verification_complete"])
+        self.assertEqual(return_payload["required_mute_missing_axes"], ["stories"])
 
 
 if __name__ == "__main__":

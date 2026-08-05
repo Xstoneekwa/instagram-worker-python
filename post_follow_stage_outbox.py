@@ -375,6 +375,18 @@ def flush_pending(
     other_action_receipts = 0
     for group in groups:
         first = group[0]
+        expected_stages = {str(row["stage"]) for row in group}
+        return_ct_present = "return_ct_exact" in expected_stages
+        required_mute_stages = {
+            "mute_posts_verified",
+            "mute_stories_verified",
+        }
+        missing_required_mute_stages = sorted(
+            required_mute_stages - expected_stages
+        )
+        completed_cycle_ready = bool(
+            return_ct_present and not missing_required_mute_stages
+        )
         binding_fields = (
             "account_id", "original_run_id", "original_request_id", "action_id",
             "action_id_hash", "candidate_username", "source_profile", "attempt_id",
@@ -434,7 +446,7 @@ def flush_pending(
                 action_id_hash_value=first["action_id_hash"],
                 username=first["candidate_username"], source_profile=first["source_profile"],
                 attempt_id=first["attempt_id"], business_session_id=first["business_session_id"],
-                cycle_complete=any(bool(row["cycle_complete"]) for row in group),
+                cycle_complete=completed_cycle_ready,
                 stages=[
                     {
                         "stage": row["stage"],
@@ -457,7 +469,6 @@ def flush_pending(
         if not bool(out.get("ok")) or out.get("binding_valid") is not True:
             _mark_delivery_error(group, path, out.get("reason") or "rpc_not_confirmed")
             return {"ok": False, "reason": str(out.get("reason") or "rpc_not_confirmed"), "flushed": flushed}
-        expected_stages = {str(row["stage"]) for row in group}
         confirmed_stages = {
             str(stage)
             for stage in (
@@ -472,7 +483,36 @@ def flush_pending(
                 "reason": "rpc_stage_confirmation_incomplete",
                 "flushed": flushed,
             }
-        if any(bool(row["cycle_complete"]) for row in group):
+        if return_ct_present and not completed_cycle_ready:
+            _delete_confirmed(group, path)
+            flushed += 1
+            log(
+                "error",
+                "follow60_cycle_incomplete_missing_required_mute_stage",
+                account_id=first["account_id"],
+                run_id=first["original_run_id"],
+                request_id=first["original_request_id"],
+                action_id_hash=first["action_id_hash"],
+                candidate_username=first["candidate_username"],
+                persisted_stages=sorted(expected_stages),
+                missing_required_stages=missing_required_mute_stages,
+                cycle_ledger_ack_skipped=True,
+                next_candidate_blocked=True,
+            )
+            return {
+                "ok": False,
+                "reason": "follow60_cycle_incomplete_missing_required_mute_stage",
+                "flushed": flushed,
+                "partial_receipts_persisted": True,
+                "persisted_stages": sorted(expected_stages),
+                "missing_required_stages": missing_required_mute_stages,
+                "pending": _active_pending_count(
+                    _load_groups(path),
+                    active_binding=binding,
+                    action_id_hash_value=action_hash,
+                ),
+            }
+        if completed_cycle_ready:
             return_row = next(
                 (row for row in group if row["stage"] == "return_ct_exact"), None
             )

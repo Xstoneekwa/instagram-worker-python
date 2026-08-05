@@ -86,6 +86,68 @@ class Follow60MainlineOutboxTests(unittest.TestCase):
             self.assertEqual(ledger_rpc.call_args.kwargs["binding_kind"], "mainline")
             self.assertFalse(result["latest_ledger_ack"]["barrier_reached"])
 
+    def test_partial_mute_receipts_persist_without_completed_cycle_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "outbox.sqlite3"
+            payload = {
+                "binding_kind": "mainline",
+                "control_id": RUN,
+                "worker_sha": SHA,
+                "proof_type": "verified",
+                "like_terminal_status": "safe_skip",
+                "like_terminal_reason": "required_mute_verification_incomplete",
+            }
+            for stage in ("mute_posts_verified", "return_ct_exact"):
+                outbox.journal_stage(
+                    account_id=ACCOUNT,
+                    original_run_id=RUN,
+                    request_id=REQUEST,
+                    action_id="candidate-action",
+                    stage=stage,
+                    candidate_username="candidate",
+                    source_profile="source",
+                    attempt_id=1,
+                    business_session_id="session-1",
+                    verified_at="2026-08-05T20:00:00+00:00",
+                    payload=payload,
+                    path=path,
+                )
+            persist = {
+                "ok": True,
+                "binding_valid": True,
+                "inserted_stages": ["mute_posts_verified", "return_ct_exact"],
+                "duplicate_stages": [],
+            }
+            with mock.patch(
+                "supabase_client.persist_follow60_post_follow_v3",
+                return_value=persist,
+            ) as persist_rpc, mock.patch(
+                "supabase_client.ack_follow60_completed_cycle_v2"
+            ) as ledger_rpc:
+                result = outbox.flush_pending(
+                    active_binding={
+                        "binding_kind": "mainline",
+                        "account_id": ACCOUNT,
+                        "run_id": RUN,
+                        "request_id": REQUEST,
+                        "control_id": RUN,
+                        "worker_sha": SHA,
+                    },
+                    path=path,
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(
+                result["reason"],
+                "follow60_cycle_incomplete_missing_required_mute_stage",
+            )
+            self.assertTrue(result["partial_receipts_persisted"])
+            self.assertEqual(
+                result["missing_required_stages"], ["mute_stories_verified"]
+            )
+            self.assertEqual(outbox.pending_count(path), 0)
+            self.assertIs(persist_rpc.call_args.kwargs["cycle_complete"], False)
+            ledger_rpc.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

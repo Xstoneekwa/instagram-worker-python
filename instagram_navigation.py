@@ -58609,6 +58609,22 @@ def run_visual_candidate_post_follow_phase(
                 timings_ms=v2.get("timings_ms") or {},
             )
 
+    required_mute_verification_incomplete = bool(
+        should_mute
+        and (
+            not bool(mute_out.get("posts_verified"))
+            or not bool(mute_out.get("stories_verified"))
+        )
+    )
+    required_mute_missing_axes = [
+        axis
+        for axis, verified in (
+            ("posts", bool(mute_out.get("posts_verified"))),
+            ("stories", bool(mute_out.get("stories_verified"))),
+        )
+        if should_mute and not verified
+    ]
+
     likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
     if critical_stage_persist_failed:
         post_follow_ctx.mark_post_grid_blocked(reason="critical_stage_persist_failed")
@@ -58629,6 +58645,33 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             follower_username=cand,
             stage_persist_results=dict(stage_persist_results),
+            safety_return_ct_still_required=True,
+        )
+    elif required_mute_verification_incomplete:
+        post_follow_ctx.mark_post_grid_blocked(
+            reason="required_mute_verification_incomplete"
+        )
+        post_follow_ctx.mark_like_done_or_skipped(
+            reason="required_mute_verification_incomplete"
+        )
+        likes_out.update(
+            {
+                "ok": False,
+                "skipped": True,
+                "phase_outcome": "skipped",
+                "skipped_reason": "required_mute_verification_incomplete",
+                "likes_failure_kind": "required_mute_verification_incomplete",
+                "required_mute_missing_axes": list(required_mute_missing_axes),
+            }
+        )
+        log(
+            "warning",
+            "post_follow_like_skipped_required_mute_verification_incomplete",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            required_mute_missing_axes=list(required_mute_missing_axes),
+            mute_v2_outcome=str(mute_out.get("mute_v2_outcome") or ""),
             safety_return_ct_still_required=True,
         )
     elif candidate_profile_lost:
@@ -59017,6 +59060,10 @@ def run_visual_candidate_post_follow_phase(
                 "worker_sha": str(
                     (stage_binding or {}).get("worker_sha") or ""
                 ).lower(),
+                "required_mute_verification_complete": bool(
+                    not should_mute or not required_mute_verification_incomplete
+                ),
+                "required_mute_missing_axes": list(required_mute_missing_axes),
             },
         )
         log(
@@ -59088,6 +59135,10 @@ def run_visual_candidate_post_follow_phase(
         ),
         "stage_persist_results": dict(stage_persist_results),
         "stage_persist_ok": all(stage_persist_results.values()),
+        "required_mute_verification_incomplete": bool(
+            required_mute_verification_incomplete
+        ),
+        "required_mute_missing_axes": list(required_mute_missing_axes),
     }
     for _k in (
         "return_list_screenshot_path",
