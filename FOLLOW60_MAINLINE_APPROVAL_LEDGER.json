@@ -1,4 +1,6 @@
 {
   "schema": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1",
-  "consumed_approval_ids": []
+  "consumed_approval_ids": [
+    "825171c2-9be7-4e2a-90ce-01aa4afb84fc-mainline-binding-fix-v1"
+  ]
 }

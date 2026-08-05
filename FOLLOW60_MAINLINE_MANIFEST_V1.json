@@ -21,7 +21,7 @@
   },
   "critical_files": {
     "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
-    "runner.py": "4d24f408c99331522ecf8a39b3b35cea29c6b4b112ed0bb1d434b7dbceeeac7a",
+    "runner.py": "0cef9e26516a1f649f8688af826fc28650dd2597746725efd58b944a5522a61f",
     "post_follow_stage_outbox.py": "b3f2dc4b2054e44c29a2d956034570a7d449d5a57a2763fb5dda38479042cbe2",
     "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7",
     "instagram_navigation.py": "c1ac7e050dcd42e8a0e6dadf92a5930fd0f121f90b77f8a28379a240fd9908e3"

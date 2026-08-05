@@ -162,6 +162,8 @@ def _without_reviewed_follow60_binding(node: ast.FunctionDef) -> ast.FunctionDef
         "follow60_canary_control",
         "follow60_attempt_id",
         "business_session_id",
+        "follow60_mainline_active",
+        "follow60_business_session_binding",
     }
     for index, argument in list(enumerate(normalized.args.kwonlyargs))[::-1]:
         if argument.arg in reviewed_arguments:
@@ -169,8 +171,19 @@ def _without_reviewed_follow60_binding(node: ast.FunctionDef) -> ast.FunctionDef
             normalized.args.kw_defaults.pop(index)
 
     class RemoveReviewedFollow60Binding(ast.NodeTransformer):
+        def visit_AnnAssign(self, item):
+            if (
+                isinstance(item.target, ast.Name)
+                and item.target.id == "mainline_session_binding"
+            ):
+                return None
+            return self.generic_visit(item)
+
         def visit_If(self, item):
-            if isinstance(item.test, ast.Name) and item.test.id == "follow60_canary_active":
+            if (
+                isinstance(item.test, ast.Name)
+                and item.test.id in {"follow60_canary_active", "follow60_mainline_active"}
+            ):
                 return None
             return self.generic_visit(item)
 

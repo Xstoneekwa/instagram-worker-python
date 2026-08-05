@@ -26,6 +26,7 @@ from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import resolve_welcome_dm_real_send_enabled
 from follow_outcome_contract import merge_follow_outcome
+from follow60_business_session_binding_v1 import validate_business_session_binding
 from instagram_navigation import verify_app_foreground
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
@@ -779,6 +780,8 @@ def _run_follow_target_rotation(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    follow60_mainline_active: bool = False,
+    follow60_business_session_binding: dict[str, Any] | None = None,
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
@@ -805,6 +808,42 @@ def _run_follow_target_rotation(
     prevalidated_followers_target_key: str | None = None
     prevalidated_followers_meta: dict[str, Any] = {}
     t0 = time.perf_counter()
+
+    mainline_session_binding: dict[str, Any] = {}
+    if follow60_mainline_active:
+        mainline_session_binding, binding_reason = validate_business_session_binding(
+            follow60_business_session_binding,
+            account_id=account_id,
+            request_id=str(run_request_id or ""),
+            run_id=str(run_id or ""),
+            attempt_id=int(follow60_attempt_id or 0),
+            worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+            business_session_id=str(business_session_id or ""),
+        )
+        if mainline_session_binding is None:
+            log(
+                "error",
+                "follow60_business_session_binding_rejected",
+                account_id=account_id,
+                run_id=run_id,
+                request_id=run_request_id,
+                reason=binding_reason,
+                boundary="account_session_to_target_rotation",
+                device_actions_blocked=True,
+            )
+            return {
+                "exit_code": 96,
+                "reason": binding_reason,
+                "summary": {
+                    "exit_code": 96,
+                    "follow_session_outcome": "business_session_binding_rejected",
+                    "follow_stop_reason": binding_reason,
+                    "follows_completed_count": 0,
+                    "follow_processed_count": 0,
+                },
+                "attempts": [],
+                "exhausted_targets": [],
+            }
 
     log(
         "info",
@@ -984,6 +1023,21 @@ def _run_follow_target_rotation(
                     "follow60_canary_control": dict(follow60_canary_control or {}),
                     "follow60_attempt_id": int(follow60_attempt_id or 1),
                     "business_session_id": str(business_session_id or "") or None,
+                }
+            )
+        elif follow60_mainline_active:
+            call_kwargs.update(
+                {
+                    "run_request_id": str(run_request_id or "") or None,
+                    "follow60_mainline_active": True,
+                    "follow60_business_session_binding": dict(
+                        mainline_session_binding
+                    ),
+                    "follow60_attempt_id": int(follow60_attempt_id or 1),
+                    "business_session_id": str(
+                        mainline_session_binding.get("business_session_id") or ""
+                    )
+                    or None,
                 }
             )
         if start_from_current_followers_list:
@@ -3628,6 +3682,8 @@ def run_account_session(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    follow60_mainline_active: bool = False,
+    follow60_business_session_binding: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
@@ -4086,6 +4142,16 @@ def run_account_session(
                     "run_request_id": run_request_id,
                     "follow60_canary_active": True,
                     "follow60_canary_control": follow60_canary_control,
+                    "follow60_attempt_id": follow60_attempt_id,
+                    "business_session_id": business_session_id,
+                }
+            elif follow60_mainline_active:
+                _follow60_rotation_kwargs = {
+                    "run_request_id": run_request_id,
+                    "follow60_mainline_active": True,
+                    "follow60_business_session_binding": dict(
+                        follow60_business_session_binding or {}
+                    ),
                     "follow60_attempt_id": follow60_attempt_id,
                     "business_session_id": business_session_id,
                 }
@@ -5063,6 +5129,8 @@ def dispatch_account_session(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    follow60_mainline_active: bool = False,
+    follow60_business_session_binding: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
 ) -> int:
     return run_account_session(
@@ -5090,5 +5158,7 @@ def dispatch_account_session(
         follow60_canary_control=follow60_canary_control,
         follow60_attempt_id=follow60_attempt_id,
         business_session_id=business_session_id,
+        follow60_mainline_active=follow60_mainline_active,
+        follow60_business_session_binding=follow60_business_session_binding,
         worker_runtime_identity=worker_runtime_identity,
     )

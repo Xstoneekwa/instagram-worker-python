@@ -11227,6 +11227,8 @@ def _run_followers_list_engine_session(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    follow60_mainline_active: bool = False,
+    follow60_business_session_binding: dict[str, Any] | None = None,
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
@@ -11239,6 +11241,42 @@ def _run_followers_list_engine_session(
     global _RUNTIME_SKIPPED_USERNAMES
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+    _mainline_session_binding: dict[str, Any] = {}
+    if follow60_mainline_active:
+        from follow60_business_session_binding_v1 import (
+            validate_business_session_binding,
+        )
+
+        _validated_mainline_binding, _mainline_binding_reason = (
+            validate_business_session_binding(
+                follow60_business_session_binding,
+                account_id=account_id,
+                request_id=str(run_request_id or ""),
+                run_id=str(run_id or ""),
+                attempt_id=int(follow60_attempt_id or 0),
+                worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+                business_session_id=str(business_session_id or ""),
+            )
+        )
+        if _validated_mainline_binding is None:
+            log(
+                "error",
+                "follow60_stage_binding_missing_or_invalid",
+                account_id=account_id or None,
+                run_id=run_id or None,
+                request_id=run_request_id or None,
+                attempt_id=int(follow60_attempt_id or 0),
+                business_session_id_present=bool(business_session_id),
+                reason=_mainline_binding_reason,
+                boundary="target_rotation_to_follow_engine",
+                mainline_active=True,
+                device_actions_started=False,
+            )
+            return 96
+        _mainline_session_binding = dict(_validated_mainline_binding)
+        business_session_id = str(
+            _mainline_session_binding.get("business_session_id") or ""
+        )
     if follow60_canary_active:
         _control = dict(follow60_canary_control or {})
         _binding_ok = bool(
@@ -20055,6 +20093,11 @@ def _run_followers_list_engine_session(
             if _pf_run_full:
                 _pf_stage_persist_callback = None
                 _pf_follow_context = None
+                _pf_session_binding = (
+                    dict(_mainline_session_binding)
+                    if follow60_mainline_active
+                    else dict(follow60_canary_control or {})
+                )
                 if _pf_follow_ok:
                     try:
                         from follow_state_contract import FollowContext
@@ -20112,16 +20155,19 @@ def _run_followers_list_engine_session(
                                 payload={
                                     **dict(payload or {}),
                                     "binding_kind": str(
-                                        (follow60_canary_control or {}).get("binding_kind")
+                                        _pf_session_binding.get("binding_kind")
                                         or ("canary" if follow60_canary_active else "mainline")
                                     ),
                                     "control_id": str(
-                                        (follow60_canary_control or {}).get("control_id")
-                                        or (follow60_canary_control or {}).get("id")
+                                        _pf_session_binding.get("control_id")
+                                        or _pf_session_binding.get("id")
+                                        or _pf_session_binding.get("run_id")
                                         or ""
                                     ),
                                     "worker_sha": str(
-                                        os.environ.get("WORKER_GIT_SHA") or ""
+                                        _pf_session_binding.get("worker_sha")
+                                        or os.environ.get("WORKER_GIT_SHA")
+                                        or ""
                                     ).lower(),
                                     "visual_candidate_id": _pf_log_vcid,
                                 },
@@ -20158,32 +20204,47 @@ def _run_followers_list_engine_session(
                     return 96
                 _pf_expected_stage_binding = None
                 if _follow60_stage_receipts:
-                    _pf_expected_stage_binding = {
-                        "binding_kind": str(
-                            (follow60_canary_control or {}).get("binding_kind")
-                            or ("canary" if follow60_canary_active else "mainline")
-                        ),
-                        "account_id": str(account_id or ""),
-                        "run_id": str(run_id or ""),
-                        "request_id": str(run_request_id or ""),
-                        "action_id": str(_pf_log_vcid or ""),
-                        "attempt_id": int(follow60_attempt_id or 1),
-                        "business_session_id": str(business_session_id or ""),
-                        "control_id": str(
-                            (follow60_canary_control or {}).get("control_id")
-                            or (follow60_canary_control or {}).get("id")
-                            or ""
-                        ),
-                        "worker_sha": str(
-                            os.environ.get("WORKER_GIT_SHA") or ""
-                        ),
-                        "candidate_username": str(follower_un or ""),
-                        "source_target_id": str(
+                    _pf_source_target_id = str(
                             (pick or {}).get("target_id")
                             or (pick or {}).get("source_target_id")
                             or ""
-                        ) if isinstance(pick, dict) else "",
-                    }
+                        ) if isinstance(pick, dict) else ""
+                    if follow60_mainline_active:
+                        from follow60_business_session_binding_v1 import (
+                            build_candidate_stage_binding,
+                        )
+
+                        _pf_expected_stage_binding = build_candidate_stage_binding(
+                            _mainline_session_binding,
+                            action_id=str(_pf_log_vcid or ""),
+                            candidate_username=str(follower_un or ""),
+                            source_target_id=_pf_source_target_id,
+                        )
+                        _pf_expected_stage_binding["control_id"] = str(run_id or "")
+                    else:
+                        _pf_expected_stage_binding = {
+                            "binding_kind": str(
+                                _pf_session_binding.get("binding_kind") or "canary"
+                            ),
+                            "account_id": str(account_id or ""),
+                            "run_id": str(run_id or ""),
+                            "request_id": str(run_request_id or ""),
+                            "action_id": str(_pf_log_vcid or ""),
+                            "attempt_id": int(follow60_attempt_id or 1),
+                            "business_session_id": str(business_session_id or ""),
+                            "control_id": str(
+                                _pf_session_binding.get("control_id")
+                                or _pf_session_binding.get("id")
+                                or ""
+                            ),
+                            "worker_sha": str(
+                                _pf_session_binding.get("worker_sha")
+                                or os.environ.get("WORKER_GIT_SHA")
+                                or ""
+                            ),
+                            "candidate_username": str(follower_un or ""),
+                            "source_target_id": _pf_source_target_id,
+                        }
                     _positive_post_count_proof = _build_positive_post_count_proof_v1(
                         dict(
                             (_pre_follow_observation_proof or {}).get(
@@ -20305,19 +20366,22 @@ def _run_followers_list_engine_session(
 
                         _active_outbox_binding = {
                             "binding_kind": str(
-                                (follow60_canary_control or {}).get("binding_kind")
+                                _pf_session_binding.get("binding_kind")
                                 or ("canary" if follow60_canary_active else "mainline")
                             ),
                             "account_id": str(account_id or ""),
                             "run_id": str(run_id or ""),
                             "request_id": str(run_request_id or ""),
                             "control_id": str(
-                                (follow60_canary_control or {}).get("control_id")
-                                or (follow60_canary_control or {}).get("id")
+                                _pf_session_binding.get("control_id")
+                                or _pf_session_binding.get("id")
+                                or _pf_session_binding.get("run_id")
                                 or ""
                             ),
                             "worker_sha": str(
-                                os.environ.get("WORKER_GIT_SHA") or ""
+                                _pf_session_binding.get("worker_sha")
+                                or os.environ.get("WORKER_GIT_SHA")
+                                or ""
                             ),
                         }
                         _follow60_composite_flush = post_follow_stage_outbox.flush_pending(
@@ -21989,6 +22053,7 @@ def _main_impl() -> int:
     _follow60_engine_active = False
     _follow60_canary_active = False
     _follow60_canary_control: dict[str, Any] = {}
+    _follow60_business_session_binding: dict[str, Any] = {}
     _follow60_attempt_id = 1
     _raw_control: dict[str, Any] | None = None
     _follow60_persistence_binding_ready = False
@@ -22401,13 +22466,20 @@ def _main_impl() -> int:
                     device_actions_started=False,
                 )
                 return 96
-            _follow60_canary_control = {
-                "control_id": str(run_id or ""),
-                "id": str(run_id or ""),
-                "binding_kind": "mainline",
-                "binding_version": "FOLLOW60_MAINLINE_BINDING_V1",
-                "worker_sha": _worker_sha,
-            }
+            from follow60_business_session_binding_v1 import (
+                create_mainline_business_session_binding,
+            )
+
+            _follow60_business_session_binding = (
+                create_mainline_business_session_binding(
+                    business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    account_id=str(account_id or ""),
+                    request_id=str(run_request_id or ""),
+                    run_id=str(run_id or ""),
+                    attempt_id=int(_follow60_attempt_id or 1),
+                    worker_sha=_worker_sha,
+                ).to_dict()
+            )
             _ensure_follow_persistence_run_binding(
                 persistence_required=True,
                 account_id=account_id,
@@ -24220,6 +24292,12 @@ def _main_impl() -> int:
             follow60_canary_control=dict(_follow60_canary_control or {}),
             follow60_attempt_id=int(_follow60_attempt_id or 1),
             business_session_id=_SESSION_SOCIAL_ID or None,
+            follow60_mainline_active=bool(
+                _follow60_engine_active and not _follow60_canary_active
+            ),
+            follow60_business_session_binding=dict(
+                _follow60_business_session_binding or {}
+            ),
             worker_runtime_identity=_ct_resume_runtime_identity,
         )
         if supabase_mode and run_id:
@@ -24369,6 +24447,12 @@ def _main_impl() -> int:
             follow60_canary_control=dict(_follow60_canary_control or {}),
             follow60_attempt_id=int(_follow60_attempt_id or 1),
             business_session_id=_SESSION_SOCIAL_ID or None,
+            follow60_mainline_active=bool(
+                _follow60_engine_active and not _follow60_canary_active
+            ),
+            follow60_business_session_binding=dict(
+                _follow60_business_session_binding or {}
+            ),
             target_followers_resume_source_request_id=run_request_id,
             worker_runtime_identity=bind_worker_runtime_identity(
                 runtime_identity,
