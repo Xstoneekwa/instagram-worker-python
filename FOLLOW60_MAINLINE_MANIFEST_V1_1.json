@@ -1,0 +1,48 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_1",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1.json",
+  "status": "FOLLOW60_MAINLINE_APPROVED_PATCH",
+  "historical_manifest_immutable": true,
+  "worker_parent_sha": "e4390a42f72ff91d7a712358166e418e227f7a95",
+  "approved_worker_sha": "51880fe31a2f513dee0d4e042b0be9414738d26d",
+  "runtime_release": "/Users/admin/phonefarm-worker-releases/51880fe-follow60-followers-list-proof-v1",
+  "critical_files": {
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "runner.py": "0cef9e26516a1f649f8688af826fc28650dd2597746725efd58b944a5522a61f",
+    "post_follow_stage_outbox.py": "b3f2dc4b2054e44c29a2d956034570a7d449d5a57a2763fb5dda38479042cbe2",
+    "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7",
+    "instagram_navigation.py": "f606a99532332c258ace5bdb05384bc584c1a7a9f8f047d5566ce6189fd347ea",
+    "tests/test_follow_targets_runtime_p1b.py": "90d14fec415ca8dfac6975016b982855fabc609ed6e1396e1e692f631fa1b2b5"
+  },
+  "approved_diff": {
+    "scope": [
+      "instagram_navigation.py",
+      "tests/test_follow_targets_runtime_p1b.py"
+    ],
+    "sha256": "5ea69ab2c96e6d6066919b285fc354950c3b3f6801b14a0e29f1b3841130538b",
+    "summary": "192 insertions, 1 deletion"
+  },
+  "incident": {
+    "incident_id": "85096e6c-cc36-4423-9480-c49c6c9be396",
+    "cause": "followers_entry_rendered_strong_accepted_unchanged_source_profile",
+    "correction": "reject unchanged source profile and allow one exact-profile standard V2 retry"
+  },
+  "tests": {
+    "targeted": "184/184",
+    "full_worker": "2712/2712"
+  },
+  "approval": {
+    "approval_id": "fe77e521-97ae-49bb-af25-3a4265a7d3f9-followers-list-proof-v1",
+    "approved_by": "liam",
+    "approved_at": "2026-08-05T08:27:10Z",
+    "expires_at": "2026-08-05T10:27:10Z",
+    "base_sha": "e4390a42f72ff91d7a712358166e418e227f7a95",
+    "target_sha": "51880fe31a2f513dee0d4e042b0be9414738d26d",
+    "scope": [
+      "instagram_navigation.py",
+      "tests/test_follow_targets_runtime_p1b.py"
+    ],
+    "diff_sha256": "5ea69ab2c96e6d6066919b285fc354950c3b3f6801b14a0e29f1b3841130538b",
+    "one_shot_status": "consumed"
+  }
+}

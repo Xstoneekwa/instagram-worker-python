@@ -1,0 +1,19 @@
+{
+  "schema": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_1",
+  "consumed_approval_ids": [
+    "fe77e521-97ae-49bb-af25-3a4265a7d3f9-followers-list-proof-v1"
+  ],
+  "entries": [
+    {
+      "approval_id": "fe77e521-97ae-49bb-af25-3a4265a7d3f9-followers-list-proof-v1",
+      "base_sha": "e4390a42f72ff91d7a712358166e418e227f7a95",
+      "target_sha": "51880fe31a2f513dee0d4e042b0be9414738d26d",
+      "consumed_at": "2026-08-05T08:27:10Z",
+      "scope": [
+        "instagram_navigation.py",
+        "tests/test_follow_targets_runtime_p1b.py"
+      ],
+      "diff_sha256": "5ea69ab2c96e6d6066919b285fc354950c3b3f6801b14a0e29f1b3841130538b"
+    }
+  ]
+}
