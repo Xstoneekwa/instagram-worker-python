@@ -1,0 +1,48 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_2",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1_1.json",
+  "status": "FOLLOW60_MAINLINE_APPROVED_PATCH",
+  "historical_manifest_immutable": true,
+  "worker_parent_sha": "f8b6348ecb7df5ce1a4eae65834e2cc7904b9a9f",
+  "approved_worker_sha": "4dce7f69ef7f80f69c15d1c7276545a74c057b16",
+  "runtime_release": "/Users/admin/phonefarm-worker-releases/4dce7f6-follow60-mainline-stop-live-v1",
+  "critical_files": {
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "runner.py": "0ef02241b616a2200e6db6970fb6f99bfb5d32e65ed0be1b0b402524306a9f4c",
+    "post_follow_stage_outbox.py": "b3f2dc4b2054e44c29a2d956034570a7d449d5a57a2763fb5dda38479042cbe2",
+    "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7",
+    "instagram_navigation.py": "f606a99532332c258ace5bdb05384bc584c1a7a9f8f047d5566ce6189fd347ea",
+    "tests/test_follow60_mainline_manual_stop_binding_v1.py": "7232b6fea395b2d1ec40763264ceb1c4b5b8231975c19bd1341d874296e95c8b"
+  },
+  "approved_diff": {
+    "scope": [
+      "runner.py",
+      "tests/test_follow60_mainline_manual_stop_binding_v1.py"
+    ],
+    "sha256": "35330989511a7de2fd9ed1c08d7f05d8a51b1016f4206e96c69961ddc020ade9",
+    "summary": "108 insertions, 1 deletion"
+  },
+  "incident": {
+    "incident_id": null,
+    "cause": "mainline_manual_stop_omitted_binding_kind_and_entered_canary_hold_path",
+    "correction": "transport the active mainline binding into bounded outbox drain and restrict evaluation holds to canary bindings"
+  },
+  "tests": {
+    "targeted": "223/223",
+    "full_worker": "2722/2722"
+  },
+  "approval": {
+    "approval_id": "1e0bc60b-c18f-4e6a-b70b-389cb71c4d1a-follow60-global-audit-v1",
+    "approved_by": "liam",
+    "approved_at": "2026-08-05T10:06:59Z",
+    "expires_at": "2026-08-05T12:06:59Z",
+    "base_sha": "f8b6348ecb7df5ce1a4eae65834e2cc7904b9a9f",
+    "target_sha": "4dce7f69ef7f80f69c15d1c7276545a74c057b16",
+    "scope": [
+      "runner.py",
+      "tests/test_follow60_mainline_manual_stop_binding_v1.py"
+    ],
+    "diff_sha256": "35330989511a7de2fd9ed1c08d7f05d8a51b1016f4206e96c69961ddc020ade9",
+    "one_shot_status": "consumed"
+  }
+}
