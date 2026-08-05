@@ -40585,6 +40585,40 @@ def _vf_followers_rendered_strong_list_structure_strong_no_visible_follow_cta(
     return True
 
 
+def _followers_entry_v2_unchanged_source_profile_evidence(
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+) -> bool:
+    """Positive proof that a Followers tap did not leave the source profile."""
+    if not isinstance(det, dict):
+        return False
+    source = _normalize_handle(
+        str(tap_diag.get("entry_v2_source_profile_username") or "")
+    )
+    title = _normalize_handle(str(det.get("action_bar_title") or ""))
+    if not source or title != source:
+        return False
+    if str(det.get("current_screen_guess") or "").strip().lower() not in (
+        "profile",
+        "likely_profile",
+    ):
+        return False
+    if bool(det.get("is_followers_list")):
+        return False
+    if int(det.get("candidate_username_count") or 0) != 0:
+        return False
+    if bool(det.get("recycler_present")) or bool(det.get("listview_present")):
+        return False
+    if bool(det.get("scrollable_present")):
+        return False
+    if det.get("profile_tabs_absent") is not False:
+        return False
+    vf = det.get("visual_fallback_detail")
+    if isinstance(vf, dict) and bool(vf.get("visual_match")):
+        return False
+    return True
+
+
 def _followers_entry_v2_transition_visual_rendered_strong_gates(
     d: u2.Device,
     det: dict[str, Any],
@@ -40592,6 +40626,8 @@ def _followers_entry_v2_transition_visual_rendered_strong_gates(
 ) -> tuple[bool, str]:
     if not _followers_entry_v2_post_tap_semantic_followers_context(tap_diag):
         return False, "not_semantic_post_tap_context"
+    if _followers_entry_v2_unchanged_source_profile_evidence(det, tap_diag):
+        return False, "unchanged_source_profile"
     vf = det.get("visual_fallback_detail")
     if not isinstance(vf, dict):
         return False, "no_visual_fallback_detail"
@@ -43870,6 +43906,38 @@ def _try_followers_entry_fast_path_from_profile(
     return "failed", fmeta
 
 
+def _followers_entry_fast_path_failure_safe_for_standard_v2_retry(
+    meta: dict[str, Any],
+    *,
+    source_profile_username: str,
+    expected_package: str,
+) -> bool:
+    """Allow one fresh standard-V2 retry only after exact unchanged-profile proof."""
+    if not isinstance(meta, dict):
+        return False
+    if str(meta.get("failure_reason") or "") != "entry_fast_path_transition_not_confirmed":
+        return False
+    if _normalize_handle(str(meta.get("source_profile_username") or "")) != _normalize_handle(
+        source_profile_username
+    ):
+        return False
+    if str(meta.get("current_package") or "") != str(expected_package or ""):
+        return False
+    tap_diag = {
+        "entry_v2_source_profile_username": source_profile_username,
+        "entry_engine_v2": True,
+        "semantic_followers_metric": True,
+    }
+    for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
+        snapshot = meta.get(key)
+        if isinstance(snapshot, dict) and _followers_entry_v2_unchanged_source_profile_evidence(
+            snapshot,
+            tap_diag,
+        ):
+            return True
+    return False
+
+
 def open_followers_list_from_profile(
     d: u2.Device,
     source_profile_username: str,
@@ -44004,7 +44072,21 @@ def open_followers_list_from_profile(
         if fast_status == "success":
             return True, fast_payload
         if fast_status == "failed":
-            return False, fast_payload
+            if not _followers_entry_fast_path_failure_safe_for_standard_v2_retry(
+                fast_payload,
+                source_profile_username=source_profile_username,
+                expected_package=pkg,
+            ):
+                return False, fast_payload
+            log(
+                "warning",
+                "followers_entry_fast_path_unchanged_profile_retry_standard_v2",
+                source_profile_username=source_profile_username,
+                failure_reason=str(fast_payload.get("failure_reason") or ""),
+                current_package=str(fast_payload.get("current_package") or ""),
+                retry_count=1,
+                fresh_proof_required=True,
+            )
 
     # After verify_profile success (callers pass profile_verified=True): let header/stats render.
     if profile_verified:

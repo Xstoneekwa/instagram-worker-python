@@ -710,6 +710,115 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         post_confirm.assert_called_once()
         self.assertEqual(post_confirm.call_args.kwargs["post_tap_settle_s"], 2.0)
 
+    def test_followers_entry_rendered_strong_rejects_exact_unchanged_source_profile(self) -> None:
+        det = {
+            "is_followers_list": False,
+            "action_bar_title": "the1040restaurant",
+            "current_screen_guess": "likely_profile",
+            "candidate_username_count": 0,
+            "recycler_present": False,
+            "listview_present": False,
+            "scrollable_present": False,
+            "profile_tabs_absent": False,
+            "visual_fallback_detail": {
+                "visual_match": False,
+                "visual_search_area_detected": True,
+                "visual_followers_title_hint": True,
+                "visual_user_rows_detected": 22,
+                "visual_follow_button_count": 1,
+                "visual_signals": ["search_strip"],
+            },
+        }
+        tap_diag = {
+            "entry_engine_v2": True,
+            "semantic_followers_metric": True,
+            "entry_v2_source_profile_username": "the1040restaurant",
+        }
+
+        ok, reason = nav._followers_entry_v2_transition_visual_rendered_strong_gates(
+            FakeFollowersEntryDevice(followers_entry_profile_xml()),
+            det,
+            tap_diag,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unchanged_source_profile")
+
+    def test_followers_entry_unchanged_profile_fast_failure_retries_standard_v2_once(self) -> None:
+        d = FakeFollowersEntryDevice(followers_entry_profile_xml())
+        unchanged = {
+            "is_followers_list": False,
+            "action_bar_title": "the1040restaurant",
+            "current_screen_guess": "likely_profile",
+            "candidate_username_count": 0,
+            "recycler_present": False,
+            "listview_present": False,
+            "scrollable_present": False,
+            "profile_tabs_absent": False,
+            "visual_fallback_detail": {"visual_match": False},
+        }
+        failure = {
+            "failure_reason": "entry_fast_path_transition_not_confirmed",
+            "source_profile_username": "the1040restaurant",
+            "current_package": "com.instagram.androie",
+            "last_poll_snapshot": unchanged,
+            "after_tap_screen_snapshot": unchanged,
+        }
+        logs: list[tuple[str, dict]] = []
+
+        with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+        ), patch.object(
+            nav, "_guess_profile_screen", return_value="likely_profile"
+        ), patch.object(
+            nav, "_try_followers_entry_fast_path_from_profile", return_value=("failed", failure)
+        ) as fast_path, patch.object(
+            nav.time, "sleep", return_value=None
+        ), patch.object(
+            nav, "_followers_debug_capture", return_value={}
+        ), patch.object(
+            nav, "_open_followers_list_from_profile_v2", return_value=(True, {"open_method": "standard_v2_retry"})
+        ) as standard_v2, patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((event, kw))
+        ):
+            ok, meta = nav.open_followers_list_from_profile(
+                d,
+                "the1040restaurant",
+                "com.instagram.androie",
+                profile_verified=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(meta["open_method"], "standard_v2_retry")
+        fast_path.assert_called_once()
+        standard_v2.assert_called_once()
+        self.assertIn(
+            "followers_entry_fast_path_unchanged_profile_retry_standard_v2",
+            [event for event, _ in logs],
+        )
+
+    def test_followers_entry_fast_failure_without_exact_profile_proof_stays_fail_closed(self) -> None:
+        failure = {
+            "failure_reason": "entry_fast_path_transition_not_confirmed",
+            "source_profile_username": "the1040restaurant",
+            "current_package": "com.other.app",
+            "last_poll_snapshot": {
+                "action_bar_title": "the1040restaurant",
+                "current_screen_guess": "likely_profile",
+                "profile_tabs_absent": False,
+            },
+        }
+
+        self.assertFalse(
+            nav._followers_entry_fast_path_failure_safe_for_standard_v2_retry(
+                failure,
+                source_profile_username="the1040restaurant",
+                expected_package="com.instagram.androie",
+            )
+        )
+
     def test_followers_entry_post_tap_xml_fast_confirms_without_vision(self) -> None:
         d = FakeFollowersPostTapDevice(followers_list_xml())
         tap_diag = post_tap_xml_fast_diag()
