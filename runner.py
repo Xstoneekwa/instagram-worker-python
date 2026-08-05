@@ -615,6 +615,50 @@ def _private_skip_fast_path_handle(
     }
 
 
+def _record_follow60_ordering_v2_shadow_from_existing_capture(
+    mono_capture: dict[str, Any] | None,
+    *,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    candidate_username: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+) -> dict[str, Any] | None:
+    """Emit Ordering V2 feasibility telemetry without acquiring or changing UI state."""
+    try:
+        from follow60_ordering_v2_shadow import (
+            classify_existing_pre_follow_capture,
+        )
+
+        result = classify_existing_pre_follow_capture(
+            mono_capture,
+            account_id=account_id,
+            run_id=run_id,
+            request_id=request_id,
+            candidate_username=candidate_username,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=visual_candidate_id,
+        )
+        if result is not None:
+            log("info", "follow60_ordering_v2_shadow_evaluated", **result)
+        return result
+    except Exception as exc:
+        # Shadow telemetry must never affect Follow60 V1.
+        try:
+            log(
+                "warning",
+                "follow60_ordering_v2_shadow_failed_open",
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                candidate_username=str(candidate_username or ""),
+                exception_type=type(exc).__name__,
+            )
+        except Exception:
+            pass
+        return None
+
+
 # Real DM sends per worker process (pairs with SEND_DM_MAX_PER_RUN).
 _RUNTIME_REAL_DM_SENT_COUNT: int = 0
 # Successful follows this process (pairs with FOLLOW_MAX_PER_RUN).
@@ -17779,6 +17823,22 @@ def _run_followers_list_engine_session(
                 _early_mono = _private_fast_path.get("mono_capture")
                 if isinstance(_early_mono, dict):
                     _early_pre_follow_mono_capture = dict(_early_mono)
+                    _record_follow60_ordering_v2_shadow_from_existing_capture(
+                        _early_pre_follow_mono_capture,
+                        account_id=str(account_id or ""),
+                        run_id=str(run_id or ""),
+                        request_id=str(
+                            run_request_id or _CURRENT_RUN_REQUEST_ID or ""
+                        ),
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=str(source_profile_username or ""),
+                        visual_candidate_id=str(
+                            _vcid_sm
+                            or _post_follow_visual_candidate_id(
+                                pick, str(follower_un or "")
+                            )
+                        ),
+                    )
                 if bool(_private_fast_path.get("handled")):
                     _target_rejection_record(
                         target_scan_tracker,
