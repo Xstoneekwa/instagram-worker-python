@@ -1,0 +1,68 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_4",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1_3.json",
+  "status": "FOLLOW60_ORDERING_V2_SHADOW_EVIDENCE_V2_APPROVED_FOR_REX_RUNTIME",
+  "historical_manifests_immutable": true,
+  "production_runtime_unchanged_at_source_certification": true,
+  "active_production_worker_sha_at_source_certification": "d624600b3d4a0a0bccd49e16a920ae6be27d433d",
+  "active_production_release_at_source_certification": "/Users/admin/phonefarm-worker-releases/d624600-follow60-ordering-v2-shadow-v1",
+  "worker_parent_sha": "d624600b3d4a0a0bccd49e16a920ae6be27d433d",
+  "approved_source_sha": "ceca7c2ef44daf90e519f690dbb36c783c79cd74",
+  "behavioral_ordering_v2": false,
+  "runtime_activation_authorized": true,
+  "default_enabled": false,
+  "account_scope": [
+    "b024e94e-395d-4f02-9787-81ddc679b014"
+  ],
+  "critical_files": {
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "runner.py": "b1c030fae3197b91da51d9c5a1643c454b4f29cde9b0b07bc17d836ec583b8de",
+    "post_follow_stage_outbox.py": "b3f2dc4b2054e44c29a2d956034570a7d449d5a57a2763fb5dda38479042cbe2",
+    "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7",
+    "instagram_navigation.py": "f606a99532332c258ace5bdb05384bc584c1a7a9f8f047d5566ce6189fd347ea",
+    "follow60_ordering_v2_shadow.py": "887bcb77f26a1bc4dbcfdd473725243fdd919fba8b5f40ed7d0383c3ad300e57",
+    "logs.py": "cd6d57cf07cb4f15d8fe8d422b939858ee2e79ad731552ee1a2c33a4008a0ec4",
+    "tests/test_follow60_ordering_v2_shadow.py": "cffab089c3a809db097d8e5a06b77b312a57efdad217f72310a0a1978a8d3860"
+  },
+  "approved_diff": {
+    "scope": [
+      "docs/follow60-ordering-v2-shadow-v1.md",
+      "follow60_ordering_v2_shadow.py",
+      "logs.py",
+      "runner.py",
+      "tests/test_follow60_ordering_v2_shadow.py"
+    ],
+    "sha256": "c00b6389f8fb3707961b9872089dcafd07fb1eeb745dc530920f2d7f51c3e75e",
+    "summary": "1285 insertions, 164 deletions"
+  },
+  "decision": {
+    "behavioral_verdict": "V1_ONLY_BEHAVIORAL_ENGINE",
+    "delivered": "one_terminal_candidate_event_from_existing_v1_evidence_only",
+    "new_ui_acquisition": false,
+    "shadow_failure_blocks_v1": false,
+    "v1_action_engine_changed": false,
+    "activation_scope": "rex_only_shadow"
+  },
+  "tests": {
+    "targeted": "14/14",
+    "neighborhood": "277/277",
+    "full_worker": "2743/2743"
+  },
+  "approval": {
+    "approval_id": "da1bf63c-8908-4c53-b8f1-d9bcfa00e39d-follow60-ordering-v2-shadow-evidence-v2",
+    "approved_by": "liam",
+    "approved_at": "2026-08-05T16:07:05Z",
+    "expires_at": "2026-08-05T18:07:05Z",
+    "base_sha": "d624600b3d4a0a0bccd49e16a920ae6be27d433d",
+    "target_sha": "ceca7c2ef44daf90e519f690dbb36c783c79cd74",
+    "scope": [
+      "docs/follow60-ordering-v2-shadow-v1.md",
+      "follow60_ordering_v2_shadow.py",
+      "logs.py",
+      "runner.py",
+      "tests/test_follow60_ordering_v2_shadow.py"
+    ],
+    "diff_sha256": "c00b6389f8fb3707961b9872089dcafd07fb1eeb745dc530920f2d7f51c3e75e",
+    "one_shot_status": "consumed"
+  }
+}
