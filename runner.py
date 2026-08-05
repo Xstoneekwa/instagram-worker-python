@@ -215,6 +215,19 @@ def _follow60_canary_enabled_for_account(account_id: str | None) -> bool:
         return False
 
 
+def _follow60_canary_evaluation_hold_allowed(
+    *,
+    account_id: str | None,
+    runtime_context: dict[str, Any] | None,
+) -> bool:
+    """Keep operator-evaluation holds exclusive to real canary bindings."""
+    return bool(
+        _follow60_canary_enabled_for_account(account_id)
+        and str(dict(runtime_context or {}).get("binding_kind") or "").strip().lower()
+        == "canary"
+    )
+
+
 def _follow60_evaluation_barrier_due(
     *,
     canary_active: bool,
@@ -3741,6 +3754,7 @@ def _drain_candidate_receipts_for_manual_stop(
     request_id: str = "",
     control_id: str = "",
     worker_sha: str = "",
+    binding_kind: str = "",
     budget_s: float = 8.0,
 ) -> dict[str, Any]:
     """Drain only DB persistence after the device latch, within a hard budget."""
@@ -3768,6 +3782,7 @@ def _drain_candidate_receipts_for_manual_stop(
         )
         post_follow: dict[str, Any] = {"ok": True, "pending": 0, "flushed": 0}
         active_binding = {
+            "binding_kind": str(binding_kind or "").strip().lower(),
             "account_id": str(account_id or ""),
             "run_id": str(run_id or ""),
             "request_id": str(request_id or ""),
@@ -21806,6 +21821,7 @@ def _main_impl() -> int:
             request_id=str(run_request_id or ""),
             control_id=str(_stop_runtime_context.get("control_id") or ""),
             worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+            binding_kind=str(_stop_runtime_context.get("binding_kind") or ""),
             budget_s=8.0,
         )
         verified_follow_ok = bool(_candidate_receipt_drain.get("ok"))
@@ -21819,7 +21835,10 @@ def _main_impl() -> int:
         except Exception as exc:
             spooled = {"error": str(exc)[:200]}
         if (
-            _follow60_canary_enabled_for_account(account_id)
+            _follow60_canary_evaluation_hold_allowed(
+                account_id=account_id,
+                runtime_context=_stop_runtime_context,
+            )
             and run_id
             and run_request_id
         ):
