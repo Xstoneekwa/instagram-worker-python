@@ -537,6 +537,11 @@ function mutationTargetStatus(action: DashboardMutation): string {
 
 function clientMutationAllowed(action: DashboardMutation, row: Record<string, any>): boolean {
   if (TERMINAL_STATUSES.has(String(row.status))) return false;
+  // Client-side lifecycle mutations are never authoritative for security
+  // incidents.  Critical rows remain fail-closed and require the audited
+  // internal incident-review path, even when their action is pending
+  // verification.
+  if (String(row.severity).toLowerCase() === "critical") return false;
   if (action === "acknowledge") {
     return row.status === "pending" || row.status === "acknowledged" || row.status === "pending_verification";
   }
@@ -544,7 +549,9 @@ function clientMutationAllowed(action: DashboardMutation, row: Record<string, an
     if (row.status === "pending_verification") return false;
     return !(row.blocking_campaign === true && row.requires_client_action === true);
   }
-  if (row.status === "pending_verification") return false;
+  if (action === "resolve" && row.status === "pending_verification") {
+    return row.blocking_campaign !== true && row.requires_client_action !== true;
+  }
   return row.blocking_campaign !== true && row.requires_client_action !== true;
 }
 
@@ -655,9 +662,6 @@ async function handleMutation(
     return jsonResponse(500, { ok: false, error: "internal_error", request_id: rid }, headers);
   }
   if (!row) return jsonResponse(404, { ok: false, error: "action_not_found", request_id: rid }, headers);
-  if (TERMINAL_STATUSES.has(String(row.status))) {
-    return jsonResponse(409, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
-  }
 
   let actorType: "client" | "internal" = "internal";
   let actorId: string | null = null;
@@ -673,7 +677,11 @@ async function handleMutation(
       });
       return jsonResponse(access.status, { ok: false, error: access.error, request_id: rid }, headers);
     }
-    if (!clientMutationAllowed(mutation, row)) {
+    const idempotentResolve = mutation === "resolve" && String(row.status) === "resolved";
+    if (!idempotentResolve && TERMINAL_STATUSES.has(String(row.status))) {
+      return jsonResponse(409, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
+    }
+    if (!idempotentResolve && !clientMutationAllowed(mutation, row)) {
       logEvent(deps, "dashboard_actions_mutation_rejected", {
         request_id: rid,
         action: mutation,
@@ -685,6 +693,18 @@ async function handleMutation(
     }
     actorType = "client";
     actorId = auth.authUserId;
+  }
+
+  if (mutation === "resolve" && String(row.status) === "resolved") {
+    return jsonResponse(200, {
+      ok: true,
+      idempotent: true,
+      request_id: rid,
+      dashboard_action: safeActionRow(row),
+    }, headers);
+  }
+  if (TERMINAL_STATUSES.has(String(row.status))) {
+    return jsonResponse(409, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
   }
 
   const transitioned = await transitionDashboardAction({

@@ -15,6 +15,8 @@ const BLOCKING_ACTION_ID = "10000000-0000-4000-8000-000000000001";
 const PENDING_VERIFICATION_ACTION_ID = "10000000-0000-4000-8000-000000000002";
 const ADMIN_ACTION_ID = "10000000-0000-4000-8000-000000000003";
 const NON_BLOCKING_REQUIRED_ACTION_ID = "10000000-0000-4000-8000-000000000004";
+const PENDING_VERIFICATION_BLOCKING_ACTION_ID = "10000000-0000-4000-8000-000000000009";
+const PENDING_VERIFICATION_SECURITY_ACTION_ID = "10000000-0000-4000-8000-00000000000a";
 const OTHER_CLIENT_ACTION_ID = "10000000-0000-4000-8000-000000000005";
 const CLIENT_RESOLVABLE_ACTION_ID = "10000000-0000-4000-8000-000000000006";
 const TERMINAL_ACTION_ID = "10000000-0000-4000-8000-000000000007";
@@ -62,6 +64,40 @@ const FIXTURE_ROWS: Row[] = [
     action_deep_link: "/accounts/42/status",
     created_at: "2026-05-25T19:00:00Z",
     updated_at: "2026-05-25T19:01:00Z",
+  },
+  {
+    id: "10000000-0000-4000-8000-000000000009",
+    client_id: CLIENT_ID,
+    account_id: ACCOUNT_ID,
+    action_type: "review_login_failure_blocking",
+    status: "pending_verification",
+    severity: "error",
+    audience: "client",
+    requires_client_action: false,
+    blocking_campaign: true,
+    title: "Login verification pending blocking",
+    safe_client_message: "Credentials still require verification and are blocking.",
+    action_label: "View status",
+    action_deep_link: "/accounts/42/status",
+    created_at: "2026-05-25T18:30:00Z",
+    updated_at: "2026-05-25T18:31:00Z",
+  },
+  {
+    id: "10000000-0000-4000-8000-00000000000a",
+    client_id: CLIENT_ID,
+    account_id: ACCOUNT_ID,
+    action_type: "security_incident_review",
+    status: "pending_verification",
+    severity: "critical",
+    audience: "client",
+    requires_client_action: false,
+    blocking_campaign: false,
+    title: "Security incident verification",
+    safe_client_message: "A security review is still required.",
+    action_label: "View status",
+    action_deep_link: "/accounts/42/status",
+    created_at: "2026-05-25T18:20:00Z",
+    updated_at: "2026-05-25T18:21:00Z",
   },
   {
     id: "10000000-0000-4000-8000-000000000003",
@@ -286,6 +322,7 @@ function makeFetch(options: {
   transitionError?: string;
 } = {}) {
   const calls = options.calls ?? [];
+  // deno-lint-ignore require-await -- this test fetcher intentionally matches the async Fetch API contract
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const href = String(input);
     const url = new URL(href);
@@ -408,10 +445,15 @@ Deno.test("client count filtre correctement ses actions", withEnv(async () => {
     log: () => {},
   });
   const body = await res.json();
-  if (res.status !== 200 || body.pending_count !== 5 || body.blocking_count !== 2 || body.client_required_count !== 3) {
+  if (res.status !== 200 || body.pending_count !== 7 || body.blocking_count !== 3 || body.client_required_count !== 3) {
     throw new Error(`count client inattendu: ${JSON.stringify(body)}`);
   }
-  if (body.counts_by_severity.info !== 2 || body.counts_by_severity.warning !== 2 || body.counts_by_severity.error !== 1) {
+  if (
+    body.counts_by_severity.info !== 2
+    || body.counts_by_severity.warning !== 2
+    || body.counts_by_severity.error !== 2
+    || body.counts_by_severity.critical !== 1
+  ) {
     throw new Error("counts_by_severity client incorrect");
   }
 }));
@@ -591,15 +633,46 @@ Deno.test("client ne peut pas dismiss action bloquante requise", withEnv(async (
 }));
 
 Deno.test("client ne peut pas dismiss ou resolve pending_verification", withEnv(async () => {
-  for (const action of ["dismiss", "resolve"]) {
-    const res = await handleRequest(request({ action, action_id: PENDING_VERIFICATION_ACTION_ID }), {
-      fetch: makeFetch(),
-      log: () => {},
-    });
-    const body = await res.json();
-    if (res.status !== 403 || body.error !== "transition_not_allowed") {
-      throw new Error(`${action} pending_verification accepte`);
-    }
+  const res = await handleRequest(request({ action: "dismiss", action_id: PENDING_VERIFICATION_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "transition_not_allowed") {
+    throw new Error("dismiss pending_verification accepte");
+  }
+}));
+
+Deno.test("client peut resolve pending_verification et resolved_at est present", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: PENDING_VERIFICATION_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.dashboard_action?.status !== "resolved" || !body.dashboard_action?.resolved_at) {
+    throw new Error("resolve pending_verification bloque");
+  }
+}));
+
+Deno.test("client ne peut pas resolve pending_verification si blocking_campaign true", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: PENDING_VERIFICATION_BLOCKING_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "transition_not_allowed") {
+    throw new Error("resolve pending_verification bloque pas blocking_campaign");
+  }
+}));
+
+Deno.test("client ne peut pas resolve un incident securite pending_verification", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: PENDING_VERIFICATION_SECURITY_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "transition_not_allowed") {
+    throw new Error("resolve security pending_verification accepte");
   }
 }));
 
@@ -631,6 +704,23 @@ Deno.test("client resolve action non bloquante non requise", withEnv(async () =>
   if (res.status !== 200 || body.dashboard_action?.status !== "resolved" || !body.dashboard_action?.resolved_at) {
     throw new Error("resolve client safe echoue");
   }
+}));
+
+Deno.test("client resolve deja resolue est idempotent apres controle tenant", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: TERMINAL_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.idempotent !== true || body.dashboard_action?.status !== "resolved") {
+    throw new Error("resolve terminal idempotent echoue");
+  }
+
+  const forbidden = await handleRequest(request({ action: "resolve", action_id: OTHER_CLIENT_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  if (forbidden.status !== 403) throw new Error("controle tenant contourne par idempotence");
 }));
 
 Deno.test("internal resolve pending_verification et dismiss bloquante", withEnv(async () => {
@@ -671,7 +761,7 @@ Deno.test("mutation response exclut metadata messages internes et secrets", with
   }
 }));
 
-Deno.test("mutation terminale et erreur RPC retournent transition_not_allowed safe", withEnv(async () => {
+Deno.test("mutation terminale non idempotente et erreur RPC retournent transition_not_allowed safe", withEnv(async () => {
   const terminal = await handleRequest(request({ action: "acknowledge", action_id: TERMINAL_ACTION_ID }), {
     fetch: makeFetch(),
     log: () => {},
