@@ -197,7 +197,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertTrue(result["expanded"])
         self.assertEqual(device.clicks, 1)
 
-    def test_05_see_more_no_result_stops_after_two_selector_clicks(self) -> None:
+    def test_05_see_more_no_result_stops_after_one_selector_click(self) -> None:
         xml = _surface(rows=[], see_more=True, suggestions=True)
         nav._followers_store_detect_hierarchy_xml(xml)
         device = _FakeDevice(xml)
@@ -209,7 +209,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             "see_more_click_exhausted_after_bounded_recovery",
         )
         self.assertEqual(result["see_more_status"], "see_more_failed_terminal")
-        self.assertEqual(device.clicks, 2)
+        self.assertEqual(device.clicks, 1)
 
     def test_05d_slow_loading_three_seconds_keeps_same_ct_until_rows_stable(self) -> None:
         before = _surface(rows=[], see_more=True, suggestions=True)
@@ -250,7 +250,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertTrue(result["expanded"])
         self.assertEqual(result["poll_count"], 2)
 
-    def test_05g_stale_xml_without_mutation_uses_single_bounded_retry(self) -> None:
+    def test_05g_stale_xml_without_mutation_never_repeats_the_tap(self) -> None:
         before = _surface(rows=[], see_more=True, suggestions=True)
         nav._followers_store_detect_hierarchy_xml(before)
         device = _SequenceDevice([before])
@@ -258,7 +258,41 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             result = nav.followers_try_expand_primary_list(device, max_attempts=2)
         self.assertFalse(result["expanded"])
         self.assertEqual(result["failure_reason"], "see_more_click_no_surface_mutation")
-        self.assertEqual(device.clicks, 2)
+        self.assertEqual(device.clicks, 1)
+
+    def test_05i_verified_return_rearms_committed_surface_for_see_more(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        device = _FakeDevice(_surface(rows=[("row_a", "Follow")]))
+        detection = {
+            "is_followers_list": True,
+            "open_detection_method": "own_unified_follow_list",
+        }
+        with patch.object(nav, "detect_followers_list_screen", return_value=detection), patch.object(
+            nav.time, "sleep", return_value=None
+        ):
+            ok, how = nav.return_to_followers_list(device, "source")
+        self.assertTrue(ok)
+        self.assertEqual(how, "back")
+        self.assertTrue(nav.followers_session_list_committed_open_for("source"))
+        self.assertEqual(
+            nav.followers_session_committed_meta()["followers_list_committed_source"],
+            "verified_return_to_followers_list",
+        )
+
+    def test_05j_unverified_return_does_not_rearm_committed_surface(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        device = _FakeDevice(_surface(rows=[]))
+        with patch.object(nav, "detect_followers_list_screen", return_value={"is_followers_list": False}), patch.object(
+            nav, "verify_profile", return_value=False
+        ), patch.object(nav.time, "sleep", return_value=None):
+            ok, how = nav.return_to_followers_list(
+                device,
+                "source",
+                max_retries=0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(how, "failed")
+        self.assertFalse(nav.followers_session_list_committed_open_for("source"))
 
     def test_05h_visual_fallback_uses_a_bounded_coarse_signature(self) -> None:
         before = "0" * 256

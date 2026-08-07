@@ -14513,9 +14513,14 @@ def followers_try_expand_primary_list(
     target_id: str = "",
     run_id: str = "",
     processed_primary_row_ids: set[str] | None = None,
-    max_attempts: int = 2,
+    max_attempts: int = 1,
 ) -> dict[str, Any]:
-    """Click a verified primary-list See more selector and prove expansion."""
+    """Click one verified primary-list See more selector and prove expansion.
+
+    ``max_attempts`` is retained for call-site compatibility, but the physical
+    intent is deliberately one-shot.  A failed or unproved transition must not
+    be followed by a second blind tap on a potentially changed surface.
+    """
     if expected_source_profile and not followers_session_list_committed_open_for(
         expected_source_profile
     ):
@@ -14634,8 +14639,9 @@ def followers_try_expand_primary_list(
     baseline_rows = list(before.get("primary_row_ids") or [])
     last_after = before
     last_visual_probe_path = ""
-    no_progress_reason = "bounded_clicks_without_new_primary_rows"
-    for attempt in range(1, max(1, min(int(max_attempts or 1), 2)) + 1):
+    no_progress_reason = "one_shot_click_without_new_primary_rows"
+    attempt_limit = 1
+    for attempt in range(1, attempt_limit + 1):
         clicked = False
         for label_re in (
             r"(?i)^\s*see more(?:\s*[,;:-]?\s*button)?\s*$",
@@ -14686,20 +14692,9 @@ def followers_try_expand_primary_list(
                 reason=no_progress_reason,
                 target_username=expected_source_profile,
                 attempt=attempt,
-                recovery_path=(
-                    "fresh_hierarchy_then_second_exact_selector_attempt"
-                    if attempt < max(1, min(int(max_attempts or 1), 2))
-                    else "bounded_recovery_exhausted"
-                ),
-                see_more_status=(
-                    "see_more_failed_recoverable"
-                    if attempt < max(1, min(int(max_attempts or 1), 2))
-                    else "see_more_failed_terminal"
-                ),
+                recovery_path="one_shot_selector_unavailable_fail_closed",
+                see_more_status="see_more_failed_terminal",
             )
-            if attempt < max(1, min(int(max_attempts or 1), 2)):
-                followers_refresh_detect_hierarchy_cache(d)
-                continue
             break
         _instagram_list_event(
             "instagram_list_see_more_clicked",
@@ -14924,16 +14919,8 @@ def followers_try_expand_primary_list(
             reason=no_progress_reason,
             target_username=expected_source_profile,
             attempt=attempt,
-            recovery_path=(
-                "fresh_hierarchy_then_second_exact_selector_attempt"
-                if attempt < max(1, min(int(max_attempts or 1), 2))
-                else "bounded_recovery_exhausted"
-            ),
-            see_more_status=(
-                "see_more_failed_recoverable"
-                if attempt < max(1, min(int(max_attempts or 1), 2))
-                else "see_more_failed_terminal"
-            ),
+            recovery_path="one_shot_fresh_proof_exhausted_fail_closed",
+            see_more_status="see_more_failed_terminal",
             loading_observed=loading_observed,
             mutation_observed=mutation_observed,
             poll_count=max_polls,
@@ -59173,12 +59160,29 @@ def return_to_followers_list(
         time.sleep(0.38)
         det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
         if det.get("is_followers_list"):
+            # The same positive detector that authorises the caller to resume
+            # list processing also restores the committed-surface invariant.
+            # Without this central promotion, private/filter/duplicate return
+            # paths could truthfully recover the CT list yet leave See More
+            # fail-closed as ``see_more_surface_not_committed``.
+            followers_session_mark_list_committed_open(
+                source_profile_username,
+                committed_source="verified_return_to_followers_list",
+            )
             log(
                 "info",
                 "followers_list_recovered",
                 source_profile_username=source_profile_username,
                 attempt=attempt,
                 method="back",
+            )
+            log(
+                "info",
+                "followers_session_rearmed_after_verified_return",
+                source_profile_username=source_profile_username,
+                method="back",
+                committed_source="verified_return_to_followers_list",
+                open_detection_method=str(det.get("open_detection_method") or ""),
             )
             return True, "back"
     log(
