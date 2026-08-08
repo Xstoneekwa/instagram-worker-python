@@ -145,7 +145,10 @@ class Follow60MainlineOutboxTests(unittest.TestCase):
                 result["missing_required_stages"], ["mute_stories_verified"]
             )
             self.assertEqual(outbox.pending_count(path), 0)
-            self.assertIs(persist_rpc.call_args.kwargs["cycle_complete"], False)
+            # This legacy RPC argument means that Return CT closes the receipt
+            # batch.  Business-cycle completion remains false because the
+            # completed-cycle ledger is deliberately not acknowledged.
+            self.assertIs(persist_rpc.call_args.kwargs["cycle_complete"], True)
             ledger_rpc.assert_not_called()
 
 

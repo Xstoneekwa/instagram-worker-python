@@ -384,6 +384,11 @@ def flush_pending(
         missing_required_mute_stages = sorted(
             required_mute_stages - expected_stages
         )
+        # The RPC's historical ``p_cycle_complete`` flag closes the receipt
+        # batch when Return CT is present.  It is not the completed-cycle
+        # ledger verdict.  Keep that wire contract intact, then gate the
+        # authoritative ledger ACK separately on both required Mute stages.
+        rpc_receipt_batch_complete = bool(return_ct_present)
         completed_cycle_ready = bool(
             return_ct_present and not missing_required_mute_stages
         )
@@ -446,7 +451,7 @@ def flush_pending(
                 action_id_hash_value=first["action_id_hash"],
                 username=first["candidate_username"], source_profile=first["source_profile"],
                 attempt_id=first["attempt_id"], business_session_id=first["business_session_id"],
-                cycle_complete=completed_cycle_ready,
+                cycle_complete=rpc_receipt_batch_complete,
                 stages=[
                     {
                         "stage": row["stage"],

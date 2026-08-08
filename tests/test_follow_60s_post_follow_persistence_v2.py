@@ -196,6 +196,38 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
                 self.assertEqual(sent, list(outbox.VALID_STAGES[:stop_after]))
                 self.assertEqual(outbox.pending_count(path), 0)
 
+    def test_partial_mute_closes_rpc_batch_but_never_acks_completed_cycle(self) -> None:
+        self._journal("mute_stories_verified")
+        self._journal("return_ct_exact", {
+            "like_terminal_status": "safe_skip",
+            "like_terminal_reason": "required_mute_verification_incomplete",
+        })
+        response = {
+            "ok": True,
+            "binding_valid": True,
+            "inserted_stages": ["mute_stories_verified", "return_ct_exact"],
+            "duplicate_stages": [],
+        }
+        with mock.patch(
+            "supabase_client.persist_follow_60s_post_follow_v2",
+            return_value=response,
+        ) as rpc, mock.patch(
+            "supabase_client.ack_follow_60s_completed_cycle_v1",
+        ) as ledger_rpc:
+            result = outbox.flush_pending(
+                active_binding=self.active_binding,
+                path=self.path,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["reason"],
+            "follow60_cycle_incomplete_missing_required_mute_stage",
+        )
+        self.assertEqual(result["missing_required_stages"], ["mute_posts_verified"])
+        self.assertTrue(result["partial_receipts_persisted"])
+        self.assertIs(rpc.call_args.kwargs["cycle_complete"], True)
+        ledger_rpc.assert_not_called()
+
     def test_rpc_success_then_crash_before_delete_replays_db_only_as_duplicates(self) -> None:
         self._journal("like_verified", {"liked_count": 1})
         inserted = {
