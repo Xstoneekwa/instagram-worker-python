@@ -1,0 +1,86 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_6",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1_5.json",
+  "status": "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_RUNTIME_V2_SOURCE_APPROVED_INACTIVE",
+  "historical_manifests_immutable": true,
+  "production_runtime_unchanged_at_source_certification": true,
+  "active_production_worker_sha_at_source_certification": "45de130d29a8658ff24f222595f1d2b9184716d9",
+  "active_production_release_at_source_certification": "/Users/admin/phonefarm-worker-releases/45de130-follow60-see-more-surface-v1",
+  "worker_parent_sha": "8e815fc6eeef84c04ddbf0819f9d79553877788a",
+  "approved_source_sha": "03dd964d0b1dbb9e05f0dd7296321575f846f383",
+  "behavioral_ordering_v2": true,
+  "runtime_binding_materialized_at_claim": true,
+  "runtime_activation_authorized": false,
+  "production_migration_authorized": false,
+  "default_enabled": false,
+  "account_scope": [
+    "b024e94e-395d-4f02-9787-81ddc679b014"
+  ],
+  "max_v2_complete_cycles": 10,
+  "critical_files": {
+    "follow60_ordering_v2_behavioral_canary_v1.py": "32465660197d703e42799cf34d364203ddf2a1c0e60d40ad4e8ca5f2f6ceab21",
+    "follow60_ordering_v2_ledger_v1.py": "5b89dc7d0bafdc4ea121739b6c6ff4f9816d0024bd09da9713b980a47e4c15d8",
+    "follow_action_engine.py": "f21ad51c86f645b5286dbf83b629ccf554452d2f61770312914e77d45dc97f90",
+    "instagram_navigation.py": "50af3243f2b02a1e39680b692fd84b696d400d0e6eb81ba60859c22a016df0c5",
+    "runner.py": "321a3c94cb55e2593042551ae2b102a2fd41635bdbb7fdf4e02ea43ad66c1396",
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "post_follow_stage_outbox.py": "2f61ff634ddc94d661220c81a72df122260c032d3284aa73025310afbfddc8ad",
+    "supabase_client.py": "3e9b95a4f062f9ac42bc33101cfe7686c856ca77d8b3b917a89dc994e8c52b21",
+    "account_run_request_consumer.py": "43d14f7e1a279cf78aa0e3ab026e5595020dda20927716bf3844854625bfdae0",
+    "supabase/migrations/20260808154030_follow60_ordering_v2_behavioral_runtime_control_v1.sql": "4fbd13216acfa061c6c1ca12e700af6dc19f17bea8767be039921b3b033bf1b5"
+  },
+  "approved_diff": {
+    "scope": [
+      "account_run_request_consumer.py",
+      "docs/checkpoints/2026-08-08-follow60-ordering-v2-runtime-integration-v1.md",
+      "docs/run-control-dispatcher.env.example",
+      "follow60_ordering_v2_behavioral_canary_v1.py",
+      "runner.py",
+      "supabase/migrations/20260808154030_follow60_ordering_v2_behavioral_runtime_control_v1.sql",
+      "supabase_client.py",
+      "tests/test_follow60_ordering_v2_behavioral_canary_v1.py",
+      "tests/test_follow60_ordering_v2_runner_integration.py",
+      "tests/test_follow60_ordering_v2_runtime_control_contract.py",
+      "tests/test_follow60_ordering_v2_runtime_control_postgres.py"
+    ],
+    "sha256": "64751997c08bd2220478b81b277ba5d9fde9e49982a566e5123230a0c055eaa2",
+    "summary": "1187 insertions, 44 deletions"
+  },
+  "decision": {
+    "v1_default_path": true,
+    "v2_default_off": true,
+    "v2_scope": "rex_only_via_exact_runtime_allowlist_no_source_constant",
+    "pre_run_future_runtime_identities": false,
+    "claim_atomic_one_shot": true,
+    "claim_exact_sha_and_account": true,
+    "v2_barrier_counter": "v2_complete_count",
+    "v1_fallback_counts_toward_v2_barrier": false,
+    "tenth_v2_complete_stops_before_candidate_eleven": true,
+    "v5_mandatory": true,
+    "v1_noneligible_fallback": true,
+    "runtime_release_state": "inactive"
+  },
+  "tests": {
+    "targeted": "18/18",
+    "neighborhood": "138/138",
+    "postgres": "7/7",
+    "full_worker": "2810/2810 (10 skipped)",
+    "py_compile": "pass",
+    "diff_check": "pass"
+  },
+  "approval": {
+    "approval_id": "00900e15-2bd0-497d-aa97-a1c351d0faf8-follow60-ordering-v2-behavioral-canary-runtime-v2-source",
+    "approved_by": "liam",
+    "approved_at": "2026-08-08T14:02:01Z",
+    "base_sha": "8e815fc6eeef84c04ddbf0819f9d79553877788a",
+    "target_sha": "03dd964d0b1dbb9e05f0dd7296321575f846f383",
+    "scope": "source_tests_docs_inactive_release_lock_only",
+    "runtime_activation_authorized": false,
+    "production_migration_authorized": false,
+    "one_shot_status": "consumed"
+  },
+  "historical_hashes": {
+    "FOLLOW60_MAINLINE_MANIFEST_V1_5.json": "8a206f6bbb7c70fa3eb7c57f7e69cd191c68cffa48dc7a3d036d9f6403ecb7b8",
+    "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_5.json": "78cab67b1e412b612d8e7b2581847baa4ad485552520aaea98b1ee52be5a39b8"
+  }
+}

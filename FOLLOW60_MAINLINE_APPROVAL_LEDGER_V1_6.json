@@ -1,0 +1,21 @@
+{
+  "schema": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_6",
+  "extends": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_5.json",
+  "consumed_approval_ids": [
+    "00900e15-2bd0-497d-aa97-a1c351d0faf8-follow60-ordering-v2-behavioral-canary-runtime-v2-source"
+  ],
+  "entries": [
+    {
+      "approval_id": "00900e15-2bd0-497d-aa97-a1c351d0faf8-follow60-ordering-v2-behavioral-canary-runtime-v2-source",
+      "base_sha": "8e815fc6eeef84c04ddbf0819f9d79553877788a",
+      "target_sha": "03dd964d0b1dbb9e05f0dd7296321575f846f383",
+      "consumed_at": "2026-08-08T14:02:01Z",
+      "scope": "source_tests_docs_inactive_release_lock_only",
+      "runtime_activation_authorized": false,
+      "production_migration_authorized": false,
+      "activation_scope": "none",
+      "behavioral_scope": "rex_only_via_exact_runtime_allowlist_no_source_constant",
+      "default_enabled": false
+    }
+  ]
+}
