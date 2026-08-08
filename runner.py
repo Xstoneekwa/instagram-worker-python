@@ -11302,8 +11302,9 @@ def _follow60_ordering_v2_prepare_candidate(
     private_probe_payload: dict[str, Any] | None,
     session_likes_used: int,
     commercial_policy_revision: str | None,
+    event_recorder: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Prepare one Rex-only POST_FIRST_V2 candidate or preserve V1 exactly.
+    """Prepare one account-scoped POST_FIRST_V2 candidate or preserve V1 exactly.
 
     The function is intentionally called only after all existing V1 business,
     private-account, budget, identity, and Follow-state gates passed.  Before a
@@ -11340,6 +11341,8 @@ def _follow60_ordering_v2_prepare_candidate(
         "action_id": str(action_id or ""),
         "route": "FOLLOW60_V1",
         "reason": "v2_not_selected",
+        "barrier_reached": False,
+        "runtime_control": dict(control or {}),
         "timings_ms": {},
     }
     _ordering_v2_prepare_t0 = time.perf_counter()
@@ -11351,8 +11354,50 @@ def _follow60_ordering_v2_prepare_candidate(
         business_session_id=str(business_session_id or ""),
         attempt_id=int(attempt_id or 0),
         worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
-        completed_v2_cycles=int(completed_v2_cycles or 0),
+        completed_v2_cycles=int(dict(control or {}).get("v2_complete_count") or 0),
     )
+    def _record(event_kind: str, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        if binding is None or event_recorder is None:
+            return {"ok": False, "reason": "v2_event_recorder_unavailable"}
+        ack = dict(event_recorder(
+            control_id=binding.control_id,
+            account_id=binding.account_id,
+            run_id=binding.run_id,
+            request_id=binding.request_id,
+            business_session_id=binding.business_session_id,
+            attempt_id=binding.attempt_id,
+            lease_id=binding.lease_id,
+            lease_nonce=binding.lease_nonce,
+            worker_sha=binding.actual_worker_sha,
+            action_id=str(action_id or ""),
+            event_kind=event_kind,
+            metadata_safe=dict(metadata or {}),
+        ) or {})
+        if ack.get("ok") is True:
+            mutable = control if isinstance(control, dict) else None
+            if mutable is not None:
+                for key in (
+                    "candidate_seen_count", "v2_selected_count", "v2_complete_count",
+                    "v2_partial_count", "v1_fallback_count", "status",
+                ):
+                    if key in ack:
+                        mutable[key] = ack[key]
+            result["runtime_control"] = dict(control or {})
+        return ack
+
+    if binding is not None:
+        _seen_ack = _record("candidate_seen", metadata={"candidate_username": str(candidate_username or "")})
+        if _seen_ack.get("barrier_reached") is True:
+            result.update(
+                route="CANARY_BARRIER_REACHED",
+                reason="v2_cycle_barrier_reached",
+                barrier_reached=True,
+            )
+            return result
+        if _seen_ack.get("ok") is not True:
+            result.update(reason=str(_seen_ack.get("reason") or "v2_candidate_seen_not_persisted"))
+            return result
+
     stable = None
     proof_reason = "v2_binding_absent_or_invalid"
     if binding is not None:
@@ -11374,7 +11419,7 @@ def _follow60_ordering_v2_prepare_candidate(
     route, route_reason = route_candidate_v2(
         binding=binding,
         stable_proof=stable,
-        completed_v2_cycles=int(completed_v2_cycles or 0),
+        completed_v2_cycles=(binding.v2_complete_count if binding is not None else 0),
     )
     result.update(route=route, reason=route_reason)
     log(
@@ -11389,10 +11434,21 @@ def _follow60_ordering_v2_prepare_candidate(
         route_reason=route_reason,
         binding_reason=binding_reason,
         proof_reason=proof_reason,
-        completed_v2_cycles=int(completed_v2_cycles or 0),
+        completed_v2_cycles=int(dict(control or {}).get("v2_complete_count") or 0),
         default_path="FOLLOW60_V1",
     )
+    if route == "CANARY_BARRIER_REACHED":
+        result["barrier_reached"] = True
+        return result
     if route != "POST_FIRST_V2" or binding is None or stable is None:
+        if binding is not None:
+            _record("v1_fallback", metadata={"route_reason": route_reason, "proof_reason": proof_reason})
+        return result
+
+    _selected_ack = _record("v2_selected", metadata={"route_reason": route_reason})
+    if _selected_ack.get("ok") is not True:
+        result.update(route="FOLLOW60_V1", reason=str(_selected_ack.get("reason") or "v2_selected_not_persisted"))
+        _record("v1_fallback", metadata={"route_reason": result["reason"]})
         return result
 
     deferred = create_deferred_follow_intent_v2(stable, initial_cta_identity="follow")
@@ -11519,6 +11575,8 @@ def _follow60_ordering_v2_prepare_candidate(
                     v1_behavior_preserved=True,
                 )
                 result.update(reason=str(executed.get("reason") or route_reason))
+                _record("v2_partial", metadata={"reason": result["reason"], "post_action_started": False})
+                _record("v1_fallback", metadata={"route_reason": result["reason"]})
                 clear_active_store(store)
                 return result
             try:
@@ -11533,6 +11591,7 @@ def _follow60_ordering_v2_prepare_candidate(
                 ledger=store,
                 plan=plan,
             )
+            _record("v2_partial", metadata={"reason": result["reason"], "post_action_started": True})
             return result
         precompleted = dict(executed)
 
@@ -11558,6 +11617,7 @@ def _follow60_ordering_v2_prepare_candidate(
             ledger=store,
             plan=plan,
         )
+        _record("v2_partial", metadata={"reason": reentry_reason, "post_action_started": True})
         log(
             "error",
             "follow60_ordering_v2_reentry_failed_closed",
@@ -11727,7 +11787,15 @@ def _run_followers_list_engine_session(
     processed = 0
     follows_completed_count = 0
     follow60_completed_cycle_count = 0
-    follow60_ordering_v2_completed_cycle_count = 0
+    follow60_ordering_v2_completed_cycle_count = int(
+        dict(
+            dict(follow60_canary_control or {}).get(
+                "ordering_v2_behavioral_canary_v1"
+            )
+            or {}
+        ).get("v2_complete_count")
+        or 0
+    )
     max_iter: int | None = None
     _followers_session_summary: dict[str, Any] = {
         "source_profile_username": source_profile_username,
@@ -19513,15 +19581,11 @@ def _run_followers_list_engine_session(
                         pick, str(follower_un or "")
                     ),
                 }
-                _ordering_v2_raw_control = (
-                    dict(
-                        (follow60_canary_control or {}).get(
-                            "ordering_v2_behavioral_canary_v1"
-                        )
-                        or {}
+                _ordering_v2_raw_control = dict(
+                    (follow60_canary_control or {}).get(
+                        "ordering_v2_behavioral_canary_v1"
                     )
-                    if follow60_canary_active
-                    else {}
+                    or {}
                 )
                 if _ordering_v2_raw_control:
                     try:
@@ -19557,6 +19621,11 @@ def _run_followers_list_engine_session(
                             commercial_policy_revision=(
                                 session_commercial_policy_revision
                             ),
+                            event_recorder=(
+                                supabase_client.record_follow60_ordering_v2_behavioral_event_v1
+                                if supabase_mode
+                                else None
+                            ),
                         )
                     except Exception as _ordering_v2_exc:
                         log(
@@ -19571,6 +19640,29 @@ def _run_followers_list_engine_session(
                         )
                         _ordering_v2["abort_candidate"] = True
                         _ordering_v2["reason"] = "v2_prepare_exception_fail_closed"
+                if _ordering_v2.get("runtime_control"):
+                    follow60_ordering_v2_completed_cycle_count = int(
+                        dict(_ordering_v2.get("runtime_control") or {}).get(
+                            "v2_complete_count"
+                        )
+                        or follow60_ordering_v2_completed_cycle_count
+                    )
+                    if isinstance(follow60_canary_control, dict):
+                        follow60_canary_control[
+                            "ordering_v2_behavioral_canary_v1"
+                        ] = dict(_ordering_v2.get("runtime_control") or {})
+                if _ordering_v2.get("barrier_reached") is True:
+                    log(
+                        "info", "follow60_ordering_v2_barrier_reached_before_candidate_action",
+                        account_id=str(account_id or ""), run_id=str(run_id or ""),
+                        candidate_username=str(follower_un or ""),
+                        completed_v2_cycles=int(follow60_ordering_v2_completed_cycle_count),
+                        next_candidate_permitted=False, device_actions_started=False,
+                    )
+                    device_action_latch.request_stop(
+                        reason="follow60_ordering_v2_barrier_reached"
+                    )
+                    return 0
                 if _ordering_v2.get("abort_candidate") is True:
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)
@@ -21332,7 +21424,59 @@ def _run_followers_list_engine_session(
                                 "candidate_username": str(follower_un or ""),
                             },
                         )
-                        follow60_ordering_v2_completed_cycle_count += 1
+                        _ordering_v2_binding = _ordering_v2.get("plan").binding
+                        _ordering_v2_complete_ack = (
+                            supabase_client.record_follow60_ordering_v2_behavioral_event_v1(
+                                control_id=_ordering_v2_binding.control_id,
+                                account_id=_ordering_v2_binding.account_id,
+                                run_id=_ordering_v2_binding.run_id,
+                                request_id=_ordering_v2_binding.request_id,
+                                business_session_id=_ordering_v2_binding.business_session_id,
+                                attempt_id=_ordering_v2_binding.attempt_id,
+                                lease_id=_ordering_v2_binding.lease_id,
+                                lease_nonce=_ordering_v2_binding.lease_nonce,
+                                worker_sha=_ordering_v2_binding.actual_worker_sha,
+                                action_id=str(_ordering_v2.get("action_id") or ""),
+                                event_kind="v2_complete",
+                                metadata_safe={
+                                    "critical_persistence_acknowledged": True,
+                                    "ledger_cycle_complete": True,
+                                },
+                            )
+                            if supabase_mode
+                            else {"ok": False, "reason": "v2_complete_requires_supabase"}
+                        )
+                        if _ordering_v2_complete_ack.get("ok") is not True:
+                            log(
+                                "error", "follow60_ordering_v2_complete_not_persisted",
+                                account_id=str(account_id or ""), run_id=str(run_id or ""),
+                                candidate_username=str(follower_un or ""),
+                                reason=str(_ordering_v2_complete_ack.get("reason") or ""),
+                                next_candidate_permitted=False,
+                            )
+                            return 96
+                        follow60_ordering_v2_completed_cycle_count = int(
+                            _ordering_v2_complete_ack.get("v2_complete_count") or 0
+                        )
+                        if isinstance(follow60_canary_control, dict):
+                            _v2_mutable = dict(
+                                follow60_canary_control.get(
+                                    "ordering_v2_behavioral_canary_v1"
+                                )
+                                or {}
+                            )
+                            for _v2_count_key in (
+                                "candidate_seen_count", "v2_selected_count",
+                                "v2_complete_count", "v2_partial_count",
+                                "v1_fallback_count", "status",
+                            ):
+                                if _v2_count_key in _ordering_v2_complete_ack:
+                                    _v2_mutable[_v2_count_key] = _ordering_v2_complete_ack[
+                                        _v2_count_key
+                                    ]
+                            follow60_canary_control[
+                                "ordering_v2_behavioral_canary_v1"
+                            ] = _v2_mutable
                         log(
                             "info",
                             "follow60_ordering_v2_cycle_completed",
@@ -21372,6 +21516,32 @@ def _run_followers_list_engine_session(
                         from follow60_ordering_v2_ledger_v1 import clear_active_store
 
                         clear_active_store(_ordering_v2_ledger)
+                        if _ordering_v2_complete_ack.get("barrier_reached") is True:
+                            log(
+                                "info", "follow60_ordering_v2_tenth_cycle_barrier_reached",
+                                account_id=str(account_id or ""), run_id=str(run_id or ""),
+                                request_id=str(run_request_id or ""),
+                                completed_v2_cycles=int(
+                                    follow60_ordering_v2_completed_cycle_count
+                                ),
+                                v1_fallback_count=int(
+                                    _ordering_v2_complete_ack.get("v1_fallback_count") or 0
+                                ),
+                                receipts_flushed=True, ledger_acknowledged=True,
+                                next_candidate_permitted=False,
+                                candidate_eleven_opened=False,
+                            )
+                            device_action_latch.request_stop(
+                                reason="follow60_ordering_v2_tenth_cycle_complete"
+                            )
+                            _publish_followers_session_summary(
+                                exit_code=0,
+                                follow_session_outcome="follow60_ordering_v2_barrier_reached",
+                                follow_stop_reason="follow60_ordering_v2_tenth_cycle_complete",
+                                follows_completed_count=int(follows_completed_count),
+                                target_follow_budget_effective=target_follow_budget_effective,
+                            )
+                            return 0
                 _schedule_deferred_follow_action_log_flush(
                     events=_follow_action_events,
                     run_id=run_id,
@@ -23252,6 +23422,65 @@ def _main_impl() -> int:
                     worker_sha=_worker_sha,
                 ).to_dict()
             )
+            # Ordering V2 is an optional behavioral layer over mainline V1.
+            # Its dormant pre-run control is claimed only after all immutable
+            # runtime identities exist.  Missing/disabled/non-allowlisted
+            # controls preserve V1 without weakening the mainline binding.
+            from follow60_ordering_v2_behavioral_canary_v1 import (
+                behavioral_runtime_scope_for_account,
+            )
+
+            _v2_scope_ok, _v2_scope_reason = behavioral_runtime_scope_for_account(
+                str(account_id or "")
+            )
+            if _v2_scope_ok:
+                _v2_claim = supabase_client.claim_follow60_ordering_v2_behavioral_binding_v1(
+                    account_id=str(account_id or ""),
+                    expected_worker_sha=_worker_sha,
+                    run_id=str(run_id or ""),
+                    request_id=str(run_request_id or ""),
+                    business_session_id=str(_SESSION_SOCIAL_ID or ""),
+                    attempt_id=int(_follow60_attempt_id or 1),
+                )
+                if _v2_claim.get("barrier_reached") is True:
+                    log(
+                        "info", "follow60_ordering_v2_barrier_replayed_pre_device",
+                        account_id=account_id or None, run_id=run_id or None,
+                        request_id=run_request_id or None,
+                        v2_complete_count=int(_v2_claim.get("v2_complete_count") or 0),
+                        next_candidate_permitted=False, device_actions_started=False,
+                    )
+                    device_action_latch.request_stop(
+                        reason="follow60_ordering_v2_barrier_replayed"
+                    )
+                    return 0
+                if _v2_claim.get("ok") is True:
+                    _follow60_canary_control["ordering_v2_behavioral_canary_v1"] = dict(
+                        _v2_claim
+                    )
+                    log(
+                        "info", "follow60_ordering_v2_runtime_binding_materialized",
+                        account_id=account_id or None, run_id=run_id or None,
+                        request_id=run_request_id or None,
+                        control_id=str(_v2_claim.get("control_id") or "") or None,
+                        binding_reason=str(_v2_claim.get("reason") or ""),
+                        v2_complete_count=int(_v2_claim.get("v2_complete_count") or 0),
+                        binding_consumed=True, device_actions_started=False,
+                    )
+                else:
+                    log(
+                        "info", "follow60_ordering_v2_runtime_binding_not_selected",
+                        account_id=account_id or None, run_id=run_id or None,
+                        request_id=run_request_id or None,
+                        reason=str(_v2_claim.get("reason") or "v2_control_not_found"),
+                        v1_behavior_preserved=True, device_actions_started=False,
+                    )
+            else:
+                log(
+                    "info", "follow60_ordering_v2_runtime_scope_not_selected",
+                    account_id=account_id or None, reason=_v2_scope_reason,
+                    v1_behavior_preserved=True, device_actions_started=False,
+                )
             _ensure_follow_persistence_run_binding(
                 persistence_required=True,
                 account_id=account_id,

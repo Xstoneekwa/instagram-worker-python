@@ -1,4 +1,4 @@
-"""Rex-only Follow60 Ordering V2 behavioral canary contracts.
+"""Account-scoped Follow60 Ordering V2 behavioral canary contracts.
 
 This module owns routing and proof transport only.  It deliberately has no
 device dependency: the runner supplies the already-certified V1 evidence and
@@ -12,13 +12,14 @@ import os
 import re
 import secrets
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping
 
 
 SCHEMA = "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1"
-REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+CANARY_TYPE = "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1"
 DEFAULT_MAX_NEW_CYCLES = 10
 ENABLED_ENV = "FOLLOW60_ORDERING_V2_BEHAVIORAL_ENABLED"
 ALLOWLIST_ENV = "FOLLOW60_ORDERING_V2_BEHAVIORAL_ACCOUNT_IDS"
@@ -44,11 +45,38 @@ def _flag_on(environ: Mapping[str, str]) -> bool:
 
 
 def _allowlist(environ: Mapping[str, str]) -> set[str]:
-    return {
-        item.strip().lower()
-        for item in _text(environ.get(ALLOWLIST_ENV)).split(",")
-        if item.strip()
-    }
+    values: set[str] = set()
+    for item in _text(environ.get(ALLOWLIST_ENV)).split(","):
+        candidate = item.strip().lower()
+        if not candidate:
+            continue
+        try:
+            values.add(str(uuid.UUID(candidate)))
+        except (ValueError, AttributeError):
+            return set()
+    return values
+
+
+def behavioral_runtime_scope_for_account(
+    account_id: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Fail closed unless one and only one valid account is allowlisted."""
+
+    env = os.environ if environ is None else environ
+    if not _flag_on(env):
+        return False, "v2_behavioral_disabled"
+    allowed = _allowlist(env)
+    if len(allowed) != 1:
+        return False, "v2_allowlist_must_contain_exactly_one_valid_account"
+    try:
+        current = str(uuid.UUID(_text(account_id)))
+    except (ValueError, AttributeError):
+        return False, "v2_account_id_invalid"
+    if current not in allowed:
+        return False, "v2_account_not_allowlisted"
+    return True, "v2_behavioral_scope_valid"
 
 
 @dataclass(frozen=True)
@@ -61,11 +89,20 @@ class BehavioralCanaryBindingV1:
     business_session_id: str
     attempt_id: int
     expected_worker_sha: str
+    actual_worker_sha: str
+    canary_type: str
     max_new_cycles: int
     baseline_follow_count: int
     expires_at_epoch_s: float
     lease_id: str
     lease_nonce: str
+    lease_expires_at_epoch_s: float
+    claimed_at_epoch_s: float
+    candidate_seen_count: int
+    v2_selected_count: int
+    v2_complete_count: int
+    v2_partial_count: int
+    v1_fallback_count: int
     status: str
 
     def payload(self) -> dict[str, Any]:
@@ -81,29 +118,31 @@ def validate_behavioral_canary_binding(
     business_session_id: str,
     attempt_id: int,
     worker_sha: str,
-    completed_v2_cycles: int,
+    completed_v2_cycles: int | None = None,
     now_epoch_s: float | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[BehavioralCanaryBindingV1 | None, str]:
     """Validate the full canary boundary.  Any missing signal routes to V1."""
 
     env = os.environ if environ is None else environ
-    if not _flag_on(env):
-        return None, "v2_behavioral_disabled"
-    allowed = _allowlist(env)
-    if allowed != {REX_ACCOUNT_ID}:
-        return None, "v2_allowlist_not_exact_rex_only"
-    if _text(account_id).lower() != REX_ACCOUNT_ID:
-        return None, "v2_account_not_rex"
+    scope_ok, scope_reason = behavioral_runtime_scope_for_account(
+        account_id, environ=env
+    )
+    if not scope_ok:
+        return None, scope_reason
     raw = dict(control or {})
     if _text(raw.get("schema")) != SCHEMA:
         return None, "v2_control_schema_invalid"
-    if _text(raw.get("status")) not in {"armed", "running"}:
+    if _text(raw.get("status")) != "running":
         return None, "v2_control_not_active"
+    if _text(raw.get("canary_type")) != CANARY_TYPE:
+        return None, "v2_canary_type_invalid"
     expected = _sha(raw.get("expected_worker_sha") or raw.get("worker_sha"))
     actual = _sha(worker_sha)
     if len(expected) != 40 or expected != actual:
         return None, "v2_expected_worker_sha_mismatch"
+    if _sha(raw.get("actual_worker_sha")) != actual:
+        return None, "v2_actual_worker_sha_mismatch"
     exact = (
         ("account_id", _text(account_id)),
         ("run_id", _text(run_id)),
@@ -118,12 +157,19 @@ def validate_behavioral_canary_binding(
     max_cycles = int(raw.get("max_new_cycles") or 0)
     if max_cycles < 1 or max_cycles > DEFAULT_MAX_NEW_CYCLES:
         return None, "v2_max_new_cycles_invalid"
-    if int(completed_v2_cycles or 0) >= max_cycles:
-        return None, "v2_cycle_barrier_reached"
+    authoritative_complete = int(raw.get("v2_complete_count") or 0)
+    if completed_v2_cycles is not None and int(completed_v2_cycles) != authoritative_complete:
+        return None, "v2_complete_count_not_authoritative"
     expiry = float(raw.get("expires_at_epoch_s") or 0.0)
     now = time.time() if now_epoch_s is None else float(now_epoch_s)
     if expiry <= now:
         return None, "v2_control_expired"
+    lease_expiry = float(raw.get("lease_expires_at_epoch_s") or 0.0)
+    if lease_expiry <= now:
+        return None, "v2_control_lease_expired"
+    claimed_at = float(raw.get("claimed_at_epoch_s") or 0.0)
+    if claimed_at <= 0.0 or claimed_at > now + 5.0:
+        return None, "v2_claimed_at_invalid"
     required = {
         "control_id": _text(raw.get("control_id") or raw.get("id")),
         "lease_id": _text(raw.get("lease_id")),
@@ -143,11 +189,20 @@ def validate_behavioral_canary_binding(
         business_session_id=_text(business_session_id),
         attempt_id=int(attempt_id),
         expected_worker_sha=actual,
+        actual_worker_sha=_sha(raw.get("actual_worker_sha")),
+        canary_type=CANARY_TYPE,
         max_new_cycles=max_cycles,
         baseline_follow_count=int(raw.get("baseline_follow_count") or 0),
         expires_at_epoch_s=expiry,
         lease_id=required["lease_id"],
         lease_nonce=required["lease_nonce"],
+        lease_expires_at_epoch_s=lease_expiry,
+        claimed_at_epoch_s=claimed_at,
+        candidate_seen_count=int(raw.get("candidate_seen_count") or 0),
+        v2_selected_count=int(raw.get("v2_selected_count") or 0),
+        v2_complete_count=authoritative_complete,
+        v2_partial_count=int(raw.get("v2_partial_count") or 0),
+        v1_fallback_count=int(raw.get("v1_fallback_count") or 0),
         status=_text(raw.get("status")),
     ), "v2_binding_valid"
 
@@ -590,12 +645,15 @@ def route_candidate_v2(
     *,
     binding: BehavioralCanaryBindingV1 | None,
     stable_proof: StableCandidateProofV2 | None,
-    completed_v2_cycles: int,
+    completed_v2_cycles: int | None = None,
 ) -> tuple[str, str]:
     if binding is None:
         return "FOLLOW60_V1", "v2_binding_absent_or_invalid"
-    if int(completed_v2_cycles or 0) >= binding.max_new_cycles:
-        return "FOLLOW60_V1", "v2_cycle_barrier_reached"
+    complete = binding.v2_complete_count
+    if completed_v2_cycles is not None:
+        complete = int(completed_v2_cycles)
+    if complete >= binding.max_new_cycles:
+        return "CANARY_BARRIER_REACHED", "v2_cycle_barrier_reached"
     if stable_proof is None or not stable_proof.direct_grid_safe:
         return "FOLLOW60_V1", "candidate_not_direct_grid_safe"
-    return "POST_FIRST_V2", "v2_rex_binding_and_direct_grid_safe"
+    return "POST_FIRST_V2", "v2_binding_and_direct_grid_safe"

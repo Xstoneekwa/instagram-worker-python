@@ -62,6 +62,9 @@ import runtime_incidents
 import supabase_client
 import deferred_projection_outbox
 import follow_persistence_receipt_replay
+from follow60_ordering_v2_behavioral_canary_v1 import (
+    behavioral_runtime_scope_for_account,
+)
 from worker_runtime_identity import (
     WorkerRuntimeIdentity,
     WorkerRuntimeIdentityError,
@@ -1265,6 +1268,39 @@ def _reconcile_linked_run(
         "completed", "failed", "stopped", "canceled", "blocked", "aborted"
     }:
         mapped_terminal_status = "failed"
+
+    # Dedicated V2 controls are independent from the generic Follow60
+    # evaluation control.  The RPC is an idempotent no-op for every unbound
+    # run and preserves exact 3/7/9 counters on an operator Stop.
+    v2_runtime_scoped, _v2_runtime_scope_reason = (
+        behavioral_runtime_scope_for_account(account_id)
+    )
+    if run_id and v2_runtime_scoped:
+        try:
+            v2_terminal = (
+                supabase_client.terminalize_follow60_ordering_v2_behavioral_control_v1(
+                    account_id=account_id,
+                    run_id=str(run_id),
+                    request_id=request_id,
+                    terminal_status=mapped_terminal_status,
+                    reason=f"run_terminal_{mapped_terminal_status}",
+                )
+            )
+            if v2_terminal.get("reason") != "v2_control_not_bound_noop":
+                log(
+                    "info", "follow60_ordering_v2_control_terminalized",
+                    account_id=account_id, run_id=run_id, request_id=request_id,
+                    terminal_status=mapped_terminal_status,
+                    control_status=v2_terminal.get("status"),
+                    v2_complete_count=v2_terminal.get("v2_complete_count"),
+                    v1_fallback_count=v2_terminal.get("v1_fallback_count"),
+                )
+        except Exception as v2_terminal_exc:
+            log(
+                "error", "follow60_ordering_v2_control_terminalization_failed",
+                account_id=account_id, run_id=run_id, request_id=request_id,
+                reason=str(v2_terminal_exc)[:200],
+            )
 
     # Every run is reconciled from durable canonical events.  This makes an
     # operator Stop and a natural terminal exit equivalent for counters and is

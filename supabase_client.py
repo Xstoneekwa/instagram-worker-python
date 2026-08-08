@@ -2964,6 +2964,70 @@ def terminalize_follow_60s_canary_control_v1(
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 
+def claim_follow60_ordering_v2_behavioral_binding_v1(
+    *, account_id: str, expected_worker_sha: str, run_id: str,
+    request_id: str, business_session_id: str, attempt_id: int,
+) -> dict[str, Any]:
+    """Atomically materialize the dormant V2 control for one exact runtime."""
+    out = call_rpc(
+        "claim_follow60_ordering_v2_behavioral_binding_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_actual_worker_sha": str(expected_worker_sha),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_business_session_id": str(business_session_id),
+            "p_attempt_id": int(attempt_id),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def record_follow60_ordering_v2_behavioral_event_v1(
+    *, control_id: str, account_id: str, run_id: str, request_id: str,
+    business_session_id: str, attempt_id: int, lease_id: str,
+    lease_nonce: str, worker_sha: str, action_id: str, event_kind: str,
+    metadata_safe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record one idempotent V2 routing/cycle fact under the claimed lease."""
+    out = call_rpc(
+        "record_follow60_ordering_v2_behavioral_event_v1",
+        {
+            "p_control_id": str(control_id),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_business_session_id": str(business_session_id),
+            "p_attempt_id": int(attempt_id),
+            "p_lease_id": str(lease_id),
+            "p_lease_nonce": str(lease_nonce),
+            "p_worker_sha": str(worker_sha),
+            "p_action_id": str(action_id),
+            "p_event_kind": str(event_kind),
+            "p_metadata_safe": dict(metadata_safe or {}),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def terminalize_follow60_ordering_v2_behavioral_control_v1(
+    *, account_id: str, run_id: str, request_id: str,
+    terminal_status: str, reason: str,
+) -> dict[str, Any]:
+    """Terminalize a claimed V2 control while preserving its exact counters."""
+    out = call_rpc(
+        "terminalize_follow60_ordering_v2_behavioral_control_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_terminal_status": str(terminal_status),
+            "p_reason": str(reason),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def reconcile_ig_run_canonical_totals_v1(
     *, run_id: str, account_id: str, terminal_status: str,
     metadata_safe: dict[str, Any] | None = None,
