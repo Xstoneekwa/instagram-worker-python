@@ -376,6 +376,192 @@ def try_select_exact_profile_header_follow_fast(
         return None, None
 
 
+def capture_ordering_v2_profile_reentry_follow_surface(
+    d: u2.Device,
+    ign: Any,
+    pkg: str,
+    *,
+    candidate_username: str,
+    visual_candidate_id: str,
+    screen_guard: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Capture the volatile Level-1 Follow surface after returning from Post.
+
+    This is intentionally selector-only: no hierarchy dump, screenshot, filter,
+    eligibility, Posts-count, or PostGrid pass is allowed at this boundary.
+    """
+
+    candidate = _norm_follow_handle(candidate_username)
+    if not candidate:
+        return {"ok": False, "reason": "v2_reentry_candidate_missing"}
+
+    pkg_use = (pkg or str(getattr(ign.config, "INSTAGRAM_PACKAGE", "") or "")).strip()
+    try:
+        current = dict(d.app_current() or {})
+    except Exception:
+        current = {}
+    current_package = str(current.get("package") or "").strip()
+    current_activity = str(current.get("activity") or "").strip()
+    if (
+        not pkg_use
+        or current_package != pkg_use
+        or "instagrammainactivity" not in current_activity.lower()
+    ):
+        return {"ok": False, "reason": "v2_reentry_package_or_activity_mismatch"}
+
+    # Exact profile identity is refreshed from the volatile action-bar control.
+    # This is a single selector read, not a hierarchy dump or profile analysis.
+    try:
+        title_control = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if not title_control.exists(timeout=0.06):
+            return {"ok": False, "reason": "v2_reentry_action_bar_missing"}
+        current_title = _norm_follow_handle(title_control.get_text())
+    except Exception:
+        return {"ok": False, "reason": "v2_reentry_action_bar_probe_failed"}
+    if current_title != candidate:
+        return {"ok": False, "reason": "v2_reentry_wrong_profile"}
+
+    # A challenge/verification overlay is a hard stop.  This is a lightweight
+    # selector probe and does not acquire XML or image evidence.
+    challenge = False
+    try:
+        challenge = bool(
+            d(textMatches=r"(?i).*(challenge required|verify it'?s you|suspicious login|account restricted).*").exists(
+                timeout=0.04
+            )
+        )
+    except Exception:
+        challenge = False
+    if challenge:
+        return {"ok": False, "reason": "v2_reentry_overlay_or_challenge"}
+
+    proxy, meta = try_select_exact_profile_header_follow_fast(
+        d,
+        ign,
+        pkg_use,
+        visual_candidate_id=str(visual_candidate_id or ""),
+        ui_snap="follow",
+        raw_inv=True,
+        screen_class="profile_like",
+    )
+    if proxy is None or not isinstance(meta, dict) or not meta.get("bounds"):
+        return {"ok": False, "reason": "v2_reentry_exact_follow_control_missing"}
+    try:
+        from follow_60s_canary import runtime_context as _follow60_runtime_context
+
+        ui_generation = int((_follow60_runtime_context() or {}).get("ui_generation") or 0)
+    except Exception:
+        ui_generation = 0
+    if ui_generation < 1:
+        return {"ok": False, "reason": "v2_reentry_generation_missing"}
+    captured = time.monotonic()
+    return {
+        "ok": True,
+        "reason": "v2_reentry_level1_surface_captured",
+        "package": current_package,
+        "activity": current_activity,
+        "surface": "candidate_profile",
+        "candidate_username": candidate,
+        "action_bar_title": current_title,
+        "cta_state": "follow",
+        "cta_bounds": dict(meta.get("bounds") or {}),
+        "overlay_or_challenge": False,
+        "navigation_generation": f"ui:{ui_generation}",
+        "ui_generation": ui_generation,
+        "captured_at_monotonic": captured,
+        "resource_id": str(meta.get("resource_id") or ""),
+        "text": str(meta.get("text") or ""),
+        "acquisition": "level1_exact_selector_only",
+        "xml_count": 0,
+        "screenshot_count": 0,
+    }
+
+
+def _select_ordering_v2_reentry_follow_from_context(
+    d: u2.Device,
+    ign: Any,
+    pkg: str,
+    *,
+    username: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    pre_follow_context: dict[str, Any] | None,
+) -> tuple[Any | None, dict[str, Any] | None, str]:
+    """Consume the fresh post-Back bounds once, or fail closed."""
+
+    ctx = dict(pre_follow_context or {})
+    proof = ctx.get("ordering_v2_reentry")
+    if not isinstance(proof, dict):
+        return None, None, "not_ordering_v2_reentry"
+    if str(proof.get("schema") or "") != "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1":
+        return None, None, "v2_reentry_schema_invalid"
+    if _norm_follow_handle(proof.get("candidate_username")) != _norm_follow_handle(username):
+        return None, None, "v2_reentry_candidate_mismatch"
+    if _norm_follow_handle(ctx.get("action_bar_title")) != _norm_follow_handle(username):
+        return None, None, "v2_reentry_action_bar_mismatch"
+    requested_source = _norm_follow_handle(source_profile_username)
+    bound_source = _norm_follow_handle(ctx.get("source_profile_username"))
+    if requested_source and bound_source and requested_source != bound_source:
+        return None, None, "v2_reentry_source_mismatch"
+    try:
+        age_s = time.monotonic() - float(proof.get("captured_at_monotonic") or 0.0)
+    except (TypeError, ValueError):
+        return None, None, "v2_reentry_timestamp_invalid"
+    if age_s < 0.0 or age_s > 2.0:
+        return None, None, "v2_reentry_bounds_stale"
+    if bool(proof.get("overlay_or_challenge")):
+        return None, None, "v2_reentry_overlay_or_challenge"
+    pkg_use = (pkg or str(getattr(ign.config, "INSTAGRAM_PACKAGE", "") or "")).strip()
+    try:
+        current = dict(d.app_current() or {})
+    except Exception:
+        current = {}
+    if (
+        not pkg_use
+        or str(current.get("package") or "") != pkg_use
+        or str(current.get("activity") or "") != str(proof.get("activity") or "")
+    ):
+        return None, None, "v2_reentry_live_package_or_activity_changed"
+    try:
+        from follow_60s_canary import runtime_context as _follow60_runtime_context
+
+        live_generation = int((_follow60_runtime_context() or {}).get("ui_generation") or 0)
+    except Exception:
+        live_generation = 0
+    if live_generation < 1 or live_generation != int(proof.get("ui_generation") or 0):
+        return None, None, "v2_reentry_ui_generation_changed"
+    bounds = _bounds_dict_from_inf_bounds(proof.get("cta_bounds") or {})
+    if bounds is None:
+        return None, None, "v2_reentry_follow_bounds_invalid"
+    resource_id = str(proof.get("cta_resource_id") or "")
+    if resource_id and not _resource_id_is_profile_header_follow_button(resource_id):
+        return None, None, "v2_reentry_follow_resource_id_invalid"
+    inf = {
+        "resourceName": resource_id or f"{pkg_use}:id/{PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN}",
+        "text": str(proof.get("cta_text") or "Follow"),
+        "contentDescription": "Follow",
+        "bounds": dict(bounds),
+    }
+    proxy = _ExactFollowFastPathProxy(
+        d, inf, visual_candidate_id=str(visual_candidate_id or "")
+    )
+    mx, my = _bounds_center_xy(bounds)
+    sx, sy = _snap_click_inside_bounds(bounds, mx, my)
+    return proxy, {
+        "resource_id": inf["resourceName"],
+        "text": inf["text"],
+        "bounds": dict(bounds),
+        "derived_click_target": [sx, sy],
+        "center_x": sx,
+        "center_y": sy,
+        "cta_type": CTA_TYPE_FOLLOW,
+        "acceptance_mode": "ordering_v2_fresh_reentry_bounds",
+        "exact_follow_fast_path": True,
+        "ordering_v2_reentry": True,
+        "proof_age_ms": round(age_s * 1000.0, 2),
+    }, "v2_reentry_fresh_bounds_selected"
+
+
 def _parse_android_bounds_attr(bounds: str | None) -> dict[str, int] | None:
     if not bounds:
         return None
@@ -1877,6 +2063,72 @@ def follow_action_surface_wait_and_select_element(
         pl = dict(payload)
         events.append((name, pl))
         log("info", name, **pl)
+
+    ordering_v2_reentry_requested = bool(
+        isinstance(pre_follow_context, dict)
+        and isinstance(pre_follow_context.get("ordering_v2_reentry"), dict)
+    )
+    if ordering_v2_reentry_requested:
+        v2_el, v2_meta, v2_reason = _select_ordering_v2_reentry_follow_from_context(
+            d,
+            ign,
+            pkg,
+            username=username,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=str(visual_candidate_id or ""),
+            pre_follow_context=pre_follow_context,
+        )
+        _emit(
+            "follow60_ordering_v2_reentry_follow_surface_selected"
+            if v2_el is not None
+            else "follow60_ordering_v2_reentry_follow_surface_rejected",
+            {
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "candidate_username": str(username or ""),
+                "reason": v2_reason,
+                "safe_to_tap": bool(v2_el is not None),
+                "fallback_to_v1_selector": False,
+                "bounds": dict((v2_meta or {}).get("bounds") or {}),
+                "proof_age_ms": (v2_meta or {}).get("proof_age_ms"),
+                "xml_count": 0,
+                "screenshot_count": 0,
+            },
+        )
+        if v2_el is not None:
+            _emit(
+                "follow_action_timing_surface_selection_completed",
+                {
+                    "duration_ms": 0.0,
+                    "caller": "follow_action_surface_wait_and_select_element",
+                    "result": "ready",
+                    "reason": v2_reason,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "attempt": 1,
+                    "fallback_used": False,
+                    "exact_follow_fast_path": True,
+                    "ordering_v2_reentry": True,
+                },
+            )
+            return v2_el, {
+                "outcome": "ready",
+                "pick_meta": dict(v2_meta or {}),
+                "events": events,
+                "surface": None,
+                "exact_follow_fast_path": True,
+                "prefollow_profile_proof_reused": True,
+                "ordering_v2_reentry": True,
+            }
+        return None, {
+            "outcome": "not_found",
+            "last_ui_state": "ambiguous",
+            "events": events,
+            "surface": None,
+            "visual_follow_failure_reason": v2_reason,
+            "safe_to_tap": False,
+            "ordering_v2_reentry": True,
+        }
 
     pkg = pkg or str(getattr(ign.config, "INSTAGRAM_PACKAGE", "") or "")
     deadline = time.monotonic() + float(

@@ -153,6 +153,7 @@ from instagram_navigation import (
     iter_followers_candidates,
     open_follower_profile_from_list,
     return_to_followers_list,
+    run_post_follow_post_likes_phase,
     run_visual_candidate_post_follow_phase,
     scroll_followers_list_forward,
     followers_refresh_hierarchy_for_candidates,
@@ -11280,6 +11281,349 @@ def _resolve_target_followers_resume_provenance(
     }, "provenance_resolved", identity_diagnostics
 
 
+def _follow60_ordering_v2_prepare_candidate(
+    d,
+    *,
+    control: dict[str, Any] | None,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    business_session_id: str,
+    attempt_id: int,
+    completed_v2_cycles: int,
+    target_id: str,
+    candidate_username: str,
+    action_id: str,
+    mono_capture: dict[str, Any] | None,
+    pkg: str,
+    source_profile_username: str,
+    pick: dict[str, Any],
+    dont_follow_private_accounts: bool,
+    private_probe_payload: dict[str, Any] | None,
+    session_likes_used: int,
+    commercial_policy_revision: str | None,
+) -> dict[str, Any]:
+    """Prepare one Rex-only POST_FIRST_V2 candidate or preserve V1 exactly.
+
+    The function is intentionally called only after all existing V1 business,
+    private-account, budget, identity, and Follow-state gates passed.  Before a
+    physical Post action, any failure returns the caller to unchanged V1.  Once
+    a Post action may have started, every failure is fail-closed for this
+    candidate so V1 can never issue a second Post/Like or a stale Follow tap.
+    """
+
+    from follow60_ordering_v2_behavioral_canary_v1 import (
+        CandidateCyclePlanV2,
+        Follow60OrderingV2OrchestratorV1,
+        build_fresh_follow_tap_context_v2,
+        build_profile_reentry_proof_v2,
+        build_stable_candidate_proof_v2,
+        create_deferred_follow_intent_v2,
+        route_candidate_v2,
+        validate_behavioral_canary_binding,
+    )
+    from follow60_ordering_v2_ledger_v1 import (
+        DurableOrderingLedgerV1,
+        LedgerScope,
+        clear_active_store,
+        register_active_store,
+    )
+    from follow_action_engine import capture_ordering_v2_profile_reentry_follow_surface
+
+    result: dict[str, Any] = {
+        "selected": False,
+        "abort_candidate": False,
+        "precompleted_like_result": None,
+        "pre_follow_context": None,
+        "ledger": None,
+        "plan": None,
+        "action_id": str(action_id or ""),
+        "route": "FOLLOW60_V1",
+        "reason": "v2_not_selected",
+        "timings_ms": {},
+    }
+    _ordering_v2_prepare_t0 = time.perf_counter()
+    binding, binding_reason = validate_behavioral_canary_binding(
+        control,
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        request_id=str(request_id or ""),
+        business_session_id=str(business_session_id or ""),
+        attempt_id=int(attempt_id or 0),
+        worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+        completed_v2_cycles=int(completed_v2_cycles or 0),
+    )
+    stable = None
+    proof_reason = "v2_binding_absent_or_invalid"
+    if binding is not None:
+        stable, proof_reason = build_stable_candidate_proof_v2(
+            binding=binding,
+            mono_capture=dict(mono_capture or {}),
+            business_evidence={
+                "filter_passed": True,
+                "filter_reason": "v1_filter_gate_passed",
+                "eligibility_passed": True,
+                "eligibility_reason": "v1_eligibility_gate_passed",
+                "follow_budget_available": True,
+            },
+            target_id=str(target_id or ""),
+            candidate_username=str(candidate_username or ""),
+            action_id=str(action_id or ""),
+            binding_kind="canary",
+        )
+    route, route_reason = route_candidate_v2(
+        binding=binding,
+        stable_proof=stable,
+        completed_v2_cycles=int(completed_v2_cycles or 0),
+    )
+    result.update(route=route, reason=route_reason)
+    log(
+        "info",
+        "follow60_ordering_v2_behavioral_route_selected",
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        request_id=str(request_id or ""),
+        candidate_username=str(candidate_username or ""),
+        visual_candidate_id=str(action_id or ""),
+        selected_path=route,
+        route_reason=route_reason,
+        binding_reason=binding_reason,
+        proof_reason=proof_reason,
+        completed_v2_cycles=int(completed_v2_cycles or 0),
+        default_path="FOLLOW60_V1",
+    )
+    if route != "POST_FIRST_V2" or binding is None or stable is None:
+        return result
+
+    deferred = create_deferred_follow_intent_v2(stable, initial_cta_identity="follow")
+    plan = CandidateCyclePlanV2(
+        selected_path="POST_FIRST_V2",
+        binding=binding,
+        stable_proof=stable,
+        deferred_follow=deferred,
+        started_at_monotonic=time.monotonic(),
+    )
+    store = DurableOrderingLedgerV1(
+        LedgerScope(
+            account_id=str(account_id or ""),
+            run_id=str(run_id or ""),
+            request_id=str(request_id or ""),
+            business_session_id=str(business_session_id or ""),
+            target_id=str(target_id or ""),
+            action_id=str(action_id or ""),
+            candidate_username=str(candidate_username or ""),
+        )
+    )
+    register_active_store(store)
+    orchestrator = Follow60OrderingV2OrchestratorV1(ledger_apply=store.apply_receipt)
+    loaded = store.load()
+    _ordering_v2_like_terminal_loaded = bool(
+        {"like_verified", "like_skipped"} & loaded.stages
+    )
+    if loaded.cycle_complete or bool(
+        {"follow_pending", "follow_verified", "follow_failed", "stop_recorded"}
+        & loaded.stages
+    ) or ("post_opened" in loaded.stages and not _ordering_v2_like_terminal_loaded):
+        log(
+            "error",
+            "follow60_ordering_v2_replay_blocked",
+            candidate_username=str(candidate_username or ""),
+            action_id=str(action_id or ""),
+            stages=sorted(loaded.stages),
+            next_stage=store.replay_plan().get("next_stage"),
+            double_like_blocked=True,
+            double_follow_blocked=True,
+        )
+        result.update(abort_candidate=True, reason="v2_replay_requires_explicit_recovery")
+        return result
+    if "profile_certified" not in loaded.stages:
+        orchestrator.begin(plan)
+
+    precompleted: dict[str, Any] | None = None
+    if "like_verified" in loaded.stages:
+        precompleted = {
+            "ok": True,
+            "skipped": False,
+            "phase_outcome": "success",
+            "liked_count": 1,
+            "post_opened": True,
+            "post_like_mode": "ordering_v2_post_first_replay",
+        }
+    elif "like_skipped" in loaded.stages:
+        precompleted = {
+            "ok": True,
+            "skipped": True,
+            "phase_outcome": "skipped",
+            "liked_count": 0,
+            "post_opened": True,
+            "like_skipped_safely": True,
+            "skipped_reason": "ordering_v2_durable_safe_skip",
+            "post_like_mode": "ordering_v2_post_first_replay",
+        }
+    else:
+        stage_binding = {
+            "account_id": str(account_id or ""),
+            "run_id": str(run_id or ""),
+            "request_id": str(request_id or ""),
+            "action_id": str(action_id or ""),
+            "attempt_id": int(attempt_id or 0),
+            "business_session_id": str(business_session_id or ""),
+            "control_id": binding.control_id,
+            "worker_sha": str(os.environ.get("WORKER_GIT_SHA") or "").lower(),
+            "candidate_username": str(candidate_username or ""),
+            "source_target_id": str(target_id or ""),
+        }
+
+        def _post_like_engine(ordering_context: dict[str, Any]) -> dict[str, Any]:
+            out = run_post_follow_post_likes_phase(
+                d,
+                pkg=pkg,
+                source_profile_username=source_profile_username,
+                follower_username=str(candidate_username or ""),
+                visual_candidate_id=str(action_id or ""),
+                follow_success_verified=False,
+                follow_state_after="",
+                skipped_tap=False,
+                session_likes_used=int(session_likes_used or 0),
+                account_id=str(account_id or "") or None,
+                bound_commercial_policy_revision=commercial_policy_revision,
+                run_id=str(run_id or "") or None,
+                candidate_profile_context={
+                    "package": str(pkg or ""),
+                    "activity": str(dict(mono_capture or {}).get("activity") or ""),
+                },
+                expected_stage_binding=stage_binding,
+                ordering_v2_post_first_context=dict(ordering_context),
+            )
+            if (
+                out.get("post_opened") is True
+                and out.get("ok") is True
+                and str(out.get("phase_outcome") or "") == "skipped"
+            ):
+                out["like_skipped_safely"] = True
+            return out
+
+        _ordering_v2_post_t0 = time.perf_counter()
+        executed = orchestrator.execute_post_first(plan, post_like_engine=_post_like_engine)
+        result["timings_ms"]["post_v5_like_back_ms"] = round(
+            (time.perf_counter() - _ordering_v2_post_t0) * 1000.0, 2
+        )
+        if executed.get("ok") is not True:
+            if plan.may_fallback_to_v1:
+                log(
+                    "warning",
+                    "follow60_ordering_v2_pre_post_fallback_v1",
+                    candidate_username=str(candidate_username or ""),
+                    reason=str(executed.get("reason") or ""),
+                    post_action_started=False,
+                    v1_behavior_preserved=True,
+                )
+                result.update(reason=str(executed.get("reason") or route_reason))
+                clear_active_store(store)
+                return result
+            try:
+                visual_return_to_profile_from_post(
+                    d, source_profile_username=source_profile_username
+                )
+            except Exception:
+                pass
+            result.update(
+                abort_candidate=True,
+                reason=str(executed.get("reason") or "v2_post_action_failed_closed"),
+                ledger=store,
+                plan=plan,
+            )
+            return result
+        precompleted = dict(executed)
+
+    _ordering_v2_reentry_t0 = time.perf_counter()
+    live = capture_ordering_v2_profile_reentry_follow_surface(
+        d,
+        __import__("instagram_navigation"),
+        pkg,
+        candidate_username=str(candidate_username or ""),
+        visual_candidate_id=str(action_id or ""),
+        screen_guard=None,
+    )
+    reentry, reentry_reason = build_profile_reentry_proof_v2(
+        deferred,
+        stable,
+        live=live,
+        expected_package=str(pkg or ""),
+    )
+    if reentry is None:
+        result.update(
+            abort_candidate=True,
+            reason=reentry_reason,
+            ledger=store,
+            plan=plan,
+        )
+        log(
+            "error",
+            "follow60_ordering_v2_reentry_failed_closed",
+            candidate_username=str(candidate_username or ""),
+            reason=reentry_reason,
+            live_reason=str(live.get("reason") or ""),
+            follow_tap_blocked=True,
+        )
+        return result
+    store.apply_receipt(
+        "profile_reentry_verified",
+        {
+            "candidate_username": str(candidate_username or ""),
+            "navigation_generation": str(reentry.navigation_generation),
+            "ui_generation": int(reentry.ui_generation),
+            "proof_source": "level1_exact_selector_only",
+        },
+    )
+    private_probe = dict(private_probe_payload or {})
+    context = build_fresh_follow_tap_context_v2(
+        reentry,
+        source_profile_username=source_profile_username,
+        visual_candidate_id=str(action_id or ""),
+        private_probe_payload=private_probe,
+    )
+    result.update(
+        selected=True,
+        precompleted_like_result=precompleted,
+        pre_follow_context=context,
+        ledger=store,
+        plan=plan,
+        reason="v2_post_first_ready_for_fresh_follow",
+    )
+    result["timings_ms"].update(
+        reentry_level1_ms=round(
+            (time.perf_counter() - _ordering_v2_reentry_t0) * 1000.0, 2
+        ),
+        prepare_total_ms=round(
+            (time.perf_counter() - _ordering_v2_prepare_t0) * 1000.0, 2
+        ),
+        extra_xml_count=0,
+        extra_screenshot_count=0,
+        extra_tap_count=0,
+    )
+    log(
+        "info",
+        "follow60_ordering_v2_pre_follow_ready",
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        candidate_username=str(candidate_username or ""),
+        selected_path="POST_FIRST_V2",
+        v5_mandatory=True,
+        raw_avoidable_phase_eliminated=True,
+        actual_reentry_ms=result["timings_ms"]["reentry_level1_ms"],
+        # The local durable ledger cost is not the Supabase outbox cost.  Keep
+        # this unknown until the existing outbox instrumentation publishes an
+        # observed value instead of reporting a misleading synthetic zero.
+        db_outbox_cost_ms=None,
+        extra_xml_count=0,
+        extra_screenshot_count=0,
+        extra_tap_count=0,
+        timings_ms=dict(result["timings_ms"]),
+    )
+    return result
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -11383,6 +11727,7 @@ def _run_followers_list_engine_session(
     processed = 0
     follows_completed_count = 0
     follow60_completed_cycle_count = 0
+    follow60_ordering_v2_completed_cycle_count = 0
     max_iter: int | None = None
     _followers_session_summary: dict[str, Any] = {
         "source_profile_username": source_profile_username,
@@ -19157,6 +19502,96 @@ def _run_followers_list_engine_session(
                             )
                         return 42
                     continue
+                _ordering_v2: dict[str, Any] = {
+                    "selected": False,
+                    "abort_candidate": False,
+                    "precompleted_like_result": None,
+                    "pre_follow_context": None,
+                    "ledger": None,
+                    "plan": None,
+                    "action_id": _post_follow_visual_candidate_id(
+                        pick, str(follower_un or "")
+                    ),
+                }
+                _ordering_v2_raw_control = (
+                    dict(
+                        (follow60_canary_control or {}).get(
+                            "ordering_v2_behavioral_canary_v1"
+                        )
+                        or {}
+                    )
+                    if follow60_canary_active
+                    else {}
+                )
+                if _ordering_v2_raw_control:
+                    try:
+                        _ordering_v2 = _follow60_ordering_v2_prepare_candidate(
+                            d,
+                            control=_ordering_v2_raw_control,
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            request_id=str(
+                                run_request_id or _CURRENT_RUN_REQUEST_ID or ""
+                            ),
+                            business_session_id=str(business_session_id or ""),
+                            attempt_id=int(follow60_attempt_id or 1),
+                            completed_v2_cycles=int(
+                                follow60_ordering_v2_completed_cycle_count
+                            ),
+                            target_id=str(target_id or ""),
+                            candidate_username=str(follower_un or ""),
+                            action_id=str(_ordering_v2.get("action_id") or ""),
+                            mono_capture=dict(_early_pre_follow_mono_capture or {}),
+                            pkg=pkg,
+                            source_profile_username=source_profile_username,
+                            pick=pick,
+                            dont_follow_private_accounts=_dont_follow_private_pre,
+                            private_probe_payload=dict(
+                                _early_private_probe_for_terminal
+                                or (_early_pre_follow_mono_capture or {}).get(
+                                    "private_probe_payload"
+                                )
+                                or {}
+                            ),
+                            session_likes_used=int(_SESSION_COUNTERS.get("likes") or 0),
+                            commercial_policy_revision=(
+                                session_commercial_policy_revision
+                            ),
+                        )
+                    except Exception as _ordering_v2_exc:
+                        log(
+                            "error",
+                            "follow60_ordering_v2_behavioral_prepare_exception",
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            candidate_username=str(follower_un or ""),
+                            exception_type=type(_ordering_v2_exc).__name__,
+                            reason=str(_ordering_v2_exc)[:240],
+                            safe_to_continue_candidate=False,
+                        )
+                        _ordering_v2["abort_candidate"] = True
+                        _ordering_v2["reason"] = "v2_prepare_exception_fail_closed"
+                if _ordering_v2.get("abort_candidate") is True:
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                    _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                    _ct_clear_candidate_attempt_timer()
+                    _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                    ok_v2_abort_ct, _v2_abort_method = return_to_followers_list(
+                        d, source_profile_username, pkg
+                    )
+                    log(
+                        "error",
+                        "follow60_ordering_v2_candidate_aborted_fail_closed",
+                        candidate_username=str(follower_un or ""),
+                        reason=str(_ordering_v2.get("reason") or ""),
+                        return_ct_ok=bool(ok_v2_abort_ct),
+                        return_ct_method=str(_v2_abort_method or ""),
+                        follow_tap_blocked=True,
+                    )
+                    if not ok_v2_abort_ct:
+                        return 42
+                    continue
+
                 log(
                     "info",
                     "visual_followers_perform_follow_safe_invocation",
@@ -19207,8 +19642,16 @@ def _run_followers_list_engine_session(
                         else ""
                     )
                 )
-                _pre_follow_tap_ctx = None
-                if _profile_follow_already_open and _dont_follow_private_pre:
+                _pre_follow_tap_ctx = (
+                    dict(_ordering_v2.get("pre_follow_context") or {})
+                    if _ordering_v2.get("selected") is True
+                    else None
+                )
+                if (
+                    _pre_follow_tap_ctx is None
+                    and _profile_follow_already_open
+                    and _dont_follow_private_pre
+                ):
                     _pre_follow_tap_ctx = build_pre_follow_tap_context(
                         follower_username=str(follower_un or ""),
                         source_profile_username=source_profile_username,
@@ -19318,6 +19761,18 @@ def _run_followers_list_engine_session(
                     if _follow_persistence_intent_enabled_for_account(account_id)
                     else None
                 )
+                _ordering_v2_ledger = _ordering_v2.get("ledger")
+                if _ordering_v2.get("selected") is True:
+                    _ordering_v2_ledger.apply_receipt(
+                        "follow_pending",
+                        {
+                            "candidate_username": str(follower_un or ""),
+                            "deferred_intent_nonce": str(
+                                _ordering_v2.get("plan").deferred_follow.intent_nonce
+                            ),
+                            "fresh_reentry_proof": True,
+                        },
+                    )
                 follow_out = perform_follow_safe(
                     d,
                     follower_un,
@@ -19385,6 +19840,37 @@ def _run_followers_list_engine_session(
                             safe_to_continue_ui=False,
                         )
                         return 1
+                if _ordering_v2.get("selected") is True:
+                    _ordering_v2_follow_state = str(
+                        follow_out.get("follow_state_after") or ""
+                    ).strip().lower()
+                    if (
+                        follow_out.get("ok") is True
+                        and _tap_sent_seen
+                        and _ordering_v2_follow_state == "following"
+                    ):
+                        _ordering_v2_ledger.apply_receipt(
+                            "follow_verified",
+                            {
+                                "candidate_username": str(follower_un or ""),
+                                "follow_state_after": _ordering_v2_follow_state,
+                                "tap_sent": True,
+                            },
+                        )
+                    else:
+                        _ordering_v2_ledger.apply_receipt(
+                            "follow_failed",
+                            {
+                                "candidate_username": str(follower_un or ""),
+                                "follow_state_after": _ordering_v2_follow_state,
+                                "tap_sent": bool(_tap_sent_seen),
+                                "reason": str(
+                                    follow_out.get("failure_code")
+                                    or follow_out.get("visual_follow_failure_reason")
+                                    or "follow_not_physically_verified"
+                                ),
+                            },
+                        )
                 _button_detect_reason = str(
                     (_surface_event or {}).get("reason")
                     or follow_out.get("visual_follow_failure_reason")
@@ -20457,6 +20943,11 @@ def _run_followers_list_engine_session(
                     bound_commercial_policy_revision=session_commercial_policy_revision,
                     stage_persist_callback=_pf_stage_persist_callback,
                     expected_stage_binding=_pf_expected_stage_binding,
+                    precompleted_like_result=(
+                        dict(_ordering_v2.get("precompleted_like_result") or {})
+                        if _ordering_v2.get("selected") is True
+                        else None
+                    ),
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
@@ -20783,6 +21274,104 @@ def _run_followers_list_engine_session(
                         target_username=source_profile_username,
                     )
                     return 96
+                if _ordering_v2.get("selected") is True:
+                    _ordering_v2_loaded_before_post_follow = _ordering_v2_ledger.load()
+                    _ordering_v2_mute = (
+                        dict(_pf.get("mute") or {})
+                        if isinstance(_pf.get("mute"), dict)
+                        else {}
+                    )
+                    if (
+                        "follow_verified"
+                        in _ordering_v2_loaded_before_post_follow.stages
+                        and _ordering_v2_mute.get("posts_verified") is True
+                    ):
+                        _ordering_v2_ledger.apply_receipt(
+                            "mute_posts_verified",
+                            {"verified": True, "engine": "mute_engine_v2"},
+                        )
+                    if (
+                        "follow_verified"
+                        in _ordering_v2_loaded_before_post_follow.stages
+                        and _ordering_v2_mute.get("stories_verified") is True
+                    ):
+                        _ordering_v2_ledger.apply_receipt(
+                            "mute_stories_verified",
+                            {"verified": True, "engine": "mute_engine_v2"},
+                        )
+                    _ordering_v2_loaded_after_mute = _ordering_v2_ledger.load()
+                    if (
+                        _pf.get("return_ok") is True
+                        and {
+                            "follow_verified",
+                            "mute_posts_verified",
+                            "mute_stories_verified",
+                        }.issubset(_ordering_v2_loaded_after_mute.stages)
+                    ):
+                        _ordering_v2_ledger.apply_receipt(
+                            "return_ct_exact",
+                            {
+                                "verified": True,
+                                "method": str(_pf.get("return_how") or ""),
+                            },
+                        )
+                    _ordering_v2_loaded_after = _ordering_v2_ledger.load()
+                    _ordering_v2_required = {
+                        "follow_verified",
+                        "mute_posts_verified",
+                        "mute_stories_verified",
+                        "return_ct_exact",
+                    }
+                    if _ordering_v2_required.issubset(
+                        _ordering_v2_loaded_after.stages
+                    ):
+                        _ordering_v2_ledger.apply_receipt(
+                            "cycle_complete",
+                            {
+                                "critical_persistence_acknowledged": True,
+                                "candidate_username": str(follower_un or ""),
+                            },
+                        )
+                        follow60_ordering_v2_completed_cycle_count += 1
+                        log(
+                            "info",
+                            "follow60_ordering_v2_cycle_completed",
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            candidate_username=str(follower_un or ""),
+                            selected_path="POST_FIRST_V2",
+                            completed_v2_cycles=int(
+                                follow60_ordering_v2_completed_cycle_count
+                            ),
+                            max_new_cycles=int(
+                                dict(_ordering_v2_raw_control or {}).get(
+                                    "max_new_cycles"
+                                )
+                                or 0
+                            ),
+                            cycle_total_ms=round(
+                                max(
+                                    0.0,
+                                    (
+                                        time.monotonic()
+                                        - float(
+                                            _ordering_v2.get("plan").started_at_monotonic
+                                        )
+                                    )
+                                    * 1000.0,
+                                ),
+                                2,
+                            ),
+                            candidate_to_candidate_instrumentation=(
+                                "followers_inter_candidate_perf"
+                            ),
+                            v5_mandatory=True,
+                            receipts_persisted=True,
+                            net_gain_source="existing_v1_vs_v2_phase_events",
+                        )
+                        from follow60_ordering_v2_ledger_v1 import clear_active_store
+
+                        clear_active_store(_ordering_v2_ledger)
                 _schedule_deferred_follow_action_log_flush(
                     events=_follow_action_events,
                     run_id=run_id,
@@ -21934,6 +22523,19 @@ def _main_impl() -> int:
             signal_number=signum,
             reason="manual_stop_signal",
         )
+        try:
+            from follow60_ordering_v2_ledger_v1 import record_stop_for_run
+
+            _ordering_v2_stop_receipts = record_stop_for_run(
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                reason="manual_stop_signal",
+            )
+        except Exception as _ordering_v2_stop_exc:
+            _ordering_v2_stop_receipts = {
+                "ok": False,
+                "reason": type(_ordering_v2_stop_exc).__name__,
+            }
         log(
             "warning",
             "manual_stop_signal_received",
@@ -21942,6 +22544,7 @@ def _main_impl() -> int:
             account_id=account_id or None,
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
             stop_trace=stop_trace,
+            ordering_v2_stop_receipts=_ordering_v2_stop_receipts,
         )
         try:
             from follow60_ordering_v2_shadow import (

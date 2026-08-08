@@ -53071,6 +53071,7 @@ def run_post_follow_post_likes_phase(
     commercial_policy_evidence: Any | None = None,
     candidate_profile_context: dict[str, Any] | None = None,
     expected_stage_binding: dict[str, Any] | None = None,
+    ordering_v2_post_first_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -53086,6 +53087,13 @@ def run_post_follow_post_likes_phase(
     cand = str(follower_username or "").strip().lstrip("@")
     vcid = str(visual_candidate_id or "").strip()
     fs_after = str(follow_state_after or "").strip()
+    ordering_v2_context = dict(ordering_v2_post_first_context or {})
+    ordering_v2_post_first = bool(
+        ordering_v2_context.get("schema")
+        == "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1"
+        and isinstance(ordering_v2_context.get("stable_proof"), dict)
+        and isinstance(ordering_v2_context.get("post_grid_evidence"), dict)
+    )
     authoritative_binding, authoritative_binding_reason = (
         _authoritative_stage_binding_v2(
             expected_stage_binding,
@@ -53364,7 +53372,7 @@ def run_post_follow_post_likes_phase(
         _log_likes_early_exit("unresolved_follower_username")
         return _finish(phase_outcome="skipped", skipped_reason="unresolved_follower_username")
 
-    if not follow_success_verified:
+    if not follow_success_verified and not ordering_v2_post_first:
         return _finish(
             phase_outcome="skipped",
             skipped_reason="follow_not_verified",
@@ -53517,12 +53525,37 @@ def run_post_follow_post_likes_phase(
     fast_profile_guard_reused = False
     continuity_evidence: dict[str, Any] = {}
     profile_guard_live_mismatch = False
-    proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
-        source_profile_username=src,
-        candidate_username=cand,
-        visual_candidate_id=vcid,
-        candidate_context=candidate_profile_context,
-    )
+    if ordering_v2_post_first:
+        stable_v2 = dict(ordering_v2_context.get("stable_proof") or {})
+        proof_ok = bool(
+            stable_v2.get("direct_grid_safe") is True
+            and _normalize_handle(stable_v2.get("candidate_username"))
+            == _normalize_handle(cand)
+            and str(stable_v2.get("account_id") or "")
+            == str((authoritative_binding or {}).get("account_id") or "")
+            and str(stable_v2.get("run_id") or "")
+            == str((authoritative_binding or {}).get("run_id") or "")
+            and str(stable_v2.get("request_id") or "")
+            == str((authoritative_binding or {}).get("request_id") or "")
+            and str(stable_v2.get("action_id") or "")
+            == str((authoritative_binding or {}).get("action_id") or "")
+            and str(stable_v2.get("worker_sha") or "").lower()
+            == str((authoritative_binding or {}).get("worker_sha") or "").lower()
+        )
+        proof = {
+            "immutable_verdict": bool(proof_ok),
+            "candidate_context": dict(candidate_profile_context or {}),
+            "action_bar_title": cand,
+        }
+        proof_age_ms = 0.0
+        proof_reject = "" if proof_ok else "ordering_v2_stable_profile_proof_invalid"
+    else:
+        proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
+            source_profile_username=src,
+            candidate_username=cand,
+            visual_candidate_id=vcid,
+            candidate_context=candidate_profile_context,
+        )
     if proof_ok:
         reject_reason = ""
         cur_pkg = ""
@@ -53787,8 +53820,12 @@ def run_post_follow_post_likes_phase(
             )
         return False
 
-    _canary_grid_evidence: dict[str, Any] | None = None
-    _canary_grid_decision_consumed = False
+    _canary_grid_evidence: dict[str, Any] | None = (
+        dict(ordering_v2_context.get("post_grid_evidence") or {})
+        if ordering_v2_post_first
+        else None
+    )
+    _canary_grid_decision_consumed = bool(ordering_v2_post_first)
     _canary_grid_golden_direct = False
     _canary_grid_golden_reason = ""
     _canary_golden_post_existence_evidence: dict[str, Any] | None = None
@@ -53799,7 +53836,7 @@ def run_post_follow_post_likes_phase(
             record_outcome as _record_follow_60s_outcome,
         )
 
-        if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
+        if not ordering_v2_post_first and _follow_60s_canary_enabled("like_fresh_cell_bounds"):
             _grid_ww, _grid_wh = d.window_size()
             _expected_ctx = dict(continuity_evidence or candidate_profile_context or {})
             _grid_ev, _grid_age, _grid_reject = _consume_post_grid_evidence(
@@ -54224,16 +54261,21 @@ def run_post_follow_post_likes_phase(
             pass
         from follow_state_contract import FollowContext, evaluate_like_precheck_contract
 
-        _like_contract_ctx, _can_probe_like_grid, _like_contract_reason = (
-            evaluate_like_precheck_contract(
-                sheet_precheck=sheet_precheck,
-                surface_precheck=surface_precheck,
-                follower_username=cand,
-                source_profile_username=src,
-                visual_candidate_id=vcid,
-                initial_context=follow_context if isinstance(follow_context, FollowContext) else None,
+        if ordering_v2_post_first:
+            _like_contract_ctx = follow_context
+            _can_probe_like_grid = True
+            _like_contract_reason = "ordering_v2_post_first_direct_grid_safe"
+        else:
+            _like_contract_ctx, _can_probe_like_grid, _like_contract_reason = (
+                evaluate_like_precheck_contract(
+                    sheet_precheck=sheet_precheck,
+                    surface_precheck=surface_precheck,
+                    follower_username=cand,
+                    source_profile_username=src,
+                    visual_candidate_id=vcid,
+                    initial_context=follow_context if isinstance(follow_context, FollowContext) else None,
+                )
             )
-        )
         if not _can_probe_like_grid:
             failed_nav += 1
             fr_contract = str(
@@ -55373,19 +55415,27 @@ def run_post_follow_post_likes_phase(
                     )
                 except Exception:
                     pass
-                _canary_preopened_out = visual_open_recent_post_from_profile(
-                    d,
-                    source_profile_username=src,
-                    expected_follower_username=cand,
-                    grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
-                    grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
-                    selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
-                    likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
-                    post_follow_stash_open_like_proof=True,
-                    post_open_intent_binding=authoritative_binding,
-                    post_open_intent_target_username=src,
-                    post_grid_existence_evidence=_canary_grid_evidence,
-                )
+                if ordering_v2_post_first:
+                    _canary_preopened_out = {
+                        "ok": False,
+                        "post_detected": False,
+                        "failure_reason": _tap_failure_reason,
+                        "open_strategy": "ordering_v2_safe_intent_rejected_no_golden",
+                    }
+                else:
+                    _canary_preopened_out = visual_open_recent_post_from_profile(
+                        d,
+                        source_profile_username=src,
+                        expected_follower_username=cand,
+                        grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
+                        grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
+                        selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+                        likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                        post_follow_stash_open_like_proof=True,
+                        post_open_intent_binding=authoritative_binding,
+                        post_open_intent_target_username=src,
+                        post_grid_existence_evidence=_canary_grid_evidence,
+                    )
                 log(
                     "info",
                     "follow_60s_post_grid_evidence_golden_direct_completed",
@@ -56764,6 +56814,8 @@ def run_post_follow_post_likes_phase(
             tap_x=open_out.get("tap_x"),
             tap_y=open_out.get("tap_y"),
         )
+        out["post_opened"] = True
+        out["ordering_v2_post_first"] = bool(ordering_v2_post_first)
 
         def _skip_unusable_post_like_surface(
             *,
@@ -57929,6 +57981,7 @@ def run_visual_candidate_post_follow_phase(
     bound_commercial_policy_revision: str | None = None,
     stage_persist_callback: Callable[[str, dict[str, Any]], bool] | None = None,
     expected_stage_binding: dict[str, Any] | None = None,
+    precompleted_like_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -58613,7 +58666,34 @@ def run_visual_candidate_post_follow_phase(
     ]
 
     likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
-    if critical_stage_persist_failed:
+    ordering_v2_like = dict(precompleted_like_result or {})
+    if ordering_v2_like:
+        likes_out.update(ordering_v2_like)
+        likes_out["ordering_v2_precompleted"] = True
+        if int(likes_out.get("liked_count") or 0) > 0:
+            _persist_verified_stage(
+                "like_verified",
+                {
+                    "liked_count": int(likes_out.get("liked_count") or 0),
+                    "phase_outcome": str(likes_out.get("phase_outcome") or "success"),
+                    "post_like_mode": "ordering_v2_post_first",
+                    "timings_ms": likes_out.get("timings_ms") or {},
+                    "ordering_version": "FOLLOW60_ORDERING_V2",
+                },
+            )
+        log(
+            "info",
+            "follow60_ordering_v2_precompleted_like_reused_after_mute",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            liked_count=int(likes_out.get("liked_count") or 0),
+            skipped_reason=str(likes_out.get("skipped_reason") or ""),
+            v5_mandatory=True,
+            second_post_open_attempted=False,
+            golden_attempted=False,
+        )
+    elif critical_stage_persist_failed:
         post_follow_ctx.mark_post_grid_blocked(reason="critical_stage_persist_failed")
         post_follow_ctx.mark_like_done_or_skipped(reason="critical_stage_persist_failed")
         likes_out.update(
