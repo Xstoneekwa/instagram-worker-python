@@ -447,11 +447,24 @@ def capture_ordering_v2_profile_reentry_follow_surface(
     if proxy is None or not isinstance(meta, dict) or not meta.get("bounds"):
         return {"ok": False, "reason": "v2_reentry_exact_follow_control_missing"}
     try:
-        from follow_60s_canary import runtime_context as _follow60_runtime_context
+        from follow_60s_canary import (
+            invalidate as _follow60_invalidate,
+            runtime_context as _follow60_runtime_context,
+        )
 
-        ui_generation = int((_follow60_runtime_context() or {}).get("ui_generation") or 0)
+        # Returning from the Post viewer is a real navigation boundary.  The
+        # V1 Back helper proves the exact profile but does not own the Follow60
+        # proof-generation clock, so seal that already-observed transition
+        # here before publishing any reusable CTA bounds.  This invalidates
+        # pre-Post proofs and gives the fresh reentry proof its own generation;
+        # it does not acquire XML/image evidence or authorize a tap.
+        _follow60_invalidate("ordering_v2_profile_reentry_navigation")
+        runtime = dict(_follow60_runtime_context() or {})
+        ui_generation = int(runtime.get("ui_generation") or 0)
+        navigation_counter = int(runtime.get("navigation_counter") or 0)
     except Exception:
         ui_generation = 0
+        navigation_counter = 0
     if ui_generation < 1:
         return {"ok": False, "reason": "v2_reentry_generation_missing"}
     captured = time.monotonic()
@@ -466,7 +479,7 @@ def capture_ordering_v2_profile_reentry_follow_surface(
         "cta_state": "follow",
         "cta_bounds": dict(meta.get("bounds") or {}),
         "overlay_or_challenge": False,
-        "navigation_generation": f"ui:{ui_generation}",
+        "navigation_generation": f"nav:{navigation_counter}:ui:{ui_generation}",
         "ui_generation": ui_generation,
         "captured_at_monotonic": captured,
         "resource_id": str(meta.get("resource_id") or ""),
