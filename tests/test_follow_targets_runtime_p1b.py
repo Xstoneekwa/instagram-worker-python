@@ -4286,6 +4286,26 @@ class CtCheckpointV1Tests(unittest.TestCase):
             )
         )
 
+    def test_failed_scroll_continuation_prefers_fresh_primary_rows_then_see_more(self) -> None:
+        self.assertEqual(
+            runner._followers_post_scroll_failure_continuation_action(
+                {"state": "PRIMARY_ROWS_AVAILABLE"}
+            ),
+            "continue_primary_rows",
+        )
+        self.assertEqual(
+            runner._followers_post_scroll_failure_continuation_action(
+                {"state": "EXPAND_PRIMARY_LIST_AVAILABLE"}
+            ),
+            "expand_primary_list",
+        )
+        self.assertEqual(
+            runner._followers_post_scroll_failure_continuation_action(
+                {"state": "AMBIGUOUS_SURFACE"}
+            ),
+            "rotate_safe",
+        )
+
     def test_runtime_follow_cap_check_accepts_resolved_db_cap(self) -> None:
         old_count = runner._RUNTIME_FOLLOW_COUNT
         try:

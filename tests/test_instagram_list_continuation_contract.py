@@ -1133,6 +1133,10 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("followers_try_expand_primary_list", final_probe)
         self.assertIn("max_attempts=1", final_probe)
         self.assertIn("if _post_scroll_failure_see_more_expanded", final_probe)
+        self.assertIn("_post_scroll_failure_primary_rows_available", final_probe)
+        self.assertIn(
+            "instagram_list_final_primary_rows_continue_same_ct", final_probe
+        )
         self.assertIn("continue", final_probe)
 
     def test_44_real_grouped_count_without_selected_flag_uses_committed_surface(self) -> None:

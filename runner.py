@@ -2095,6 +2095,18 @@ def _followers_snapshot_viewport_exhausted(
     return bool(rows) and all(bool(row.get("already_seen_runtime")) for row in rows)
 
 
+def _followers_post_scroll_failure_continuation_action(
+    continuation: dict[str, Any] | None,
+) -> str:
+    """Classify the one fresh continuation probe after a rejected depth move."""
+    state = str((continuation or {}).get("state") or "")
+    if state == "PRIMARY_ROWS_AVAILABLE":
+        return "continue_primary_rows"
+    if state == "EXPAND_PRIMARY_LIST_AVAILABLE":
+        return "expand_primary_list"
+    return "rotate_safe"
+
+
 def _followers_visible_window_scroll_strategy(*, scroll_used: int) -> dict[str, Any]:
     attempt_index = max(1, int(scroll_used or 0) + 1)
     if attempt_index == 1:
@@ -17335,6 +17347,7 @@ def _run_followers_list_engine_session(
                         # cannot loop: one probe, one expansion attempt, then
                         # the existing safe rotation path remains authoritative.
                         _post_scroll_failure_see_more_expanded = False
+                        _post_scroll_failure_primary_rows_available = False
                         try:
                             from instagram_navigation import (
                                 followers_refresh_detect_hierarchy_cache,
@@ -17353,10 +17366,16 @@ def _run_followers_list_engine_session(
                                     continuation_probe_count=1,
                                 )
                             )
-                            if str(
-                                _post_scroll_failure_continuation.get("state")
-                                or ""
-                            ) == "EXPAND_PRIMARY_LIST_AVAILABLE":
+                            _post_scroll_failure_action = (
+                                _followers_post_scroll_failure_continuation_action(
+                                    _post_scroll_failure_continuation
+                                )
+                            )
+                            _post_scroll_failure_primary_rows_available = bool(
+                                _post_scroll_failure_action
+                                == "continue_primary_rows"
+                            )
+                            if _post_scroll_failure_action == "expand_primary_list":
                                 _post_scroll_failure_expansion = (
                                     followers_try_expand_primary_list(
                                         d,
@@ -17399,6 +17418,31 @@ def _run_followers_list_engine_session(
                                 error_type=type(_final_see_more_exc).__name__,
                             )
                         if _post_scroll_failure_see_more_expanded:
+                            continue
+                        if _post_scroll_failure_primary_rows_available:
+                            log(
+                                "info",
+                                "instagram_list_final_primary_rows_continue_same_ct",
+                                flow="follow",
+                                account_id=str(account_id or ""),
+                                target_id=str(target_id or ""),
+                                run_id=str(run_id or ""),
+                                source_profile_username=source_profile_username,
+                                visible_primary_row_count=int(
+                                    _post_scroll_failure_continuation.get(
+                                        "primary_row_count"
+                                    )
+                                    or 0
+                                ),
+                                see_more_visible=bool(
+                                    _post_scroll_failure_continuation.get(
+                                        "see_more_visible"
+                                    )
+                                ),
+                                reason=(
+                                    "fresh_primary_rows_after_failed_depth_validation"
+                                ),
+                            )
                             continue
                         _followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"
                         scroll_failure_recovery_attempts = int(
