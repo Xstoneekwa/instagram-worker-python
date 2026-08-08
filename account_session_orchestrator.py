@@ -758,6 +758,25 @@ def _authorized_resume_follow_quota(
     return value if value > 0 else None
 
 
+def _follow60_ordering_v2_runtime_control_carrier(
+    follow60_canary_control: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Carry only the optional V2 runtime control through mainline wiring.
+
+    Ordering V2 is not a legacy Follow60 canary session.  Its runtime binding
+    is nested in the historical control carrier, so mainline must preserve
+    that single nested field without enabling or leaking any other canary
+    state into the V1 engine.
+    """
+
+    if not isinstance(follow60_canary_control, dict):
+        return None
+    raw = follow60_canary_control.get("ordering_v2_behavioral_canary_v1")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return {"ordering_v2_behavioral_canary_v1": dict(raw)}
+
+
 def _run_follow_target_rotation(
     d: u2.Device,
     *,
@@ -1040,6 +1059,15 @@ def _run_follow_target_rotation(
                     or None,
                 }
             )
+            ordering_v2_control_carrier = (
+                _follow60_ordering_v2_runtime_control_carrier(
+                    follow60_canary_control
+                )
+            )
+            if ordering_v2_control_carrier is not None:
+                call_kwargs["follow60_canary_control"] = (
+                    ordering_v2_control_carrier
+                )
         if start_from_current_followers_list:
             call_kwargs["start_from_current_followers_list"] = True
             call_kwargs["prevalidated_followers_list_meta"] = dict(prevalidated_followers_meta)
@@ -4155,6 +4183,15 @@ def run_account_session(
                     "follow60_attempt_id": follow60_attempt_id,
                     "business_session_id": business_session_id,
                 }
+                ordering_v2_control_carrier = (
+                    _follow60_ordering_v2_runtime_control_carrier(
+                        follow60_canary_control
+                    )
+                )
+                if ordering_v2_control_carrier is not None:
+                    _follow60_rotation_kwargs["follow60_canary_control"] = (
+                        ordering_v2_control_carrier
+                    )
             rotation_result = _run_follow_target_rotation(
                 d,
                 account_id=aid,
