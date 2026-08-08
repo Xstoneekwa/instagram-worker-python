@@ -15,7 +15,7 @@ from follow60_ordering_v2_ledger_v1 import (
 )
 
 
-ACCOUNT = v2.REX_ACCOUNT_ID
+ACCOUNT = "b024e94e-395d-4f02-9787-81ddc679b014"
 SHA = "a" * 40
 
 
@@ -36,12 +36,17 @@ def _control(**overrides):
         "business_session_id": "session-a",
         "attempt_id": 1,
         "expected_worker_sha": SHA,
+        "actual_worker_sha": SHA,
+        "canary_type": v2.CANARY_TYPE,
         "max_new_cycles": 10,
         "baseline_follow_count": 0,
         "expires_at_epoch_s": time.time() + 3600,
         "lease_id": "lease-a",
         "lease_nonce": "nonce-a",
-        "status": "armed",
+        "lease_expires_at_epoch_s": time.time() + 3600,
+        "claimed_at_epoch_s": time.time(),
+        "v2_complete_count": 0,
+        "status": "running",
     }
     out.update(overrides)
     return out
@@ -126,17 +131,17 @@ class BehavioralRouterTests(unittest.TestCase):
         self.assertIsNotNone(binding, reason)
         proof = _stable(binding)
         self.assertEqual(
-            ("POST_FIRST_V2", "v2_rex_binding_and_direct_grid_safe"),
+            ("POST_FIRST_V2", "v2_binding_and_direct_grid_safe"),
             v2.route_candidate_v2(binding=binding, stable_proof=proof, completed_v2_cycles=0),
         )
 
     def test_disabled_wrong_account_wrong_sha_expired_and_barrier_route_v1(self):
         cases = (
             ({"environ": {}}, "v2_behavioral_disabled"),
-            ({"account_id": "other", "environ": _env("other")}, "v2_allowlist_not_exact_rex_only"),
+            ({"account_id": "other", "environ": _env("other")}, "v2_allowlist_must_contain_exactly_one_valid_account"),
             ({"worker_sha": "b" * 40}, "v2_expected_worker_sha_mismatch"),
             ({"control": _control(expires_at_epoch_s=1)}, "v2_control_expired"),
-            ({"completed_v2_cycles": 10}, "v2_cycle_barrier_reached"),
+            ({"control": _control(v2_complete_count=10), "completed_v2_cycles": 9}, "v2_complete_count_not_authoritative"),
         )
         for values, expected in cases:
             control = values.pop("control", _control())
@@ -161,7 +166,7 @@ class BehavioralRouterTests(unittest.TestCase):
             environ=_env("future-account"),
         )
         self.assertIsNone(binding)
-        self.assertEqual("v2_allowlist_not_exact_rex_only", reason)
+        self.assertEqual("v2_allowlist_must_contain_exactly_one_valid_account", reason)
 
     def test_invalid_profiles_never_enter_v2(self):
         binding, _ = _binding()

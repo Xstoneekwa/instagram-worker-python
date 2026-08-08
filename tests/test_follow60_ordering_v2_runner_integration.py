@@ -12,7 +12,7 @@ import follow60_ordering_v2_ledger_v1 as ledger_module
 import runner
 
 
-ACCOUNT = contract.REX_ACCOUNT_ID
+ACCOUNT = "b024e94e-395d-4f02-9787-81ddc679b014"
 SHA = "a" * 40
 REAL_LEDGER_CLASS = ledger_module.DurableOrderingLedgerV1
 
@@ -27,12 +27,17 @@ def _control() -> dict:
         "business_session_id": "session-a",
         "attempt_id": 1,
         "expected_worker_sha": SHA,
+        "actual_worker_sha": SHA,
+        "canary_type": contract.CANARY_TYPE,
         "max_new_cycles": 10,
         "baseline_follow_count": 0,
         "expires_at_epoch_s": time.time() + 3600,
         "lease_id": "lease-a",
         "lease_nonce": "nonce-a",
-        "status": "armed",
+        "lease_expires_at_epoch_s": time.time() + 3600,
+        "claimed_at_epoch_s": time.time(),
+        "v2_complete_count": 0,
+        "status": "running",
     }
 
 
@@ -60,6 +65,77 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
         return REAL_LEDGER_CLASS(
             scope, path=Path(self.directory.name) / "ledger.sqlite3"
         )
+
+    @patch.dict(
+        os.environ,
+        {
+            contract.ENABLED_ENV: "1",
+            contract.ALLOWLIST_ENV: ACCOUNT,
+            "WORKER_GIT_SHA": SHA,
+        },
+        clear=False,
+    )
+    @patch("runner.run_post_follow_post_likes_phase")
+    def test_authoritative_barrier_blocks_before_post_action(self, post_like) -> None:
+        events: list[str] = []
+
+        def recorder(**kwargs):
+            events.append(kwargs["event_kind"])
+            return {
+                "ok": False,
+                "reason": "v2_cycle_barrier_reached",
+                "barrier_reached": True,
+                "v2_complete_count": 10,
+            }
+
+        result = runner._follow60_ordering_v2_prepare_candidate(
+            object(), control=_control(), account_id=ACCOUNT,
+            run_id="run-a", request_id="request-a",
+            business_session_id="session-a", attempt_id=1,
+            completed_v2_cycles=0, target_id="target-a",
+            candidate_username="alice", action_id="action-a",
+            mono_capture={"ok": True, "exact_identity": True, "xml": _xml()},
+            pkg="com.instagram.android", source_profile_username="ct",
+            pick={"username": "alice"}, dont_follow_private_accounts=True,
+            private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
+            session_likes_used=0, commercial_policy_revision="policy-a",
+            event_recorder=recorder,
+        )
+        self.assertTrue(result["barrier_reached"])
+        self.assertEqual(["candidate_seen"], events)
+        post_like.assert_not_called()
+
+    @patch.dict(
+        os.environ,
+        {
+            contract.ENABLED_ENV: "1",
+            contract.ALLOWLIST_ENV: ACCOUNT,
+            "WORKER_GIT_SHA": SHA,
+        },
+        clear=False,
+    )
+    def test_v1_fallback_is_counted_separately_from_v2_complete(self) -> None:
+        events: list[str] = []
+
+        def recorder(**kwargs):
+            events.append(kwargs["event_kind"])
+            return {"ok": True, "v2_complete_count": 0, "v1_fallback_count": 1}
+
+        result = runner._follow60_ordering_v2_prepare_candidate(
+            object(), control=_control(), account_id=ACCOUNT,
+            run_id="run-a", request_id="request-a",
+            business_session_id="session-a", attempt_id=1,
+            completed_v2_cycles=0, target_id="target-a",
+            candidate_username="alice", action_id="action-a",
+            mono_capture={"ok": True, "exact_identity": True, "xml": "<hierarchy/>"},
+            pkg="com.instagram.android", source_profile_username="ct",
+            pick={"username": "alice"}, dont_follow_private_accounts=True,
+            private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
+            session_likes_used=0, commercial_policy_revision="policy-a",
+            event_recorder=recorder,
+        )
+        self.assertFalse(result["selected"])
+        self.assertEqual(["candidate_seen", "v1_fallback"], events)
 
     @patch.dict(
         os.environ,
@@ -114,6 +190,7 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             pick={"username": "alice"}, dont_follow_private_accounts=True,
             private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
             session_likes_used=0, commercial_policy_revision="policy-a",
+            event_recorder=lambda **kwargs: {"ok": True, "reason": "recorded", "v2_complete_count": 0},
         )
         self.assertTrue(result["selected"])
         self.assertFalse(result["abort_candidate"])
@@ -148,6 +225,7 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             pick={"username": "alice"}, dont_follow_private_accounts=True,
             private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
             session_likes_used=0, commercial_policy_revision="policy-a",
+            event_recorder=lambda **kwargs: {"ok": True, "reason": "recorded", "v2_complete_count": 0},
         )
         post_like.return_value = {
             "ok": False, "post_opened": False, "attempted_count": 0,
