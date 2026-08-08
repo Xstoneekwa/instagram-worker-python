@@ -119,6 +119,12 @@ def _route_runtime_fixture(candidate: str, posts_count: int, cell_count: int):
             "exact_identity": True,
             "profile_surface": True,
             "follow_cta_positive": True,
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+            "package_exact": True,
+            "navigation_counter": 4,
+            "scroll_counter": 2,
+            "ui_generation": 6,
             "private_probe_payload": {
                 "private_profile_detected": False,
                 "detection_method": "existing_mono_xml",
@@ -325,7 +331,7 @@ class Follow60OrderingV2RouterFieldTransportTests(unittest.TestCase):
     def test_no_posts_runtime_structure_falls_back_to_v1(self) -> None:
         proof, reason, route = _route_runtime_fixture("no_posts", 0, 0)
         self.assertIsNone(proof)
-        self.assertEqual(reason, "v2_candidate_not_direct_grid_safe")
+        self.assertEqual(reason, "v2_posts_count_not_positive")
         self.assertEqual(route, ("FOLLOW60_V1", "candidate_not_direct_grid_safe"))
 
 

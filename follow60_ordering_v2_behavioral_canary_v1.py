@@ -284,6 +284,70 @@ def _selected_posts_tab_exact_from_xml(xml: str) -> bool:
     return False
 
 
+def _direct_grid_rejection_reason_v2(
+    grid: Mapping[str, Any],
+    *,
+    selected_posts_tab_exact: bool,
+) -> str:
+    """Return the first field-level reason blocking ``POST_FIRST_V2``.
+
+    Region *presence* is deliberately not a blocker.  Only a region that is
+    not structurally separated from the post grid may overlap the absolute
+    top-left cell.  The terminal viewer V5 guard remains mandatory after tap.
+    """
+
+    if grid.get("private_profile_visible"):
+        return "v2_private_profile_surface"
+    if grid.get("loading_visible"):
+        return "v2_loading_or_challenge_surface"
+    if str(grid.get("tagged_tab_state") or "") == "selected":
+        return "v2_tagged_tab_selected"
+    if str(grid.get("reels_tab_state") or "") == "selected":
+        return "v2_reels_tab_selected"
+    if grid.get("reels_or_tagged_selected"):
+        return "v2_non_posts_tab_selected"
+    if grid.get("post_count_positive") is not True:
+        return "v2_posts_count_not_positive"
+    if not (grid.get("posts_tab_selected") is True or grid.get("grid_selected") is True):
+        return "v2_posts_tab_not_selected"
+    if not selected_posts_tab_exact:
+        return "v2_posts_tab_identity_not_exact"
+    cells = [
+        dict(item)
+        for item in list(grid.get("physical_cells") or [])
+        if isinstance(item, Mapping)
+    ]
+    top_left = [
+        item
+        for item in cells
+        if int(item.get("absolute_row_index") or 0) == 1
+        and int(item.get("absolute_column_index") or 0) == 1
+    ]
+    if not cells:
+        return "v2_physical_post_cell_missing"
+    if len(top_left) != 1:
+        return "v2_absolute_top_left_not_unique"
+    if grid.get("absolute_top_left_origin_proven") is not True:
+        return "v2_absolute_top_left_origin_not_proven"
+    if grid.get("top_left_fully_visible") is not True:
+        return "v2_absolute_top_left_not_fully_visible"
+    if not isinstance(grid.get("post_bounds"), Mapping):
+        return "v2_absolute_top_left_bounds_missing"
+    if (
+        bool(grid.get("suggested_region_detected"))
+        and grid.get("suggested_region_separate") is not True
+    ):
+        return "v2_suggested_region_overlaps_post_grid"
+    if (
+        bool(grid.get("highlights_region_detected"))
+        and grid.get("highlights_region_separate") is not True
+    ):
+        return "v2_highlights_region_overlaps_post_grid"
+    if str(grid.get("outcome") or "") != "POST_ROW_POSITIVE_SAFE":
+        return str(grid.get("rejection_reason") or "v2_grid_outcome_not_tap_safe")
+    return ""
+
+
 def build_stable_candidate_proof_v2(
     *,
     binding: BehavioralCanaryBindingV1,
@@ -315,6 +379,27 @@ def build_stable_candidate_proof_v2(
         return None, "v2_eligibility_not_passed"
     if not bool(business_evidence.get("follow_budget_available")):
         return None, "v2_follow_budget_unavailable"
+    package = _text(capture.get("package"))
+    activity = _text(capture.get("activity"))
+    if (
+        capture.get("package_exact") is not True
+        or not package
+        or "instagram" not in activity.lower()
+        or "mainactivity" not in activity.lower()
+    ):
+        return None, "v2_profile_surface_package_activity_not_exact"
+    generation_fields = (
+        "navigation_counter",
+        "scroll_counter",
+        "ui_generation",
+    )
+    if any(field not in capture for field in generation_fields):
+        return None, "v2_profile_surface_generation_missing"
+    try:
+        if any(int(capture[field]) < 0 for field in generation_fields):
+            return None, "v2_profile_surface_generation_invalid"
+    except (TypeError, ValueError):
+        return None, "v2_profile_surface_generation_invalid"
 
     from instagram_navigation import _post_follow_post_grid_evidence_from_xml
 
@@ -326,30 +411,12 @@ def build_stable_candidate_proof_v2(
         profile_identity_exact=True,
         profile_origin_exact=True,
     )
-    cells = [dict(item) for item in list(grid.get("physical_cells") or []) if isinstance(item, Mapping)]
-    top_left = [
-        item for item in cells
-        if int(item.get("absolute_row_index") or 0) == 1
-        and int(item.get("absolute_column_index") or 0) == 1
-    ]
-    safe = bool(
-        str(grid.get("outcome") or "") == "POST_ROW_POSITIVE_SAFE"
-        and grid.get("post_count_positive") is True
-        and (grid.get("posts_tab_selected") is True or grid.get("grid_selected") is True)
-        and _selected_posts_tab_exact_from_xml(xml)
-        and grid.get("top_left_fully_visible") is True
-        and grid.get("absolute_top_left_origin_proven") is True
-        and len(top_left) == 1
-        and isinstance(grid.get("post_bounds"), Mapping)
-        and not grid.get("suggested_region_detected")
-        and not grid.get("highlights_region_detected")
-        and not grid.get("private_profile_visible")
-        and not grid.get("loading_visible")
-        and str(grid.get("reels_tab_state") or "") != "selected"
-        and str(grid.get("tagged_tab_state") or "") != "selected"
+    rejection_reason = _direct_grid_rejection_reason_v2(
+        grid,
+        selected_posts_tab_exact=_selected_posts_tab_exact_from_xml(xml),
     )
-    if not safe:
-        return None, "v2_candidate_not_direct_grid_safe"
+    if rejection_reason:
+        return None, rejection_reason
     posts_count = int(grid.get("posts_count") or grid.get("post_count") or 0)
     posts_count_source = _text(
         grid.get("posts_count_source") or grid.get("post_count_source")
@@ -379,6 +446,28 @@ def build_stable_candidate_proof_v2(
     grid_payload["screen_width"] = int(viewport[0])
     grid_payload["screen_height"] = int(viewport[1])
     grid_payload["candidate_username"] = _norm(candidate_username)
+    # Transport the already-certified profile surface into PostOpenIntentV2.
+    # No device acquisition or hierarchy pass is allowed between routing and
+    # the one-shot live package/activity/generation validation at dispatch.
+    grid_payload["package"] = package
+    grid_payload["activity"] = activity
+    grid_payload["final_proof_package"] = package
+    grid_payload["final_proof_activity"] = activity
+    grid_payload["coordinate_frame"] = dict(
+        grid_payload.get("coordinate_frame")
+        or grid_payload.get("frame")
+        or {}
+    )
+    grid_payload["ordering_v2_initial_proof"] = True
+    grid_payload["proof_navigation_counter"] = int(
+        capture.get("navigation_counter") or 0
+    )
+    grid_payload["proof_scroll_counter"] = int(
+        capture.get("scroll_counter") or 0
+    )
+    grid_payload["proof_ui_generation"] = int(
+        capture.get("ui_generation") or 0
+    )
     return StableCandidateProofV2(
         schema=SCHEMA,
         account_id=binding.account_id,

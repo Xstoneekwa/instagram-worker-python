@@ -91,6 +91,12 @@ def _capture(xml=None):
         "exact_identity": True,
         "profile_surface": True,
         "follow_cta_positive": True,
+        "package": "com.instagram.android",
+        "activity": "com.instagram.mainactivity.InstagramMainActivity",
+        "package_exact": True,
+        "navigation_counter": 4,
+        "scroll_counter": 2,
+        "ui_generation": 6,
         "private_probe_payload": {
             "private_profile_detected": False,
             "detection_method": "existing_mono_xml",
@@ -174,17 +180,19 @@ class BehavioralRouterTests(unittest.TestCase):
             (_capture(_xml().replace("8 posts", "0 posts").replace(
                 '<node class="android.widget.ImageView" resource-id="profile_grid_media_0"',
                 '<node text="No posts yet"/><node class="android.widget.ImageView" resource-id="x"',
-            )), _business(), "v2_candidate_not_direct_grid_safe"),
+            )), _business(), "v2_posts_count_not_positive"),
             (_capture(), _business(filter_passed=False), "v2_filter_not_passed"),
             (_capture(), _business(eligibility_passed=False), "v2_eligibility_not_passed"),
             (_capture(), _business(follow_budget_available=False), "v2_follow_budget_unavailable"),
             ({**_capture(), "private_probe_payload": {"private_profile_detected": True}}, _business(), "v2_private_profile"),
-            (_capture(_xml().replace("Grid view", "Reels")), _business(), "v2_candidate_not_direct_grid_safe"),
-            (_capture(_xml().replace("Grid view", "Tagged")), _business(), "v2_candidate_not_direct_grid_safe"),
-            (_capture(_xml().replace('selected="true"', 'selected="false"')), _business(), "v2_candidate_not_direct_grid_safe"),
-            (_capture(_xml().replace('[0,900][360,1260]', '[0,2200][360,2500]').replace('[360,900][720,1260]', '[360,2200][720,2500]')), _business(), "v2_candidate_not_direct_grid_safe"),
-            (_capture(_xml().replace("<node resource-id=\"bottom_navigation\"", "<node text=\"Suggested for you\" bounds=\"[0,850][1080,1200]\"/><node resource-id=\"bottom_navigation\"")), _business(), "v2_candidate_not_direct_grid_safe"),
-            (_capture(_xml().replace("<node resource-id=\"bottom_navigation\"", "<node text=\"Story Highlights\" bounds=\"[0,850][1080,1200]\"/><node resource-id=\"bottom_navigation\"")), _business(), "v2_candidate_not_direct_grid_safe"),
+            (_capture(_xml().replace("Grid view", "Reels")), _business(), "v2_reels_tab_selected"),
+            (_capture(_xml().replace("Grid view", "Tagged")), _business(), "v2_tagged_tab_selected"),
+            (_capture(_xml().replace('selected="true"', 'selected="false"')), _business(), "v2_posts_tab_identity_not_exact"),
+            (_capture(_xml().replace('[0,900][360,1260]', '[0,2200][360,2500]').replace('[360,900][720,1260]', '[360,2200][720,2500]')), _business(), "v2_absolute_top_left_not_fully_visible"),
+            (_capture(_xml().replace("<node resource-id=\"bottom_navigation\"", "<node text=\"Suggested for you\" bounds=\"[0,850][1080,1200]\"/><node resource-id=\"bottom_navigation\"")), _business(), "v2_suggested_region_overlaps_post_grid"),
+            (_capture(_xml().replace("<node resource-id=\"bottom_navigation\"", "<node text=\"Story Highlights\" bounds=\"[0,850][1080,1200]\"/><node resource-id=\"bottom_navigation\"")), _business(), "v2_highlights_region_overlaps_post_grid"),
+            ({**_capture(), "package_exact": False}, _business(), "v2_profile_surface_package_activity_not_exact"),
+            ({key: value for key, value in _capture().items() if key != "ui_generation"}, _business(), "v2_profile_surface_generation_missing"),
         )
         for capture, business, expected in cases:
             with self.subTest(expected=expected):
@@ -199,6 +207,94 @@ class BehavioralRouterTests(unittest.TestCase):
                 )
                 self.assertIsNone(proof)
                 self.assertEqual(expected, reason)
+
+    def test_highlights_or_suggested_presence_before_posts_tab_does_not_block_v2(self):
+        binding, _ = _binding()
+        for marker in (
+            '<node text="Story Highlights" bounds="[0,300][1080,600]"/>',
+            '<node text="Suggested for you" bounds="[0,300][1080,600]"/>',
+        ):
+            with self.subTest(marker=marker):
+                proof, reason = v2.build_stable_candidate_proof_v2(
+                    binding=binding,
+                    mono_capture=_capture(_xml().replace(
+                        '<node resource-id="profile_tabs_container"',
+                        marker + '<node resource-id="profile_tabs_container"',
+                    )),
+                    business_evidence=_business(),
+                    target_id="target-a",
+                    candidate_username="alice",
+                    action_id="action-a",
+                    binding_kind="mainline",
+                )
+                self.assertIsNotNone(proof, reason)
+                self.assertTrue(proof.direct_grid_safe)
+
+    def test_partial_grid_still_uses_v2_when_absolute_top_left_is_fully_visible(self):
+        binding, _ = _binding()
+        partial_lower_row = (
+            '<node class="android.widget.ImageView" '
+            'resource-id="profile_grid_media_2" '
+            'content-desc="Post thumbnail, row 2, column 1" '
+            'bounds="[0,2090][360,2380]"/>'
+        )
+        proof, reason = v2.build_stable_candidate_proof_v2(
+            binding=binding,
+            mono_capture=_capture(
+                _xml().replace(
+                    '<node resource-id="bottom_navigation"',
+                    partial_lower_row + '<node resource-id="bottom_navigation"',
+                )
+            ),
+            business_evidence=_business(),
+            target_id="target-a",
+            candidate_username="alice",
+            action_id="action-a",
+            binding_kind="mainline",
+        )
+        self.assertIsNotNone(proof, reason)
+        self.assertTrue(proof.direct_grid_safe)
+        top_left = [
+            cell
+            for cell in proof.post_grid_evidence["physical_cells"]
+            if cell.get("absolute_row_index") == 1
+            and cell.get("absolute_column_index") == 1
+        ]
+        self.assertEqual(1, len(top_left))
+
+    def test_zero_is_a_valid_current_generation_when_transport_is_explicit(self):
+        binding, _ = _binding()
+        capture = {
+            **_capture(),
+            "navigation_counter": 0,
+            "scroll_counter": 0,
+            "ui_generation": 0,
+        }
+        proof, reason = v2.build_stable_candidate_proof_v2(
+            binding=binding,
+            mono_capture=capture,
+            business_evidence=_business(),
+            target_id="target-a",
+            candidate_username="alice",
+            action_id="action-a",
+            binding_kind="mainline",
+        )
+        self.assertIsNotNone(proof, reason)
+        self.assertEqual(0, proof.post_grid_evidence["proof_ui_generation"])
+
+    def test_stable_proof_transports_existing_surface_without_new_acquisition(self):
+        binding, _ = _binding()
+        proof = _stable(binding)
+        evidence = proof.post_grid_evidence
+        self.assertEqual(evidence["final_proof_package"], "com.instagram.android")
+        self.assertEqual(
+            evidence["final_proof_activity"],
+            "com.instagram.mainactivity.InstagramMainActivity",
+        )
+        self.assertTrue(evidence.get("coordinate_frame"))
+        self.assertEqual(evidence["proof_navigation_counter"], 4)
+        self.assertEqual(evidence["proof_scroll_counter"], 2)
+        self.assertEqual(evidence["proof_ui_generation"], 6)
 
 
 class DeferredAndReentryTests(unittest.TestCase):

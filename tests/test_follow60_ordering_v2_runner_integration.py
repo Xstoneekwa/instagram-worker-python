@@ -54,6 +54,24 @@ def _xml() -> str:
     </hierarchy>"""
 
 
+def _mono_capture() -> dict:
+    return {
+        "ok": True,
+        "exact_identity": True,
+        "xml": _xml(),
+        "package": "com.instagram.android",
+        "activity": "com.instagram.mainactivity.InstagramMainActivity",
+        "package_exact": True,
+        "navigation_counter": 4,
+        "scroll_counter": 2,
+        "ui_generation": 6,
+        "private_probe_payload": {
+            "private_profile_detected": False,
+            "probe_ms": 1.0,
+        },
+    }
+
+
 class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -94,7 +112,7 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             business_session_id="session-a", attempt_id=1,
             completed_v2_cycles=0, target_id="target-a",
             candidate_username="alice", action_id="action-a",
-            mono_capture={"ok": True, "exact_identity": True, "xml": _xml()},
+            mono_capture=_mono_capture(),
             pkg="com.instagram.android", source_profile_username="ct",
             pick={"username": "alice"}, dont_follow_private_accounts=True,
             private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
@@ -182,10 +200,7 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             business_session_id="session-a", attempt_id=1,
             completed_v2_cycles=0, target_id="target-a",
             candidate_username="alice", action_id="action-a",
-            mono_capture={
-                "ok": True, "exact_identity": True, "xml": _xml(),
-                "private_probe_payload": {"private_profile_detected": False, "probe_ms": 1.0},
-            },
+            mono_capture=_mono_capture(),
             pkg="com.instagram.android", source_profile_username="ct",
             pick={"username": "alice"}, dont_follow_private_accounts=True,
             private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
@@ -220,7 +235,7 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             business_session_id="session-a", attempt_id=1,
             completed_v2_cycles=0, target_id="target-a",
             candidate_username="alice", action_id="action-a",
-            mono_capture={"ok": True, "exact_identity": True, "xml": _xml()},
+            mono_capture=_mono_capture(),
             pkg="com.instagram.android", source_profile_username="ct",
             pick={"username": "alice"}, dont_follow_private_accounts=True,
             private_probe_payload={"private_profile_detected": False, "probe_ms": 1.0},
