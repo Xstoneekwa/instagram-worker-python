@@ -26824,6 +26824,8 @@ def _dispatch_post_open_intent_v2_tap(
             acquisitions_count=0,
             classifications_count=0,
             terminal_helper_used="_dispatch_post_open_intent_v2_tap",
+            intent_final_validation_ms=_validation_ms,
+            command_tap_ack_ms=_tap_ack_ms,
             tap_x=tap_x,
             tap_y=tap_y,
         )
@@ -53575,19 +53577,36 @@ def run_post_follow_post_likes_phase(
         )
     if proof_ok:
         reject_reason = ""
-        cur_pkg = ""
-        try:
-            meta = _followers_current_pkg_activity(d)
-            cur_pkg = str(meta.get("current_package") or "")
-            cur_activity = str(meta.get("current_activity") or "")
-        except Exception:
-            cur_pkg = ""
-            cur_activity = ""
-        if cur_pkg and "instagram" not in cur_pkg.lower():
-            reject_reason = "instagram_not_foreground"
         expected_context = dict(candidate_profile_context or {})
         expected_pkg = str(expected_context.get("package") or "")
         expected_activity = str(expected_context.get("activity") or "")
+        live_validation_deferred_to_post_intent = bool(
+            ordering_v2_post_first
+            and proof.get("immutable_verdict") is True
+            and expected_pkg
+            and "instagram" in expected_activity.lower()
+            and "mainactivity" in expected_activity.lower()
+        )
+        if live_validation_deferred_to_post_intent:
+            # POST_FIRST_V2 already binds this exact package/activity and the
+            # current UI generations into PostOpenIntentV2.  Its one-shot
+            # dispatcher performs the mandatory live comparison immediately
+            # before d.click.  Avoid an identical app_current() acquisition a
+            # few hundred milliseconds earlier; a mismatch still rejects the
+            # intent fail-closed and never reaches Golden on the V2 path.
+            cur_pkg = expected_pkg
+            cur_activity = expected_activity
+        else:
+            cur_pkg = ""
+            try:
+                meta = _followers_current_pkg_activity(d)
+                cur_pkg = str(meta.get("current_package") or "")
+                cur_activity = str(meta.get("current_activity") or "")
+            except Exception:
+                cur_pkg = ""
+                cur_activity = ""
+        if cur_pkg and "instagram" not in cur_pkg.lower():
+            reject_reason = "instagram_not_foreground"
         if not reject_reason and expected_pkg and cur_pkg and expected_pkg != cur_pkg:
             reject_reason = "candidate_context_package_mismatch"
         if (
@@ -53648,7 +53667,14 @@ def run_post_follow_post_likes_phase(
                     current_package=cur_pkg,
                     used_cached_context=True,
                     candidate_context_reused=True,
-                    avoided_blocks=[
+                    live_validation_deferred_to_post_intent=bool(
+                        live_validation_deferred_to_post_intent
+                    ),
+                    avoided_blocks=(
+                        ["duplicate_pre_intent_app_current"]
+                        if live_validation_deferred_to_post_intent
+                        else []
+                    ) + [
                         "second_followers_list_surface_probe",
                         "second_candidate_username_read",
                     ],
@@ -55499,6 +55525,12 @@ def run_post_follow_post_likes_phase(
                     else "post_viewer_not_detected_after_fresh_bounds_tap",
                     "open_strategy": "single_post_grid_evidence",
                     "tap_to_viewer_detected_ms": _viewer.get("viewer_detect_total_ms"),
+                    "intent_final_validation_ms": _intent_dispatch.get(
+                        "intent_final_validation_ms"
+                    ),
+                    "command_tap_ack_ms": _intent_dispatch.get(
+                        "command_tap_ack_ms"
+                    ),
                     "viewer_detect_path": _viewer.get("viewer_detect_path"),
                     "post_open_snapshot_xml": _viewer.get("post_open_snapshot_xml"),
                     "post_open_snapshot_captured_at_monotonic": _viewer.get(
@@ -55524,6 +55556,10 @@ def run_post_follow_post_likes_phase(
                     fresh_tap_proof_used=False,
                     post_open_intent_v2_used=True,
                     proof_age_at_tap_ms=_intent_dispatch.get("intent_age_ms"),
+                    intent_final_validation_ms=_intent_dispatch.get(
+                        "intent_final_validation_ms"
+                    ),
+                    command_tap_ack_ms=_intent_dispatch.get("command_tap_ack_ms"),
                     acquisitions_count=0,
                     classifications_count=0,
                     reveal_count_total_for_like_phase=int(
