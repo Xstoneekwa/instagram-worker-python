@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from unittest.mock import MagicMock, patch
 
 import instagram_navigation as nav
@@ -183,6 +184,57 @@ class PreFollowPrivateGateTest(unittest.TestCase):
         self.assertTrue(out.get("fast_path"))
         mock_observe.assert_not_called()
         mock_fresh.assert_not_called()
+
+    def test_screen_guard_reuses_bound_package_activity_without_device_probe(self) -> None:
+        device = MagicMock()
+        proof = {
+            "kind": "pre_follow_observation_proof_v1",
+            "follower_username": "candidate_user",
+            "source_profile_username": "healthup.sw",
+            "visual_candidate_id": "vc-1",
+            "action_bar_title": "candidate_user",
+            "navigation_state": "CANDIDATE_PROFILE",
+            "navigation_confidence": 1.0,
+            "follow_header_state": "follow",
+            "requested": False,
+            "following": False,
+            "ambiguous": False,
+            "navigation_token": "nav-1",
+            "captured_at_mono": time.monotonic(),
+            "private_probe_payload": {
+                "private_profile_detected": False,
+                "package_exact": True,
+                "package": "com.instagram.android",
+                "activity": "ProfileActivity",
+                "follow_cta_positive": True,
+            },
+        }
+        with patch("follow_60s_canary.enabled", return_value=True), patch(
+            "follow_60s_canary.runtime_context", return_value={}
+        ), patch(
+            "follow_60s_canary.consume", return_value=({"ok": True}, 10.0, "")
+        ), patch(
+            "follow_60s_canary.record_outcome"
+        ), patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            side_effect=AssertionError("bound package/activity must be reused"),
+        ):
+            out = nav.visual_candidate_follow_pre_follow_screen_guard(
+                device,
+                source_profile_username="healthup.sw",
+                pkg="com.instagram.android",
+                pick={
+                    "visual_candidate_id": "vc-1",
+                    "resolved_username_hint": "candidate_user",
+                },
+                profile_already_open=True,
+                defer_private_gate=True,
+                pre_follow_observation_proof=proof,
+                navigation_token="nav-1",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["reason"], "candidate_profile_surface_proof_reused")
 
     def test_screen_guard_blocks_private_before_follow_surface_ok(self) -> None:
         device = MagicMock()

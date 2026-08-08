@@ -23111,13 +23111,18 @@ def _official_positive_post_count_observation_from_pre_follow_capture(
     navigation_generation: str,
     ui_generation: int,
     captured_at_monotonic: float,
+    precomputed_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return the official profile count already present in the mono capture.
 
     This helper performs no acquisition.  It accepts only the structured
     profile-header sources already used by the strict No Posts parser.
     """
-    evidence = _post_follow_fast_no_posts_xml_evidence(hierarchy_xml)
+    evidence = (
+        dict(precomputed_evidence)
+        if isinstance(precomputed_evidence, dict)
+        else _post_follow_fast_no_posts_xml_evidence(hierarchy_xml)
+    )
     source = str(evidence.get("posts_count_source") or "")
     try:
         posts_count = int(evidence.get("posts_count_value"))
@@ -23747,6 +23752,11 @@ def _post_follow_post_grid_evidence_from_xml(
     out["grid_tab_marker"] = grid_tab_marker
     out["post_count_positive"] = bool(post_count_positive)
     out["posts_count_zero_exact"] = bool(posts_count_zero_exact)
+    # Preserve the official count fields already derived by ``base`` so the
+    # caller can bind the same immutable XML to the pre-Follow count proof
+    # without reparsing the hierarchy a second time.
+    out["posts_count_value"] = base.get("posts_count_value")
+    out["posts_count_source"] = str(base.get("posts_count_source") or "")
     out["highlights_region_detected"] = highlights_marker_order >= 0
     out["suggested_region_detected"] = bool(
         base.get("suggested_overlay_visible") or suggested_marker_order >= 0
@@ -26264,7 +26274,11 @@ def _visual_detect_post_viewer_opened_after_tap(
         posts_action_bar: bool = False,
         action_bar_title: str = "",
     ) -> dict[str, Any]:
+        t_hierarchy0 = time.perf_counter()
         snapshot_xml = _dump_post_viewer_hierarchy(d)
+        stage["viewer_detect_hierarchy_ms"] = _visual_detect_post_viewer_stage_ms(
+            t_hierarchy0
+        )
         snapshot_captured_at = time.perf_counter()
         t_meta0 = time.perf_counter()
         meta = _followers_current_pkg_activity(d)
@@ -59895,6 +59909,7 @@ def acquire_pre_follow_mono_capture(
     *,
     follower_username: str,
     expected_package: str = "",
+    prepare_ordering_v2_evidence: bool = False,
 ) -> dict[str, Any]:
     """One XML capture deriving identity, profile, CTA and private signals.
 
@@ -59903,13 +59918,26 @@ def acquire_pre_follow_mono_capture(
     """
     t0 = time.perf_counter()
     captured_at_monotonic = time.monotonic()
+    dump_t0 = time.perf_counter()
     xml = str(d.dump_hierarchy(compressed=False) or "")
+    dump_hierarchy_ms = round((time.perf_counter() - dump_t0) * 1000.0, 2)
     labels: list[str] = []
     resource_ids: list[str] = []
     follow_bounds: dict[str, int] | None = None
+    hierarchy_max_right = 0
+    hierarchy_max_bottom = 0
+    parse_t0 = time.perf_counter()
     try:
         root = ET.fromstring(xml)
         for node in root.iter():
+            node_bounds = _parse_ui_bounds_str(str(node.attrib.get("bounds") or ""))
+            if node_bounds:
+                hierarchy_max_right = max(
+                    hierarchy_max_right, int(node_bounds.get("right") or 0)
+                )
+                hierarchy_max_bottom = max(
+                    hierarchy_max_bottom, int(node_bounds.get("bottom") or 0)
+                )
             for attr in ("text", "content-desc"):
                 value = str(node.attrib.get(attr) or "").strip()
                 if value:
@@ -59931,6 +59959,7 @@ def acquire_pre_follow_mono_capture(
     except Exception:
         return {"ok": False, "reason": "xml_parse_failed", "dump_count": 1,
                 "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2)}
+    xml_parse_cpu_ms = round((time.perf_counter() - parse_t0) * 1000.0, 2)
     expected = _norm_follow_username(follower_username)
     normalized_tokens = {
         _norm_follow_username(token)
@@ -59969,7 +59998,9 @@ def acquire_pre_follow_mono_capture(
         marker.lower() in value.lower() for marker in private_markers for value in labels
     )
     public_ready = bool(exact_identity and profile_surface and follow_cta and not private_detected)
+    meta_t0 = time.perf_counter()
     live_meta = _followers_current_pkg_activity(d)
+    package_activity_ms = round((time.perf_counter() - meta_t0) * 1000.0, 2)
     current_package = str(live_meta.get("current_package") or "")
     current_activity = str(live_meta.get("current_activity") or "")
     package_exact = bool(
@@ -59995,6 +60026,27 @@ def acquire_pre_follow_mono_capture(
         scroll_counter = 0
         navigation_generation = ""
     public_ready = bool(public_ready and package_exact and current_activity)
+    grid_classification_t0 = time.perf_counter()
+    ordering_v2_existing_grid_evidence = (
+        _post_follow_post_grid_evidence_from_xml(
+            xml,
+            candidate_username=follower_username,
+            ww=int(hierarchy_max_right),
+            wh=int(hierarchy_max_bottom),
+            profile_identity_exact=True,
+            profile_origin_exact=True,
+        )
+        if (
+            public_ready
+            and prepare_ordering_v2_evidence
+            and hierarchy_max_right > 0
+            and hierarchy_max_bottom > 0
+        )
+        else None
+    )
+    grid_classification_cpu_ms = round(
+        (time.perf_counter() - grid_classification_t0) * 1000.0, 2
+    )
     structured_post_count_observation = (
         _official_positive_post_count_observation_from_pre_follow_capture(
             hierarchy_xml=xml,
@@ -60004,6 +60056,11 @@ def acquire_pre_follow_mono_capture(
             navigation_generation=navigation_generation,
             ui_generation=ui_generation,
             captured_at_monotonic=captured_at_monotonic,
+            precomputed_evidence=(
+                ordering_v2_existing_grid_evidence
+                if prepare_ordering_v2_evidence
+                else None
+            ),
         )
         if public_ready
         else None
@@ -60032,6 +60089,23 @@ def acquire_pre_follow_mono_capture(
         "scroll_counter": scroll_counter,
         "ui_generation": ui_generation,
         "captured_at_monotonic": captured_at_monotonic,
+        "mono_capture_breakdown_ms": {
+            "dump_hierarchy_ms": dump_hierarchy_ms,
+            "xml_parse_cpu_ms": xml_parse_cpu_ms,
+            "package_activity_ms": package_activity_ms,
+            "grid_classification_cpu_ms": grid_classification_cpu_ms,
+        },
+        # Internal CPU-only transport from this immutable mono XML.  Shadow
+        # output remains redacted and never serializes these bounds.
+        "_ordering_v2_existing_grid_evidence": ordering_v2_existing_grid_evidence,
+        "_ordering_v2_existing_viewport": (
+            [int(hierarchy_max_right), int(hierarchy_max_bottom)]
+            if hierarchy_max_right > 0 and hierarchy_max_bottom > 0
+            else None
+        ),
+        "_ordering_v2_existing_xml_fingerprint": hashlib.sha256(
+            xml.encode("utf-8", errors="replace")
+        ).hexdigest()[:20],
         "structured_post_count_observation": structured_post_count_observation,
         "follow_header_state": "follow" if follow_cta else "unknown",
         "action_bar_title": follower_username if exact_identity else "",
@@ -60504,6 +60578,7 @@ def visual_candidate_follow_pre_follow_screen_guard(
     _early_composite = None
     _early_composite_age_ms = 0.0
     _early_composite_reject = ""
+    _early_package_activity_reused = False
     try:
         from follow_60s_canary import (
             consume as _consume_follow_60s_proof,
@@ -60514,7 +60589,29 @@ def visual_candidate_follow_pre_follow_screen_guard(
 
         if _follow_60s_canary_enabled("opening_follow_composite"):
             _runtime = _follow_60s_runtime_context()
-            _live_meta = _followers_current_pkg_activity(d)
+            _proof_meta = dict(
+                (pre_follow_observation_proof or {}).get("private_probe_payload")
+                or {}
+            )
+            _proof_meta_reason = _pre_follow_observation_proof_reuse_block_reason(
+                pre_follow_observation_proof,
+                follower_username=follower_hint,
+                source_profile_username=src_raw,
+                navigation_token=navigation_token,
+            )
+            if (
+                not _proof_meta_reason
+                and bool(_proof_meta.get("package_exact"))
+                and str(_proof_meta.get("package") or "").strip()
+                and str(_proof_meta.get("activity") or "").strip()
+            ):
+                _live_meta = {
+                    "current_package": str(_proof_meta.get("package") or ""),
+                    "current_activity": str(_proof_meta.get("activity") or ""),
+                }
+                _early_package_activity_reused = True
+            else:
+                _live_meta = _followers_current_pkg_activity(d)
             _early_composite, _early_composite_age_ms, _early_composite_reject = (
                 _consume_follow_60s_proof(
                     "opening_follow_composite",
@@ -60632,6 +60729,7 @@ def visual_candidate_follow_pre_follow_screen_guard(
             action_bar_title=ab_title or None,
             username_reused=False,
             action_bar_check_duration_ms=_ab_ms,
+            package_activity_reused=_early_package_activity_reused,
             follow_header_state_reused=True,
             follow_header_state="follow",
             raw_follow_invite_visible=True,

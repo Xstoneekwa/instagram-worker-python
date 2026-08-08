@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import follow60_ordering_v2_shadow as shadow
+import instagram_navigation as nav
 import logs
 import runner
 
@@ -143,6 +145,44 @@ class Follow60OrderingV2ShadowTests(unittest.TestCase):
         self.assertEqual(1, geometry["absolute_top_left_column"])
         self.assertEqual(0, out["acquisition_count"])
         self.assertFalse(out["behavior_changed"])
+
+    def test_exact_mono_grid_evidence_is_reused_without_reparsing(self) -> None:
+        xml = _direct_xml()
+        evidence = nav._post_follow_post_grid_evidence_from_xml(
+            xml,
+            candidate_username="candidate",
+            ww=1080,
+            wh=2340,
+            profile_identity_exact=True,
+            profile_origin_exact=True,
+        )
+        fingerprint = hashlib.sha256(xml.encode()).hexdigest()[:20]
+        capture = _capture(xml)
+        capture.update(
+            {
+                "xml_fingerprint": fingerprint,
+                "_ordering_v2_existing_grid_evidence": evidence,
+                "_ordering_v2_existing_viewport": [1080, 2340],
+                "_ordering_v2_existing_xml_fingerprint": fingerprint,
+            }
+        )
+        with mock.patch.object(
+            nav,
+            "_post_follow_post_grid_evidence_from_xml",
+            side_effect=AssertionError("immutable mono evidence must be reused"),
+        ):
+            out = shadow.classify_existing_pre_follow_capture(
+                capture,
+                account_id=ACCOUNT,
+                run_id=RUN,
+                request_id=REQUEST,
+                candidate_username="candidate",
+                source_profile_username="source_ct",
+                visual_candidate_id="xml_list:candidate",
+                environ=_env(),
+            )
+        self.assertEqual(out["classification"], "DIRECT_GRID_SAFE")
+        self.assertTrue(out["mono_grid_classification_reused"])
 
     def test_ambiguous_below_fold_overlaps_no_posts_private_and_loading_fail_closed(self) -> None:
         below = """<hierarchy><node bounds="[0,0][1080,2340]"/>

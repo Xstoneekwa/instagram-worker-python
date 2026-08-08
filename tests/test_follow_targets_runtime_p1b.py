@@ -3072,6 +3072,8 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
         }
         with patch(
             "follow_60s_canary.enabled", return_value=True
+        ), patch(
+            "follow60_ordering_v2_shadow.enabled_for_account", return_value=True
         ), patch.object(
             runner, "acquire_pre_follow_mono_capture", return_value=mono
         ) as capture, patch.object(
@@ -3097,6 +3099,9 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
         self.assertFalse(out["handled"])
         self.assertIs(out["mono_capture"], mono)
         capture.assert_called_once()
+        self.assertTrue(
+            capture.call_args.kwargs["prepare_ordering_v2_evidence"]
+        )
         used = [
             kw
             for _level, event, kw in logs

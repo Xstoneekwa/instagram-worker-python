@@ -460,10 +460,19 @@ def _private_skip_fast_path_handle(
         from follow_60s_canary import enabled as _follow_60s_canary_enabled
 
         if _follow_60s_canary_enabled("opening_follow_composite"):
+            try:
+                from follow60_ordering_v2_shadow import enabled_for_account
+
+                _prepare_ordering_v2_evidence = bool(
+                    enabled_for_account(str(source_account_context or ""))
+                )
+            except Exception:
+                _prepare_ordering_v2_evidence = False
             mono_capture = acquire_pre_follow_mono_capture(
                 d,
                 follower_username=cand,
                 expected_package=str(pkg or ""),
+                prepare_ordering_v2_evidence=_prepare_ordering_v2_evidence,
             )
     except Exception:
         mono_capture = None
@@ -13062,11 +13071,37 @@ def _run_followers_list_engine_session(
         nav_obs_local: dict[str, Any] = {}
         _hdr_fast_captured_at_mono: float | None = None
         if _xml_list_fast_trace:
-            try:
-                _hdr_fast = _follow_ui_state_snapshot(d)
-                _hdr_fast_captured_at_mono = time.monotonic()
-            except Exception:
-                _hdr_fast = "unknown"
+            _prior_mono_ready = bool(
+                isinstance(prior_mono_capture, dict)
+                and prior_mono_capture.get("ok")
+                and prior_mono_capture.get("exact_identity")
+                and prior_mono_capture.get("profile_surface")
+                and prior_mono_capture.get("follow_cta_positive")
+                and prior_mono_capture.get("package_exact")
+                and str(prior_mono_capture.get("activity") or "").strip()
+            )
+            if _prior_mono_ready:
+                _hdr_fast = str(
+                    prior_mono_capture.get("follow_header_state") or "unknown"
+                )
+                _hdr_fast_captured_at_mono = float(
+                    prior_mono_capture.get("captured_at_monotonic")
+                    or time.monotonic()
+                )
+                log(
+                    "info",
+                    "pre_follow_mono_capture_follow_state_reused",
+                    source_profile_username=source_profile_username,
+                    candidate_username=str(follower_un_so_far or ""),
+                    follow_header_state=_hdr_fast,
+                    duplicate_ui_snapshot_avoided=True,
+                )
+            else:
+                try:
+                    _hdr_fast = _follow_ui_state_snapshot(d)
+                    _hdr_fast_captured_at_mono = time.monotonic()
+                except Exception:
+                    _hdr_fast = "unknown"
             nav_obs_local = {
                 "state": NavigationEngineState.CANDIDATE_PROFILE.value,
                 "confidence": 0.72,
@@ -18720,10 +18755,35 @@ def _run_followers_list_engine_session(
                 _follow_invite_visible = _follow_hdr_snap == "follow" or _ct_list_raw_follow_invite_visible(
                     d
                 )
-                try:
-                    _posts_cnt = visual_profile_stats_posts_count(d)
-                except Exception:
-                    _posts_cnt = None
+                _structured_posts = dict(
+                    (_pre_follow_observation_proof or {}).get(
+                        "structured_post_count_observation"
+                    )
+                    or {}
+                )
+                if (
+                    not _header_proof_reason
+                    and str(_structured_posts.get("version") or "")
+                    == "OfficialPositivePostCountObservationV1"
+                    and _norm_ig_handle(_structured_posts.get("candidate_username"))
+                    == _norm_ig_handle(follower_un)
+                    and int(_structured_posts.get("posts_count") or 0) > 0
+                ):
+                    _posts_cnt = int(_structured_posts.get("posts_count") or 0)
+                    log(
+                        "info",
+                        "pre_follow_structured_post_count_reused",
+                        source_profile_username=source_profile_username,
+                        follower_username=follower_un,
+                        posts_count=_posts_cnt,
+                        source=str(_structured_posts.get("source") or ""),
+                        duplicate_profile_metrics_probe_avoided=True,
+                    )
+                else:
+                    try:
+                        _posts_cnt = visual_profile_stats_posts_count(d)
+                    except Exception:
+                        _posts_cnt = None
                 if (
                     _posts_cnt is not None
                     and int(_posts_cnt) == 0

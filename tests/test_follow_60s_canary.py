@@ -956,6 +956,50 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         self.assertFalse(out["private_probe_payload"]["private_profile_detected"])
         device.dump_hierarchy.assert_called_once()
 
+    def test_pre_follow_mono_capture_precomputes_v2_grid_once_when_requested(self) -> None:
+        device = MagicMock()
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node bounds="[0,0][1080,2340]"/><node text="candidate"/>
+        <node content-desc="8 posts"
+        resource-id="com.instagram.android:id/profile_header_post_count"/>
+        <node text="42 followers"/>
+        <node text="17 following"/><node text="Follow"
+        resource-id="com.instagram.android:id/profile_header_follow_button"
+        bounds="[700,420][1040,560]"/>
+        <node resource-id="profile_tabs_container" bounds="[0,700][1080,850]">
+          <node resource-id="profile_tab_icon_view" content-desc="Grid view"
+          selected="true" bounds="[0,700][360,850]"/>
+        </node>
+        <node class="android.widget.ImageView" resource-id="profile_grid_media_0"
+        content-desc="Post thumbnail, row 1, column 1"
+        bounds="[0,900][360,1260]"/></hierarchy>"""
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "ProfileActivity",
+            },
+        ), patch.object(
+            nav,
+            "_post_follow_post_grid_evidence_from_xml",
+            wraps=nav._post_follow_post_grid_evidence_from_xml,
+        ) as grid:
+            out = nav.acquire_pre_follow_mono_capture(
+                device,
+                follower_username="candidate",
+                expected_package="com.instagram.android",
+                prepare_ordering_v2_evidence=True,
+            )
+        self.assertTrue(out["ok"])
+        grid.assert_called_once()
+        self.assertIsInstance(out["_ordering_v2_existing_grid_evidence"], dict)
+        self.assertEqual(out["_ordering_v2_existing_viewport"], [1080, 2340])
+        self.assertEqual(
+            out["structured_post_count_observation"]["posts_count"], 8
+        )
+        self.assertIn("grid_classification_cpu_ms", out["mono_capture_breakdown_ms"])
+
     def test_pre_follow_mono_capture_rejects_private_even_with_follow_cta(self) -> None:
         device = MagicMock()
         device.dump_hierarchy.return_value = """<hierarchy>

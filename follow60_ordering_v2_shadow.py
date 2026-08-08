@@ -192,7 +192,29 @@ def classify_existing_pre_follow_capture(
         return None
     capture = dict(mono_capture or {})
     xml = str(capture.get("xml") or "")
-    viewport = _viewport_from_existing_xml(xml)
+    capture_fingerprint = str(
+        capture.get("xml_fingerprint")
+        or hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()[:20]
+    )
+    cached_fingerprint = str(
+        capture.get("_ordering_v2_existing_xml_fingerprint") or ""
+    )
+    cached_viewport = capture.get("_ordering_v2_existing_viewport")
+    cached_evidence = capture.get("_ordering_v2_existing_grid_evidence")
+    cache_valid = bool(
+        cached_fingerprint
+        and cached_fingerprint == capture_fingerprint
+        and isinstance(cached_viewport, (list, tuple))
+        and len(cached_viewport) == 2
+        and int(cached_viewport[0] or 0) > 0
+        and int(cached_viewport[1] or 0) > 0
+        and isinstance(cached_evidence, Mapping)
+    )
+    viewport = (
+        (int(cached_viewport[0]), int(cached_viewport[1]))
+        if cache_valid
+        else _viewport_from_existing_xml(xml)
+    )
     private_probe = dict(capture.get("private_probe_payload") or {})
     private_detected = bool(private_probe.get("private_profile_detected"))
     identity_exact = bool(capture.get("exact_identity"))
@@ -211,13 +233,17 @@ def classify_existing_pre_follow_capture(
     else:
         from instagram_navigation import _post_follow_post_grid_evidence_from_xml
 
-        evidence = _post_follow_post_grid_evidence_from_xml(
-            xml,
-            candidate_username=candidate_username,
-            ww=int(viewport[0]),
-            wh=int(viewport[1]),
-            profile_identity_exact=True,
-            profile_origin_exact=True,
+        evidence = (
+            deepcopy(dict(cached_evidence))
+            if cache_valid
+            else _post_follow_post_grid_evidence_from_xml(
+                xml,
+                candidate_username=candidate_username,
+                ww=int(viewport[0]),
+                wh=int(viewport[1]),
+                profile_identity_exact=True,
+                profile_origin_exact=True,
+            )
         )
         outcome = str(evidence.get("outcome") or "")
         geometry = _redacted_grid_geometry(evidence)
@@ -268,8 +294,7 @@ def classify_existing_pre_follow_capture(
         "reason": reason,
         "eligible_for_ordering_v2": classification == "DIRECT_GRID_SAFE",
         "capture_fingerprint": str(
-            capture.get("xml_fingerprint")
-            or hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()[:20]
+            capture_fingerprint
         ),
         "capture_duration_ms": float(capture.get("duration_ms") or 0.0),
         "identity_exact": identity_exact,
@@ -290,6 +315,7 @@ def classify_existing_pre_follow_capture(
         "navigation_generation": str(capture.get("navigation_generation") or ""),
         "ui_generation": int(capture.get("ui_generation") or 0),
         "classification_cpu_ns": time.perf_counter_ns() - cpu_started,
+        "mono_grid_classification_reused": bool(cache_valid),
         "acquisition_count": 0,
         "extra_screenshots": 0,
         "extra_xml": 0,
