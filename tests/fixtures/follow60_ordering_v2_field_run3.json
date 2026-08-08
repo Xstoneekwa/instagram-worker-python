@@ -1,0 +1,45 @@
+{
+  "run_id": "ffdf53d8-ac0a-454e-8ca2-410135d2aa3d",
+  "request_id": "6c3b3670-3792-4309-bbfb-c641217e6451",
+  "worker_sha": "19b1a39c0dc61ea1338f1e77247f8bec3f820f5d",
+  "v2_operation_budget": {
+    "golden_calls": 0,
+    "reveal_calls": 0,
+    "extra_xml": 0,
+    "extra_screenshots": 0,
+    "extra_polls": 0,
+    "extra_taps": 0
+  },
+  "cycles": [
+    {
+      "candidate": "laperlebleue_rungis",
+      "route_selected_at": "2026-08-08T21:14:26.795977+00:00",
+      "post_intent_consumed_at": "2026-08-08T21:14:29.866633+00:00",
+      "intent_age_ms": 906.69,
+      "viewer_detect_ms": 774.04,
+      "like_verified": true,
+      "profile_returned": true,
+      "reentry_live_reason": "v2_reentry_generation_missing"
+    },
+    {
+      "candidate": "julien.vizz",
+      "route_selected_at": "2026-08-08T21:15:24.393492+00:00",
+      "post_intent_consumed_at": "2026-08-08T21:15:27.361880+00:00",
+      "intent_age_ms": 833.15,
+      "viewer_detect_ms": 735.4,
+      "like_verified": true,
+      "profile_returned": true,
+      "reentry_live_reason": "v2_reentry_generation_missing"
+    },
+    {
+      "candidate": "l.g.yohan",
+      "route_selected_at": "2026-08-08T21:16:10.016908+00:00",
+      "post_intent_consumed_at": "2026-08-08T21:16:12.810674+00:00",
+      "intent_age_ms": 858.96,
+      "viewer_detect_ms": 1151.01,
+      "like_verified": true,
+      "profile_returned": true,
+      "reentry_live_reason": "v2_reentry_generation_missing"
+    }
+  ]
+}

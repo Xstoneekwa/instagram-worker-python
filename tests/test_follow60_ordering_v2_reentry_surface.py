@@ -50,10 +50,14 @@ class Follow60OrderingV2ReentrySurfaceTests(unittest.TestCase):
             "text": "Follow",
         }
 
-    @patch("follow_60s_canary.runtime_context", return_value={"ui_generation": 7})
+    @patch(
+        "follow_60s_canary.runtime_context",
+        return_value={"ui_generation": 7, "navigation_counter": 11},
+    )
+    @patch("follow_60s_canary.invalidate")
     @patch("follow_action_engine.try_select_exact_profile_header_follow_fast")
     def test_capture_and_consume_use_only_fresh_level1_evidence(
-        self, select_fast, _runtime
+        self, select_fast, invalidate, _runtime
     ) -> None:
         select_fast.return_value = (object(), dict(self.meta))
         live = engine.capture_ordering_v2_profile_reentry_follow_surface(
@@ -65,6 +69,10 @@ class Follow60OrderingV2ReentrySurfaceTests(unittest.TestCase):
             screen_guard=None,
         )
         self.assertTrue(live["ok"])
+        invalidate.assert_called_once_with(
+            "ordering_v2_profile_reentry_navigation"
+        )
+        self.assertEqual("nav:11:ui:7", live["navigation_generation"])
         self.assertEqual(0, live["xml_count"])
         self.assertEqual(0, live["screenshot_count"])
         proof = {
@@ -94,6 +102,28 @@ class Follow60OrderingV2ReentrySurfaceTests(unittest.TestCase):
         self.assertIsNotNone(proxy)
         self.assertEqual("v2_reentry_fresh_bounds_selected", reason)
         self.assertEqual(self.bounds, selected["bounds"])
+
+    @patch(
+        "follow_60s_canary.runtime_context",
+        return_value={"ui_generation": 0, "navigation_counter": 0},
+    )
+    @patch("follow_60s_canary.invalidate")
+    @patch("follow_action_engine.try_select_exact_profile_header_follow_fast")
+    def test_reentry_without_a_sealed_generation_still_fails_closed(
+        self, select_fast, invalidate, _runtime
+    ) -> None:
+        select_fast.return_value = (object(), dict(self.meta))
+        live = engine.capture_ordering_v2_profile_reentry_follow_surface(
+            self.device,
+            _Ign,
+            "com.instagram.android",
+            candidate_username="alice",
+            visual_candidate_id="action-a",
+            screen_guard=None,
+        )
+        invalidate.assert_called_once()
+        self.assertFalse(live["ok"])
+        self.assertEqual("v2_reentry_generation_missing", live["reason"])
 
     @patch("follow_60s_canary.runtime_context", return_value={"ui_generation": 8})
     def test_stale_generation_wrong_profile_and_wrong_activity_fail_closed(self, _runtime) -> None:
