@@ -40,7 +40,7 @@ class Follow60OrderingV2LedgerPostgresTests(unittest.TestCase):
         out = self.sql(
             "select follow60_ordering_v2_test.apply_receipt("
             f"'account-a','run-a','request-a','session-a','target-a','{action}',"
-            f"'alice','FOLLOW60_ORDERING_V2_LEDGER_V1','{stage}','{value}'::jsonb)::text"
+            f"'alice','FOLLOW60_ORDERING_V2','{stage}','{value}'::jsonb)::text"
         )
         return json.loads(out)
 
@@ -58,6 +58,11 @@ class Follow60OrderingV2LedgerPostgresTests(unittest.TestCase):
         # 1. Like verified -> Follow verified.
         self.prepare_follow()
         self.assertTrue(self.apply("follow_verified")["follow_verified"])
+        self.apply("mute_posts_verified")
+        self.apply("mute_stories_verified")
+        returned = self.apply("return_ct_exact")
+        self.assertFalse(returned["cycle_complete"])
+        self.assertTrue(self.apply("cycle_complete")["cycle_complete"])
 
         # 2. Like verified -> Follow failed preserves Like and never completes.
         self.setUp()
@@ -140,6 +145,15 @@ class Follow60OrderingV2LedgerPostgresTests(unittest.TestCase):
         self.assertEqual("2", self.sql("select count(*) from follow60_ordering_v2_test.ledger"))
         with self.assertRaises(subprocess.CalledProcessError):
             self.apply("follow_verified", action="action-c")
+
+    def test_partial_mute_can_never_complete_cycle(self) -> None:
+        self.prepare_follow()
+        self.apply("follow_verified")
+        self.apply("mute_posts_verified")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.apply("return_ct_exact")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.apply("cycle_complete")
 
 
 if __name__ == "__main__":

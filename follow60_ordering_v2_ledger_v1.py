@@ -1,18 +1,19 @@
-"""Dormant source contract for a durable Like-before-Follow ledger.
-
-The production runtime does not import this module.  It specifies and tests the
-state machine that a future explicit Behavioral V2 implementation must use.
-"""
+"""Durable fail-closed Like-before-Follow ledger for Ordering V2."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sqlite3
+import threading
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 
 
-ORDERING_VERSION = "FOLLOW60_ORDERING_V2_LEDGER_V1"
+ORDERING_VERSION = "FOLLOW60_ORDERING_V2"
 STAGES = (
     "profile_certified",
     "post_opened",
@@ -25,8 +26,18 @@ STAGES = (
     "mute_posts_verified",
     "mute_stories_verified",
     "return_ct_exact",
+    "cycle_complete",
     "stop_recorded",
 )
+
+DEFAULT_PATH = Path(
+    os.environ.get(
+        "FOLLOW60_ORDERING_V2_LEDGER_PATH",
+        "/Users/admin/phonefarm-worker-runtime/follow60_ordering_v2_ledger_v1.sqlite3",
+    )
+)
+_LOCK = threading.RLock()
+_ACTIVE_STORES: dict[tuple[str, str, str], "DurableOrderingLedgerV1"] = {}
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,21 @@ class OrderingLedger:
                 stage,
                 ("follow_verified", "mute_posts_verified", "mute_stories_verified"),
             )
+        elif stage == "cycle_complete":
+            self._require(
+                stage,
+                (
+                    "profile_certified",
+                    "post_opened",
+                    "profile_reentry_verified",
+                    "follow_verified",
+                    "mute_posts_verified",
+                    "mute_stories_verified",
+                    "return_ct_exact",
+                ),
+            )
+            if not ({"like_verified", "like_skipped"} & self.stages):
+                raise ValueError("ledger_transition_invalid:cycle_complete:like_terminal_missing")
         elif stage == "stop_recorded":
             return
         else:
@@ -186,6 +212,7 @@ class OrderingLedger:
             required.issubset(self.stages)
             and {"like_verified", "like_skipped"} & self.stages
             and "follow_failed" not in self.stages
+            and "cycle_complete" in self.stages
         )
 
     def next_stage(self) -> str:
@@ -220,3 +247,218 @@ class OrderingLedger:
             "cycle_complete": self.cycle_complete,
             "stopped": self.stopped,
         }
+
+
+class DurableOrderingLedgerV1:
+    """SQLite WAL receipt store; every acknowledged physical stage is fsynced.
+
+    The table is local runtime state, not a production Supabase migration.  A
+    later composite outbox flush may project the same idempotency keys, while
+    this store prevents a crash/restart from replaying Like or Follow.
+    """
+
+    def __init__(self, scope: LedgerScope, *, path: Path = DEFAULT_PATH) -> None:
+        scope.validate()
+        self.scope = scope
+        self.path = Path(path)
+        self._init()
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.path), timeout=3.0)
+        conn.execute("pragma journal_mode=WAL")
+        conn.execute("pragma synchronous=FULL")
+        conn.execute("pragma foreign_keys=ON")
+        return conn
+
+    def _init(self) -> None:
+        with _LOCK, self._connect() as conn:
+            conn.execute(
+                """
+                create table if not exists follow60_ordering_v2_receipts (
+                  ordering_version text not null,
+                  account_id text not null,
+                  run_id text not null,
+                  request_id text not null,
+                  business_session_id text not null,
+                  target_id text not null,
+                  action_id text not null,
+                  candidate_username text not null,
+                  stage text not null,
+                  idempotency_key text not null,
+                  payload_hash text not null,
+                  payload_json text not null,
+                  acknowledged integer not null check (acknowledged in (0, 1)),
+                  created_at_monotonic real not null,
+                  primary key (account_id, run_id, action_id, stage),
+                  unique (idempotency_key)
+                )
+                """
+            )
+            conn.commit()
+        for item in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
+            try:
+                if item.exists():
+                    os.chmod(item, 0o600)
+            except OSError:
+                pass
+
+    def _rows(self) -> list[sqlite3.Row]:
+        with _LOCK, self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return list(
+                conn.execute(
+                    """
+                    select stage, idempotency_key, payload_hash, payload_json,
+                           acknowledged
+                    from follow60_ordering_v2_receipts
+                    where account_id=? and run_id=? and action_id=?
+                    order by created_at_monotonic, rowid
+                    """,
+                    (self.scope.account_id, self.scope.run_id, self.scope.action_id),
+                ).fetchall()
+            )
+
+    def load(self) -> OrderingLedger:
+        ledger = OrderingLedger(self.scope)
+        for row in self._rows():
+            stage = str(row["stage"])
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            out = ledger.apply_receipt(stage, payload)
+            if str(out.get("idempotency_key")) != str(row["idempotency_key"]):
+                raise ValueError("ledger_idempotency_key_mismatch")
+            if ledger.receipts[stage].payload_hash != str(row["payload_hash"]):
+                raise ValueError("ledger_payload_hash_mismatch")
+            if bool(row["acknowledged"]):
+                ledger.acknowledge(stage)
+        return ledger
+
+    def apply_receipt(self, stage: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        clean = dict(payload or {})
+        for forbidden in ("xml", "hierarchy", "screenshot", "token", "secret"):
+            clean.pop(forbidden, None)
+        with _LOCK:
+            ledger = self.load()
+            result = ledger.apply_receipt(stage, clean)
+            receipt = ledger.receipts[stage]
+            payload_json = json.dumps(
+                clean, sort_keys=True, separators=(",", ":"), default=str
+            )
+            with self._connect() as conn:
+                existing = conn.execute(
+                    """
+                    select payload_hash from follow60_ordering_v2_receipts
+                    where account_id=? and run_id=? and action_id=? and stage=?
+                    """,
+                    (
+                        self.scope.account_id,
+                        self.scope.run_id,
+                        self.scope.action_id,
+                        stage,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != receipt.payload_hash:
+                        raise ValueError(f"ledger_duplicate_conflict:{stage}")
+                    return {**result, "durable": True}
+                conn.execute(
+                    """
+                    insert into follow60_ordering_v2_receipts (
+                      ordering_version, account_id, run_id, request_id,
+                      business_session_id, target_id, action_id,
+                      candidate_username, stage, idempotency_key, payload_hash,
+                      payload_json, acknowledged, created_at_monotonic
+                    ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        self.scope.ordering_version,
+                        self.scope.account_id,
+                        self.scope.run_id,
+                        self.scope.request_id,
+                        self.scope.business_session_id,
+                        self.scope.target_id,
+                        self.scope.action_id,
+                        self.scope.candidate_username,
+                        stage,
+                        receipt.idempotency_key,
+                        receipt.payload_hash,
+                        payload_json,
+                        0,
+                        time.monotonic(),
+                    ),
+                )
+                conn.commit()
+            return {**result, "durable": True}
+
+    def acknowledge(self, stage: str) -> dict[str, Any]:
+        with _LOCK:
+            ledger = self.load()
+            result = ledger.acknowledge(stage)
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    update follow60_ordering_v2_receipts set acknowledged=1
+                    where account_id=? and run_id=? and action_id=? and stage=?
+                    """,
+                    (
+                        self.scope.account_id,
+                        self.scope.run_id,
+                        self.scope.action_id,
+                        stage,
+                    ),
+                )
+                conn.commit()
+            if cur.rowcount != 1:
+                raise ValueError(f"ledger_receipt_missing:{stage}")
+            return {**result, "durable": True}
+
+    def replay_plan(self) -> dict[str, Any]:
+        return self.load().replay_plan()
+
+
+def register_active_store(store: DurableOrderingLedgerV1) -> None:
+    key = (
+        store.scope.account_id,
+        store.scope.run_id,
+        store.scope.action_id,
+    )
+    with _LOCK:
+        _ACTIVE_STORES[key] = store
+
+
+def clear_active_store(store: DurableOrderingLedgerV1) -> None:
+    key = (
+        store.scope.account_id,
+        store.scope.run_id,
+        store.scope.action_id,
+    )
+    with _LOCK:
+        _ACTIVE_STORES.pop(key, None)
+
+
+def record_stop_for_run(*, account_id: str, run_id: str, reason: str) -> dict[str, Any]:
+    """Persist Stop for every in-flight V2 action without inventing a stage."""
+
+    with _LOCK:
+        stores = [
+            store
+            for (bound_account, bound_run, _action), store in _ACTIVE_STORES.items()
+            if bound_account == str(account_id or "") and bound_run == str(run_id or "")
+        ]
+    recorded = 0
+    failures: list[str] = []
+    for store in stores:
+        try:
+            store.apply_receipt(
+                "stop_recorded",
+                {"reason": str(reason or "manual_stop"), "source": "runner_signal"},
+            )
+            recorded += 1
+        except Exception as exc:
+            failures.append(type(exc).__name__)
+    return {
+        "ok": not failures,
+        "active_count": len(stores),
+        "recorded": recorded,
+        "failure_types": failures,
+    }

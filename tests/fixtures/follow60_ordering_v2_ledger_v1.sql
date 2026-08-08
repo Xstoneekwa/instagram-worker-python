@@ -1,4 +1,4 @@
--- TEST-ONLY PostgreSQL contract for FOLLOW60_ORDERING_V2_LEDGER_V1.
+-- TEST-ONLY PostgreSQL contract for FOLLOW60_ORDERING_V2.
 -- Never register or apply this file as a production migration.
 
 drop schema if exists follow60_ordering_v2_test cascade;
@@ -14,7 +14,7 @@ create table follow60_ordering_v2_test.ledger (
     target_id text not null,
     action_id text not null,
     candidate_username text not null,
-    ordering_version text not null check (ordering_version = 'FOLLOW60_ORDERING_V2_LEDGER_V1'),
+    ordering_version text not null check (ordering_version = 'FOLLOW60_ORDERING_V2'),
     profile_certified boolean not null default false,
     post_opened boolean not null default false,
     like_verified boolean not null default false,
@@ -92,14 +92,14 @@ begin
        or nullif(btrim(p_candidate_username), '') is null then
         raise exception 'ledger_scope_missing';
     end if;
-    if p_ordering_version <> 'FOLLOW60_ORDERING_V2_LEDGER_V1' then
+    if p_ordering_version <> 'FOLLOW60_ORDERING_V2' then
         raise exception 'ledger_ordering_version_invalid';
     end if;
     if p_action_type not in (
         'profile_certified', 'post_opened', 'like_verified', 'like_skipped',
         'profile_reentry_verified', 'follow_pending', 'follow_verified',
         'follow_failed', 'mute_posts_verified', 'mute_stories_verified',
-        'return_ct_exact', 'stop_recorded'
+        'return_ct_exact', 'cycle_complete', 'stop_recorded'
     ) then
         raise exception 'ledger_action_type_invalid';
     end if;
@@ -149,6 +149,15 @@ begin
     elsif p_action_type = 'return_ct_exact'
           and not (v_ledger.follow_verified and v_ledger.mute_posts_verified and v_ledger.mute_stories_verified) then
         raise exception 'ledger_transition_invalid:return_ct_exact';
+    elsif p_action_type = 'cycle_complete'
+          and not (
+              (v_ledger.like_verified or v_ledger.like_skipped)
+              and v_ledger.follow_verified
+              and v_ledger.mute_posts_verified
+              and v_ledger.mute_stories_verified
+              and v_ledger.return_ct_exact
+          ) then
+        raise exception 'ledger_transition_invalid:cycle_complete';
     end if;
 
     insert into follow60_ordering_v2_test.receipts (ledger_id, action_type, payload_hash, payload)
@@ -178,6 +187,7 @@ begin
             mute_stories_verified = mute_stories_verified or p_action_type = 'mute_stories_verified',
             return_ct_exact = return_ct_exact or p_action_type = 'return_ct_exact',
             stop_recorded = stop_recorded or p_action_type = 'stop_recorded',
+            cycle_complete = cycle_complete or p_action_type = 'cycle_complete',
             updated_at = clock_timestamp()
         where ledger_id = v_ledger.ledger_id;
 
@@ -187,13 +197,7 @@ begin
     end if;
 
     update follow60_ordering_v2_test.ledger
-    set cycle_complete = (
-            profile_certified and post_opened and (like_verified or like_skipped)
-            and profile_reentry_verified and follow_verified
-            and mute_posts_verified and mute_stories_verified and return_ct_exact
-            and not follow_failed
-        ),
-        updated_at = clock_timestamp()
+    set updated_at = clock_timestamp()
     where ledger_id = v_ledger.ledger_id
     returning * into v_ledger;
 

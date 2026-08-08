@@ -38,6 +38,8 @@ class Follow60OrderingV2LedgerV1Tests(unittest.TestCase):
         ledger.apply_receipt("mute_posts_verified", {"verified": True})
         ledger.apply_receipt("mute_stories_verified", {"verified": True})
         ledger.apply_receipt("return_ct_exact", {"exact": True})
+        self.assertFalse(ledger.cycle_complete)
+        ledger.apply_receipt("cycle_complete", {"persisted": True})
         self.assertTrue(ledger.cycle_complete)
         self.assertEqual("cycle_complete", ledger.next_stage())
 
