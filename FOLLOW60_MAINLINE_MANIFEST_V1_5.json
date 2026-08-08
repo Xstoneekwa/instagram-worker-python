@@ -1,0 +1,77 @@
+{
+  "schema": "FOLLOW60_MAINLINE_MANIFEST_V1_5",
+  "extends": "FOLLOW60_MAINLINE_MANIFEST_V1_4.json",
+  "status": "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1_SOURCE_APPROVED_INACTIVE",
+  "historical_manifests_immutable": true,
+  "production_runtime_unchanged_at_source_certification": true,
+  "active_production_worker_sha_at_source_certification": "45de130d29a8658ff24f222595f1d2b9184716d9",
+  "active_production_release_at_source_certification": "/Users/admin/phonefarm-worker-releases/45de130-follow60-see-more-surface-v1",
+  "worker_parent_sha": "114f891b2df58135a5cb6c548899571ab4e76492",
+  "approved_source_sha": "4431e67933078367731b07a398e86d8c6ccd5e9d",
+  "behavioral_ordering_v2": true,
+  "runtime_activation_authorized": false,
+  "default_enabled": false,
+  "account_scope": [
+    "b024e94e-395d-4f02-9787-81ddc679b014"
+  ],
+  "max_new_cycles": 10,
+  "critical_files": {
+    "follow60_ordering_v2_behavioral_canary_v1.py": "1812a162f8517a0abe7cab40d386e7e9bb1247b3ae3f4a8a74974127844be20e",
+    "follow60_ordering_v2_ledger_v1.py": "5b89dc7d0bafdc4ea121739b6c6ff4f9816d0024bd09da9713b980a47e4c15d8",
+    "follow_action_engine.py": "f21ad51c86f645b5286dbf83b629ccf554452d2f61770312914e77d45dc97f90",
+    "instagram_navigation.py": "50af3243f2b02a1e39680b692fd84b696d400d0e6eb81ba60859c22a016df0c5",
+    "runner.py": "c822722e639a8bace617976d61b968dfe6fe0337ce7fd3c1579323b0ee5d7c58",
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "post_follow_stage_outbox.py": "2f61ff634ddc94d661220c81a72df122260c032d3284aa73025310afbfddc8ad",
+    "supabase_client.py": "51b777a352ceea022c7b48ca714acfc6f5851194c300c71f485c6fd41a82f7d7"
+  },
+  "approved_diff": {
+    "scope": [
+      "follow60_ordering_v2_behavioral_canary_v1.py",
+      "follow60_ordering_v2_ledger_v1.py",
+      "follow_action_engine.py",
+      "instagram_navigation.py",
+      "runner.py",
+      "tests/fixtures/follow60_ordering_v2_ledger_v1.sql",
+      "tests/test_follow60_ordering_v2_behavioral_canary_v1.py",
+      "tests/test_follow60_ordering_v2_ledger_postgres.py",
+      "tests/test_follow60_ordering_v2_ledger_v1.py",
+      "tests/test_follow60_ordering_v2_reentry_surface.py",
+      "tests/test_follow60_ordering_v2_runner_integration.py"
+    ],
+    "sha256": "61e15d6eaabe07a34daa758f1a4bd47d06c9b8c4aecad10986bf6c694edeedc9",
+    "summary": "2571 insertions, 53 deletions"
+  },
+  "decision": {
+    "v1_default_path": true,
+    "v2_default_off": true,
+    "v2_scope": "rex_only_exact_binding",
+    "v2_candidate_gate": "DIRECT_GRID_SAFE",
+    "v5_mandatory": true,
+    "pre_post_bounds_invalidated": true,
+    "level1_reentry_only": true,
+    "new_ui_acquisition_for_measurement": false,
+    "v1_noneligible_fallback": true,
+    "runtime_release_state": "inactive"
+  },
+  "tests": {
+    "targeted": "23/23",
+    "neighborhood": "502/502",
+    "postgres": "3/3",
+    "full_worker": "2792/2792 (3 skipped)"
+  },
+  "approval": {
+    "approval_id": "ddb5579d-5b7d-4a2c-95d0-c583e4cc8bce-follow60-ordering-v2-behavioral-canary-v1-source",
+    "approved_by": "liam",
+    "approved_at": "2026-08-08T13:06:50Z",
+    "base_sha": "114f891b2df58135a5cb6c548899571ab4e76492",
+    "target_sha": "4431e67933078367731b07a398e86d8c6ccd5e9d",
+    "scope": "source_tests_docs_inactive_release_only",
+    "runtime_activation_authorized": false,
+    "one_shot_status": "consumed"
+  },
+  "historical_hashes": {
+    "FOLLOW60_MAINLINE_MANIFEST_V1_4.json": "d0ea29de4f9f3a150d55d7c574c57e24ef00e89e0179288e366f322fa2d52b49",
+    "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_4.json": "d8eb3135444e713ce89ddbe6987f23ef230ecdba11aac33fb30e913413d0e9db"
+  }
+}

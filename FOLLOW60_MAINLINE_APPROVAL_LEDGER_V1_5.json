@@ -1,0 +1,20 @@
+{
+  "schema": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_5",
+  "extends": "FOLLOW60_MAINLINE_APPROVAL_LEDGER_V1_4.json",
+  "consumed_approval_ids": [
+    "ddb5579d-5b7d-4a2c-95d0-c583e4cc8bce-follow60-ordering-v2-behavioral-canary-v1-source"
+  ],
+  "entries": [
+    {
+      "approval_id": "ddb5579d-5b7d-4a2c-95d0-c583e4cc8bce-follow60-ordering-v2-behavioral-canary-v1-source",
+      "base_sha": "114f891b2df58135a5cb6c548899571ab4e76492",
+      "target_sha": "4431e67933078367731b07a398e86d8c6ccd5e9d",
+      "consumed_at": "2026-08-08T13:06:50Z",
+      "scope": "source_tests_docs_inactive_release_only",
+      "runtime_activation_authorized": false,
+      "activation_scope": "none",
+      "behavioral_scope": "rex_only_exact_binding",
+      "default_enabled": false
+    }
+  ]
+}
