@@ -26645,6 +26645,23 @@ def _create_post_open_intent_from_final_proof(
         from post_open_intent_v2 import create_post_open_intent_v2
 
         runtime = _intent_runtime_context()
+        if evidence.get("ordering_v2_initial_proof") is True:
+            exact_generations = (
+                (
+                    int(evidence.get("proof_navigation_counter") or 0),
+                    int(runtime.get("navigation_counter") or 0),
+                ),
+                (
+                    int(evidence.get("proof_scroll_counter") or 0),
+                    int(runtime.get("scroll_counter") or 0),
+                ),
+                (
+                    int(evidence.get("proof_ui_generation") or 0),
+                    int(runtime.get("ui_generation") or 0),
+                ),
+            )
+            if any(proven != current for proven, current in exact_generations):
+                return None
         frame = dict(evidence.get("coordinate_frame") or {})
         insets = dict(frame.get("system_insets") or {})
         return create_post_open_intent_v2(
@@ -59931,9 +59948,15 @@ def acquire_pre_follow_mono_capture(
 
         _pre_follow_runtime = dict(_follow_60s_runtime_context() or {})
         ui_generation = int(_pre_follow_runtime.get("ui_generation") or 0)
+        navigation_counter = int(
+            _pre_follow_runtime.get("navigation_counter") or 0
+        )
+        scroll_counter = int(_pre_follow_runtime.get("scroll_counter") or 0)
         navigation_generation = str(ui_generation)
     except Exception:
         ui_generation = 0
+        navigation_counter = 0
+        scroll_counter = 0
         navigation_generation = ""
     public_ready = bool(public_ready and package_exact and current_activity)
     structured_post_count_observation = (
@@ -59969,6 +59992,8 @@ def acquire_pre_follow_mono_capture(
         "activity": current_activity,
         "package_exact": package_exact,
         "navigation_generation": navigation_generation,
+        "navigation_counter": navigation_counter,
+        "scroll_counter": scroll_counter,
         "ui_generation": ui_generation,
         "captured_at_monotonic": captured_at_monotonic,
         "structured_post_count_observation": structured_post_count_observation,

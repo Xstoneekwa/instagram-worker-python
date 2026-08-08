@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest import mock
 
 import instagram_navigation as nav
 import post_open_intent_v2 as intent_v2
+from tests.test_follow60_ordering_v2_behavioral_canary_v1 import _binding, _stable
 
 
 class PostOpenIntentV2Tests(unittest.TestCase):
@@ -136,6 +138,65 @@ class PostOpenIntentV2Tests(unittest.TestCase):
             ),
             ("", ""),
         )
+
+    def _ordering_v2_stage_binding(self, binding, stable):
+        return {
+            "account_id": binding.account_id,
+            "run_id": binding.run_id,
+            "request_id": binding.request_id,
+            "action_id": stable.action_id,
+            "attempt_id": binding.attempt_id,
+            "business_session_id": binding.business_session_id,
+            "control_id": binding.control_id,
+            "worker_sha": binding.actual_worker_sha,
+            "source_target_id": stable.target_id,
+        }
+
+    def _ordering_v2_intent(self, runtime):
+        binding, _ = _binding()
+        stable = _stable(binding)
+        evidence = dict(stable.post_grid_evidence)
+        package, activity = nav._post_open_intent_surface_from_final_proof(
+            evidence, expected_package="com.instagram.android"
+        )
+        with mock.patch(
+            "follow_60s_canary.runtime_context", return_value=runtime
+        ):
+            intent = nav._create_post_open_intent_from_final_proof(
+                binding=self._ordering_v2_stage_binding(binding, stable),
+                candidate_username=stable.candidate_username,
+                target_username="ct",
+                source_branch="SAFE",
+                bounds=dict(evidence["post_bounds"]),
+                package=package,
+                activity=activity,
+                evidence=evidence,
+                viewport_width=int(evidence["screen_width"]),
+                viewport_height=int(evidence["screen_height"]),
+                xml_hash=str(evidence["source_xml_fingerprint"]),
+                fingerprint=str(evidence["source_xml_fingerprint"]),
+                absolute_row=1,
+                absolute_column=1,
+                candidate_bound_provenance="ordering_v2_initial_mono_xml",
+            )
+        return intent
+
+    def test_ordering_v2_initial_proof_creates_intent_without_reacquisition(self):
+        intent = self._ordering_v2_intent({
+            "navigation_counter": 4,
+            "scroll_counter": 2,
+            "ui_generation": 6,
+        })
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.source_branch, "SAFE")
+
+    def test_ordering_v2_initial_proof_generation_mismatch_fails_closed(self):
+        intent = self._ordering_v2_intent({
+            "navigation_counter": 5,
+            "scroll_counter": 2,
+            "ui_generation": 6,
+        })
+        self.assertIsNone(intent)
 
 
 if __name__ == "__main__":
