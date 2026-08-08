@@ -9,7 +9,8 @@ import follow60_ordering_v2_behavioral_canary_v1 as contract
 ACCOUNT = "b024e94e-395d-4f02-9787-81ddc679b014"
 OTHER = "11111111-1111-4111-8111-111111111111"
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "supabase/migrations/20260808154030_follow60_ordering_v2_behavioral_runtime_control_v1.sql"
+BASE_MIGRATION = ROOT / "supabase/migrations/20260808154030_follow60_ordering_v2_behavioral_runtime_control_v1.sql"
+VARIABLE_MIGRATION = ROOT / "supabase/migrations/20260808201850_follow60_ordering_v2_variable_canary_barrier_v1.sql"
 
 
 class Follow60OrderingV2RuntimeControlContractTests(unittest.TestCase):
@@ -27,17 +28,25 @@ class Follow60OrderingV2RuntimeControlContractTests(unittest.TestCase):
         self.assertNotIn("REX_ACCOUNT_ID", source)
 
     def test_migration_is_dormant_least_privilege_and_has_exact_counters(self) -> None:
-        sql = MIGRATION.read_text()
+        base_sql = BASE_MIGRATION.read_text()
+        sql = VARIABLE_MIGRATION.read_text()
         for signal in (
             "candidate_seen_count", "v2_selected_count", "v2_complete_count",
-            "v2_partial_count", "v1_fallback_count", "max_v2_cycles = 10",
+            "v2_partial_count", "v1_fallback_count",
             "manual_start", "binding_consumed", "for update", "barrier_reached",
         ):
-            self.assertIn(signal, sql)
-        self.assertIn("enable row level security", sql)
+            self.assertIn(signal, base_sql)
+        self.assertIn("max_v2_cycles = 10", base_sql)
+        self.assertIn("max_v2_cycles between 1 and 10", sql)
+        self.assertIn("p_requested_max_v2_cycles integer default 10", sql)
+        self.assertIn("canonical_follow_remaining_at_arm", sql)
+        self.assertIn("behavioral_canary_hard_max", sql)
+        self.assertIn("ig_interaction_events", sql)
+        self.assertIn("account_package_summary", sql)
+        self.assertIn("enable row level security", base_sql)
         self.assertIn("from public, anon, authenticated", sql)
         self.assertIn("to service_role", sql)
-        self.assertNotIn("insert into public.follow60_ordering_v2_behavioral_controls", sql.split("create or replace function public.arm_")[0])
+        self.assertNotIn("update public.follow60_ordering_v2_behavioral_controls set max_v2_cycles", sql)
 
 
 if __name__ == "__main__":
