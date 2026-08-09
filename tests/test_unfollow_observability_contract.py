@@ -85,6 +85,37 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
         )
         self.assertEqual(markers, ["active_account_mismatch"])
 
+    def test_unfollow_diagnostic_v2_preserves_unknown_outside_capped_plan(self) -> None:
+        viewport, candidates = orchestrator.build_unfollow_diagnostic_v2(
+            rows=[{"username": "planned.one"}, {"username": "backlog.two"}],
+            visible_eval={
+                "visible_eligible_matches": [
+                    {"username": "planned.one"},
+                    {"username": "backlog.two"},
+                ],
+                "visible_ineligible_rows": [],
+            },
+            planned_usernames={"planned.one"},
+            row_cache={"planned.one": {"id": "1"}, "backlog.two": {"id": "2"}},
+            attempted_usernames={"planned.one"},
+            verified_usernames={"planned.one"},
+            persisted_usernames=set(),
+            viewport_index=3,
+            scroll_depth=2,
+        )
+        self.assertTrue(viewport["viewport_fingerprint"])
+        by_username = {row["username"]: row for row in candidates}
+        self.assertTrue(by_username["planned.one"]["db_eligible_at_start"])
+        self.assertIsNone(by_username["backlog.two"]["db_eligible_at_start"])
+        self.assertTrue(by_username["planned.one"]["action_attempted"])
+        self.assertFalse(by_username["planned.one"]["persistence_ok"])
+
+    def test_unfollow_diagnostic_v2_events_are_wired_without_extra_ui_acquisition(self) -> None:
+        source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
+        self.assertIn('"unfollow_diagnostic_v2_viewport"', source)
+        self.assertIn('"unfollow_candidate_lineage_v1"', source)
+        self.assertIn("build_unfollow_diagnostic_v2(", source)
+
 
 if __name__ == "__main__":
     unittest.main()

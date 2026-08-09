@@ -26,13 +26,14 @@ class Follow60P0SourceContractTest(unittest.TestCase):
         self.assertIn('export WORKER_GIT_SHA="$RUNTIME_GIT_SHA"', source)
         self.assertIn('WORKER_GIT_SHA_SOURCE="runtime_release_head"', source)
 
-    def test_unfollow_ui_files_are_not_in_follow60_diff(self) -> None:
+    def test_unfollow_navigation_remains_outside_follow60_diff(self) -> None:
         # The original P0 excluded every navigation edit. The approved
         # PostGrid/Like successor deliberately changes instagram_navigation,
-        # while Unfollow remains outside scope and must stay untouched.
+        # and the post-promotion audit explicitly adds observability inside the
+        # orchestrator.  Unfollow search/navigation strategy remains outside
+        # scope and must stay untouched.
         forbidden = {
             "unfollow_hybrid_strategy.py",
-            "unfollow_session_orchestrator.py",
         }
         import subprocess
 
@@ -44,6 +45,12 @@ class Follow60P0SourceContractTest(unittest.TestCase):
             ).splitlines()
         )
         self.assertFalse(changed & forbidden, changed & forbidden)
+
+        unfollow = (ROOT / "unfollow_session_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"unfollow_diagnostic_v2_viewport"', unfollow)
+        self.assertIn('"unfollow_candidate_lineage_v1"', unfollow)
 
         # The transactional activation GO explicitly requires the canary
         # registry to install concrete callbacks before consuming control.

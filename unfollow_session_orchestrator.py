@@ -22,6 +22,7 @@ from instagram_list_continuation import (
     adaptive_follow_scroll_geometry,
     classify_instagram_list_continuation,
     compare_instagram_list_viewports,
+    viewport_fingerprint,
 )
 from logs import log
 from runtime_caps import resolve_unfollow_runtime_cap
@@ -287,6 +288,86 @@ def _visible_username_keys(usernames: list[str]) -> list[str]:
             seen.add(key)
             out.append(key)
     return out
+
+
+def build_unfollow_diagnostic_v2(
+    *,
+    rows: list[dict[str, Any]],
+    visible_eval: dict[str, Any],
+    planned_usernames: set[str],
+    row_cache: dict[str, dict[str, Any] | None],
+    attempted_usernames: set[str],
+    verified_usernames: set[str],
+    persisted_usernames: set[str],
+    viewport_index: int,
+    scroll_depth: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build read-only Unfollow lineage diagnostics from already loaded data.
+
+    The capped plan is authoritative only for its own members.  Candidates
+    outside that plan deliberately expose ``db_eligible_at_start=None`` rather
+    than inventing eligibility for a backlog row that was not admitted at T0.
+    """
+    ordered = _visible_username_keys(
+        [str(row.get("username") or "") for row in rows]
+    )
+    eligible = _visible_candidates_by_username(visible_eval)
+    skip_reasons: dict[str, str] = {}
+    for row in list(visible_eval.get("visible_ineligible_rows") or []):
+        if not isinstance(row, dict):
+            continue
+        key = normalize_unfollow_username(
+            str(row.get("username_normalized") or row.get("username") or "")
+        )
+        if key:
+            skip_reasons[key] = str(row.get("skip_reason") or "unknown")
+
+    eligibility_map: dict[str, bool] = {}
+    acted_map: dict[str, dict[str, bool]] = {}
+    lineage: list[dict[str, Any]] = []
+    for key in ordered:
+        is_eligible = key in eligible
+        eligibility_map[key] = is_eligible
+        action_state = {
+            "attempted": key in attempted_usernames,
+            "verified": key in verified_usernames,
+            "persisted": key in persisted_usernames,
+        }
+        acted_map[key] = action_state
+        planned_at_start = key in planned_usernames
+        lineage.append(
+            {
+                "username": key,
+                "db_eligible_at_start": True if planned_at_start else None,
+                "db_eligibility_scope": (
+                    "known_from_capped_session_plan"
+                    if planned_at_start
+                    else "unknown_outside_capped_session_plan"
+                ),
+                "db_row_present_at_viewport": isinstance(row_cache.get(key), dict),
+                "ui_seen": True,
+                "viewport_index": max(1, int(viewport_index or 1)),
+                "scroll_depth": max(0, int(scroll_depth or 0)),
+                "eligible_at_viewport": is_eligible,
+                "skip_reason": skip_reasons.get(key, ""),
+                "action_attempted": action_state["attempted"],
+                "action_verified": action_state["verified"],
+                "persistence_ok": action_state["persisted"],
+                "monotonic_s": round(time.perf_counter(), 6),
+            }
+        )
+
+    viewport = {
+        "viewport_index": max(1, int(viewport_index or 1)),
+        "scroll_depth": max(0, int(scroll_depth or 0)),
+        "ordered_visible_usernames": ordered,
+        "viewport_fingerprint": viewport_fingerprint(ordered),
+        "candidate_eligibility_map": eligibility_map,
+        "candidate_skip_reason_map": skip_reasons,
+        "candidate_acted_map": acted_map,
+        "monotonic_s": round(time.perf_counter(), 6),
+    }
+    return viewport, lineage
 
 
 def _real_action_enabled() -> bool:
@@ -1400,6 +1481,9 @@ def _run_real_unfollow_multi_loop(
     stop_reason = ""
     completed_usernames: set[str] = set()
     failed_usernames_this_run: set[str] = set()
+    action_attempted_usernames: set[str] = set()
+    action_verified_usernames: set[str] = set()
+    action_persisted_usernames: set[str] = set()
     unfollow_observed_successes: list[dict[str, Any]] = []
     recoverable_action_failure_usernames: list[str] = []
     recoverable_action_failure_reasons: dict[str, str] = {}
@@ -2246,6 +2330,33 @@ def _run_real_unfollow_multi_loop(
                 (time.perf_counter() - selection_t0) * 1000.0,
                 2,
             )
+            diagnostic_viewport, diagnostic_candidates = build_unfollow_diagnostic_v2(
+                rows=rows,
+                visible_eval=visible_eval,
+                planned_usernames=planned_usernames,
+                row_cache=visible_eligibility_row_cache,
+                attempted_usernames=action_attempted_usernames,
+                verified_usernames=action_verified_usernames,
+                persisted_usernames=action_persisted_usernames,
+                viewport_index=iteration_index,
+                scroll_depth=scroll_passes_used,
+            )
+            log(
+                "info",
+                "unfollow_diagnostic_v2_viewport",
+                account_id=aid,
+                run_id=run_id,
+                **diagnostic_viewport,
+            )
+            for diagnostic_candidate in diagnostic_candidates:
+                log(
+                    "info",
+                    "unfollow_candidate_lineage_v1",
+                    account_id=aid,
+                    run_id=run_id,
+                    lineage_stage="viewport_observed",
+                    **diagnostic_candidate,
+                )
             last_fields = {**last_fields, **eval_fields}
             if target_row is not None:
                 break
@@ -2891,6 +3002,7 @@ def _run_real_unfollow_multi_loop(
         tap_out = tap_unfollow_in_following_sheet(d, target_username=target_username)
         if tap_out.get("ok"):
             sent += 1
+            action_attempted_usernames.add(target_key)
             if coverage_tracker is not None:
                 coverage_tracker.mark_action_attempted(target_key)
         else:
@@ -2917,6 +3029,8 @@ def _run_real_unfollow_multi_loop(
 
         verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
         verify_ok = bool(verify_out.get("ok"))
+        if verify_ok:
+            action_verified_usernames.add(target_key)
         if verify_ok and coverage_tracker is not None:
             coverage_tracker.mark_action_verified(target_key)
         cand = (
@@ -2941,6 +3055,8 @@ def _run_real_unfollow_multi_loop(
         persisted += int(persistence_delta["verified_persisted"])
         persisted_outcomes += int(persistence_delta["outcome_persisted"])
         if persist_ok:
+            if verify_ok:
+                action_persisted_usernames.add(target_key)
             if verify_ok and coverage_tracker is not None:
                 coverage_tracker.mark_action_persisted(target_key)
             if verify_ok:
@@ -2962,6 +3078,32 @@ def _run_real_unfollow_multi_loop(
                 username=target_username,
                 reason=str(persist_out.get("error") or "persist_failed"),
             )
+        log(
+            "info",
+            "unfollow_candidate_lineage_v1",
+            account_id=aid,
+            run_id=run_id,
+            username=target_key,
+            lineage_stage="action_terminal",
+            db_eligible_at_start=(True if target_key in planned_usernames else None),
+            db_eligibility_scope=(
+                "known_from_capped_session_plan"
+                if target_key in planned_usernames
+                else "unknown_outside_capped_session_plan"
+            ),
+            ui_seen=True,
+            viewport_index=iteration_index,
+            scroll_depth=scroll_passes_used,
+            skip_reason=str(
+                verify_out.get("failure_reason")
+                or persist_out.get("error")
+                or ""
+            ),
+            action_attempted=target_key in action_attempted_usernames,
+            action_verified=target_key in action_verified_usernames,
+            persistence_ok=target_key in action_persisted_usernames,
+            monotonic_s=round(time.perf_counter(), 6),
+        )
         if verify_ok and persist_ok:
             verified += 1
             completed_usernames.add(target_key)
