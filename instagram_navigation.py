@@ -24403,6 +24403,28 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
             reacquired.get("outcome") or "POST_GRID_AMBIGUOUS_FINAL"
         )
         out = reacquired
+        if str(out.get("outcome") or "") not in {
+            "POST_ROW_POSITIVE_SAFE",
+            "NO_POSTS_POSITIVE",
+        }:
+            out = _post_follow_revalidate_transient_grid_once(
+                d,
+                out,
+                stable_evidence=evidence,
+                ww=int(ww),
+                wh=int(wh),
+                candidate_username=(
+                    candidate_username
+                    or str(evidence.get("candidate_username") or "")
+                ),
+                expected_package=str(
+                    getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+                ),
+                expected_absolute_cell=expected_absolute_cell,
+                absolute_top_left_origin_proven=bool(
+                    evidence.get("absolute_top_left_origin_proven")
+                ),
+            )
     except Exception:
         out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
         out["fast_vision_probe_rejection_reason"] = "clipped_reveal_reacquire_error"
@@ -24411,9 +24433,18 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         "POST_ROW_POSITIVE_SAFE",
         "NO_POSTS_POSITIVE",
     }:
-        out["post_bounds_source"] = "single_reveal_fresh_xml_physical_cell"
+        out["post_bounds_source"] = (
+            "transient_revalidation_fresh_xml_physical_cell"
+            if bool(out.get("transient_grid_revalidation_attempted"))
+            else "single_reveal_fresh_xml_physical_cell"
+        )
         out["post_reveal_safe_reason"] = (
-            "fresh_xml_exact_identity_posts_tab_physical_top_left_row"
+            (
+                "one_shot_transient_revalidation_exact_identity_posts_tab_"
+                "physical_top_left_row"
+            )
+            if bool(out.get("transient_grid_revalidation_attempted"))
+            else "fresh_xml_exact_identity_posts_tab_physical_top_left_row"
             if str(out.get("outcome") or "") == "POST_ROW_POSITIVE_SAFE"
             else "fresh_xml_positive_no_posts"
         )
@@ -24445,6 +24476,8 @@ def _post_follow_post_reveal_safe_first_row_contract(
     wh: int,
     expected_absolute_cell: dict[str, Any] | None = None,
     absolute_top_left_origin_proven: bool = False,
+    verified_package_activity: dict[str, Any] | None = None,
+    expected_ui_generation: int | None = None,
 ) -> dict[str, Any]:
     """Promote only a fully visible first row from the one fresh reveal XML."""
     out = dict(classified or {})
@@ -24502,13 +24535,17 @@ def _post_follow_post_reveal_safe_first_row_contract(
         )
     ):
         return _reject("story_highlight_marker_present")
-    meta = _followers_current_pkg_activity(d)
+    meta = dict(verified_package_activity or {})
+    if not meta:
+        meta = _followers_current_pkg_activity(d)
     package = str(meta.get("current_package") or "")
     activity = str(meta.get("current_activity") or "")
     if package != str(expected_package or ""):
         return _reject("post_reveal_package_mismatch")
     if "instagram" not in activity.lower() or "mainactivity" not in activity.lower():
         return _reject("post_reveal_activity_mismatch")
+    out["post_reveal_package"] = package
+    out["post_reveal_activity"] = activity
     if _normalize_handle(str(out.get("candidate_username") or candidate_username)) != _normalize_handle(
         candidate_username
     ):
@@ -24521,11 +24558,15 @@ def _post_follow_post_reveal_safe_first_row_contract(
     frame = dict(dimensions.get("coordinate_frame") or {})
     if not bool(dimensions.get("screen_dimensions_trusted")) or not frame:
         return _reject("post_reveal_frame_untrusted")
+    out["post_reveal_coordinate_frame"] = frame
     try:
         from follow_60s_canary import runtime_context as _post_reveal_runtime_context
         generation = int(_post_reveal_runtime_context().get("ui_generation") or 0)
     except Exception:
         return _reject("post_reveal_generation_missing")
+    out["post_reveal_ui_generation"] = generation
+    if expected_ui_generation is not None and generation != int(expected_ui_generation):
+        return _reject("post_reveal_generation_changed_during_revalidation")
     cells = [
         dict(cell)
         for cell in (out.get("physical_cells") or [])
@@ -24657,6 +24698,158 @@ def _post_follow_post_reveal_safe_first_row_contract(
                 or (chosen_row == 1 and chosen_column == 1)
             ),
         }
+    )
+    return out
+
+
+_POST_FOLLOW_TRANSIENT_GRID_REVALIDATION_REASONS = frozenset(
+    {
+        "post_reveal_physical_cell_missing",
+        "post_reveal_fully_visible_first_row_missing",
+        "absolute_top_left_not_visible_after_reveal",
+    }
+)
+
+
+def _post_follow_revalidate_transient_grid_once(
+    d: u2.Device,
+    rejected: dict[str, Any] | None,
+    *,
+    stable_evidence: dict[str, Any] | None,
+    ww: int,
+    wh: int,
+    candidate_username: str,
+    expected_package: str,
+    expected_absolute_cell: dict[str, Any] | None = None,
+    absolute_top_left_origin_proven: bool = False,
+) -> dict[str, Any]:
+    """Refresh volatile grid XML once before handing persistent ambiguity to Golden.
+
+    This is deliberately not a wait loop or a second reveal.  Exact profile,
+    package/activity, positive post counter, Posts-tab and safety gates were
+    already proved by the stable post-Mute/reveal evidence.  The only new device
+    operation is one hierarchy dump; the same strict top-left contract then
+    revalidates the refreshed cells, coordinate frame, loading state and UI
+    generation.  Any unsafe or still-ambiguous result remains Golden-owned.
+    """
+    out = dict(rejected or {})
+    out.setdefault("transient_grid_revalidation_attempted", False)
+    out.setdefault("transient_grid_revalidation_count", 0)
+    out.setdefault("transient_grid_revalidation_explicit_wait_ms", 0.0)
+    stable = dict(stable_evidence or {})
+    reason = str(
+        out.get("post_reveal_safe_rejection_reason")
+        or out.get("rejection_reason")
+        or ""
+    )
+    if reason not in _POST_FOLLOW_TRANSIENT_GRID_REVALIDATION_REASONS:
+        return out
+    stable_required = (
+        bool(stable.get("identity_exact")),
+        bool(stable.get("profile_tabs_present")),
+        bool(stable.get("grid_selected")),
+        bool(stable.get("post_count_positive")),
+        not bool(stable.get("loading_visible")),
+        not bool(stable.get("private_profile_visible")),
+        not bool(stable.get("reels_or_tagged_selected")),
+        not bool(stable.get("suggested_overlay_visible")),
+    )
+    if not all(stable_required):
+        out["transient_grid_revalidation_skip_reason"] = (
+            "stable_positive_surface_contract_missing"
+        )
+        return out
+    if int(out.get("reveal_count_total_for_like_phase") or 0) != 1:
+        out["transient_grid_revalidation_skip_reason"] = "reveal_count_not_one"
+        return out
+    if int(out.get("reacquire_dump_count") or 0) != 1:
+        out["transient_grid_revalidation_skip_reason"] = (
+            "initial_fresh_reacquisition_missing"
+        )
+        return out
+    if not bool(out.get("old_bounds_invalidated")):
+        out["transient_grid_revalidation_skip_reason"] = "old_bounds_not_invalidated"
+        return out
+    verified_meta = {
+        "current_package": str(out.get("post_reveal_package") or ""),
+        "current_activity": str(out.get("post_reveal_activity") or ""),
+    }
+    if (
+        verified_meta["current_package"] != str(expected_package or "")
+        or "instagram" not in verified_meta["current_activity"].lower()
+        or "mainactivity" not in verified_meta["current_activity"].lower()
+    ):
+        out["transient_grid_revalidation_skip_reason"] = (
+            "stable_package_activity_missing"
+        )
+        return out
+    expected_generation = out.get("post_reveal_ui_generation")
+    if expected_generation is None:
+        out["transient_grid_revalidation_skip_reason"] = (
+            "stable_generation_missing"
+        )
+        return out
+
+    started = time.perf_counter()
+    out["transient_grid_revalidation_attempted"] = True
+    out["transient_grid_revalidation_count"] = 1
+    out["transient_grid_revalidation_original_rejection_reason"] = reason
+    try:
+        refreshed_xml = str(d.dump_hierarchy(compressed=False) or "")
+        refreshed = _post_follow_post_grid_evidence_from_xml(
+            refreshed_xml,
+            candidate_username=candidate_username,
+            ww=int(ww),
+            wh=int(wh),
+            profile_identity_exact=True,
+        )
+        if str(refreshed.get("outcome") or "") in {
+            "POST_ROW_POSITIVE_SAFE",
+            "POST_ROW_POSITIVE_BUT_CLIPPED",
+        }:
+            refreshed = _post_follow_post_reveal_safe_first_row_contract(
+                d,
+                refreshed,
+                hierarchy_xml=refreshed_xml,
+                candidate_username=candidate_username,
+                expected_package=expected_package,
+                ww=int(ww),
+                wh=int(wh),
+                expected_absolute_cell=expected_absolute_cell,
+                absolute_top_left_origin_proven=bool(
+                    absolute_top_left_origin_proven
+                ),
+                verified_package_activity=verified_meta,
+                expected_ui_generation=int(expected_generation),
+            )
+        refreshed.update(
+            {
+                "reveal_scroll_attempted": True,
+                "reveal_scroll_ok": True,
+                "reveal_distance_px": out.get("reveal_distance_px"),
+                "reveal_count_total_for_like_phase": 1,
+                "reacquire_dump_count": 2,
+                "old_bounds_invalidated": True,
+                "reacquired_hierarchy_xml": refreshed_xml,
+                "transient_grid_revalidation_attempted": True,
+                "transient_grid_revalidation_count": 1,
+                "transient_grid_revalidation_explicit_wait_ms": 0.0,
+                "transient_grid_revalidation_original_rejection_reason": reason,
+                "transient_grid_revalidation_stable_proofs_reused": [
+                    "candidate_identity",
+                    "package_activity",
+                    "positive_post_count",
+                    "posts_tab",
+                    "overlay_absence",
+                ],
+            }
+        )
+        out = refreshed
+    except Exception as exc:
+        out["transient_grid_revalidation_error"] = type(exc).__name__
+    out["transient_grid_revalidation_duration_ms"] = round(
+        (time.perf_counter() - started) * 1000.0,
+        2,
     )
     return out
 
@@ -26984,12 +27177,20 @@ def _post_follow_golden_can_reuse_positive_post_grid_existence(
 
     # An ambiguous post-reveal result may prove that posts exist while still
     # refusing its bounds.  Reuse it only after the one canonical reveal and
-    # one fresh XML reacquisition, and only for tap-safety rejection reasons
+    # one fresh XML reacquisition (plus the optional one-shot transient grid
+    # refresh), and only for tap-safety rejection reasons
     # reached after physical-cell presence was established.
     if int(evidence.get("reveal_count_total_for_like_phase") or 0) != 1:
         return False, "positive_post_grid_reveal_count_not_one"
-    if int(evidence.get("reacquire_dump_count") or 0) != 1:
+    reacquire_dump_count = int(evidence.get("reacquire_dump_count") or 0)
+    transient_revalidation_count = int(
+        evidence.get("transient_grid_revalidation_count") or 0
+    )
+    expected_dump_count = 2 if transient_revalidation_count == 1 else 1
+    if reacquire_dump_count != expected_dump_count:
         return False, "positive_post_grid_fresh_reacquisition_missing"
+    if transient_revalidation_count not in {0, 1}:
+        return False, "positive_post_grid_transient_revalidation_not_one_shot"
     if not bool(evidence.get("old_bounds_invalidated")):
         return False, "positive_post_grid_old_bounds_not_invalidated"
     rejection_reason = str(
@@ -54260,6 +54461,29 @@ def run_post_follow_post_likes_phase(
                             ),
                             golden_reason=str(
                                 _candidate_grid.get("golden_reason") or ""
+                            ),
+                            transient_grid_revalidation_attempted=bool(
+                                _candidate_grid.get(
+                                    "transient_grid_revalidation_attempted"
+                                )
+                            ),
+                            transient_grid_revalidation_count=int(
+                                _candidate_grid.get(
+                                    "transient_grid_revalidation_count"
+                                )
+                                or 0
+                            ),
+                            transient_grid_revalidation_duration_ms=float(
+                                _candidate_grid.get(
+                                    "transient_grid_revalidation_duration_ms"
+                                )
+                                or 0.0
+                            ),
+                            transient_grid_revalidation_explicit_wait_ms=float(
+                                _candidate_grid.get(
+                                    "transient_grid_revalidation_explicit_wait_ms"
+                                )
+                                or 0.0
                             ),
                         )
                     else:
