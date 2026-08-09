@@ -445,6 +445,43 @@ class RepositoryAndControllerTests(unittest.TestCase):
         self.assertEqual(ctl.reached_depth, 1)
         self.assertTrue(ctl.commit_verified_progress())
 
+    def test_43a_promoted_shadow_depth_does_not_skip_first_enforce_commit(self):
+        rpc = FakeRpc(
+            row=checkpoint_row(
+                checkpoint_version=3,
+                last_safe_depth=0,
+                last_visible_anchor_hashes=[],
+                shadow_last_safe_depth=1,
+                shadow_visible_anchor_hashes=list(
+                    resume.bounded_anchor_hashes(["shadow.anchor"])
+                ),
+                last_verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        ctl = self.controller(rpc, flags=resume.ResumeFlags(False, True))
+        plan = ctl.load_and_plan()
+        self.assertEqual(plan.reason, "shadow_plan_promoted_for_enforce")
+        self.assertEqual(plan.previous_depth, 1)
+        self.assertEqual(ctl.checkpoint_depth_before, 0)
+        self.assertEqual(ctl.last_committed_depth, 0)
+        self.assertTrue(ctl.claim())
+        ctl.observe_viewport(
+            ["before", "shadow.anchor"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        verdict = ctl.observe_viewport(
+            ["shadow.anchor", "after"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(verdict.verified)
+        self.assertEqual(ctl.reached_depth, 1)
+        self.assertTrue(ctl.commit_verified_progress())
+        commit = [params for name, params in rpc.calls if name.startswith("commit_")][-1]
+        self.assertEqual(commit["p_last_safe_depth"], 1)
+
     def test_44_partial_viewport_never_advances(self):
         ctl = self.controller(FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0)))
         ctl.load_and_plan(); ctl.claim()

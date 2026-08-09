@@ -1010,8 +1010,19 @@ class ProgressiveResumeController:
             target_id=self.target_id,
             target_username=self.target_username,
         )
-        self.checkpoint_depth_before = self.plan.previous_depth
-        self.last_committed_depth = self.plan.previous_depth
+        # ``plan.previous_depth`` may be a verified Shadow depth promoted as an
+        # Enforce navigation proposal.  It is not necessarily the canonical
+        # depth already persisted in the active mode.  Keeping those two
+        # notions separate prevents the first proven Enforce scroll from being
+        # skipped and the following scroll from becoming an invalid 0 -> 2
+        # commit jump.
+        authoritative_depth = (
+            self.checkpoint.depth(self.flags.mode)
+            if self.checkpoint is not None
+            else 0
+        )
+        self.checkpoint_depth_before = authoritative_depth
+        self.last_committed_depth = authoritative_depth
         # Both modes begin at physical depth zero. Enforce must prove every
         # bounded transition before reaching the stored depth; treating the
         # checkpoint depth as already physical would create a false jump.
