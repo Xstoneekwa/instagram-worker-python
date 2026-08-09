@@ -42,6 +42,13 @@ class UnfollowBatchContinuationContractTests(unittest.TestCase):
             self.source,
         )
 
+    def test_positive_not_following_terminal_is_persisted_without_false_unfollow(self) -> None:
+        self.assertIn("record_unfollow_already_not_following_v1", self.source)
+        self.assertIn('sheet_failure_reason == "already_not_following_confirmed"', self.source)
+        self.assertIn("unfollow_marked_success=False", self.source)
+        self.assertIn('trigger_reason="already_not_following_confirmed"', self.source)
+        self.assertIn("unfollow_already_not_following_return_failed", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

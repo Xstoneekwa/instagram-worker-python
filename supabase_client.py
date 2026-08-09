@@ -3872,7 +3872,7 @@ def fetch_unfollow_candidate_availability(
             query={
                 "select": "account_id,normalized_username,status,reason,first_not_found_at,last_checked_at,not_found_attempt_count,first_failure_at,last_failure_at,technical_attempt_count,next_retry_at,terminal_at,source_run_id,business_date_sast,created_at",
                 "account_id": f"eq.{aid}",
-                "status": "in.(temporary_unavailable,exhausted,username_not_found_confirmed,search_surface_unhealthy)",
+                "status": "in.(temporary_unavailable,exhausted,username_not_found_confirmed,search_surface_unhealthy,already_not_following_confirmed)",
                 "created_at": f"lte.{snapshot_at}",
                 "order": "normalized_username.asc",
                 "limit": str(page_size),
@@ -3983,6 +3983,38 @@ def record_unfollow_candidate_availability_v2(
     )
     if not isinstance(result, dict) or not bool(result.get("ok")):
         raise RuntimeError("record_unfollow_candidate_availability_v2_failed")
+    return dict(result)
+
+
+def record_unfollow_already_not_following_v1(
+    account_id: str,
+    normalized_username: str,
+    *,
+    source_run_id: str | None,
+    relationship_state: str,
+) -> dict[str, Any]:
+    """Persist a positively proven terminal non-Following relationship state."""
+
+    aid = str(account_id or "").strip()
+    username = _canonical_interaction_username(normalized_username)
+    relationship = str(relationship_state or "").strip()
+    if not aid or not username or not source_run_id:
+        raise ValueError("account_id, normalized_username and source_run_id are required")
+    if relationship not in {"follow", "follow_back", "requested"}:
+        raise ValueError("unsupported_unfollow_relationship_state")
+    result = _call_rpc(
+        "record_unfollow_already_not_following_v1",
+        {
+            "p_account_id": aid,
+            "p_normalized_username": username,
+            "p_source_run_id": str(source_run_id).strip(),
+            "p_relationship_state": relationship,
+        },
+        timeout_seconds=5.0,
+        max_retries=1,
+    )
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        raise RuntimeError("record_unfollow_already_not_following_v1_failed")
     return dict(result)
 
 

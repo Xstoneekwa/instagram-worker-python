@@ -26,25 +26,16 @@ class Follow60P0SourceContractTest(unittest.TestCase):
         self.assertIn('export WORKER_GIT_SHA="$RUNTIME_GIT_SHA"', source)
         self.assertIn('WORKER_GIT_SHA_SOURCE="runtime_release_head"', source)
 
-    def test_unfollow_navigation_remains_outside_follow60_diff(self) -> None:
-        # The original P0 excluded every navigation edit. The approved
-        # PostGrid/Like successor deliberately changes instagram_navigation,
-        # and the post-promotion audit explicitly adds observability inside the
-        # orchestrator.  Unfollow search/navigation strategy remains outside
-        # scope and must stay untouched.
-        forbidden = {
-            "unfollow_hybrid_strategy.py",
-        }
-        import subprocess
-
-        changed = set(
-            subprocess.check_output(
-                ["git", "diff", "--name-only", "5132e8c"],
-                cwd=ROOT,
-                text=True,
-            ).splitlines()
+    def test_unfollow_search_hardening_preserves_follow60_activation_contract(self) -> None:
+        # The Unfollow Search terminal-proof GO now explicitly authorizes the
+        # shared search classifier.  Keep this lock semantic: a generic exact
+        # text row cannot authorize a profile tap without account semantics.
+        search = (ROOT / "unfollow_hybrid_strategy.py").read_text(
+            encoding="utf-8"
         )
-        self.assertFalse(changed & forbidden, changed & forbidden)
+        self.assertIn('bool(match.get("account_signal"))', search)
+        self.assertIn('not bool(match.get("suggestion_signal"))', search)
+        self.assertIn("Only canonical/account-semantic rows", search)
 
         unfollow = (ROOT / "unfollow_session_orchestrator.py").read_text(
             encoding="utf-8"

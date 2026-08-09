@@ -338,7 +338,11 @@ def plan_unfollow_targets(
 
         availability = availability_by_username.get(username_key) or {}
         availability_status = str(availability.get("status") or "").strip()
-        if availability_status in {"exhausted", "username_not_found_confirmed"}:
+        if availability_status in {
+            "exhausted",
+            "username_not_found_confirmed",
+            "already_not_following_confirmed",
+        }:
             skipped["candidate_unavailable_exhausted"] = int(
                 skipped.get("candidate_unavailable_exhausted", 0)
             ) + 1

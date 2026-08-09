@@ -157,6 +157,28 @@ class UnfollowCandidateAvailabilityTests(unittest.TestCase):
         self.assertEqual(out["status"], "search_surface_unhealthy")
         self.assertEqual(rpc.call_args.args[1]["p_technical_cooldown_minutes"], 30)
 
+    def test_v2_positive_already_not_following_is_terminal(self) -> None:
+        with patch.object(
+            supabase_client,
+            "_call_rpc",
+            return_value={
+                "ok": True,
+                "status": "already_not_following_confirmed",
+                "terminal_at": "2026-08-09T12:00:00Z",
+            },
+        ) as rpc:
+            out = supabase_client.record_unfollow_already_not_following_v1(
+                "account-1",
+                "already.done",
+                source_run_id="run-1",
+                relationship_state="follow",
+            )
+        self.assertEqual(out["status"], "already_not_following_confirmed")
+        self.assertEqual(
+            rpc.call_args.args[1]["p_relationship_state"],
+            "follow",
+        )
+
     def test_v2_rejects_unknown_candidate_classification(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported"):
             supabase_client.record_unfollow_candidate_availability_v2(

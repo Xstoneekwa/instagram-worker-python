@@ -229,6 +229,34 @@ class FollowingCtaContractTests(unittest.TestCase):
         self.assertEqual(out["terminal_reason"], "following_cta_terminally_absent")
         self.assertEqual(out["probes_count"], 5)
 
+    def test_positive_follow_cta_terminalizes_already_not_following(self):
+        device = _XmlDevice(_profile_xml(text="Follow"))
+        with patch.object(probe.time, "sleep"):
+            out = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="target",
+                profile_exact_confirmed=True,
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["terminal_reason"], "already_not_following_confirmed")
+        self.assertEqual(out["positive_not_following_state"], "follow")
+        self.assertEqual(device.clicks, [])
+
+    def test_follow_text_outside_profile_cta_band_is_not_terminal_proof(self):
+        xml = (
+            '<hierarchy><node clickable="true" text="Follow" '
+            'bounds="[20,1800][420,1890]" /></hierarchy>'
+        )
+        device = _XmlDevice(xml)
+        with patch.object(probe.time, "sleep"):
+            out = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="target",
+                profile_exact_confirmed=True,
+            )
+        self.assertEqual(out["terminal_reason"], "following_cta_terminally_absent")
+        self.assertEqual(out.get("positive_not_following_state"), "")
+
     def test_following_stat_is_not_a_cta_and_never_false_succeeds(self):
         xml = (
             '<hierarchy><node text="" content-desc="5,425 following" '

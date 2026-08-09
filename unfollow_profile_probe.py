@@ -31,6 +31,15 @@ _FOLLOWING_BUTTON_LABELS = (
     "Siguiendo",
     "Gefolgt",
 )
+_NOT_FOLLOWING_BUTTON_LABELS = {
+    "follow": "follow",
+    "suivre": "follow",
+    "follow back": "follow_back",
+    "suivre en retour": "follow_back",
+    "requested": "requested",
+    "demande envoyée": "requested",
+    "demande envoyee": "requested",
+}
 _FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX = 140
 _FOLLOWING_BUTTON_RETRY_STABLE_SHIFT_PX = 50
 _FOLLOWING_BUTTON_BOUNDS_SHIFT_RETRY_SETTLE_S = 1.0
@@ -213,6 +222,45 @@ def _unfollow_button_bounds_reject_reason(
     return ""
 
 
+def _positive_not_following_relationship_state(
+    root: ET.Element | None,
+    *,
+    screen_w: int,
+    screen_h: int,
+) -> str:
+    """Return a positive non-Following CTA state from the current profile.
+
+    Absence of the Following CTA is never enough.  This proof requires an
+    exact localized relationship label on a clickable profile CTA whose fresh
+    bounds pass the same profile-band contract as the Following detector.
+    """
+    if root is None:
+        return ""
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    for element in root.iter():
+        label = str(
+            element.get("text") or element.get("content-desc") or ""
+        ).strip().casefold()
+        state = _NOT_FOLLOWING_BUTTON_LABELS.get(label)
+        if not state:
+            continue
+        tap_element = element
+        if str(element.get("clickable") or "").casefold() != "true":
+            ancestor = _nearest_clickable_ancestor(element, parent_map)
+            if ancestor is None:
+                continue
+            tap_element = ancestor
+        bounds = _parse_bounds_attr(tap_element.get("bounds"))
+        if _unfollow_button_bounds_reject_reason(
+            bounds,
+            screen_w=screen_w,
+            screen_h=screen_h,
+        ):
+            continue
+        return state
+    return ""
+
+
 def _detect_following_cta_from_accessibility(
     d: u2.Device,
     *,
@@ -306,6 +354,11 @@ def detect_profile_following_button_for_unfollow(
     candidates_seen = 0
     candidates_rejected = 0
     best: dict[str, Any] | None = None
+    non_following_relationship_state = _positive_not_following_relationship_state(
+        root,
+        screen_w=screen_w,
+        screen_h=screen_h,
+    )
 
     if root is None:
         out = {
@@ -317,6 +370,7 @@ def detect_profile_following_button_for_unfollow(
             "reject_reasons_count": {},
             "probe_at": probe_at,
             "hierarchy_xml_len": len(str(hierarchy or "")),
+            "positive_not_following_state": non_following_relationship_state,
         }
         log(
             "info",
@@ -448,6 +502,7 @@ def detect_profile_following_button_for_unfollow(
             "reject_reasons_count": reject_reasons_count,
             "probe_at": probe_at,
             "hierarchy_xml_len": len(str(hierarchy or "")),
+            "positive_not_following_state": non_following_relationship_state,
         }
         log(
             "info",
@@ -1252,8 +1307,21 @@ def _poll_following_cta_after_initial_miss(
             return out
 
     surface_stable = _profile_surface_xml_is_stable(hierarchy_lengths)
+    positive_states = [
+        str(item.get("positive_not_following_state") or "")
+        for item in detections[-2:]
+    ]
+    positive_not_following_state = (
+        positive_states[-1]
+        if len(positive_states) == 2
+        and positive_states[0]
+        and positive_states[0] == positive_states[1]
+        else ""
+    )
     terminal_reason = (
-        "following_cta_terminally_absent"
+        "already_not_following_confirmed"
+        if surface_stable and positive_not_following_state
+        else "following_cta_terminally_absent"
         if surface_stable
         else "following_cta_surface_not_stable"
     )
@@ -1268,6 +1336,7 @@ def _poll_following_cta_after_initial_miss(
         "profile_surface_stable_at": _utc_now_iso() if surface_stable else "",
         "recovery_used": True,
         "hierarchy_xml_lengths": hierarchy_lengths,
+        "positive_not_following_state": positive_not_following_state,
     }
     log("info", "unfollow_following_cta_render_recovery_exhausted", **out)
     return out
@@ -1327,6 +1396,9 @@ def open_unfollow_actions_sheet_from_profile_probe(
             "profile_surface_stable_at": str(btn_det.get("profile_surface_stable_at") or ""),
             "recovery_used": bool(btn_det.get("recovery_used")),
             "terminal_reason": str(btn_det.get("terminal_reason") or btn_det.get("failure_reason") or ""),
+            "positive_not_following_state": str(
+                btn_det.get("positive_not_following_state") or ""
+            ),
         }
         log("info", "unfollow_actions_sheet_open_failed", **out)
         return out

@@ -2969,6 +2969,75 @@ def _run_real_unfollow_multi_loop(
                 "return_to_following_list_ok": return_ok,
                 "unfollow_actions_failed": failed,
             }
+            if sheet_failure_reason == "already_not_following_confirmed":
+                try:
+                    availability_state = (
+                        supabase_client.record_unfollow_already_not_following_v1(
+                            aid,
+                            target_key,
+                            source_run_id=run_id,
+                            relationship_state=str(
+                                sheet.get("positive_not_following_state") or ""
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    candidate_availability_persistence_failures += 1
+                    if target_key not in candidate_availability_persistence_failure_usernames:
+                        candidate_availability_persistence_failure_usernames.append(target_key)
+                    log(
+                        "error",
+                        "unfollow_already_not_following_terminal_persist_failed",
+                        account_id=aid,
+                        run_id=run_id,
+                        username=target_username,
+                        error=str(exc)[:500],
+                    )
+                    stop_reason = "unfollow_candidate_availability_persistence_failed"
+                    return emit_final("failed_unfollow_multi_action", stop_reason)
+                failed = max(0, failed - 1)
+                last_fields["unfollow_actions_failed"] = failed
+                if coverage_tracker is not None:
+                    coverage_tracker.mark_candidate_unavailable(target_key)
+                    refresh_coverage_summary_totals()
+                completed_usernames.add(target_key)
+                visible_eligibility_row_cache[target_key] = None
+                log(
+                    "info",
+                    "unfollow_already_not_following_terminalized",
+                    account_id=aid,
+                    run_id=run_id,
+                    username=target_username,
+                    relationship_state=str(
+                        sheet.get("positive_not_following_state") or ""
+                    ),
+                    persisted=bool(availability_state.get("ok")),
+                    availability_status=str(availability_state.get("status") or ""),
+                    terminal_at=availability_state.get("terminal_at"),
+                    backlog_actionable=False,
+                    unfollow_marked_success=False,
+                )
+                if not return_ok:
+                    return_ok, recovery_stop_reason = recover_following_viewport(
+                        trigger_reason="already_not_following_confirmed"
+                    )
+                    last_fields["return_to_following_list_ok"] = return_ok
+                    if not return_ok:
+                        stop_reason = str(
+                            recovery_stop_reason
+                            or "unfollow_already_not_following_return_failed"
+                        )
+                        return emit_final("failed_unfollow_multi_action", stop_reason)
+                if not bool(ret.get("search_session_reused")):
+                    rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                        d,
+                        account_username=uname,
+                    )
+                    last_fields = {
+                        **last_fields,
+                        **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                    }
+                continue
             if recoverable and coverage_tracker is not None:
                 coverage_tracker.mark_candidate_retryable(target_key)
                 refresh_coverage_summary_totals()

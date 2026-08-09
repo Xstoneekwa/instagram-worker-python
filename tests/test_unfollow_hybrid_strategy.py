@@ -238,7 +238,7 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             )
         )
 
-    def test_faydes_generic_textview_exact_row_is_detected(self) -> None:
+    def test_generic_textview_exact_row_does_not_prove_an_account(self) -> None:
         xml = (
             '<hierarchy><node class="android.widget.EditText" '
             'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
@@ -249,8 +249,7 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             'bounds="[130,150][400,200]" /></node></hierarchy>'
         )
         out = classify_search_surface_xml(xml, "faydesdjinns")
-        self.assertEqual(out["state"], SEARCH_EXACT_RESULT_VISIBLE)
-        self.assertEqual(out["bounds"], {"left": 40, "top": 130, "right": 520, "bottom": 230})
+        self.assertEqual(out["state"], SEARCH_RESULTS_LOADING)
 
     def test_comoraison_french_no_results_is_confirmed(self) -> None:
         out = classify_search_surface_xml(
@@ -309,12 +308,13 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         out = classify_search_surface_xml(_search_xml(query="target"), "target")
         self.assertEqual(out["state"], SEARCH_RESULTS_LOADING)
 
-    def test_exact_result_without_avatar_uses_clickable_ancestor(self) -> None:
+    def test_account_semantic_result_without_avatar_uses_clickable_ancestor(self) -> None:
         xml = (
             '<hierarchy><node class="android.widget.EditText" '
             'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
             'text="faydesdjinns" bounds="[60,40][500,100]" />'
-            '<node clickable="true" bounds="[20,120][540,220]">'
+            '<node clickable="true" resource-id="user_search_result" '
+            'bounds="[20,120][540,220]">'
             '<node clickable="false" bounds="[100,145][410,200]">'
             '<node text="faydesdjinns" bounds="[120,150][390,195]" />'
             '</node></node></hierarchy>'

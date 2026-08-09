@@ -426,13 +426,20 @@ def classify_search_surface_xml(
         # physically distinct canonical rows remain ambiguous and fail closed.
         unique_matches = canonical_matches
     else:
-        non_suggestion_matches = [
-            match for match in unique_matches if not bool(match.get("suggestion_signal"))
+        account_matches = [
+            match
+            for match in unique_matches
+            if bool(match.get("account_signal"))
+            and not bool(match.get("suggestion_signal"))
         ]
-        if non_suggestion_matches:
-            unique_matches = non_suggestion_matches
+        if account_matches:
+            unique_matches = account_matches
         elif unique_matches:
-            # Suggestion-only proof cannot authorize a profile tap.
+            # Exact query text in a generic clickable row is not positive
+            # account identity.  It may be the query suggestion itself or a
+            # stale generic row.  Only canonical/account-semantic rows can
+            # authorize a profile tap; the bounded poll may still observe a
+            # later canonical row or an explicit no-results surface.
             unique_matches = []
     if len(unique_matches) == 1:
         bounds = dict(unique_matches[0].get("bounds") or {})
