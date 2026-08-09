@@ -1470,14 +1470,21 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertIsNone(self.build(ACCOUNT_A, rpc, [], self.flags()))
         self.assertEqual(rpc.calls, [])
 
-    def test_65_enforce_true_is_limited_to_existing_allowlisted_account(self):
+    def test_65_enforce_true_applies_to_existing_and_future_uuid_accounts(self):
         rpc = FakeRpc(row=checkpoint_row())
         controller = self.build(ACCOUNT_A, rpc, [], self.flags(ACCOUNT_A, enforce=True))
         self.assertIsNotNone(controller)
         self.assertEqual(controller.flags.mode, "enforce")
         other_rpc = FakeRpc(row=checkpoint_row(account_id=ACCOUNT_B))
-        self.assertIsNone(self.build(ACCOUNT_B, other_rpc, [], self.flags(ACCOUNT_A, enforce=True)))
-        self.assertEqual(other_rpc.calls, [])
+        other_controller = self.build(ACCOUNT_B, other_rpc, [], self.flags(ACCOUNT_A, enforce=True))
+        self.assertIsNotNone(other_controller)
+        self.assertEqual(other_controller.flags.mode, "enforce")
+
+    def test_65b_enforce_future_account_requires_canonical_uuid_identity(self):
+        flags = self.flags(ACCOUNT_A, enforce=True)
+        self.assertTrue(flags.rollout_allowed_for(ACCOUNT_C))
+        self.assertFalse(flags.rollout_allowed_for("future-account-by-username"))
+        self.assertFalse(flags.rollout_allowed_for(""))
 
     def test_66_no_account_id_is_hardcoded_in_product(self):
         source = Path(resume.__file__).read_text(encoding="utf-8")

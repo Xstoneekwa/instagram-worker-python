@@ -301,10 +301,17 @@ class ResumeFlags:
         )
 
     def rollout_allowed_for(self, account_id: str) -> bool:
-        """Apply shadow or enforce only to the existing UUID rollout set."""
+        """Apply enforce globally; keep pre-enforcement shadow account-scoped."""
+        clean_account_id = _clean_id(account_id).lower()
+        try:
+            canonical_account_id = str(uuid.UUID(clean_account_id))
+        except (ValueError, AttributeError, TypeError):
+            return False
+        if self.enforce_enabled:
+            return True
         return bool(
-            self.enabled
-            and _clean_id(account_id).lower() in self.shadow_account_ids
+            self.shadow_enabled
+            and canonical_account_id in self.shadow_account_ids
         )
 
 
