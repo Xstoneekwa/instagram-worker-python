@@ -17821,21 +17821,25 @@ def _run_followers_list_engine_session(
                     continue
 
             if (
-                _vcid_for_pick
-                and _resolved_prefollow
+                _resolved_prefollow
                 and _is_plausible_public_ig_username(str(_resolved_prefollow))
                 and str(account_id or "").strip()
             ):
-                _db_row_b1 = _followers_visual_load_interacted_db_row(
-                    account_id=str(account_id),
+                # Exact XML usernames are just as authoritative as visual
+                # candidates for the pre-open social-memory gate.  Evaluate
+                # the complete shared contract here: the former visual-only,
+                # active-connection-only check let terminally unfollowed
+                # candidates be opened and rejected only after profile load.
+                _b1_elig = _social_memory_load_and_evaluate(
                     target_username=str(_resolved_prefollow),
                     source_profile=source_profile_username,
+                    account_id=str(account_id),
+                    run_id=str(run_id or ""),
                     supabase_mode=supabase_mode,
                 )
-                _b1_ok, _b1_reason, _b1_detail = (
-                    social_memory.db_row_persistent_active_follow_connection(_db_row_b1)
-                )
-                if _b1_ok:
+                _b1_reason = str(_b1_elig.reason or "")
+                _b1_detail = dict(_b1_elig.detail or {})
+                if not _b1_elig.allowed:
                     _target_rejection_record(
                         target_scan_tracker,
                         reason=f"persistent_preopen_already_connected:{_b1_reason}",
@@ -17847,7 +17851,7 @@ def _run_followers_list_engine_session(
                         "followers_candidate_preopen_skipped_persistent_already_connected",
                         source_profile_username=source_profile_username,
                         follower_username=str(_resolved_prefollow),
-                        visual_candidate_id=_vcid_for_pick,
+                        visual_candidate_id=_vcid_for_pick or None,
                         skip_reason=_b1_reason,
                         memory_status=str((_b1_detail or {}).get("memory_status") or ""),
                         following_status=str((_b1_detail or {}).get("following_status") or ""),

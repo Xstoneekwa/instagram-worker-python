@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import social_memory
+import runner
 
 
 def _config() -> SimpleNamespace:
@@ -68,6 +69,14 @@ class SocialMemoryActiveFollowGuardTest(unittest.TestCase):
         )
         self.assertFalse(result.allowed)
         self.assertEqual(result.reason, "lifecycle_unfollowed_completed")
+
+    def test_followers_preopen_gate_uses_complete_contract_for_exact_xml_rows(self) -> None:
+        import inspect
+
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        gate = source[source.index("_resolved_prefollow"):]
+        self.assertIn("_social_memory_load_and_evaluate(", gate)
+        self.assertNotIn("_vcid_for_pick\n                and _resolved_prefollow", gate)
 
 
 if __name__ == "__main__":
