@@ -5632,7 +5632,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             _d: object, *, source_profile_username: str
         ) -> dict[str, object]:
             detect_calls["count"] += 1
-            if detect_calls["count"] < 4:
+            if detect_calls["count"] < 2:
                 return candidate_det
             # Simulate the expensive UIAutomator dump itself taking several seconds.
             # Reuse age is measured after the detection result exists, not before it.
@@ -5686,7 +5686,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(how, "compact_safe_back_then_list")
         self.assertIsNone(fail)
-        self.assertEqual(detect.call_count, 4)
+        # One fresh candidate/list observation before Back and one exact CT
+        # observation after Back. The two identical pre-Back redetects are gone.
+        self.assertEqual(detect.call_count, 2)
         device.press.assert_called_once_with("back")
         reused = [
             kw
@@ -5737,7 +5739,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             _d: object, *, source_profile_username: str
         ) -> dict[str, object]:
             detect_calls["count"] += 1
-            if detect_calls["count"] < 4:
+            if detect_calls["count"] < 2:
                 return candidate_det
             return ct_det
 
@@ -5954,13 +5956,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         mock.patch.object(
                             nav,
                             "detect_followers_list_screen",
-                            side_effect=[
-                                candidate_det,
-                                candidate_det,
-                                candidate_det,
-                                post_back_det or {},
-                                ct_det,
-                            ],
+                            side_effect=[candidate_det, post_back_det or {}, ct_det],
                         )
                     )
                     stack.enter_context(
@@ -6004,7 +6000,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(how, "compact_safe_back_then_list")
                 self.assertIsNone(fail)
-                self.assertEqual(detect.call_count, 5)
+                self.assertEqual(detect.call_count, 3)
                 rejected = [
                     kw
                     for event, kw in logs

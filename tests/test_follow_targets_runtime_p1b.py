@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import account_session_orchestrator as session
 import instagram_navigation as nav
+import navigation_engine
 import runner
 from tests.follow60_generic_fixtures import TEST_CANARY_ACCOUNT_ID
 
@@ -1084,6 +1085,98 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertEqual(following_row["row_cta_xml_class"], "following")
         self.assertEqual(follow_row["row_cta_xml_class"], "follow")
+
+    def test_post_scroll_hierarchy_snapshot_reuses_rows_even_when_old_open_snapshot_is_stale(
+        self,
+    ) -> None:
+        snapshot = nav.followers_detection_snapshot_from_fresh_hierarchy(
+            followers_list_xml(source="reveaustral", candidate_count=3),
+            source_profile_username="reveaustral",
+            scroll_index=2,
+        )
+        meta = {
+            "source_profile_username": "reveaustral",
+            "post_scroll_detection_snapshot": snapshot,
+        }
+
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            meta,
+            source_profile_username="reveaustral",
+            snapshot_age_ms=99_000.0,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(det)
+        self.assertTrue(det["post_scroll_snapshot_verified"])
+        self.assertEqual(det["post_scroll_scroll_index"], 2)
+        self.assertEqual(
+            det["candidate_selection_snapshot_kind"],
+            "post_scroll_detection_snapshot",
+        )
+        self.assertGreater(len(det["candidate_rows_snapshot"]), 0)
+
+    def test_post_scroll_hierarchy_snapshot_expires_fail_closed(self) -> None:
+        snapshot = nav.followers_detection_snapshot_from_fresh_hierarchy(
+            followers_list_xml(source="reveaustral", candidate_count=3),
+            source_profile_username="reveaustral",
+            scroll_index=2,
+        )
+        snapshot["captured_at_perf_counter"] = time.perf_counter() - 4.0
+
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            {
+                "source_profile_username": "reveaustral",
+                "post_scroll_detection_snapshot": snapshot,
+            },
+            source_profile_username="reveaustral",
+            snapshot_age_ms=99_000.0,
+        )
+
+        self.assertIsNone(det)
+        self.assertEqual(reason, "snapshot_stale")
+
+    def test_navigation_observer_reuses_one_fresh_foreground_proof_without_ui_action(
+        self,
+    ) -> None:
+        now = time.monotonic()
+        det = strong_followers_snapshot_meta()["last_poll_snapshot"]
+        with patch.object(navigation_engine, "_foreground_package") as foreground:
+            out = navigation_engine.observe_instagram_state(
+                Mock(),
+                expected_package="com.instagram.android",
+                last_known_state="FOLLOWERS_LIST",
+                context={
+                    "det": det,
+                    "foreground_package": "com.instagram.android",
+                    "foreground_package_observed_at_monotonic": now,
+                },
+            )
+
+        foreground.assert_not_called()
+        self.assertEqual(out["state"], "FOLLOWERS_LIST")
+        self.assertTrue(out["signals"]["foreground_package_reused"])
+
+    def test_navigation_observer_refreshes_expired_foreground_proof(self) -> None:
+        det = strong_followers_snapshot_meta()["last_poll_snapshot"]
+        with patch.object(
+            navigation_engine,
+            "_foreground_package",
+            return_value="com.instagram.android",
+        ) as foreground:
+            out = navigation_engine.observe_instagram_state(
+                Mock(),
+                expected_package="com.instagram.android",
+                last_known_state="FOLLOWERS_LIST",
+                context={
+                    "det": det,
+                    "foreground_package": "com.instagram.android",
+                    "foreground_package_observed_at_monotonic": time.monotonic() - 1.0,
+                },
+            )
+
+        foreground.assert_called_once()
+        self.assertEqual(out["state"], "FOLLOWERS_LIST")
+        self.assertFalse(out["signals"]["foreground_package_reused"])
 
     def test_exhaustion_classifier_accepts_sparse_and_bounded_exhaustion(self) -> None:
         self.assertTrue(session.is_follow_target_exhaustion_outcome(exit_code=66))

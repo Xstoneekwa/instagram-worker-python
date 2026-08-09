@@ -51,6 +51,8 @@ def _run_phase(
     follow_private_accounts: bool = False,
     stage_persist_callback=None,
     mute_v2: dict | None = None,
+    precompleted_like_result: dict | None = None,
+    post_mute_return_proof: tuple[bool, dict, float, str] | None = None,
 ) -> tuple[dict, dict]:
     logs: list[tuple[str, str, dict]] = []
     ctx = FollowContext.from_follow_verified(
@@ -91,7 +93,18 @@ def _run_phase(
     ) as mock_mute, patch.object(
         nav,
         "_post_mute_state_checkpoint",
-        return_value={"navigation_state": "CANDIDATE_PROFILE"},
+        return_value={
+            "navigation_state": "CANDIDATE_PROFILE",
+            "candidate_context": {"username": follower_username},
+        },
+    ), patch.object(
+        nav,
+        "_validate_post_mute_sheet_closed_proof",
+        return_value=(
+            post_mute_return_proof
+            if post_mute_return_proof is not None
+            else (False, {}, 0.0, "missing_proof")
+        ),
     ), patch.object(
         nav,
         "run_post_follow_post_likes_phase",
@@ -100,6 +113,10 @@ def _run_phase(
         nav,
         "post_follow_controlled_return_to_followers_list",
         return_value=(True, "unit", None),
+    ) as mock_return, patch.object(
+        __import__("follow_60s_canary"),
+        "enabled",
+        return_value=True,
     ), patch.object(
         nav,
         "log",
@@ -117,6 +134,7 @@ def _run_phase(
             det={},
             follow_context=ctx,
             stage_persist_callback=stage_persist_callback,
+            precompleted_like_result=precompleted_like_result,
         )
     probes = {
         "logs": logs,
@@ -125,11 +143,54 @@ def _run_phase(
         "mute_calls": mock_mute.call_count,
         "mute_kwargs": mock_mute.call_args.kwargs if mock_mute.call_args else {},
         "like_calls": mock_likes.call_count,
+        "return_kwargs": mock_return.call_args.kwargs if mock_return.call_args else {},
     }
     return out, probes
 
 
 class PostFollowVerifiedContextFastPathTest(unittest.TestCase):
+    def test_ordering_v2_reuses_fresh_post_mute_boundary_for_one_back_return(self) -> None:
+        precompleted = nav._post_follow_post_likes_out_template()
+        precompleted.update(
+            {"ok": True, "phase_outcome": "success", "liked_count": 1, "skipped": False}
+        )
+        out, probes = _run_phase(
+            device=_Device(action_bar_title="candidate"),
+            precompleted_like_result=precompleted,
+            post_mute_return_proof=(
+                True,
+                {
+                    "sheet_closed": True,
+                    "candidate_username": "candidate",
+                    "immutable_verdict": True,
+                },
+                17.0,
+                "",
+            ),
+        )
+
+        self.assertTrue(out["return_ok"])
+        self.assertEqual(probes["like_calls"], 0)
+        self.assertTrue(probes["return_kwargs"]["immediate_candidate_back_proof"])
+        events = [event for _level, event, _kw in probes["logs"]]
+        self.assertIn("follow_60s_return_post_mute_candidate_proof_reused", events)
+
+    def test_ordering_v2_missing_post_mute_boundary_keeps_safe_return_fallback(self) -> None:
+        precompleted = nav._post_follow_post_likes_out_template()
+        precompleted.update(
+            {"ok": True, "phase_outcome": "success", "liked_count": 1, "skipped": False}
+        )
+        out, probes = _run_phase(
+            device=_Device(action_bar_title="candidate"),
+            precompleted_like_result=precompleted,
+            post_mute_return_proof=(False, {}, 2500.0, "stale_proof"),
+        )
+
+        self.assertTrue(out["return_ok"])
+        self.assertFalse(probes["return_kwargs"]["immediate_candidate_back_proof"])
+        events = [event for _level, event, _kw in probes["logs"]]
+        self.assertIn("follow_60s_return_candidate_handoff_rejected", events)
+
     def test_strong_following_context_skips_heavy_probes_and_starts_mute(self) -> None:
         out, probes = _run_phase(device=_Device(action_bar_title="candidate"))
 
