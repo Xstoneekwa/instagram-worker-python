@@ -8974,7 +8974,39 @@ def _followers_try_refresh_injection_screenshot_after_scroll(
         try:
             from instagram_navigation import followers_refresh_detect_hierarchy_cache
 
-            followers_refresh_detect_hierarchy_cache(d, screen_index=int(scroll_used))
+            _post_scroll_hierarchy = followers_refresh_detect_hierarchy_cache(
+                d,
+                screen_index=int(scroll_used),
+            )
+            try:
+                from instagram_navigation import (
+                    followers_detection_snapshot_from_fresh_hierarchy,
+                )
+
+                _post_scroll_snapshot = followers_detection_snapshot_from_fresh_hierarchy(
+                    _post_scroll_hierarchy,
+                    source_profile_username=source_profile_username,
+                    scroll_index=int(scroll_used),
+                )
+            except Exception:
+                _post_scroll_snapshot = {}
+            if _post_scroll_snapshot:
+                open_list_meta["post_scroll_detection_snapshot"] = dict(
+                    _post_scroll_snapshot
+                )
+                log(
+                    "info",
+                    "followers_post_scroll_detection_snapshot_stashed",
+                    source_profile_username=source_profile_username,
+                    scroll_used=int(scroll_used),
+                    candidate_username_count=int(
+                        _post_scroll_snapshot.get("candidate_username_count") or 0
+                    ),
+                    hierarchy_fingerprint=str(
+                        _post_scroll_snapshot.get("hierarchy_fingerprint") or ""
+                    ),
+                    live_redetect_required=False,
+                )
             log(
                 "info",
                 "followers_hierarchy_cache_refreshed_after_scroll",
@@ -9238,15 +9270,42 @@ def _candidate_selection_snapshot_reuse_candidate(
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(open_list_meta, dict):
         return None, "open_list_meta_missing"
-    if float(snapshot_age_ms) < 0.0 or float(snapshot_age_ms) > float(max_age_ms):
+    post_scroll_snapshot = open_list_meta.get("post_scroll_detection_snapshot")
+    post_scroll_fresh = False
+    if isinstance(post_scroll_snapshot, dict) and post_scroll_snapshot:
+        try:
+            post_scroll_age_ms = max(
+                0.0,
+                (
+                    time.perf_counter()
+                    - float(post_scroll_snapshot.get("captured_at_perf_counter") or 0.0)
+                )
+                * 1000.0,
+            )
+            post_scroll_fresh = bool(
+                float(post_scroll_snapshot.get("captured_at_perf_counter") or 0.0) > 0.0
+                and post_scroll_age_ms <= 3500.0
+            )
+        except Exception:
+            post_scroll_fresh = False
+    if (
+        not post_scroll_fresh
+        and (float(snapshot_age_ms) < 0.0 or float(snapshot_age_ms) > float(max_age_ms))
+    ):
         return None, "snapshot_stale"
     meta_src = str(open_list_meta.get("source_profile_username") or "").strip()
     want_src = str(source_profile_username or "").strip()
     if meta_src and want_src and meta_src != want_src:
         return None, "source_profile_mismatch"
-    for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
+    for key in (
+        "post_scroll_detection_snapshot",
+        "last_poll_snapshot",
+        "after_tap_screen_snapshot",
+    ):
         snap = open_list_meta.get(key)
         if not isinstance(snap, dict) or not snap:
+            continue
+        if key == "post_scroll_detection_snapshot" and not post_scroll_fresh:
             continue
         odm = str(snap.get("open_detection_method") or open_list_meta.get("open_detection_method") or "")
         if odm != "own_unified_follow_list":
@@ -9273,6 +9332,7 @@ def _candidate_selection_snapshot_reuse_candidate(
             return None, "missing_header_signals"
         out = dict(snap)
         out["open_detection_method"] = odm
+        out["candidate_selection_snapshot_kind"] = key
         return out, ""
     return None, "snapshot_absent"
 
@@ -13999,6 +14059,22 @@ def _run_followers_list_engine_session(
             _initial_snapshot_reuse = bool(
                 processed == 0 and followers_engine_loop_iteration == 1
             )
+            _post_scroll_snapshot_reuse = bool(
+                isinstance(_reuse_det, dict)
+                and _reuse_det.get("post_scroll_snapshot_verified") is True
+                and int(_reuse_det.get("post_scroll_scroll_index") or -1)
+                == int(scroll_used)
+                and 0.0
+                <= max(
+                    0.0,
+                    (
+                        time.perf_counter()
+                        - float(_reuse_det.get("captured_at_perf_counter") or 0.0)
+                    )
+                    * 1000.0,
+                )
+                <= 3500.0
+            )
             _canary_post_return_reuse = False
             _canary_post_return_reuse_reason = "canary_disabled"
             try:
@@ -14034,7 +14110,9 @@ def _run_followers_list_engine_session(
                     f"canary_check_failed:{type(_canary_snapshot_exc).__name__}"
                 )
             if _reuse_det is not None and (
-                _initial_snapshot_reuse or _canary_post_return_reuse
+                _initial_snapshot_reuse
+                or _canary_post_return_reuse
+                or _post_scroll_snapshot_reuse
             ):
                 det = _reuse_det
                 det_xml_last_for_bypass = det
@@ -14065,9 +14143,13 @@ def _run_followers_list_engine_session(
                     "info",
                     "candidate_selection_snapshot_reuse_accepted",
                     reason=(
-                        "same_ct_viewport_generation_no_navigation"
-                        if _canary_post_return_reuse and not _initial_snapshot_reuse
-                        else "strong_open_success_snapshot"
+                        "verified_post_scroll_hierarchy_snapshot"
+                        if _post_scroll_snapshot_reuse
+                        else (
+                            "same_ct_viewport_generation_no_navigation"
+                            if _canary_post_return_reuse and not _initial_snapshot_reuse
+                            else "strong_open_success_snapshot"
+                        )
                     ),
                     open_detection_method=open_detection_method,
                     candidate_username_count=int(det.get("candidate_username_count") or 0),
@@ -14254,8 +14336,10 @@ def _run_followers_list_engine_session(
                 )
             )
 
+            _loop_pkg_observed_at = time.monotonic()
             try:
                 _loop_pkg_meta = _followers_current_pkg_activity(d)
+                _loop_pkg_observed_at = time.monotonic()
                 _loop_pkg = str(_loop_pkg_meta.get("current_package") or "")
             except Exception:
                 _loop_pkg = ""
@@ -14287,7 +14371,7 @@ def _run_followers_list_engine_session(
                     target_username=source_profile_username,
                 )
                 return 96
-            if not verify_app_foreground(d, pkg):
+            if not _loop_pkg and not verify_app_foreground(d, pkg):
                 log(
                     "warning",
                     "runner_wrong_surface_after_safe_stop",
@@ -14325,6 +14409,8 @@ def _run_followers_list_engine_session(
                     context={
                         "phase": "followers_loop_iter_guard",
                         "det": det if isinstance(det, dict) else {},
+                        "foreground_package": _loop_pkg,
+                        "foreground_package_observed_at_monotonic": _loop_pkg_observed_at,
                     },
                 )
                 navigation_loop_state["last_state"] = str(nav_obs_fg.get("state") or "")

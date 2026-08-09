@@ -14987,6 +14987,73 @@ def followers_refresh_detect_hierarchy_cache(
     return hier_text.strip()
 
 
+def followers_detection_snapshot_from_fresh_hierarchy(
+    hierarchy_xml: str,
+    *,
+    source_profile_username: str,
+    scroll_index: int,
+) -> dict[str, Any]:
+    """Build the post-scroll picker proof from the hierarchy already acquired.
+
+    The scroll contract has just proved viewport movement and this hierarchy is
+    captured after that proof. Parsing it locally avoids a second live
+    accessibility traversal on the next loop. No UI state is inferred from a
+    screenshot and no coordinate is invented.
+    """
+    hier = str(hierarchy_xml or "").strip()
+    if not hier:
+        return {}
+    own_meta = _detect_own_unified_followers_list_from_hierarchy_xml(
+        hier,
+        source_profile_username=source_profile_username,
+    )
+    if not bool(own_meta.get("detected")):
+        return {}
+    rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+        hier,
+        source_profile_username=source_profile_username,
+        runtime_seen=set(),
+    )
+    if not rows:
+        return {}
+    action_bar_title = str(own_meta.get("action_bar_title") or "").strip()
+    selected_tab = str(own_meta.get("selected_followers_tab_text") or "").strip()
+    source_norm = _normalize_handle(source_profile_username or "")
+    action_bar_norm = _normalize_handle(action_bar_title or "")
+    title_match = bool(source_norm and action_bar_norm == source_norm)
+    signals = list(own_meta.get("signals") or [])
+    return {
+        "is_followers_list": True,
+        "title_match": title_match,
+        "strict_list_open": bool(
+            title_match
+            and (own_meta.get("recycler_present") or own_meta.get("listview_present"))
+        ),
+        "relaxed_list_open": True,
+        "own_unified_followers_list_detected": True,
+        "open_detection_method": "own_unified_follow_list",
+        "action_bar_title": action_bar_title,
+        "recycler_present": bool(own_meta.get("recycler_present")),
+        "listview_present": bool(own_meta.get("listview_present")),
+        "scrollable_present": bool(
+            own_meta.get("recycler_present") or own_meta.get("listview_present")
+        ),
+        "candidate_username_count": len(rows),
+        "follow_list_username_count": len(rows),
+        "candidate_rows_snapshot": rows,
+        "visible_usernames_sample": [
+            str(row.get("username") or "") for row in rows[:12]
+        ],
+        "visible_header_texts": [selected_tab] if selected_tab else [],
+        "signals": signals,
+        "current_screen_guess": "followers_list_post_scroll_hierarchy",
+        "post_scroll_snapshot_verified": True,
+        "post_scroll_scroll_index": int(scroll_index),
+        "captured_at_perf_counter": time.perf_counter(),
+        "hierarchy_fingerprint": hashlib.sha256(hier.encode("utf-8")).hexdigest()[:20],
+    }
+
+
 def _followers_resolve_detect_hierarchy_xml(
     d: u2.Device,
     hierarchy_xml: str | None = None,
@@ -45813,13 +45880,11 @@ def post_follow_controlled_return_to_followers_list(
             )
         )
 
-    def _list_confirmed(*, allow_stale_candidate_action_bar: bool = False) -> tuple[bool, dict[str, Any]]:
-        try:
-            det_l = detect_followers_list_screen(
-                d, source_profile_username=src
-            )
-        except Exception:
-            det_l = {}
+    def _list_confirmed_from_det(
+        det_l: dict[str, Any],
+        *,
+        allow_stale_candidate_action_bar: bool = False,
+    ) -> tuple[bool, dict[str, Any]]:
         is_list = bool(det_l.get("is_followers_list"))
         try:
             ct_ok = verify_followers_list_surface_is_ct_account(
@@ -45881,12 +45946,40 @@ def post_follow_controlled_return_to_followers_list(
             ct_ok = True
         return bool(is_list and ct_ok), det_l
 
+    def _list_confirmed(*, allow_stale_candidate_action_bar: bool = False) -> tuple[bool, dict[str, Any]]:
+        try:
+            det_l = detect_followers_list_screen(
+                d, source_profile_username=src
+            )
+        except Exception:
+            det_l = {}
+        return _list_confirmed_from_det(
+            det_l,
+            allow_stale_candidate_action_bar=allow_stale_candidate_action_bar,
+        )
+
     def _list_confirmed_nominal_or_stale_fallback() -> tuple[bool, dict[str, Any]]:
         ok_strict, det_strict = _list_confirmed(allow_stale_candidate_action_bar=False)
         if ok_strict:
             return ok_strict, det_strict
         if _post_follow_return_ct_allow_stale_action_bar(golden_strict_failed=True):
             return _list_confirmed(allow_stale_candidate_action_bar=True)
+        return False, det_strict
+
+    def _list_confirmed_nominal_or_stale_from_det(
+        det_l: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        ok_strict, det_strict = _list_confirmed_from_det(
+            det_l,
+            allow_stale_candidate_action_bar=False,
+        )
+        if ok_strict:
+            return ok_strict, det_strict
+        if _post_follow_return_ct_allow_stale_action_bar(golden_strict_failed=True):
+            return _list_confirmed_from_det(
+                det_l,
+                allow_stale_candidate_action_bar=True,
+            )
         return False, det_strict
 
     def _poll_exact_ct_after_planned_back(
@@ -46168,10 +46261,25 @@ def post_follow_controlled_return_to_followers_list(
             round_budget_s=round(budget_s, 2),
             compact_after_follow_verified_mute=True,
         )
-        try:
-            last_det = detect_followers_list_screen(d, source_profile_username=src)
-        except Exception:
-            last_det = {}
+        # ``det0`` is the fresh observation acquired immediately before compact
+        # mode. No navigation happened since, so re-running the full Followers
+        # detector here would only repeat the same expensive accessibility scan.
+        last_det = dict(det0) if isinstance(det0, dict) and det0 else {}
+        if not last_det:
+            try:
+                last_det = detect_followers_list_screen(d, source_profile_username=src)
+            except Exception:
+                last_det = {}
+        else:
+            log(
+                "info",
+                "post_follow_return_ct_initial_det_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                action_bar_title=str(last_det.get("action_bar_title") or "")[:120],
+                is_followers_list=bool(last_det.get("is_followers_list")),
+                full_detect_skipped=True,
+            )
         nav_ctx: dict[str, Any] = {
             "phase": "post_follow_return_compact",
             "visual_candidate_id": vcid,
@@ -46201,7 +46309,10 @@ def post_follow_controlled_return_to_followers_list(
             xml_guess=str(nav.get("xml_guess") or ""),
         )
 
-        ok_list_now, det_now = _list_confirmed_nominal_or_stale_fallback()
+        # The observer consumed ``last_det`` and performs no UI action. Apply
+        # the exact CT decision to that same fresh evidence instead of a third
+        # identical full Followers scan.
+        ok_list_now, det_now = _list_confirmed_nominal_or_stale_from_det(last_det)
         if ok_list_now:
             log(
                 "info",
@@ -46596,29 +46707,43 @@ def post_follow_controlled_return_to_followers_list(
         except Exception:
             last_det = {}
         post_back_det_observed_at = time.perf_counter()
-        nav_ctx2 = dict(nav_ctx)
-        nav_ctx2["det"] = last_det
-        try:
-            nav2 = observe_instagram_state(
-                d,
-                expected_package=pkg,
-                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
-                context=nav_ctx2,
+        nav2: dict[str, Any] = {}
+        _post_back_pkg = str(last_det.get("current_package") or "").strip()
+        _post_back_exact_foreground = bool(_post_back_pkg and _post_back_pkg == pkg)
+        if not _post_back_exact_foreground:
+            nav_ctx2 = dict(nav_ctx)
+            nav_ctx2["det"] = last_det
+            try:
+                nav2 = observe_instagram_state(
+                    d,
+                    expected_package=pkg,
+                    last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                    context=nav_ctx2,
+                )
+            except Exception as e2:
+                nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
+            log(
+                "info",
+                "post_follow_return_ct_state_observed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                observe_sequence="after_safe_back",
+                navigation_state=str(nav2.get("state") or ""),
+                navigation_confidence=float(nav2.get("confidence") or 0.0),
+                navigation_reason=str(nav2.get("reason") or ""),
+                xml_guess=str(nav2.get("xml_guess") or ""),
             )
-        except Exception as e2:
-            nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
-        log(
-            "info",
-            "post_follow_return_ct_state_observed",
-            visual_candidate_id=vcid,
-            source_profile_username=src,
-            attempt=round_idx,
-            observe_sequence="after_safe_back",
-            navigation_state=str(nav2.get("state") or ""),
-            navigation_confidence=float(nav2.get("confidence") or 0.0),
-            navigation_reason=str(nav2.get("reason") or ""),
-            xml_guess=str(nav2.get("xml_guess") or ""),
-        )
+        else:
+            log(
+                "info",
+                "post_follow_return_ct_post_back_foreground_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                current_package=_post_back_pkg,
+                duplicate_app_current_skipped=True,
+            )
 
         reuse_ok, det_reuse, reuse_reason, det_age_ms = _try_reuse_post_back_det(
             last_det,
@@ -59070,6 +59195,9 @@ def run_visual_candidate_post_follow_phase(
         )
     else:
         immediate_candidate_back_proof = False
+        _ret_proof_age = 0.0
+        _ret_proof_reject = ""
+        _ret_proof_source = ""
         try:
             from follow_60s_canary import (
                 consume as _consume_follow_60s_proof,
@@ -59078,18 +59206,62 @@ def run_visual_candidate_post_follow_phase(
             )
 
             if _follow_60s_canary_enabled("return_candidate_handoff"):
-                _ret_proof, _ret_proof_age, _ret_proof_reject = (
-                    _consume_follow_60s_proof(
-                        "return_candidate_profile",
-                        subject_username=src,
-                        target_username=cand,
-                        package=pkg,
-                        surface="candidate_profile_after_like",
-                        consume_once=True,
+                # In Ordering V2 post-first, the candidate proof created after
+                # Like is intentionally invalidated by the later Follow tap.
+                # Final Mute close publishes a newer exact candidate identity +
+                # sheet-closed verdict. Reuse that fresh boundary rather than
+                # consuming the knowingly stale pre-Follow handoff and then
+                # running a full candidate/list analysis before Back.
+                if bool(precompleted_like_result) and mute_ok:
+                    _post_mute_context = (
+                        dict(post_mute_checkpoint.get("candidate_context") or {})
+                        if isinstance(post_mute_checkpoint, dict)
+                        else dict(candidate_profile_context or {})
                     )
-                )
-                immediate_candidate_back_proof = _ret_proof is not None
-                if _ret_proof is None:
+                    (
+                        _post_mute_return_ok,
+                        _post_mute_return_proof,
+                        _ret_proof_age,
+                        _ret_proof_reject,
+                    ) = _validate_post_mute_sheet_closed_proof(
+                        source_profile_username=src,
+                        candidate_username=cand,
+                        visual_candidate_id=vcid,
+                        candidate_context=_post_mute_context,
+                    )
+                    immediate_candidate_back_proof = bool(
+                        _post_mute_return_ok
+                        and _post_mute_return_proof.get("sheet_closed")
+                    )
+                    if immediate_candidate_back_proof:
+                        _ret_proof_source = "post_mute_exact_sheet_closed"
+                        log(
+                            "info",
+                            "follow_60s_return_post_mute_candidate_proof_reused",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            proof_age_ms=round(float(_ret_proof_age or 0.0), 2),
+                            proof_source=_ret_proof_source,
+                            fallback_used=False,
+                        )
+
+                if not immediate_candidate_back_proof and not bool(precompleted_like_result):
+                    _ret_proof, _ret_proof_age, _ret_proof_reject = (
+                        _consume_follow_60s_proof(
+                            "return_candidate_profile",
+                            subject_username=src,
+                            target_username=cand,
+                            package=pkg,
+                            surface="candidate_profile_after_like",
+                            consume_once=True,
+                        )
+                    )
+                    immediate_candidate_back_proof = _ret_proof is not None
+                    if immediate_candidate_back_proof:
+                        _ret_proof_source = "post_like_candidate_profile"
+
+                if not immediate_candidate_back_proof:
                     _record_follow_60s_outcome(
                         "return_candidate_handoff",
                         "fallback",
@@ -59113,6 +59285,7 @@ def run_visual_candidate_post_follow_phase(
                         "used",
                         age_ms=_ret_proof_age,
                         estimated_gain_ms=7500.0,
+                        reason=_ret_proof_source,
                     )
         except Exception as _ret_consume_exc:
             immediate_candidate_back_proof = False

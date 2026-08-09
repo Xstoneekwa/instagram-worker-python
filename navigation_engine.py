@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import time
 from typing import Any
 
 import uiautomator2 as u2
@@ -89,11 +90,32 @@ def observe_instagram_state(
     ctx = dict(context) if isinstance(context, dict) else {}
     _disable_followers_vf = bool(ctx.get("disable_followers_visual_fallback"))
     exp = str(expected_package or "").strip()
-    fg = _foreground_package(d)
+    fg = ""
+    fg_reused = False
+    fg_hint = str(ctx.get("foreground_package") or "").strip()
+    try:
+        fg_hint_at = float(ctx.get("foreground_package_observed_at_monotonic") or 0.0)
+    except Exception:
+        fg_hint_at = 0.0
+    fg_hint_age_ms = (
+        max(0.0, (time.monotonic() - fg_hint_at) * 1000.0)
+        if fg_hint_at > 0.0
+        else -1.0
+    )
+    if fg_hint and 0.0 <= fg_hint_age_ms <= 750.0:
+        # The caller acquired this proof immediately before observation and no
+        # UI action occurred in between. Reusing it avoids a duplicate
+        # ``app_current`` round-trip without weakening the foreground guard.
+        fg = fg_hint
+        fg_reused = True
+    else:
+        fg = _foreground_package(d)
 
     signals: dict[str, Any] = {
         "foreground_package": fg,
         "expected_package": exp,
+        "foreground_package_reused": fg_reused,
+        "foreground_package_proof_age_ms": round(fg_hint_age_ms, 2),
     }
 
     out: dict[str, Any] = {
