@@ -126,3 +126,15 @@ these preserve the validated Warmup commits and add the Targets UI parity
 checkpoint.
 Activation requires documentation, additive migration verification, backend
 deployment, immutable Worker release and official BotApp package validation.
+## FOLLOW60_V2_MAINLINE_V1_2026-08-09
+
+Approved source `55a039ae14a2111c6c48261094e08f3fe00def01`, parent
+`e2aaa6f36469bae94459b16bc6e09505b21970a8`, promotes V2 from explicit
+behavioral canary to the normal global engine. Normal accounts never need a V2
+control, allowlist, canary lease or ten-cycle barrier. The Phase AA matrix and
+complete Worker suite are certified before release creation. Final immutable
+release path, checkpoint commit, tag, active symlink and process PIDs are
+rollout evidence and must not be inferred from this source registry entry.
+
+Verified V1 rollback source: `45de130d29a8658ff24f222595f1d2b9184716d9`.
+Golden remains a rare bounded fail-closed fallback inside V2.

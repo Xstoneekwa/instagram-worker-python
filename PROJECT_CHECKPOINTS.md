@@ -1,5 +1,22 @@
 # Project checkpoints
 
+## FOLLOW60_V2_MAINLINE_V1 — official production reference
+
+Status: source and Phase AA regression matrix certified; runtime activation is
+recorded only after the controlled gate/switch/restart/soak.
+
+- Worker behavior commit: `55a039ae14a2111c6c48261094e08f3fe00def01`
+- Parent: `e2aaa6f36469bae94459b16bc6e09505b21970a8`
+- Manifest: `FOLLOW60_V2_MAINLINE_MANIFEST_V1.json`
+- Lock: `FOLLOW60_MAINLINE_LOCK_V2_1`
+- Mainline: global default, no control, allowlist, lease or ten-cycle barrier.
+- Golden: preserved only as bounded fail-closed fallback.
+- V1 rollback: `45de130d29a8658ff24f222595f1d2b9184716d9`.
+- Field baseline: `docs/follow60-v2-performance-baseline-v1.md`.
+- Phase AA: `docs/follow60-v2-mainline-phase-aa.md`.
+
+The older V1 checkpoint below remains immutable history.
+
 ## FOLLOW60_MAINLINE_V1 — official production reference
 
 Status: source and DB contract certified; runtime activation recorded in the
@@ -17,4 +34,3 @@ manifest and release registry after the controlled switch.
 - Change lock: `FOLLOW60_MAINLINE_LOCK_V1`.
 
 No physical Instagram action belongs to this checkpoint creation.
-

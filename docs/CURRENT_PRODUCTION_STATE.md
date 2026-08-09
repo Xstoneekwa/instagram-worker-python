@@ -1,5 +1,15 @@
 # Current Production State
 
+## Prepared official engine — FOLLOW60_V2_MAINLINE_V1
+
+Source `55a039ae14a2111c6c48261094e08f3fe00def01` is certified as the global
+default Follow carrier. It derives V2 ordering from the immutable
+business-session binding and removes normal-path dependence on canary control,
+allowlist, lease and evaluation barrier. Phase AA and full Worker evidence are
+in `docs/checkpoints/2026-08-09-follow60-v2-mainline-v1.md`. Until the controlled
+switch is completed, the active production SHA remains a separately verified
+runtime fact; this paragraph does not claim activation.
+
 ## Official engine — FOLLOW60_MAINLINE_V1
 
 Follow60 Mainline V1 supersedes the historical canary-only admission model as

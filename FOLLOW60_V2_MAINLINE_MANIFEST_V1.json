@@ -1,0 +1,68 @@
+{
+  "schema": "FOLLOW60_V2_MAINLINE_MANIFEST_V1",
+  "status": "FOLLOW60_V2_MAINLINE_SOURCE_CERTIFIED",
+  "checkpoint": "FOLLOW60_V2_MAINLINE_V1",
+  "worker_parent_sha": "e2aaa6f36469bae94459b16bc6e09505b21970a8",
+  "approved_source_sha": "55a039ae14a2111c6c48261094e08f3fe00def01",
+  "official_engine": "FOLLOW60_V2_MAINLINE_V1",
+  "legacy_rollback_sha": "45de130d29a8658ff24f222595f1d2b9184716d9",
+  "default_global": true,
+  "normal_path_requires_canary_control": false,
+  "normal_path_requires_allowlist": false,
+  "normal_path_has_ten_cycle_barrier": false,
+  "golden_fail_closed_fallback_preserved": true,
+  "approved_diff": {
+    "scope": [
+      "follow60_mainline_v2.py",
+      "follow60_ordering_v2_behavioral_canary_v1.py",
+      "runner.py",
+      "tests/test_follow60_v2_mainline_v1.py"
+    ],
+    "sha256": "fd48ae122a7cf7fe630088c4d19637621453a5c6bb684d225048d893cc05a203"
+  },
+  "critical_files": {
+    "account_run_request_consumer.py": "43d14f7e1a279cf78aa0e3ab026e5595020dda20927716bf3844854625bfdae0",
+    "account_session_orchestrator.py": "b46ece746b0190f3ac477c532fa5eab720f10175e9de24c720e734f1efbe9853",
+    "follow60_business_session_binding_v1.py": "485fc52b22bc1c70506ecafbc89342fa608454f6b56f30abb4eaaa280b386cd7",
+    "follow60_mainline_v2.py": "572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652",
+    "follow60_ordering_v2_behavioral_canary_v1.py": "f6daf30e2b7d32829b11afbbab40296ff558508874572e005d094ca70c9904f7",
+    "follow60_ordering_v2_ledger_v1.py": "5b89dc7d0bafdc4ea121739b6c6ff4f9816d0024bd09da9713b980a47e4c15d8",
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "follow_action_engine.py": "5405d19e665911be4068a1d2c22d235881e550f77f4a45a0f1d106154794b540",
+    "instagram_list_continuation.py": "f264c335dcb1722202e197e024a4a55dd57ad9aae580b7ce6cdde9f57ada8e3f",
+    "instagram_navigation.py": "0e5d8220189785bad9654559fe890a1e480236813c28fd1340fe8373ae5dbdba",
+    "post_follow_stage_outbox.py": "c6f51ff560d99fe52d3fb70c86bf121a4de94d1f343f762901f8b6f955b3444d",
+    "runner.py": "2df17a5290ff061e0c6a3894462bfcd4b1e220a93ffc38529f553015791cff7e",
+    "supabase_client.py": "3e9b95a4f062f9ac42bc33101cfe7686c856ca77d8b3b917a89dc994e8c52b21",
+    "target_followers_progressive_resume_v2.py": "7ae4301fa5bc72e46b61ca777ea7c3d97160c7a64f7adc5647c75ef11e8933e8"
+  },
+  "canonical_field_baseline": {
+    "run_id": "cb7dcc07-b3bb-46cf-ac54-ae37cdfde8d7",
+    "request_id": "90f9f8f3-b017-436c-87cd-df2cd2bbba3e",
+    "business_session_id": "ea45a2e2-693f-4bed-af16-21fdab262f70",
+    "follows": 10,
+    "likes": 10,
+    "candidate_to_candidate_median_seconds": 50.586,
+    "pure_v2_candidate_to_candidate_median_seconds": 50.280,
+    "profile_to_ct_median_seconds": 41.991,
+    "profile_to_post_tap_median_seconds": 4.588,
+    "return_ct_start_to_ack_median_seconds": 5.431,
+    "golden_fallback_count": 2
+  },
+  "approval": {
+    "approval_id": "6e68ec57-f5ce-48ed-89f3-96c41c61afe6-follow60-v2-mainline-v1",
+    "approved_by": "Liam",
+    "approved_at": "2026-08-09T00:00:00Z",
+    "expires_at": "2026-08-10T00:00:00Z",
+    "base_sha": "e2aaa6f36469bae94459b16bc6e09505b21970a8",
+    "target_sha": "55a039ae14a2111c6c48261094e08f3fe00def01",
+    "scope": [
+      "follow60_mainline_v2.py",
+      "follow60_ordering_v2_behavioral_canary_v1.py",
+      "runner.py",
+      "tests/test_follow60_v2_mainline_v1.py"
+    ],
+    "diff_sha256": "fd48ae122a7cf7fe630088c4d19637621453a5c6bb684d225048d893cc05a203",
+    "one_shot_status": "consumed"
+  }
+}

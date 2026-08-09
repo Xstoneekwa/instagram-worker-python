@@ -1,0 +1,17 @@
+{
+  "schema": "FOLLOW60_MAINLINE_LOCK_V2_1",
+  "manifest_sha256": "b345be152ec1d837d56e2e9330d5e4760f349e5a5ffec82b237a727953ad57fb",
+  "consumed_approval_ids": [
+    "6e68ec57-f5ce-48ed-89f3-96c41c61afe6-follow60-v2-mainline-v1"
+  ],
+  "entries": [
+    {
+      "approval_id": "6e68ec57-f5ce-48ed-89f3-96c41c61afe6-follow60-v2-mainline-v1",
+      "status": "consumed_once",
+      "activation_scope": "source_checkpoint_and_authorized_production_promotion",
+      "base_sha": "e2aaa6f36469bae94459b16bc6e09505b21970a8",
+      "target_sha": "55a039ae14a2111c6c48261094e08f3fe00def01",
+      "diff_sha256": "fd48ae122a7cf7fe630088c4d19637621453a5c6bb684d225048d893cc05a203"
+    }
+  ]
+}

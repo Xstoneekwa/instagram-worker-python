@@ -73,3 +73,14 @@
   retry is created without explicit approval.
 - Every future change to the three open performance paths requires comparison
   against `JULY_16_PRODUCTION_BASELINE`.
+# Follow60 V2 mainline (2026-08-09)
+
+- `FOLLOW60_V2_MAINLINE_V1` is the default engine for normal existing and
+  future accounts.
+- Canary controls, account allowlists, canary leases and the ten-cycle barrier
+  are not part of the normal carrier.
+- V1 remains a verified legacy rollback; Golden remains a rare fail-closed
+  fallback inside V2.
+- Any behavioral change requires a new explicit one-shot GO, new source SHA,
+  new manifest hash and new approval consumption. `FOLLOW60_MAINLINE_LOCK_V2_1`
+  rejects reuse, lineage drift, scope expansion and manifest mutation.
