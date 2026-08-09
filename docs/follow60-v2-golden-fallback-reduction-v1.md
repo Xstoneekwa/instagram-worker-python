@@ -40,3 +40,64 @@ generation, unsafe surface or persistent ambiguity falls back to Golden.
 
 V5 remains mandatory after any direct post open.  Return CT, next-candidate,
 Mute, Follow, Stop, CT Resume and Follow-to-Unfollow code paths are unchanged.
+
+## Final field retry on `6701b2d`
+
+- Run: `cb7dcc07-b3bb-46cf-ac54-ae37cdfde8d7`
+- Worker: `6701b2dfc661ae98d97de9b2da2ff03dfc93ecce`
+- Canonical totals: 10 Follows and 10 verified Likes.
+- Ordering V2: 9 selected, 7 complete, 2 partial; 2 V1/Golden fallbacks.
+- Candidate-to-candidate field median: 50.586 s across ten identical
+  `opened_at_monotonic_ns` boundaries.
+- Pure V2 candidate-to-candidate median: 50.280 s.
+- Complete V2 profile-to-Return-CT median/P90/P95:
+  41.991 / 43.241 / 43.241 s.
+- Return CT exact median/P90/P95: 5.431 / 5.558 / 5.590 s.
+- Next candidate median/P90/P95: 7.768 / 8.470 / 8.538 s.
+
+Both residual Golden candidates (`beegreen68`, `fannybhafs`) received exactly
+one transient revalidation.  Each revalidation performed one fresh hierarchy
+dump and one strict in-memory classification, with no explicit wait,
+screenshot, Vision call, second scroll or poll loop.  Durations were 1.759 s
+and 2.071 s.  Both refreshed surfaces still failed to prove the absolute
+top-left origin after the single reveal, so both correctly remained
+`POST_GRID_AMBIGUOUS_FINAL` and entered Golden.  Golden opened the post on the
+first tap and V5 stayed mandatory.  This is accepted as residual safety cost;
+no additional Golden retry is authorized.
+
+## Future Follow60 V2 production checkpoint criteria
+
+This section prepares the next task only.  It does not promote V2, change
+account routing, alter onboarding, create a production tag or activate a
+release.
+
+- Functional completion: complete V2 cycles reach exact Return CT and durable
+  persistence without unsafe partial receipts.
+- Post-first: strict direct-grid evidence is required; ambiguous evidence
+  remains fail-closed to Golden.
+- V5: mandatory after every direct or Golden post open, including
+  Story/Highlight rejection.
+- Like: exact target, stage-scoped context and verified terminal outcome.
+- Reentry: one exact candidate-profile reentry before Follow.
+- Follow: exact CTA, fresh context, verified Following ACK and idempotent
+  persistence.
+- Mute: Posts and Stories are independently verified; partial Mute never
+  becomes a complete cycle.
+- Return CT: exact CT Followers proof and terminal ACK are mandatory.
+- Next candidate: fresh mapped row, eligibility proof and exact profile ACK.
+- See More: one-shot committed-surface progression; zero blind repeat taps.
+- CT Resume: checkpoint identity, lease, overlap and commit evidence remain
+  certified.
+- Barrier: account-scoped baseline, cap and one-shot control are exact.
+- Stop: canonical safe quiescence, terminal reconciliation and no false
+  success.
+- Follow to Unfollow: phase ownership and lineage remain isolated and
+  non-regressed.
+- Incident recovery: non-security resolution authorizes only the next natural
+  recovery; security incidents remain fail-closed.
+- Golden residual policy: one bounded micro-revalidation maximum, then Golden;
+  no iterative Golden optimization.
+- Performance references: 85.226 s Golden historical, 67.192 s prior V2,
+  50.586 s current field candidate-to-candidate median.
+- Rollback: V1 remains the documented behavioral rollback until a separate V2
+  production promotion is explicitly authorized and certified.
