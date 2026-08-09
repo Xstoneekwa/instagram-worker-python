@@ -275,6 +275,207 @@ class PostRevealSafeFirstRowV1Tests(unittest.TestCase):
         self.assertEqual(len(out["post_reveal_xml_fingerprint"]), 64)
         self.assertTrue(out["post_reveal_coordinate_frame"])
 
+    def test_transient_grid_gets_one_xml_revalidation_without_second_reveal(self) -> None:
+        before = self._classified(
+            outcome="POST_GRID_REVEAL_REQUIRED",
+            absolute_top_left_origin_proven=True,
+        )
+        self.device.dump_hierarchy.side_effect = ["<first/>", "<second/>"]
+        first = self._classified(outcome="POST_ROW_POSITIVE_BUT_CLIPPED")
+        second = self._classified(outcome="POST_ROW_POSITIVE_SAFE")
+        rejected = {
+            **first,
+            "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+            "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
+            "rejection_reason": "absolute_top_left_not_visible_after_reveal",
+            "post_reveal_safe_rejection_reason": (
+                "absolute_top_left_not_visible_after_reveal"
+            ),
+            "post_reveal_package": PKG,
+            "post_reveal_activity": ACT,
+            "post_reveal_ui_generation": 7,
+        }
+        safe = {
+            **second,
+            "outcome": "POST_ROW_POSITIVE_SAFE",
+            "post_bounds": {
+                "left": 0, "top": 800, "right": 360, "bottom": 1160,
+                "center_x": 180, "center_y": 980,
+            },
+        }
+        with ExitStack() as stack:
+            reveal = stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_likes_profile_scroll_swipe",
+                return_value={"swipe_ok": True, "scroll_distance_px": 390},
+            ))
+            stack.enter_context(mock.patch.object(canary, "invalidate"))
+            sleep = stack.enter_context(mock.patch.object(nav.time, "sleep"))
+            classify = stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_grid_evidence_from_xml",
+                side_effect=[first, second],
+            ))
+            contract = stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=[rejected, safe],
+            ))
+            vision = stack.enter_context(mock.patch.object(
+                nav, "_post_follow_likes_probe_top_left_vision_cell_meta"
+            ))
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                self.device,
+                before,
+                ww=1080,
+                wh=2340,
+                candidate_username="candidate",
+            )
+        reveal.assert_called_once()
+        sleep.assert_called_once_with(0.18)
+        self.assertEqual(self.device.dump_hierarchy.call_count, 2)
+        self.assertEqual(classify.call_count, 2)
+        self.assertEqual(contract.call_count, 2)
+        vision.assert_not_called()
+        self.device.screenshot.assert_not_called()
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
+        self.assertEqual(out["reveal_count_total_for_like_phase"], 1)
+        self.assertEqual(out["reacquire_dump_count"], 2)
+        self.assertEqual(out["transient_grid_revalidation_count"], 1)
+        self.assertEqual(out["transient_grid_revalidation_explicit_wait_ms"], 0.0)
+        self.assertEqual(
+            contract.call_args_list[1].kwargs["verified_package_activity"],
+            {"current_package": PKG, "current_activity": ACT},
+        )
+        self.assertEqual(contract.call_args_list[1].kwargs["expected_ui_generation"], 7)
+
+    def test_persistent_transient_ambiguity_still_falls_back_to_golden(self) -> None:
+        before = self._classified(
+            outcome="POST_ROW_POSITIVE_BUT_CLIPPED",
+            absolute_top_left_origin_proven=True,
+        )
+        self.device.dump_hierarchy.side_effect = ["<first/>", "<second/>"]
+        clipped = self._classified(outcome="POST_ROW_POSITIVE_BUT_CLIPPED")
+
+        def reject(_device, classified, **_kwargs):
+            return {
+                **classified,
+                "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
+                "rejection_reason": "absolute_top_left_not_visible_after_reveal",
+                "post_reveal_safe_rejection_reason": (
+                    "absolute_top_left_not_visible_after_reveal"
+                ),
+                "post_reveal_package": PKG,
+                "post_reveal_activity": ACT,
+                "post_reveal_ui_generation": 7,
+            }
+
+        with ExitStack() as stack:
+            reveal = stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_likes_profile_scroll_swipe",
+                return_value={"swipe_ok": True, "scroll_distance_px": 390},
+            ))
+            stack.enter_context(mock.patch.object(canary, "invalidate"))
+            stack.enter_context(mock.patch.object(nav.time, "sleep"))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_grid_evidence_from_xml",
+                side_effect=[clipped, clipped],
+            ))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                side_effect=reject,
+            ))
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                self.device,
+                before,
+                ww=1080,
+                wh=2340,
+                candidate_username="candidate",
+            )
+        reveal.assert_called_once()
+        self.assertEqual(self.device.dump_hierarchy.call_count, 2)
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertEqual(out["golden_reason"], "clipped_reacquisition_not_tap_safe")
+        reusable, reason = nav._post_follow_golden_can_reuse_positive_post_grid_existence(
+            out,
+            expected_follower_username="candidate",
+        )
+        self.assertTrue(reusable, reason)
+
+    def test_security_rejection_does_not_receive_transient_revalidation(self) -> None:
+        before = self._classified(
+            outcome="POST_ROW_POSITIVE_BUT_CLIPPED",
+            absolute_top_left_origin_proven=True,
+        )
+        self.device.dump_hierarchy.return_value = "<story/>"
+        rejected = {
+            **self._classified(),
+            "outcome": "POST_GRID_AMBIGUOUS_FINAL",
+            "rejection_reason": "story_highlight_marker_present",
+            "post_reveal_safe_rejection_reason": "story_highlight_marker_present",
+            "post_reveal_package": PKG,
+            "post_reveal_activity": ACT,
+            "post_reveal_ui_generation": 7,
+        }
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_likes_profile_scroll_swipe",
+                return_value={"swipe_ok": True, "scroll_distance_px": 390},
+            ))
+            stack.enter_context(mock.patch.object(canary, "invalidate"))
+            stack.enter_context(mock.patch.object(nav.time, "sleep"))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_grid_evidence_from_xml",
+                return_value=self._classified(),
+            ))
+            stack.enter_context(mock.patch.object(
+                nav,
+                "_post_follow_post_reveal_safe_first_row_contract",
+                return_value=rejected,
+            ))
+            out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                self.device,
+                before,
+                ww=1080,
+                wh=2340,
+                candidate_username="candidate",
+            )
+        self.device.dump_hierarchy.assert_called_once_with(compressed=False)
+        self.assertFalse(out.get("transient_grid_revalidation_attempted", False))
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+
+    def test_generation_change_during_revalidation_fails_closed(self) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                canary, "runtime_context", return_value={"ui_generation": 8}
+            ))
+            out = nav._post_follow_post_reveal_safe_first_row_contract(
+                self.device,
+                self._classified(),
+                hierarchy_xml=self._xml(),
+                candidate_username="candidate",
+                expected_package=PKG,
+                ww=1080,
+                wh=2340,
+                absolute_top_left_origin_proven=True,
+                verified_package_activity={
+                    "current_package": PKG,
+                    "current_activity": ACT,
+                },
+                expected_ui_generation=7,
+            )
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertEqual(
+            out["rejection_reason"],
+            "post_reveal_generation_changed_during_revalidation",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
