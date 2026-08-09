@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import uiautomator2 as u2
@@ -71,6 +71,13 @@ from unfollow_hybrid_strategy import (
     open_exact_profile_for_unfollow,
 )
 from unfollow_diagnostic_contract_v2 import UnfollowDiagnosticSession
+from unfollow_action_outcome import (
+    ACTION_ATTEMPTED_AMBIGUOUS_COOLDOWN_MINUTES,
+    UnfollowActionOutcomeClass,
+    ambiguous_failure_reason,
+    decide_verify_failure_after_recovery,
+    is_action_attempted_ambiguous_reason,
+)
 from unfollow_search_health_policy import SearchSurfaceCircuitBreaker
 from instagram_navigation import return_to_search_from_profile
 
@@ -950,6 +957,7 @@ def _evaluate_visible_unfollow_any_with_session_cache(
         "row_cta_follow": 0,
         "row_cta_follow_back": 0,
         "whitelist": 0,
+        "candidate_action_ambiguous_cooldown": 0,
     }
     candidates: list[dict[str, Any]] = []
     ineligible_rows: list[dict[str, Any]] = []
@@ -979,6 +987,19 @@ def _evaluate_visible_unfollow_any_with_session_cache(
             reject_reason = "whitelist"
         elif isinstance(db_row, dict) and db_row.get("unfollowed_at"):
             reject_reason = "already_unfollowed"
+        elif isinstance(db_row, dict) and is_action_attempted_ambiguous_reason(
+            str(db_row.get("unfollow_skip_reason") or "")
+        ):
+            attempted_at = supabase_client.parse_utc_iso_timestamp(
+                db_row.get("last_unfollow_attempt_at")
+            )
+            if (
+                attempted_at is not None
+                and attempted_at
+                + timedelta(minutes=ACTION_ATTEMPTED_AMBIGUOUS_COOLDOWN_MINUTES)
+                > datetime.now(timezone.utc)
+            ):
+                reject_reason = "candidate_action_ambiguous_cooldown"
 
         if reject_reason:
             skip_counts[reject_reason] = int(skip_counts.get(reject_reason, 0)) + 1
@@ -1492,6 +1513,10 @@ def _run_real_unfollow_multi_loop(
     recoverable_action_failures_count = 0
     session_continued_after_recoverable_failure = False
     max_recoverable_action_failures = _max_recoverable_action_failures()
+    recoverable_verify_failures_count = 0
+    recoverable_verify_failure_usernames: list[str] = []
+    recoverable_verify_failure_streak_class = ""
+    recoverable_verify_failure_streak_count = 0
     any_mode_selected_count = 0
     last_fields = dict(harvest_fields)
     any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
@@ -1530,6 +1555,10 @@ def _run_real_unfollow_multi_loop(
         "recoverable_action_failure_reasons": {},
         "max_recoverable_action_failures": max_recoverable_action_failures,
         "session_continued_after_recoverable_failure": False,
+        "recoverable_verify_failures_count": 0,
+        "recoverable_verify_failure_usernames": [],
+        "recoverable_verify_failure_streak_class": "",
+        "recoverable_verify_failure_streak_count": 0,
         "adaptive_ui_coverage_enabled": not any_mode_active,
         "coverage_historical_action_sample_count": HISTORICAL_ACTION_SAMPLE_COUNT,
         "coverage_historical_viewport_sample_count": HISTORICAL_VIEWPORT_SAMPLE_COUNT,
@@ -1628,6 +1657,102 @@ def _run_real_unfollow_multi_loop(
         )
         return recovery_ok and decision is None, str(decision.stop_reason if decision else "")
 
+    def recover_exact_following_after_ambiguous_action(
+        *,
+        trigger_reason: str,
+    ) -> dict[str, Any]:
+        """Perform one bounded recovery and prove the exact safe boundary."""
+
+        returned = return_to_following_list_after_unfollow_action(
+            d,
+            account_username=uname,
+        )
+        recovery_method = "bounded_back"
+
+        try:
+            current_app = dict(d.app_current() or {})
+            current_package = str(current_app.get("package") or "")
+            current_activity = str(current_app.get("activity") or "")
+            package_activity_ok = bool(
+                current_package == str(config.INSTAGRAM_PACKAGE or "")
+                and current_activity.endswith(".InstagramMainActivity")
+            )
+        except Exception as exc:
+            current_package = ""
+            current_activity = ""
+            package_activity_ok = False
+            returned = {
+                **dict(returned or {}),
+                "app_current_error": str(exc)[:300],
+            }
+
+        following_det = detect_own_following_list_screen(
+            d,
+            account_username=uname,
+        )
+        unsafe_markers = _merge_unfollow_surface_unsafe_markers(
+            _detect_unfollow_unsafe_markers(d),
+            following_det,
+        )
+        account_identity_ok = str(following_det.get("failure_reason") or "") != (
+            "following_list_account_title_mismatch"
+        )
+        exact_following_list_restored = bool(
+            returned.get("ok")
+            and following_det.get("is_following_list")
+            and account_identity_ok
+        )
+
+        coverage_stop_reason = ""
+        if coverage_tracker is not None:
+            decision = coverage_tracker.mark_recovery(
+                succeeded=bool(
+                    exact_following_list_restored
+                    and package_activity_ok
+                    and not unsafe_markers
+                ),
+                progress_proved=True,
+            )
+            refresh_coverage_summary_totals()
+            coverage_stop_reason = str(decision.stop_reason if decision else "")
+            if decision is not None:
+                exact_following_list_restored = False
+
+        out = {
+            "ok": bool(
+                exact_following_list_restored
+                and package_activity_ok
+                and not unsafe_markers
+                and not coverage_stop_reason
+            ),
+            "recovery_method": recovery_method,
+            "recovery_max_attempts": 1,
+            "return_to_following_list_ok": bool(returned.get("ok")),
+            "exact_following_list_restored": exact_following_list_restored,
+            "package_activity_ok": package_activity_ok,
+            "account_identity_ok": account_identity_ok,
+            "current_package": current_package,
+            "current_activity": current_activity,
+            "following_list_reason": str(following_det.get("detected_reason") or ""),
+            "following_list_failure_reason": str(following_det.get("failure_reason") or ""),
+            "unsafe_markers": unsafe_markers,
+            "coverage_stop_reason": coverage_stop_reason,
+            "failure_reason": str(
+                coverage_stop_reason
+                or returned.get("failure_reason")
+                or following_det.get("failure_reason")
+                or ("package_activity_mismatch" if not package_activity_ok else "")
+                or ("unsafe_marker_detected" if unsafe_markers else "")
+            ),
+        }
+        log(
+            "info" if out["ok"] else "error",
+            "unfollow_ambiguous_action_exact_following_recovery_completed",
+            trigger_reason=trigger_reason,
+            **out,
+        )
+        return out
+
     def exploration_fields(*, exploration_stop_reason: str = "") -> dict[str, Any]:
         skip_reason_counts_total = {
             reason: len(usernames)
@@ -1670,6 +1795,10 @@ def _run_real_unfollow_multi_loop(
         totals["recoverable_action_failure_reasons"] = dict(recoverable_action_failure_reasons)
         totals["max_recoverable_action_failures"] = max_recoverable_action_failures
         totals["session_continued_after_recoverable_failure"] = session_continued_after_recoverable_failure
+        totals["recoverable_verify_failures_count"] = recoverable_verify_failures_count
+        totals["recoverable_verify_failure_usernames"] = recoverable_verify_failure_usernames[:50]
+        totals["recoverable_verify_failure_streak_class"] = recoverable_verify_failure_streak_class
+        totals["recoverable_verify_failure_streak_count"] = recoverable_verify_failure_streak_count
 
     def is_recoverable_action_sheet_failure(sheet_out: dict[str, Any]) -> bool:
         reason = str(sheet_out.get("failure_reason") or "").strip()
@@ -3016,6 +3145,9 @@ def _run_real_unfollow_multi_loop(
                     terminal_at=availability_state.get("terminal_at"),
                     backlog_actionable=False,
                     unfollow_marked_success=False,
+                    candidate_outcome_class=(
+                        UnfollowActionOutcomeClass.ALREADY_NOT_FOLLOWING_CONFIRMED.value
+                    ),
                 )
                 if not return_ok:
                     return_ok, recovery_stop_reason = recover_following_viewport(
@@ -3063,6 +3195,9 @@ def _run_real_unfollow_multi_loop(
                     failure_reason=sheet_failure_reason,
                     recoverable_action_failures_count=recoverable_action_failures_count,
                     max_recoverable_action_failures=max_recoverable_action_failures,
+                    candidate_outcome_class=(
+                        UnfollowActionOutcomeClass.TRANSIENT_UI_FAILURE.value
+                    ),
                 )
                 if not bool(ret.get("search_session_reused")):
                     rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
@@ -3154,6 +3289,19 @@ def _run_real_unfollow_multi_loop(
 
         verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
         verify_ok = bool(verify_out.get("ok"))
+        verify_failure_reason = str(
+            verify_out.get("failure_reason")
+            or tap_out.get("failure_reason")
+            or "unfollow_verify_failed"
+        )
+        candidate_outcome_class = (
+            UnfollowActionOutcomeClass.VERIFIED_UNFOLLOW.value
+            if verify_ok
+            else UnfollowActionOutcomeClass.ACTION_ATTEMPTED_AMBIGUOUS.value
+        )
+        durable_failure_reason = (
+            "" if verify_ok else ambiguous_failure_reason(verify_failure_reason)
+        )
         if verify_ok:
             action_verified_usernames.add(target_key)
         if verify_ok and coverage_tracker is not None:
@@ -3170,7 +3318,7 @@ def _run_real_unfollow_multi_loop(
             settings=settings,
             verify_ok=verify_ok,
             interaction_row_id=str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None,
-            failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
+            failure_reason=durable_failure_reason,
         )
         persist_ok = bool(persist_out.get("ok"))
         persistence_delta = unfollow_persistence_count_delta(
@@ -3220,10 +3368,11 @@ def _run_real_unfollow_multi_loop(
             viewport_index=iteration_index,
             scroll_depth=scroll_passes_used,
             skip_reason=str(
-                verify_out.get("failure_reason")
+                durable_failure_reason
                 or persist_out.get("error")
                 or ""
             ),
+            candidate_outcome_class=candidate_outcome_class,
             action_attempted=target_key in action_attempted_usernames,
             action_verified=target_key in action_verified_usernames,
             persistence_ok=target_key in action_persisted_usernames,
@@ -3237,12 +3386,15 @@ def _run_real_unfollow_multi_loop(
             verified=target_key in action_verified_usernames,
             persisted=target_key in action_persisted_usernames,
             failure_reason=str(
-                verify_out.get("failure_reason")
+                durable_failure_reason
                 or persist_out.get("error")
                 or ""
             ),
         )
         if verify_ok and persist_ok:
+            recoverable_verify_failure_streak_class = ""
+            recoverable_verify_failure_streak_count = 0
+            refresh_recoverable_action_summary_totals()
             verified += 1
             completed_usernames.add(target_key)
             visible_eligibility_row_cache[target_key] = None
@@ -3297,18 +3449,49 @@ def _run_real_unfollow_multi_loop(
                 )
                 return emit_final("success_real_unfollow_multi_quota_reached")
 
-        ret = _return_after_unfollow_profile(
-            d,
-            account_username=uname,
-            direct_exact_search=target_opened_directly,
-        )
-        return_ok = bool(ret.get("ok"))
-        search_session_reused = bool(ret.get("search_session_reused"))
-        if search_session_reused:
-            direct_search_session_reused_count += 1
         if not verify_ok:
             failed += 1
-            stop_reason = "unfollow_verify_failed"
+            post_action_unsafe_markers = _detect_unfollow_unsafe_markers(d)
+            recovery_out: dict[str, Any]
+            if post_action_unsafe_markers:
+                recovery_out = {
+                    "ok": False,
+                    "return_to_following_list_ok": False,
+                    "exact_following_list_restored": False,
+                    "package_activity_ok": False,
+                    "account_identity_ok": True,
+                    "unsafe_markers": post_action_unsafe_markers,
+                    "failure_reason": "unsafe_marker_detected",
+                    "recovery_max_attempts": 0,
+                }
+            else:
+                recovery_out = recover_exact_following_after_ambiguous_action(
+                    trigger_reason=verify_failure_reason,
+                )
+
+            decision = decide_verify_failure_after_recovery(
+                verification_ok=False,
+                action_attempted=target_key in action_attempted_usernames,
+                failure_reason=verify_failure_reason,
+                exact_following_list_restored=bool(
+                    recovery_out.get("exact_following_list_restored")
+                ),
+                package_activity_ok=bool(recovery_out.get("package_activity_ok")),
+                account_identity_ok=bool(recovery_out.get("account_identity_ok")),
+                unsafe_markers_present=bool(recovery_out.get("unsafe_markers")),
+                persistence_ok=persist_ok,
+                previous_failure_class=recoverable_verify_failure_streak_class,
+                previous_consecutive_count=recoverable_verify_failure_streak_count,
+                max_consecutive_failures=max_recoverable_action_failures,
+            )
+            recoverable_verify_failure_streak_class = decision.recovery_class.value
+            recoverable_verify_failure_streak_count = decision.next_consecutive_count
+            if decision.recovery_class == UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE:
+                recoverable_verify_failures_count += 1
+                if target_username not in recoverable_verify_failure_usernames:
+                    recoverable_verify_failure_usernames.append(target_username)
+            refresh_recoverable_action_summary_totals()
+
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": True,
@@ -3320,12 +3503,109 @@ def _run_real_unfollow_multi_loop(
                 "unfollow_results_persisted_count": persisted,
                 "unfollow_action_verify_ok": False,
                 "unfollow_persistence_ok": persist_ok,
-                "return_to_following_list_ok": return_ok,
+                "return_to_following_list_ok": bool(
+                    recovery_out.get("return_to_following_list_ok")
+                ),
+                "exact_following_list_restored": bool(
+                    recovery_out.get("exact_following_list_restored")
+                ),
+                "unfollow_candidate_outcome_class": decision.candidate_outcome_class.value,
+                "unfollow_recovery_class": decision.recovery_class.value,
+                "unfollow_recovery_max_attempts": int(
+                    recovery_out.get("recovery_max_attempts") or 0
+                ),
+                "recoverable_verify_failure_streak_count": (
+                    recoverable_verify_failure_streak_count
+                ),
             }
+            log(
+                "info" if decision.should_continue else "error",
+                "unfollow_verify_failure_classified",
+                account_id=aid,
+                run_id=run_id,
+                username=target_username,
+                username_normalized=target_key,
+                candidate_outcome_class=decision.candidate_outcome_class.value,
+                recovery_class=decision.recovery_class.value,
+                stable_reason=decision.stable_reason,
+                persistence_ok=persist_ok,
+                exact_following_list_restored=bool(
+                    recovery_out.get("exact_following_list_restored")
+                ),
+                package_activity_ok=bool(recovery_out.get("package_activity_ok")),
+                account_identity_ok=bool(recovery_out.get("account_identity_ok")),
+                unsafe_markers=list(recovery_out.get("unsafe_markers") or []),
+                recovery_max_attempts=int(
+                    recovery_out.get("recovery_max_attempts") or 0
+                ),
+                recoverable_verify_failure_streak_count=(
+                    recoverable_verify_failure_streak_count
+                ),
+                max_recoverable_action_failures=max_recoverable_action_failures,
+                circuit_breaker_open=decision.circuit_breaker_open,
+                should_continue=decision.should_continue,
+                false_success_persisted=False,
+                second_unfollow_tap_allowed=False,
+            )
+            if decision.should_continue:
+                session_continued_after_recoverable_failure = True
+                failed_usernames_this_run.add(target_key)
+                completed_usernames.add(target_key)
+                visible_eligibility_row_cache[target_key] = None
+                if coverage_tracker is not None:
+                    coverage_tracker.mark_candidate_technical_hold(target_key)
+                    refresh_coverage_summary_totals()
+                refresh_recoverable_action_summary_totals()
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
+                last_fields = {
+                    **last_fields,
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                }
+                log(
+                    "info",
+                    "unfollow_verify_failure_recovered_continue",
+                    account_id=aid,
+                    run_id=run_id,
+                    username=target_username,
+                    username_normalized=target_key,
+                    failure_reason=verify_failure_reason,
+                    durable_failure_reason=decision.stable_reason,
+                    unfollow_actions_verified_so_far=verified,
+                    real_action_max_per_run=real_action_max,
+                    session_cap_remaining=max(0, real_action_max - verified),
+                    no_second_unfollow_tap=True,
+                    no_success_persistence=True,
+                )
+                continue
+
+            if decision.circuit_breaker_open:
+                stop_reason = "recoverable_verify_failure_circuit_open"
+                return emit_final(
+                    "success_real_unfollow_multi_partial_exhausted",
+                    stop_reason,
+                )
+            stop_reason = str(
+                recovery_out.get("failure_reason")
+                or persist_out.get("error")
+                or "unfollow_verify_failed_unsafe_state"
+            )
             return emit_final(
                 "failed_unfollow_multi_action",
-                str(verify_out.get("failure_reason") or "unfollow_verify_failed"),
+                stop_reason,
             )
+
+        ret = _return_after_unfollow_profile(
+            d,
+            account_username=uname,
+            direct_exact_search=target_opened_directly,
+        )
+        return_ok = bool(ret.get("ok"))
+        search_session_reused = bool(ret.get("search_session_reused"))
+        if search_session_reused:
+            direct_search_session_reused_count += 1
         if not persist_ok:
             failed += 1
             stop_reason = "unfollow_persistence_failed"

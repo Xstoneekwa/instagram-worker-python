@@ -19,6 +19,10 @@ from unfollow_settings import (
     UnfollowSettings,
     load_unfollow_settings,
 )
+from unfollow_action_outcome import (
+    ACTION_ATTEMPTED_AMBIGUOUS_COOLDOWN_MINUTES,
+    is_action_attempted_ambiguous_reason,
+)
 
 _ACTIVE_FOLLOWING = "active_following"
 
@@ -37,6 +41,7 @@ _STRICT_SKIP_KEYS = (
     "not_following_back",
     "candidate_unavailable_cooldown",
     "candidate_unavailable_exhausted",
+    "candidate_action_ambiguous_cooldown",
 )
 
 
@@ -138,6 +143,21 @@ def _strict_unfollow_skip_reason(
 
     if not _lifecycle_allows_strict_unfollow(row):
         return "lifecycle_ineligible"
+
+    prior_unfollow_reason = str(
+        _row_pick(row, "unfollow_skip_reason") or ""
+    ).strip().lower()
+    if is_action_attempted_ambiguous_reason(prior_unfollow_reason):
+        attempted_at = supabase_client.parse_utc_iso_timestamp(
+            _row_pick(row, "last_unfollow_attempt_at")
+        )
+        if (
+            attempted_at is not None
+            and attempted_at
+            + timedelta(minutes=ACTION_ATTEMPTED_AMBIGUOUS_COOLDOWN_MINUTES)
+            > now
+        ):
+            return "candidate_action_ambiguous_cooldown"
 
     eligible_at = _resolve_eligible_unfollow_at(row, after_days=settings.after_days)
     if eligible_at is None:
