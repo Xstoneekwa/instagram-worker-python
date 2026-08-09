@@ -20,6 +20,10 @@ from typing import Any, Callable, Mapping
 
 SCHEMA = "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1"
 CANARY_TYPE = "FOLLOW60_ORDERING_V2_BEHAVIORAL_CANARY_V1"
+MAINLINE_SCHEMA = "FOLLOW60_V2_MAINLINE_V1"
+MAINLINE_TYPE = "FOLLOW60_V2_MAINLINE_V1"
+MAINLINE_BINDING_KIND = "mainline"
+CANARY_BINDING_KIND = "canary"
 DEFAULT_MAX_NEW_CYCLES = 10
 ENABLED_ENV = "FOLLOW60_ORDERING_V2_BEHAVIORAL_ENABLED"
 ALLOWLIST_ENV = "FOLLOW60_ORDERING_V2_BEHAVIORAL_ACCOUNT_IDS"
@@ -91,6 +95,7 @@ class BehavioralCanaryBindingV1:
     expected_worker_sha: str
     actual_worker_sha: str
     canary_type: str
+    binding_kind: str
     max_new_cycles: int
     baseline_follow_count: int
     expires_at_epoch_s: float
@@ -191,6 +196,7 @@ def validate_behavioral_canary_binding(
         expected_worker_sha=actual,
         actual_worker_sha=_sha(raw.get("actual_worker_sha")),
         canary_type=CANARY_TYPE,
+        binding_kind=CANARY_BINDING_KIND,
         max_new_cycles=max_cycles,
         baseline_follow_count=int(raw.get("baseline_follow_count") or 0),
         expires_at_epoch_s=expiry,
@@ -205,6 +211,69 @@ def validate_behavioral_canary_binding(
         v1_fallback_count=int(raw.get("v1_fallback_count") or 0),
         status=_text(raw.get("status")),
     ), "v2_binding_valid"
+
+
+def build_mainline_ordering_v2_binding(
+    business_binding: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    business_session_id: str,
+    attempt_id: int,
+    worker_sha: str,
+    completed_v2_cycles: int = 0,
+) -> tuple[BehavioralCanaryBindingV1 | None, str]:
+    """Bind Ordering V2 to the normal immutable business session.
+
+    Mainline deliberately has no canary control, lease, allowlist, expiry or
+    evaluation barrier.  The existing BusinessSessionBindingV1 remains the
+    authoritative run/account/request/attempt/SHA identity.
+    """
+
+    from follow60_business_session_binding_v1 import validate_business_session_binding
+
+    validated, reason = validate_business_session_binding(
+        business_binding,
+        account_id=_text(account_id),
+        request_id=_text(request_id),
+        run_id=_text(run_id),
+        attempt_id=int(attempt_id or 0),
+        worker_sha=_sha(worker_sha),
+        binding_kind=MAINLINE_BINDING_KIND,
+        business_session_id=_text(business_session_id),
+    )
+    if validated is None:
+        return None, reason or "v2_mainline_business_binding_invalid"
+    nonce = _text(validated.get("nonce"))
+    if not nonce:
+        return None, "v2_mainline_business_binding_nonce_missing"
+    return BehavioralCanaryBindingV1(
+        schema=MAINLINE_SCHEMA,
+        control_id=f"mainline:{_text(run_id)}",
+        account_id=_text(account_id),
+        run_id=_text(run_id),
+        request_id=_text(request_id),
+        business_session_id=_text(business_session_id),
+        attempt_id=int(attempt_id),
+        expected_worker_sha=_sha(worker_sha),
+        actual_worker_sha=_sha(worker_sha),
+        canary_type=MAINLINE_TYPE,
+        binding_kind=MAINLINE_BINDING_KIND,
+        max_new_cycles=0,
+        baseline_follow_count=0,
+        expires_at_epoch_s=0.0,
+        lease_id=f"mainline:{_text(run_id)}",
+        lease_nonce=nonce,
+        lease_expires_at_epoch_s=0.0,
+        claimed_at_epoch_s=0.0,
+        candidate_seen_count=0,
+        v2_selected_count=0,
+        v2_complete_count=max(0, int(completed_v2_cycles or 0)),
+        v2_partial_count=0,
+        v1_fallback_count=0,
+        status="running",
+    ), "v2_mainline_binding_valid"
 
 
 @dataclass(frozen=True)
@@ -741,7 +810,10 @@ def route_candidate_v2(
     complete = binding.v2_complete_count
     if completed_v2_cycles is not None:
         complete = int(completed_v2_cycles)
-    if complete >= binding.max_new_cycles:
+    if (
+        binding.binding_kind == CANARY_BINDING_KIND
+        and complete >= binding.max_new_cycles
+    ):
         return "CANARY_BARRIER_REACHED", "v2_cycle_barrier_reached"
     if stable_proof is None or not stable_proof.direct_grid_safe:
         return "FOLLOW60_V1", "candidate_not_direct_grid_safe"
