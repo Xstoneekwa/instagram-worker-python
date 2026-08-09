@@ -70,6 +70,7 @@ from unfollow_hybrid_strategy import (
     cursor_anchor_matches,
     open_exact_profile_for_unfollow,
 )
+from unfollow_diagnostic_contract_v2 import UnfollowDiagnosticSession
 from unfollow_search_health_policy import SearchSurfaceCircuitBreaker
 from instagram_navigation import return_to_search_from_profile
 
@@ -1469,6 +1470,7 @@ def _run_real_unfollow_multi_loop(
     business_action_deadline: str | None,
     adaptive_coverage_budget: Any,
     resume_checkpoint: dict[str, Any] | None,
+    diagnostic_session: UnfollowDiagnosticSession | None,
     t0: float,
 ) -> int:
     verified = 0
@@ -1568,6 +1570,22 @@ def _run_real_unfollow_multi_loop(
     candidate_availability_persistence_failure_usernames: list[str] = []
     search_surface_health = SearchSurfaceCircuitBreaker()
     direct_fallback_armed = False
+
+    def safe_diagnostic_call(method_name: str, **kwargs: Any) -> Any:
+        if diagnostic_session is None:
+            return None
+        try:
+            method = getattr(diagnostic_session, method_name)
+            return method(**kwargs)
+        except Exception as exc:
+            log(
+                "warning",
+                "unfollow_diagnostic_v2_emit_failed",
+                diagnostic_method=method_name,
+                error=str(exc)[:500],
+                behavior_affected=False,
+            )
+            return None
 
     def coverage_elapsed_seconds() -> float:
         return max(0.0, time.perf_counter() - coverage_started_at)
@@ -1801,6 +1819,23 @@ def _run_real_unfollow_multi_loop(
             len(coverage_tracker.remaining_planned_usernames)
             if coverage_tracker is not None
             else len(planned_usernames - completed_usernames)
+        )
+        safe_diagnostic_call(
+            "emit_terminal",
+            status=status,
+            stop_reason=exploration_stop,
+            row_cache=visible_eligibility_row_cache,
+            plan_remaining=remaining_planned_count,
+            attempted_usernames=set(action_attempted_usernames),
+            verified_usernames=set(action_verified_usernames),
+            persisted_usernames=set(action_persisted_usernames),
+            failed_count=failed,
+            filtered_count=unique_skipped_usernames_count(),
+            end_of_list_status=str(
+                last_fields.get("following_list_end_reason")
+                or last_fields.get("scroll_stop_reason")
+                or ""
+            ),
         )
         stable_reason = str(failure_reason or stop_reason or "").strip()
         if candidate_availability_persistence_failures > 0:
@@ -2357,6 +2392,26 @@ def _run_real_unfollow_multi_loop(
                     lineage_stage="viewport_observed",
                     **diagnostic_candidate,
                 )
+            diagnostic_plan_remaining = (
+                len(coverage_tracker.remaining_planned_usernames)
+                if coverage_tracker is not None
+                else len(planned_usernames - completed_usernames)
+            )
+            safe_diagnostic_call(
+                "observe_viewport",
+                rows=rows,
+                visible_eval=visible_eval,
+                row_cache=visible_eligibility_row_cache,
+                scroll_depth=scroll_passes_used,
+                plan_remaining=diagnostic_plan_remaining,
+                verified_count=verified,
+                attempted_usernames=set(action_attempted_usernames),
+                verified_usernames=set(action_verified_usernames),
+                persisted_usernames=set(action_persisted_usernames),
+                harvest_meta=dict(harvest_meta or {}),
+                safe_stop_reason=stop_reason,
+                viewport_fingerprint_fn=viewport_fingerprint,
+            )
             last_fields = {**last_fields, **eval_fields}
             if target_row is not None:
                 break
@@ -3003,6 +3058,7 @@ def _run_real_unfollow_multi_loop(
         if tap_out.get("ok"):
             sent += 1
             action_attempted_usernames.add(target_key)
+            safe_diagnostic_call("record_action_attempt", username=target_key)
             if coverage_tracker is not None:
                 coverage_tracker.mark_action_attempted(target_key)
         else:
@@ -3103,6 +3159,19 @@ def _run_real_unfollow_multi_loop(
             action_verified=target_key in action_verified_usernames,
             persistence_ok=target_key in action_persisted_usernames,
             monotonic_s=round(time.perf_counter(), 6),
+        )
+        safe_diagnostic_call(
+            "emit_action_terminal",
+            username=target_key,
+            row_cache=visible_eligibility_row_cache,
+            attempted=target_key in action_attempted_usernames,
+            verified=target_key in action_verified_usernames,
+            persisted=target_key in action_persisted_usernames,
+            failure_reason=str(
+                verify_out.get("failure_reason")
+                or persist_out.get("error")
+                or ""
+            ),
         )
         if verify_ok and persist_ok:
             verified += 1
@@ -3284,6 +3353,10 @@ def run_unfollow_session(
     outreach_reserve_seconds: int = 0,
     resume_checkpoint: dict[str, Any] | None = None,
     quota_remaining_hint: int | None = None,
+    request_id: str | None = None,
+    business_session_id: str | None = None,
+    worker_sha: str | None = None,
+    session_attempt: int = 1,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
@@ -3449,6 +3522,66 @@ def run_unfollow_session(
             **time_budget,
         }
     )
+    diagnostic_session: UnfollowDiagnosticSession | None = None
+    if real_action_active:
+        try:
+            diagnostic_session = UnfollowDiagnosticSession(
+                account_id=aid,
+                request_id=(request_id or os.environ.get("ACCOUNT_RUN_REQUEST_ID")),
+                run_id=run_id,
+                business_session_id=business_session_id,
+                worker_sha=(worker_sha or os.environ.get("WORKER_GIT_SHA")),
+                session_attempt=max(1, int(session_attempt or 1)),
+                plan=plan,
+                protected_usernames=set(protected_usernames),
+                plan_cap=int(getattr(settings, "session_limit", 0) or 0),
+                session_quota=real_action_max,
+                daily_remaining=unfollow_day_remaining_today,
+                time_budget_seconds=handoff_budget.scheduled_session_remaining_seconds,
+                cleanup_reserve=handoff_budget.minimum_session_cleanup_reserve_seconds,
+                expected_max_actions=real_action_max,
+                plan_admission_required=(
+                    str(getattr(settings, "mode", "") or "") != UNFOLLOW_MODE_ANY
+                ),
+                emit=log,
+            )
+            diagnostic_session.emit_start()
+        except Exception as exc:
+            diagnostic_session = None
+            log(
+                "warning",
+                "unfollow_diagnostic_v2_start_failed",
+                account_id=aid,
+                run_id=run_id,
+                error=str(exc)[:500],
+                behavior_affected=False,
+            )
+
+    def emit_early_diagnostic_terminal(status: str, reason: str) -> None:
+        if diagnostic_session is None:
+            return
+        try:
+            diagnostic_session.emit_terminal(
+                status=status,
+                stop_reason=reason,
+                row_cache=visible_eligibility_row_cache,
+                plan_remaining=len(planned_usernames),
+                attempted_usernames=set(),
+                verified_usernames=set(),
+                persisted_usernames=set(),
+                failed_count=1 if status.startswith("failed_") else 0,
+                filtered_count=0,
+                end_of_list_status="not_reached",
+            )
+        except Exception as exc:
+            log(
+                "warning",
+                "unfollow_diagnostic_v2_terminal_failed",
+                account_id=aid,
+                run_id=run_id,
+                error=str(exc)[:500],
+                behavior_affected=False,
+            )
 
     if (
         not bool(dry_probe_only)
@@ -3464,6 +3597,10 @@ def run_unfollow_session(
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
         log("info", "unfollow_skipped_insufficient_time", **time_budget)
+        emit_early_diagnostic_terminal(
+            "success_unfollow_skipped_insufficient_time",
+            "unfollow_skipped_insufficient_time",
+        )
         _emit_summary(summary)
         return 0
 
@@ -3480,6 +3617,7 @@ def run_unfollow_session(
             "multi_action_stop_reason": "unfollow_day_limit_reached",
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
+        emit_early_diagnostic_terminal("no_quota", "unfollow_day_limit_reached")
         _emit_summary(summary)
         return 0
 
@@ -3504,6 +3642,10 @@ def run_unfollow_session(
             "visible_plan_matches_count": 0,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
+        emit_early_diagnostic_terminal(
+            "failed_active_instagram_account_mismatch",
+            "active_instagram_account_mismatch",
+        )
         _emit_summary(summary)
         return 1
 
@@ -3515,6 +3657,10 @@ def run_unfollow_session(
             "failure_reason": str((open_meta or {}).get("failure_reason") or "open_following_failed"),
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
+        emit_early_diagnostic_terminal(
+            "failed_open_following",
+            str((open_meta or {}).get("failure_reason") or "open_following_failed"),
+        )
         _emit_summary(summary)
         return 1
 
@@ -3527,6 +3673,10 @@ def run_unfollow_session(
             "following_surface_ok": False,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
+        emit_early_diagnostic_terminal(
+            "failed_surface",
+            str(det.get("failure_reason") or "following_surface_not_verified"),
+        )
         _emit_summary(summary)
         return 1
 
@@ -3570,6 +3720,10 @@ def run_unfollow_session(
                 "failure_reason": str(sort_apply.get("failure_reason") or "unfollow_sort_apply_failed"),
                 "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
             }
+            emit_early_diagnostic_terminal(
+                "failed_unfollow_sort_apply",
+                str(sort_apply.get("failure_reason") or "unfollow_sort_apply_failed"),
+            )
             _emit_summary(summary)
             return 1
 
@@ -3590,6 +3744,10 @@ def run_unfollow_session(
                 "failure_reason": str(sort_verify.get("failure_reason") or "unfollow_sort_verify_failed"),
                 "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
             }
+            emit_early_diagnostic_terminal(
+                "failed_unfollow_sort_verify",
+                str(sort_verify.get("failure_reason") or "unfollow_sort_verify_failed"),
+            )
             _emit_summary(summary)
             return 1
 
@@ -3701,6 +3859,7 @@ def run_unfollow_session(
             business_action_deadline=resolved_deadline,
             adaptive_coverage_budget=handoff_budget,
             resume_checkpoint=resume_checkpoint,
+            diagnostic_session=diagnostic_session,
             t0=t0,
         )
 
@@ -4071,6 +4230,10 @@ def dispatch_unfollow_session(
     account_id: str,
     account_username: str,
     run_id: str | None = None,
+    request_id: str | None = None,
+    business_session_id: str | None = None,
+    worker_sha: str | None = None,
+    session_attempt: int = 1,
 ) -> int:
     # Real Unfollow is gated by UNFOLLOW_SESSION_REAL_ACTION_ENABLED (+ unfollow_enabled).
     return run_unfollow_session(
@@ -4078,5 +4241,9 @@ def dispatch_unfollow_session(
         account_id=account_id,
         account_username=account_username,
         run_id=run_id,
+        request_id=request_id,
+        business_session_id=business_session_id,
+        worker_sha=worker_sha,
+        session_attempt=session_attempt,
         dry_probe_only=False,
     )

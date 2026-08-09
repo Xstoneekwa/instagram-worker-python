@@ -3293,6 +3293,10 @@ def _run_follow_to_unfollow_real(
     outreach_reserve_seconds: int = 0,
     resume_checkpoint: dict[str, Any] | None = None,
     quota_remaining_hint: int | None = None,
+    request_id: str | None = None,
+    business_session_id: str | None = None,
+    session_attempt: int = 1,
+    worker_sha: str | None = None,
 ) -> dict[str, Any]:
     """H3 only: explicit real Unfollow handoff with a hard low cap."""
     t0 = time.perf_counter()
@@ -3417,6 +3421,10 @@ def _run_follow_to_unfollow_real(
             outreach_reserve_seconds=outreach_reserve_seconds,
             resume_checkpoint=resume_checkpoint,
             quota_remaining_hint=quota_remaining_hint,
+            request_id=request_id,
+            business_session_id=business_session_id,
+            session_attempt=session_attempt,
+            worker_sha=worker_sha,
         )
         unfollow_summary = get_last_unfollow_session_probe_summary()
         out = _real_summary_from_unfollow_summary(
@@ -4326,6 +4334,14 @@ def run_account_session(
                         quota_remaining_hint=_as_optional_int(
                             ((auto_restart_resume_policy or {}).get("quota_remaining") or {}).get("unfollow")
                         ),
+                        request_id=run_request_id,
+                        business_session_id=business_session_id,
+                        session_attempt=follow60_attempt_id,
+                        worker_sha=(
+                            worker_runtime_identity.worker_sha
+                            if worker_runtime_identity is not None
+                            else os.environ.get("WORKER_GIT_SHA")
+                        ),
                     )
             else:
                 real_skip_reason = (
@@ -4458,6 +4474,14 @@ def run_account_session(
                 ),
                 quota_remaining_hint=_as_optional_int(
                     ((auto_restart_resume_policy or {}).get("quota_remaining") or {}).get("unfollow")
+                ),
+                request_id=run_request_id,
+                business_session_id=business_session_id,
+                session_attempt=follow60_attempt_id,
+                worker_sha=(
+                    worker_runtime_identity.worker_sha
+                    if worker_runtime_identity is not None
+                    else os.environ.get("WORKER_GIT_SHA")
                 ),
             )
 

@@ -167,6 +167,14 @@ def _candidate_payload_from_row(
         "username": username,
         "username_normalized": normalize_social_username(username),
         "followed_at": row.get("followed_at"),
+        "followed_by_bot": row.get("followed_by_bot"),
+        "follow_source": (
+            "bot"
+            if row.get("followed_by_bot") is True
+            else "manual"
+            if row.get("followed_by_bot") is False
+            else "unknown"
+        ),
         "eligible_unfollow_at": eligible_at.isoformat() if eligible_at is not None else "",
         "eligible_unfollow_at_source": (
             "column" if row.get("eligible_unfollow_at") else "computed_from_followed_at"
@@ -178,6 +186,13 @@ def _candidate_payload_from_row(
             or ""
         ),
         "interaction_row_id": str(row.get("id") or ""),
+        "interaction_lifecycle_state": _row_lifecycle(row),
+        "follow_status": _row_follow_status(row),
+        "interacted_ledger_status": str(
+            _row_lifecycle(row)
+            or _row_follow_status(row)
+            or ("unfollowed" if row.get("unfollowed_at") else "unknown")
+        ),
         "eligibility_reason": "bot_follow_delay_elapsed",
     }
 
@@ -195,6 +210,7 @@ def _empty_plan(
         "unfollow_enabled": settings.enabled,
         "plan_reason": plan_reason,
         "candidates": [],
+        "diagnostic_eligible_candidates_at_start": [],
         "candidates_count": 0,
         "eligible_total": 0,
         "unplanned_eligible_count": 0,
@@ -365,6 +381,10 @@ def plan_unfollow_targets(
         "unfollow_after_days": cfg.after_days,
         "plan_reason": "strict_db_eligibility",
         "candidates": candidates,
+        # Diagnostic-only T0 cohort.  Selection continues to use ``candidates``
+        # and its existing session cap; retaining the already-loaded overflow
+        # rows adds no query and cannot admit an extra action.
+        "diagnostic_eligible_candidates_at_start": eligible_candidates,
         "candidates_count": len(candidates),
         "eligible_total": eligible_total,
         "unplanned_eligible_count": unplanned_eligible_count,

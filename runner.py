@@ -24824,6 +24824,10 @@ def _main_impl() -> int:
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
+            request_id=run_request_id or None,
+            business_session_id=_SESSION_SOCIAL_ID or run_id or None,
+            worker_sha=os.environ.get("WORKER_GIT_SHA"),
+            session_attempt=1,
         )
         unf_summary = get_last_unfollow_session_probe_summary()
         if int(unf_code) != 0:
@@ -25335,6 +25339,10 @@ def _main_impl() -> int:
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
+            request_id=run_request_id or None,
+            business_session_id=_SESSION_SOCIAL_ID or run_id or None,
+            worker_sha=os.environ.get("WORKER_GIT_SHA"),
+            session_attempt=1,
         )
         unf_summary = get_last_unfollow_session_probe_summary()
         if supabase_mode and run_id:

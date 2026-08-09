@@ -220,6 +220,14 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
         self.assertEqual(plan["eligible_total"], 50)
         self.assertEqual(plan["candidates_count"], 25)
         self.assertEqual(plan["unplanned_eligible_count"], 25)
+        self.assertEqual(len(plan["diagnostic_eligible_candidates_at_start"]), 50)
+        self.assertEqual(
+            [row["username_normalized"] for row in plan["candidates"]],
+            [
+                row["username_normalized"]
+                for row in plan["diagnostic_eligible_candidates_at_start"][:25]
+            ],
+        )
         self.assertTrue(plan["candidate_scan_exhaustive"])
         self.assertTrue(plan["candidate_funnel_reconciled"])
 
