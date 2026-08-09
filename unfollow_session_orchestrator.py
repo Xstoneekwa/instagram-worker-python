@@ -3287,7 +3287,12 @@ def _run_real_unfollow_multi_loop(
                 str(tap_out.get("failure_reason") or "unfollow_tap_failed"),
             )
 
-        verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
+        verify_out = verify_unfollow_action_success_after_tap(
+            d,
+            target_username=target_username,
+            profile_identity_certified=True,
+            private_flow_engaged=True,
+        )
         verify_ok = bool(verify_out.get("ok"))
         verify_failure_reason = str(
             verify_out.get("failure_reason")
@@ -4476,7 +4481,12 @@ def run_unfollow_session(
         _emit_summary(summary)
         return 1
 
-    verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
+    verify_out = verify_unfollow_action_success_after_tap(
+        d,
+        target_username=target_username,
+        profile_identity_certified=True,
+        private_flow_engaged=True,
+    )
     verify_ok = bool(verify_out.get("ok"))
     target_key = normalize_unfollow_username(target_username)
     cand = (

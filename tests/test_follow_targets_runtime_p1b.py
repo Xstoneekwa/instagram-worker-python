@@ -4220,6 +4220,100 @@ class CtCheckpointV1Tests(unittest.TestCase):
         fields = runner._ct_checkpoint_common_fields(ck)
         self.assertEqual(fields["scroll_index"], 0)
 
+    def test_same_immutable_viewport_allows_stale_snapshot_without_navigation(self) -> None:
+        generation = 123.456
+        ck = self._new_checkpoint(
+            last_scroll_index=0,
+            last_visible_usernames=["user_a", "user_b"],
+            last_visible_surface_generation=generation,
+        )
+        meta = strong_followers_snapshot_meta(source_profile_username="ct_one")
+        meta["last_poll_snapshot"]["candidate_rows_snapshot"] = [
+            {"username": "user_a"},
+            {"username": "user_b"},
+        ]
+        proved, reason = runner._ct_checkpoint_same_immutable_viewport_proved(
+            ck,
+            meta,
+            source_username="ct_one",
+            account_id="acct-1",
+            run_id="run-1",
+            scroll_used=0,
+            committed_meta={
+                "followers_list_committed_open": True,
+                "followers_list_committed_for": "ct_one",
+                "followers_list_committed_at": generation,
+            },
+        )
+        det, reuse_reason = runner._candidate_selection_snapshot_reuse_candidate(
+            meta,
+            source_profile_username="ct_one",
+            snapshot_age_ms=90_000.0,
+            same_immutable_viewport_proved=proved,
+        )
+        self.assertTrue(proved)
+        self.assertEqual(reason, "same_immutable_viewport:last_poll_snapshot")
+        self.assertIsNotNone(det)
+        self.assertEqual(reuse_reason, "")
+
+    def test_same_immutable_viewport_is_invalid_after_profile_navigation(self) -> None:
+        ck = self._new_checkpoint(
+            last_scroll_index=0,
+            last_visible_usernames=["user_a"],
+            last_visible_surface_generation=123.0,
+        )
+        meta = strong_followers_snapshot_meta(source_profile_username="ct_one")
+        meta["last_poll_snapshot"]["candidate_rows_snapshot"] = [
+            {"username": "user_a"}
+        ]
+        proved, reason = runner._ct_checkpoint_same_immutable_viewport_proved(
+            ck,
+            meta,
+            source_username="ct_one",
+            account_id="acct-1",
+            run_id="run-1",
+            scroll_used=0,
+            committed_meta={
+                "followers_list_committed_open": True,
+                "followers_list_committed_for": "ct_one",
+                "followers_list_committed_at": 124.0,
+            },
+        )
+        self.assertFalse(proved)
+        self.assertEqual(reason, "surface_generation_mismatch")
+
+    def test_same_immutable_viewport_is_invalid_after_scroll_or_row_change(self) -> None:
+        generation = 123.0
+        ck = self._new_checkpoint(
+            last_scroll_index=1,
+            last_visible_usernames=["user_a"],
+            last_visible_surface_generation=generation,
+        )
+        meta = strong_followers_snapshot_meta(source_profile_username="ct_one")
+        meta["last_poll_snapshot"]["candidate_rows_snapshot"] = [
+            {"username": "different_user"}
+        ]
+        common = {
+            "source_username": "ct_one",
+            "account_id": "acct-1",
+            "run_id": "run-1",
+            "committed_meta": {
+                "followers_list_committed_open": True,
+                "followers_list_committed_for": "ct_one",
+                "followers_list_committed_at": generation,
+            },
+        }
+        proved_scroll, reason_scroll = runner._ct_checkpoint_same_immutable_viewport_proved(
+            ck, meta, scroll_used=0, **common
+        )
+        proved_rows, reason_rows = runner._ct_checkpoint_same_immutable_viewport_proved(
+            ck, meta, scroll_used=1, **common
+        )
+        self.assertFalse(proved_scroll)
+        self.assertEqual(reason_scroll, "checkpoint_scroll_mismatch")
+        self.assertFalse(proved_rows)
+        self.assertEqual(reason_rows, "snapshot_rows_mismatch")
+
     def test_update_visible_window_emits_created_then_updated(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         ck = self._new_checkpoint()

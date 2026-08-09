@@ -617,6 +617,39 @@ class RepositoryAndControllerTests(unittest.TestCase):
         self.assertNotIn("done.one", json.dumps(params))
         self.assertNotIn("not.evaluated", json.dumps(params))
 
+    def test_decision_snapshot_normalizes_once_and_is_shared_by_observe_and_prefix(self):
+        rpc = FakeRpc(
+            row=checkpoint_row(
+                checkpoint_version=3,
+                shadow_last_safe_depth=0,
+            )
+        )
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); self.assertTrue(ctl.claim())
+        original = resume.normalize_visible_handles
+        with patch.object(
+            resume,
+            "normalize_visible_handles",
+            wraps=original,
+        ) as normalize:
+            snapshot = resume.DecisionViewportSnapshot.build(
+                ["Done.One", "done.two", "done.one"],
+                hmac_secret=ctl.hmac_secret,
+            )
+            ctl.observe_snapshot(
+                snapshot,
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+                list_moved=False,
+            )
+            count = ctl.note_first_pass_evaluated_prefix_snapshot(
+                snapshot,
+                terminally_handled=lambda _handle: True,
+            )
+        self.assertEqual(normalize.call_count, 1)
+        self.assertEqual(snapshot.handles, ("done.one", "done.two"))
+        self.assertEqual(count, 2)
+
     def test_52d_first_pass_prefix_stops_at_first_unhandled_row(self):
         rpc = FakeRpc(row=checkpoint_row(checkpoint_version=3, shadow_last_safe_depth=0))
         ctl = self.controller(rpc)

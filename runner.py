@@ -1551,6 +1551,7 @@ def _ct_checkpoint_new(
         "updated_at_mono": now,
         "updated_at_epoch": time.time(),
         "last_visible_usernames": [],
+        "last_visible_surface_generation": 0.0,
         "private_rejected_count": 0,
         "followed_count": 0,
         "rejected_count": 0,
@@ -1751,6 +1752,10 @@ def _ct_checkpoint_update_visible_window(
     ]
     checkpoint["last_scroll_index"] = int(scroll_used)
     checkpoint["last_visible_usernames"] = usernames[:24]
+    committed_meta = followers_session_committed_meta()
+    checkpoint["last_visible_surface_generation"] = float(
+        committed_meta.get("followers_list_committed_at") or 0.0
+    )
     checkpoint["updated_at"] = _ct_checkpoint_utc_now_iso()
     checkpoint["updated_at_mono"] = time.perf_counter()
     checkpoint["updated_at_epoch"] = time.time()
@@ -9268,6 +9273,7 @@ def _candidate_selection_snapshot_reuse_candidate(
     source_profile_username: str,
     snapshot_age_ms: float,
     max_age_ms: float = 8500.0,
+    same_immutable_viewport_proved: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(open_list_meta, dict):
         return None, "open_list_meta_missing"
@@ -9290,7 +9296,8 @@ def _candidate_selection_snapshot_reuse_candidate(
         except Exception:
             post_scroll_fresh = False
     if (
-        not post_scroll_fresh
+        not same_immutable_viewport_proved
+        and not post_scroll_fresh
         and (float(snapshot_age_ms) < 0.0 or float(snapshot_age_ms) > float(max_age_ms))
     ):
         return None, "snapshot_stale"
@@ -9306,7 +9313,11 @@ def _candidate_selection_snapshot_reuse_candidate(
         snap = open_list_meta.get(key)
         if not isinstance(snap, dict) or not snap:
             continue
-        if key == "post_scroll_detection_snapshot" and not post_scroll_fresh:
+        if (
+            key == "post_scroll_detection_snapshot"
+            and not post_scroll_fresh
+            and not same_immutable_viewport_proved
+        ):
             continue
         odm = str(snap.get("open_detection_method") or open_list_meta.get("open_detection_method") or "")
         if odm != "own_unified_follow_list":
@@ -9336,6 +9347,88 @@ def _candidate_selection_snapshot_reuse_candidate(
         out["candidate_selection_snapshot_kind"] = key
         return out, ""
     return None, "snapshot_absent"
+
+
+def _ct_checkpoint_same_immutable_viewport_proved(
+    checkpoint: dict[str, Any],
+    open_list_meta: dict[str, Any] | None,
+    *,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+    scroll_used: int,
+    committed_meta: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    """Prove an unchanged physical CT viewport without relying on a TTL.
+
+    The proof is invalidated by every profile navigation (the committed list
+    generation changes), every scroll index change, identity drift, or any row
+    mismatch.  It only avoids reacquiring XML after a no-UI decision on the
+    exact same committed list surface.
+    """
+    if not _ct_checkpoint_enabled():
+        return False, "checkpoint_disabled"
+    if not isinstance(open_list_meta, dict) or not isinstance(committed_meta, dict):
+        return False, "snapshot_or_surface_meta_missing"
+    if not bool(committed_meta.get("followers_list_committed_open")):
+        return False, "followers_surface_not_committed"
+    expected_source = _norm_ig_handle(source_username)
+    if not expected_source:
+        return False, "source_username_missing"
+    if _norm_ig_handle(committed_meta.get("followers_list_committed_for")) != expected_source:
+        return False, "committed_source_mismatch"
+    if _norm_ig_handle(checkpoint.get("source_username")) != expected_source:
+        return False, "checkpoint_source_mismatch"
+    if str(checkpoint.get("account_id") or "") != str(account_id or ""):
+        return False, "checkpoint_account_mismatch"
+    if str(checkpoint.get("run_id") or "") != str(run_id or ""):
+        return False, "checkpoint_run_mismatch"
+    try:
+        checkpoint_scroll_index = int(checkpoint.get("last_scroll_index"))
+    except (TypeError, ValueError):
+        checkpoint_scroll_index = -1
+    if checkpoint_scroll_index != int(scroll_used):
+        return False, "checkpoint_scroll_mismatch"
+    stored_generation = float(
+        checkpoint.get("last_visible_surface_generation") or 0.0
+    )
+    current_generation = float(
+        committed_meta.get("followers_list_committed_at") or 0.0
+    )
+    if (
+        stored_generation <= 0.0
+        or current_generation <= 0.0
+        or stored_generation != current_generation
+    ):
+        return False, "surface_generation_mismatch"
+    expected_rows = tuple(
+        _norm_ig_handle(value)
+        for value in (checkpoint.get("last_visible_usernames") or [])
+        if _norm_ig_handle(value)
+    )
+    if not expected_rows:
+        return False, "checkpoint_visible_rows_missing"
+    for key in (
+        "post_scroll_detection_snapshot",
+        "last_poll_snapshot",
+        "after_tap_screen_snapshot",
+    ):
+        snapshot = open_list_meta.get(key)
+        if not isinstance(snapshot, dict):
+            continue
+        snapshot_rows = tuple(
+            _norm_ig_handle(
+                row.get("username") or row.get("resolved_username_hint") or ""
+            )
+            for row in (snapshot.get("candidate_rows_snapshot") or [])
+            if isinstance(row, dict)
+            and _norm_ig_handle(
+                row.get("username") or row.get("resolved_username_hint") or ""
+            )
+        )
+        if snapshot_rows and snapshot_rows[: len(expected_rows)] == expected_rows:
+            return True, f"same_immutable_viewport:{key}"
+    return False, "snapshot_rows_mismatch"
 
 
 def _open_meta_visual_fallback_list_was_open(meta: dict) -> bool:
@@ -14077,10 +14170,23 @@ def _run_followers_list_engine_session(
                 fallback_used=False,
                 duration_ms=0.0,
             )
+            (
+                _same_immutable_viewport_proved,
+                _same_immutable_viewport_reason,
+            ) = _ct_checkpoint_same_immutable_viewport_proved(
+                ct_checkpoint,
+                open_list_meta,
+                source_username=source_profile_username,
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                scroll_used=int(scroll_used),
+                committed_meta=_cm_loop_early,
+            )
             _reuse_det, _reuse_reason = _candidate_selection_snapshot_reuse_candidate(
                 open_list_meta,
                 source_profile_username=source_profile_username,
                 snapshot_age_ms=_snapshot_reuse_age_ms,
+                same_immutable_viewport_proved=_same_immutable_viewport_proved,
             )
             _initial_snapshot_reuse = bool(
                 processed == 0 and followers_engine_loop_iteration == 1
@@ -14139,6 +14245,7 @@ def _run_followers_list_engine_session(
                 _initial_snapshot_reuse
                 or _canary_post_return_reuse
                 or _post_scroll_snapshot_reuse
+                or _same_immutable_viewport_proved
             ):
                 det = _reuse_det
                 det_xml_last_for_bypass = det
@@ -14172,9 +14279,13 @@ def _run_followers_list_engine_session(
                         "verified_post_scroll_hierarchy_snapshot"
                         if _post_scroll_snapshot_reuse
                         else (
-                            "same_ct_viewport_generation_no_navigation"
-                            if _canary_post_return_reuse and not _initial_snapshot_reuse
-                            else "strong_open_success_snapshot"
+                            "same_immutable_viewport_no_navigation"
+                            if _same_immutable_viewport_proved
+                            else (
+                                "same_ct_viewport_generation_no_navigation"
+                                if _canary_post_return_reuse and not _initial_snapshot_reuse
+                                else "strong_open_success_snapshot"
+                            )
                         )
                     ),
                     open_detection_method=open_detection_method,
@@ -14183,6 +14294,7 @@ def _run_followers_list_engine_session(
                     snapshot_age_ms=_snapshot_reuse_age_ms,
                     fallback_used=False,
                     duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
+                    immutable_viewport_proof_reason=_same_immutable_viewport_reason,
                 )
             elif _reuse_det is None:
                 log(
@@ -15231,8 +15343,17 @@ def _run_followers_list_engine_session(
                         _v2_followers_surface_confirmed,
                         _v2_expected_target_confirmed,
                     ) = _target_followers_resume_v2_surface_proof(det)
-                    _v2_verdict = target_followers_resume_controller.observe_viewport(
+                    _v2_snapshot_started = time.perf_counter()
+                    _v2_snapshot = target_followers_resume_v2.DecisionViewportSnapshot.build(
                         _v2_handles,
+                        hmac_secret=target_followers_resume_controller.hmac_secret,
+                    )
+                    _v2_snapshot_build_ms = round(
+                        (time.perf_counter() - _v2_snapshot_started) * 1000.0,
+                        3,
+                    )
+                    _v2_verdict = target_followers_resume_controller.observe_snapshot(
+                        _v2_snapshot,
                         followers_surface_confirmed=_v2_followers_surface_confirmed,
                         expected_target_confirmed=_v2_expected_target_confirmed,
                         list_moved=bool(
@@ -15242,8 +15363,8 @@ def _run_followers_list_engine_session(
                         recoverable=True,
                         ambiguous_surface=False,
                     )
-                    target_followers_resume_controller.note_first_pass_evaluated_prefix(
-                        _v2_handles,
+                    target_followers_resume_controller.note_first_pass_evaluated_prefix_snapshot(
+                        _v2_snapshot,
                         terminally_handled=lambda handle: (
                             _norm_ig_handle(handle)
                             in _RUNTIME_SEEN_FOLLOWER_USERNAMES
@@ -15255,6 +15376,15 @@ def _run_followers_list_engine_session(
                             in _RUNTIME_FOLLOWED_USERNAMES
                         ),
                         reason="viewport_contiguous_terminal_prefix",
+                    )
+                    log(
+                        "info",
+                        "ct_resume_decision_snapshot_reused",
+                        normalized_once=True,
+                        fingerprint_once=True,
+                        viewport_count=len(_v2_snapshot.handles),
+                        snapshot_build_ms=_v2_snapshot_build_ms,
+                        observe_and_prefix_shared_snapshot=True,
                     )
                     if _v2_verdict.verified:
                         target_followers_resume_controller.commit_verified_progress(

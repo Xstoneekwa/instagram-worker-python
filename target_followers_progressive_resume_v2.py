@@ -238,13 +238,29 @@ def target_surface_identity_proved(
 
 def viewport_fingerprint(values: Iterable[object], *, secret: object | None = None) -> str:
     handles = normalize_visible_handles(values)
+    return _viewport_fingerprint_from_normalized(handles, secret=secret)
+
+
+def bounded_anchor_hashes(values: Iterable[object], *, secret: object | None = None) -> tuple[str, ...]:
+    handles = normalize_visible_handles(values)
+    return _bounded_anchor_hashes_from_normalized(handles, secret=secret)
+
+
+def _viewport_fingerprint_from_normalized(
+    handles: tuple[str, ...],
+    *,
+    secret: object | None = None,
+) -> str:
     if not handles:
         return ""
     return _hmac_token("\x1f".join(handles), prefix="v3", secret=secret)
 
 
-def bounded_anchor_hashes(values: Iterable[object], *, secret: object | None = None) -> tuple[str, ...]:
-    handles = normalize_visible_handles(values)
+def _bounded_anchor_hashes_from_normalized(
+    handles: tuple[str, ...],
+    *,
+    secret: object | None = None,
+) -> tuple[str, ...]:
     if len(handles) <= MAX_ANCHORS:
         selected = handles
     else:
@@ -316,6 +332,41 @@ class ResumeFlags:
 
 
 @dataclass(frozen=True)
+class DecisionViewportSnapshot:
+    """One immutable normalization/hash pass for a physical CT viewport."""
+
+    handles: tuple[str, ...]
+    fingerprint: str
+    anchor_hashes: tuple[str, ...]
+    legacy_fingerprint: str
+
+    @classmethod
+    def build(
+        cls,
+        visible_handles: Iterable[object],
+        *,
+        hmac_secret: object | None = None,
+    ) -> "DecisionViewportSnapshot":
+        handles = normalize_visible_handles(visible_handles)
+        return cls(
+            handles=handles,
+            fingerprint=_viewport_fingerprint_from_normalized(
+                handles,
+                secret=hmac_secret,
+            ),
+            anchor_hashes=_bounded_anchor_hashes_from_normalized(
+                handles,
+                secret=hmac_secret,
+            ),
+            legacy_fingerprint=(
+                hashlib.sha256("\x1f".join(handles).encode("utf-8")).hexdigest()[:20]
+                if handles
+                else ""
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ViewportObservation:
     handles: tuple[str, ...]
     fingerprint: str
@@ -338,11 +389,34 @@ class ViewportObservation:
         ambiguous_surface: bool = False,
         hmac_secret: object | None = None,
     ) -> "ViewportObservation":
-        handles = normalize_visible_handles(visible_handles)
+        snapshot = DecisionViewportSnapshot.build(
+            visible_handles,
+            hmac_secret=hmac_secret,
+        )
+        return cls.from_snapshot(
+            snapshot,
+            followers_surface_confirmed=followers_surface_confirmed,
+            expected_target_confirmed=expected_target_confirmed,
+            list_moved=list_moved,
+            recoverable=recoverable,
+            ambiguous_surface=ambiguous_surface,
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: DecisionViewportSnapshot,
+        *,
+        followers_surface_confirmed: bool,
+        expected_target_confirmed: bool,
+        list_moved: bool,
+        recoverable: bool,
+        ambiguous_surface: bool = False,
+    ) -> "ViewportObservation":
         return cls(
-            handles=handles,
-            fingerprint=viewport_fingerprint(handles, secret=hmac_secret),
-            anchor_hashes=bounded_anchor_hashes(handles, secret=hmac_secret),
+            handles=snapshot.handles,
+            fingerprint=snapshot.fingerprint,
+            anchor_hashes=snapshot.anchor_hashes,
             followers_surface_confirmed=bool(followers_surface_confirmed),
             expected_target_confirmed=bool(expected_target_confirmed),
             list_moved=bool(list_moved),
@@ -602,6 +676,21 @@ def find_resume_cursor(
     anchor forces scanning from that row.
     """
     handles = normalize_visible_handles(visible_handles)
+    return _find_resume_cursor_from_normalized(
+        handles,
+        expected_anchor_hashes,
+        terminally_handled=terminally_handled,
+        hmac_secret=hmac_secret,
+    )
+
+
+def _find_resume_cursor_from_normalized(
+    handles: tuple[str, ...],
+    expected_anchor_hashes: Sequence[str],
+    *,
+    terminally_handled: Callable[[str], bool] | None = None,
+    hmac_secret: object | None = None,
+) -> tuple[int, str]:
     anchors = {str(item) for item in expected_anchor_hashes[:MAX_ANCHORS] if str(item).startswith("a3:")}
     if not handles:
         return 0, "viewport_empty"
@@ -1220,14 +1309,36 @@ class ProgressiveResumeController:
         recoverable: bool = True,
         ambiguous_surface: bool = False,
     ) -> TransitionVerdict:
-        observation = ViewportObservation.build(
+        snapshot = DecisionViewportSnapshot.build(
             visible_handles,
+            hmac_secret=self.hmac_secret,
+        )
+        return self.observe_snapshot(
+            snapshot,
             followers_surface_confirmed=followers_surface_confirmed,
             expected_target_confirmed=expected_target_confirmed,
             list_moved=list_moved,
             recoverable=recoverable,
             ambiguous_surface=ambiguous_surface,
-            hmac_secret=self.hmac_secret,
+        )
+
+    def observe_snapshot(
+        self,
+        snapshot: DecisionViewportSnapshot,
+        *,
+        followers_surface_confirmed: bool,
+        expected_target_confirmed: bool,
+        list_moved: bool = True,
+        recoverable: bool = True,
+        ambiguous_surface: bool = False,
+    ) -> TransitionVerdict:
+        observation = ViewportObservation.from_snapshot(
+            snapshot,
+            followers_surface_confirmed=followers_surface_confirmed,
+            expected_target_confirmed=expected_target_confirmed,
+            list_moved=list_moved,
+            recoverable=recoverable,
+            ambiguous_surface=ambiguous_surface,
         )
         if self._safe_stop:
             return self._reject_transition("continuity_unproven", v2_safe_stop=True)
@@ -1314,7 +1425,7 @@ class ProgressiveResumeController:
         if self.pending_scroll_before is None:
             self.current_viewport = observation
             if not self._anchor_proposal_emitted and self.plan is not None:
-                cursor, anchor_reason = find_resume_cursor(
+                cursor, anchor_reason = _find_resume_cursor_from_normalized(
                     observation.handles,
                     self.plan.anchor_hashes,
                     hmac_secret=self.hmac_secret,
@@ -1404,6 +1515,23 @@ class ProgressiveResumeController:
         terminally_handled: Callable[[str], bool],
         reason: str = "first_pass_evaluated_prefix",
     ) -> int:
+        snapshot = DecisionViewportSnapshot.build(
+            visible_handles,
+            hmac_secret=self.hmac_secret,
+        )
+        return self.note_first_pass_evaluated_prefix_snapshot(
+            snapshot,
+            terminally_handled=terminally_handled,
+            reason=reason,
+        )
+
+    def note_first_pass_evaluated_prefix_snapshot(
+        self,
+        snapshot: DecisionViewportSnapshot,
+        *,
+        terminally_handled: Callable[[str], bool],
+        reason: str = "first_pass_evaluated_prefix",
+    ) -> int:
         """Stage only the contiguous, positively handled viewport prefix.
 
         This never changes ``reached_depth``.  A gap ends the prefix so a
@@ -1420,24 +1548,39 @@ class ProgressiveResumeController:
             or self.current_viewport.ambiguous_surface
         ):
             return 0
-        normalized = normalize_visible_handles(visible_handles)
-        if normalized != self.current_viewport.handles:
+        if snapshot.handles != self.current_viewport.handles:
             return 0
         prefix: list[str] = []
-        for handle in normalized[:MAX_ANCHORS]:
+        for handle in snapshot.handles[:MAX_ANCHORS]:
             if not bool(terminally_handled(handle)):
                 break
             prefix.append(handle)
         if len(prefix) <= len(self.first_pass_evaluated_handles):
             return len(self.first_pass_evaluated_handles)
-        observation = ViewportObservation.build(
-            prefix,
+        prefix_handles = tuple(prefix)
+        prefix_snapshot = DecisionViewportSnapshot(
+            handles=prefix_handles,
+            fingerprint=_viewport_fingerprint_from_normalized(
+                prefix_handles,
+                secret=self.hmac_secret,
+            ),
+            anchor_hashes=_bounded_anchor_hashes_from_normalized(
+                prefix_handles,
+                secret=self.hmac_secret,
+            ),
+            legacy_fingerprint=(
+                hashlib.sha256("\x1f".join(prefix_handles).encode("utf-8")).hexdigest()[:20]
+                if prefix_handles
+                else ""
+            ),
+        )
+        observation = ViewportObservation.from_snapshot(
+            prefix_snapshot,
             followers_surface_confirmed=True,
             expected_target_confirmed=True,
             list_moved=False,
             recoverable=True,
             ambiguous_surface=False,
-            hmac_secret=self.hmac_secret,
         )
         if not observation.fingerprint or not observation.anchor_hashes:
             return len(self.first_pass_evaluated_handles)

@@ -1,11 +1,13 @@
 """Non-destructive profile/sheet probe for Unfollow Phase 2B.
 
-This module may tap a Following-list row and the target profile's Following
-button, but it never taps the Unfollow option and never persists an unfollow.
+This module may tap a Following-list row, the target profile's Following
+button, and an evidence-gated Unfollow confirmation. It never persists an
+unfollow; the orchestrator owns terminal verification and persistence.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -883,11 +885,175 @@ def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
     return "following_absent"
 
 
+_PRIVATE_UNFOLLOW_CONTEXT_MARKERS = (
+    ("if you change your mind", "request to follow"),
+    ("si vous changez d'avis", "demander à suivre"),
+    ("si tu changes d'avis", "demander à suivre"),
+    ("si cambias de opinión", "solicitar seguir"),
+)
+_PRIVATE_UNFOLLOW_CANCEL_LABELS = frozenset(("cancel", "annuler", "cancelar"))
+_PRIVATE_UNFOLLOW_ACTION_LABELS = frozenset(
+    ("unfollow", "ne plus suivre", "dejar de seguir")
+)
+_PRIVATE_UNFOLLOW_UNSAFE_MARKERS = (
+    "challenge_required",
+    "suspicious login",
+    "verify your identity",
+    "confirmez votre identité",
+    "account suspended",
+    "compte suspendu",
+)
+
+
+def classify_private_unfollow_confirmation_snapshot(
+    hierarchy_xml: str,
+    *,
+    target_username: str,
+    profile_identity_certified: bool,
+    private_flow_engaged: bool,
+    screen_w: int,
+    screen_h: int,
+) -> dict[str, Any]:
+    """Classify one immutable private-Unfollow confirmation hierarchy.
+
+    A generic Unfollow label is insufficient.  The exact target profile,
+    private-account consequence text, Cancel control and a single actionable
+    Unfollow control must all be present on the already engaged flow.
+    """
+    target = normalize_unfollow_username(target_username)
+    base = {
+        "present": False,
+        "ok": False,
+        "failure_reason": "private_confirmation_not_present",
+        "target_username": target,
+        "bounds": {},
+        "tap_x": 0,
+        "tap_y": 0,
+        "snapshot_generation": "",
+    }
+    root = _parse_xml_root(hierarchy_xml)
+    if root is None:
+        base["failure_reason"] = "private_confirmation_hierarchy_unreadable"
+        return base
+    all_labels = [
+        str(el.get("text") or el.get("content-desc") or "").strip()
+        for el in root.iter()
+        if str(el.get("text") or el.get("content-desc") or "").strip()
+    ]
+    joined = " ".join(all_labels).casefold()
+    context_present = any(
+        first in joined and second in joined
+        for first, second in _PRIVATE_UNFOLLOW_CONTEXT_MARKERS
+    )
+    cancel_present = any(
+        label.casefold() in _PRIVATE_UNFOLLOW_CANCEL_LABELS for label in all_labels
+    )
+    action_nodes = [
+        el
+        for el in root.iter()
+        if str(el.get("text") or el.get("content-desc") or "").strip().casefold()
+        in _PRIVATE_UNFOLLOW_ACTION_LABELS
+    ]
+    modal_present = bool(context_present and cancel_present and action_nodes)
+    if not modal_present:
+        return base
+    base["present"] = True
+    if not private_flow_engaged:
+        base["failure_reason"] = "private_confirmation_flow_not_engaged"
+        return base
+    if not profile_identity_certified or not target:
+        base["failure_reason"] = "private_confirmation_identity_not_certified"
+        return base
+    actual_raw, _method, _meta = _extract_profile_username_from_hierarchy(
+        hierarchy_xml
+    )
+    actual = normalize_unfollow_username(actual_raw)
+    if actual != target:
+        base["failure_reason"] = "private_confirmation_profile_identity_mismatch"
+        base["actual_profile_username"] = actual
+        return base
+    if any(marker in joined for marker in _PRIVATE_UNFOLLOW_UNSAFE_MARKERS):
+        base["failure_reason"] = "private_confirmation_unsafe_surface"
+        return base
+    if target not in " ".join(all_labels).casefold():
+        base["failure_reason"] = "private_confirmation_target_context_missing"
+        return base
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    candidates: list[tuple[ET.Element, dict[str, int]]] = []
+    for action_node in action_nodes:
+        tap_node = action_node
+        if str(action_node.get("clickable") or "").casefold() != "true":
+            ancestor = _nearest_clickable_ancestor(action_node, parent_map)
+            if ancestor is not None:
+                tap_node = ancestor
+        bounds = _parse_bounds_attr(tap_node.get("bounds"))
+        center = _bounds_center(bounds)
+        if center is None:
+            continue
+        cx, cy = center
+        width = int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+        height = int(bounds.get("bottom", 0)) - int(bounds.get("top", 0))
+        if not (
+            int(screen_w * 0.08) <= cx <= int(screen_w * 0.92)
+            and int(screen_h * 0.25) <= cy <= int(screen_h * 0.82)
+            and width >= int(screen_w * 0.18)
+            and 24 <= height <= int(screen_h * 0.14)
+        ):
+            continue
+        candidates.append((tap_node, bounds))
+    if len(candidates) != 1:
+        base["failure_reason"] = "private_confirmation_action_not_unique"
+        base["action_candidate_count"] = len(candidates)
+        return base
+    _tap_node, bounds = candidates[0]
+    center = _bounds_center(bounds)
+    assert center is not None
+    generation_material = "\x1f".join(
+        (target, str(bounds), " ".join(all_labels).casefold())
+    )
+    base.update(
+        {
+            "ok": True,
+            "failure_reason": "",
+            "bounds": bounds,
+            "tap_x": int(center[0]),
+            "tap_y": int(center[1]),
+            "snapshot_generation": hashlib.sha256(
+                generation_material.encode("utf-8")
+            ).hexdigest()[:20],
+            "actual_profile_username": actual,
+            "context_proved": True,
+            "cancel_control_proved": True,
+            "action_candidate_count": 1,
+        }
+    )
+    return base
+
+
+def _private_confirmation_live_bounds_still_match(
+    d: u2.Device,
+    *,
+    expected_bounds: dict[str, int],
+) -> bool:
+    """Last-moment stale-control guard; it never chooses a different control."""
+    for label in ("Unfollow", "Ne plus suivre", "Dejar de seguir"):
+        try:
+            element = d(text=label)
+            if not element.exists(timeout=0.08):
+                continue
+            return _element_bounds(element) == expected_bounds
+        except Exception:
+            continue
+    return False
+
+
 def verify_unfollow_action_success_after_tap(
     d: u2.Device,
     *,
     target_username: str,
     timeout_s: float = 4.0,
+    profile_identity_certified: bool = False,
+    private_flow_engaged: bool = False,
 ) -> dict[str, Any]:
     """Verify minimal post-unfollow success: sheet closed and Following no longer visible."""
     log("info", "unfollow_action_verify_started", target_username=target_username)
@@ -898,6 +1064,9 @@ def verify_unfollow_action_success_after_tap(
     profile_follow_state_after = "unknown"
     iterations = 0
     follow_visible = False
+    private_confirmation_detected = False
+    private_confirmation_tapped = False
+    private_confirmation_generation = ""
     while time.monotonic() < deadline:
         iterations += 1
         phase_start = time.perf_counter()
@@ -908,6 +1077,127 @@ def verify_unfollow_action_success_after_tap(
             or signals.get("restrict_visible")
             or signals.get("unfollow_visible")
         )
+        private_modal_candidate = bool(
+            signals.get("unfollow_visible")
+            and not signals.get("mute_visible")
+            and not signals.get("restrict_visible")
+            and not private_confirmation_tapped
+        )
+        if private_modal_candidate:
+            hierarchy, hierarchy_dump_ms = _dump_hierarchy_with_timing(d)
+            private_snapshot = classify_private_unfollow_confirmation_snapshot(
+                hierarchy,
+                target_username=target_username,
+                profile_identity_certified=profile_identity_certified,
+                private_flow_engaged=private_flow_engaged,
+                screen_w=_safe_window_size(d)[0],
+                screen_h=_safe_window_size(d)[1],
+            )
+            if private_snapshot.get("present"):
+                private_confirmation_detected = True
+                log(
+                    "info",
+                    "unfollow_private_confirmation_detected",
+                    target_username=target_username,
+                    hierarchy_dump_ms=hierarchy_dump_ms,
+                    snapshot_generation=str(
+                        private_snapshot.get("snapshot_generation") or ""
+                    ),
+                    proof_ok=bool(private_snapshot.get("ok")),
+                    failure_reason=str(private_snapshot.get("failure_reason") or ""),
+                )
+                if not private_snapshot.get("ok"):
+                    out = {
+                        "ok": False,
+                        "verification_method": "private_confirmation_fail_closed",
+                        "sheet_closed": False,
+                        "profile_following_absent": False,
+                        "profile_follow_state_after": "unknown",
+                        "failure_reason": str(
+                            private_snapshot.get("failure_reason")
+                            or "private_confirmation_unproven"
+                        ),
+                        "target_username": target_username,
+                        "verify_iterations": iterations,
+                        "private_confirmation_detected": True,
+                        "private_confirmation_tapped": False,
+                    }
+                    log("info", "unfollow_action_verify_failed", **out)
+                    return out
+                private_confirmation_generation = str(
+                    private_snapshot.get("snapshot_generation") or ""
+                )
+                log(
+                    "info",
+                    "unfollow_private_confirmation_tap_started",
+                    target_username=target_username,
+                    snapshot_generation=private_confirmation_generation,
+                    bounds=dict(private_snapshot.get("bounds") or {}),
+                )
+                if not _private_confirmation_live_bounds_still_match(
+                    d,
+                    expected_bounds=dict(private_snapshot.get("bounds") or {}),
+                ):
+                    out = {
+                        "ok": False,
+                        "verification_method": "private_confirmation_stale_guard",
+                        "sheet_closed": False,
+                        "profile_following_absent": False,
+                        "profile_follow_state_after": "unknown",
+                        "failure_reason": "private_confirmation_disappeared_before_tap",
+                        "target_username": target_username,
+                        "verify_iterations": iterations,
+                        "private_confirmation_detected": True,
+                        "private_confirmation_tapped": False,
+                    }
+                    log("info", "unfollow_action_verify_failed", **out)
+                    return out
+                guard_instagram_action_rate_limit(
+                    d,
+                    phase="unfollow",
+                    preceding_action="private_unfollow_confirmation_pre_tap",
+                )
+                try:
+                    d.click(
+                        int(private_snapshot.get("tap_x") or 0),
+                        int(private_snapshot.get("tap_y") or 0),
+                    )
+                    private_confirmation_tapped = True
+                except Exception as exc:
+                    out = {
+                        "ok": False,
+                        "verification_method": "private_confirmation_tap",
+                        "sheet_closed": False,
+                        "profile_following_absent": False,
+                        "profile_follow_state_after": "unknown",
+                        "failure_reason": "private_confirmation_tap_failed",
+                        "error": str(exc)[:200],
+                        "target_username": target_username,
+                        "verify_iterations": iterations,
+                        "private_confirmation_detected": True,
+                        "private_confirmation_tapped": False,
+                    }
+                    log("info", "unfollow_action_verify_failed", **out)
+                    return out
+                guard_instagram_action_rate_limit(
+                    d,
+                    phase="unfollow",
+                    preceding_action="private_unfollow_confirmation",
+                )
+                log(
+                    "info",
+                    "unfollow_private_confirmation_tapped",
+                    target_username=target_username,
+                    snapshot_generation=private_confirmation_generation,
+                    tap_count=1,
+                )
+                deadline = time.monotonic() + timeout
+                fast_path_deadline = time.monotonic() + min(
+                    1.5,
+                    max(0.5, timeout * 0.45),
+                )
+                time.sleep(0.2)
+                continue
         follow_start = time.perf_counter()
         follow_visible = _exact_follow_button_visible_after_unfollow(d)
         follow_exact_check_ms = _elapsed_ms(follow_start)
@@ -933,6 +1223,9 @@ def verify_unfollow_action_success_after_tap(
                 "failure_reason": "",
                 "target_username": target_username,
                 "verify_iterations": iterations,
+                "private_confirmation_detected": private_confirmation_detected,
+                "private_confirmation_tapped": private_confirmation_tapped,
+                "private_confirmation_generation": private_confirmation_generation,
             }
             log("info", "unfollow_action_verified", **out)
             return out
@@ -968,6 +1261,9 @@ def verify_unfollow_action_success_after_tap(
             "failure_reason": "",
             "target_username": target_username,
             "verify_iterations": iterations,
+            "private_confirmation_detected": private_confirmation_detected,
+            "private_confirmation_tapped": private_confirmation_tapped,
+            "private_confirmation_generation": private_confirmation_generation,
         }
         log("info", "unfollow_action_verified", **out)
         return out
@@ -981,6 +1277,9 @@ def verify_unfollow_action_success_after_tap(
         "failure_reason": "unfollow_verify_conditions_not_met",
         "target_username": target_username,
         "verify_iterations": iterations,
+        "private_confirmation_detected": private_confirmation_detected,
+        "private_confirmation_tapped": private_confirmation_tapped,
+        "private_confirmation_generation": private_confirmation_generation,
     }
     log("info", "unfollow_action_verify_failed", **out)
     return out

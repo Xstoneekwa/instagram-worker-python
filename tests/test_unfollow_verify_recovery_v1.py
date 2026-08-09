@@ -45,6 +45,30 @@ def _decision(
 
 
 class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
+    def test_private_confirmation_ambiguous_failure_uses_existing_recovery_policy(self) -> None:
+        out = decide_verify_failure_after_recovery(
+            verification_ok=False,
+            action_attempted=True,
+            failure_reason="private_confirmation_disappeared_before_tap",
+            exact_following_list_restored=True,
+            package_activity_ok=True,
+            account_identity_ok=True,
+            unsafe_markers_present=False,
+            persistence_ok=True,
+            previous_failure_class="",
+            previous_consecutive_count=0,
+            max_consecutive_failures=2,
+        )
+        self.assertEqual(
+            out.candidate_outcome_class,
+            UnfollowActionOutcomeClass.ACTION_ATTEMPTED_AMBIGUOUS,
+        )
+        self.assertEqual(
+            out.recovery_class,
+            UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE,
+        )
+        self.assertTrue(out.should_continue)
+
     def test_verified_unfollow_resets_failure_streak(self) -> None:
         out = _decision(
             verification_ok=True,
@@ -261,6 +285,27 @@ class UnfollowAmbiguousDurabilityTest(unittest.TestCase):
             1,
         )
         self.assertNotIn("open_own_following_list_from_own_profile(", recovery_helper)
+
+    def test_private_confirmation_success_uses_single_existing_persistence_path(self) -> None:
+        source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
+        verify_block = source.split(
+            "verify_out = verify_unfollow_action_success_after_tap(", 1
+        )[1]
+        self.assertIn("profile_identity_certified=True", verify_block)
+        self.assertIn("private_flow_engaged=True", verify_block)
+        self.assertEqual(source.count("_persist_unfollow_outcome_for_session("), 1)
+        self.assertLess(
+            source.index("verify_ok =", source.index("verify_out =")),
+            source.index("_persist_unfollow_outcome_for_session("),
+        )
+
+    def test_single_action_runtime_also_wires_certified_private_confirmation(self) -> None:
+        source = inspect.getsource(orchestrator.run_unfollow_session)
+        real_action_tail = source.rsplit(
+            "verify_out = verify_unfollow_action_success_after_tap(", 1
+        )[1]
+        self.assertIn("profile_identity_certified=True", real_action_tail)
+        self.assertIn("private_flow_engaged=True", real_action_tail)
 
     def test_existing_already_not_following_terminal_branch_remains_action_free(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
