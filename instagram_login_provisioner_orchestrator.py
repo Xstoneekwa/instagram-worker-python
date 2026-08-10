@@ -131,6 +131,7 @@ PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
 Publisher = Callable[..., dict[str, Any]]
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
+ConnectedIdentityVerifier = Callable[..., Any]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
 STALE_SESSION_LIFECYCLE_SOURCE = "stale_replacement_safety_check"
@@ -274,6 +275,7 @@ def run_login_provisioning_flow(
     credentials_version: int | None = None,
     assignment_updated_at: str | None = None,
     challenge_provenance_loader: ChallengeProvenanceLoader | None = None,
+    connected_identity_verifier: ConnectedIdentityVerifier | None = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -303,6 +305,7 @@ def run_login_provisioning_flow(
     safe_assignment_id = str(assignment_id or "").strip() or None
     safe_assignment_updated_at = str(assignment_updated_at or "").strip() or None
     provenance_loader = challenge_provenance_loader or default_challenge_provenance_loader
+    identity_verifier = connected_identity_verifier or _default_connected_identity_verifier
     safe_adb_serial_masked = _mask_adb_serial(device_serial)
     safe_operator_smoke_active_username = _normalize_identity_username(operator_smoke_active_account_username)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
@@ -343,6 +346,57 @@ def run_login_provisioning_flow(
         "startup_after_retry_screens": [],
         "would_submit_password": False,
     }
+
+    def _connected_identity_gate(
+        extra_metadata: dict[str, Any],
+        *,
+        failure_timings: dict[str, Any] | None = None,
+        failure_warnings: list[str] | None = None,
+    ) -> tuple[dict[str, Any], LoginProvisioningFlowResult | None]:
+        identity_result = _verify_connected_identity_before_ready(
+            d,
+            verifier=identity_verifier,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            run_id=safe_run_id,
+            run_type=safe_run_type,
+        )
+        identity_metadata = _connected_identity_safe_metadata(identity_result)
+        merged_metadata = {**extra_metadata, **identity_metadata}
+        if bool(identity_metadata.get("expected_identity_verified")):
+            actions_taken.append("verify_connected_account_identity")
+            return merged_metadata, None
+
+        identity_failure_reason = str(
+            identity_metadata.get("identity_verification_failure_reason")
+            or "expected_instagram_identity_not_verified"
+        )
+        exact_mismatch = identity_failure_reason == "active_instagram_account_mismatch"
+        failure = _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="identity_verification_failed",
+            reason=identity_failure_reason,
+            failure_reason=identity_failure_reason,
+            final_login_status="mismatch" if exact_mismatch else "logged_out",
+            final_provisioning_status="blocked" if exact_mismatch else "login_pending",
+            final_onboarding_status="blocked" if exact_mismatch else "credentials_submitted",
+            dashboard_action_type=(
+                "review_logged_in_account_mismatch" if exact_mismatch else "retry_provisioning"
+            ),
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=[*actions_taken, "verify_connected_account_identity"],
+            timings=failure_timings or timings,
+            warnings=[*(failure_warnings or warnings), "connected_identity_not_verified_safe"],
+            extra_metadata=merged_metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+        return merged_metadata, failure
 
     if app_start_attempted:
         app_start_result = _attempt_app_start(
@@ -559,6 +613,17 @@ def run_login_provisioning_flow(
             )
         ):
             classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+            identity_metadata, identity_failure = _connected_identity_gate(
+                {
+                    **screen_preparation_metadata,
+                    "selected_route": "already_connected_expected",
+                    "selected_route_reason": "connected_probe_identity_confirmed",
+                    "password_required": False,
+                    "ready_for_password_submit": False,
+                }
+            )
+            if identity_failure is not None:
+                return identity_failure
             return _finalize(
                 ok=True,
                 completed=True,
@@ -574,13 +639,7 @@ def run_login_provisioning_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=warnings,
-                extra_metadata={
-                    **screen_preparation_metadata,
-                    "selected_route": "already_connected_expected",
-                    "selected_route_reason": "connected_probe_identity_confirmed",
-                    "password_required": False,
-                    "ready_for_password_submit": False,
-                },
+                extra_metadata=identity_metadata,
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -617,6 +676,17 @@ def run_login_provisioning_flow(
         )
     ):
         classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+        identity_metadata, identity_failure = _connected_identity_gate(
+            {
+                **screen_preparation_metadata,
+                "selected_route": "already_connected_expected",
+                "selected_route_reason": "connected_probe_identity_confirmed",
+                "password_required": False,
+                "ready_for_password_submit": False,
+            }
+        )
+        if identity_failure is not None:
+            return identity_failure
         return _finalize(
             ok=True,
             completed=True,
@@ -632,13 +702,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata={
-                **screen_preparation_metadata,
-                "selected_route": "already_connected_expected",
-                "selected_route_reason": "connected_probe_identity_confirmed",
-                "password_required": False,
-                "ready_for_password_submit": False,
-            },
+            extra_metadata=identity_metadata,
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -811,6 +875,17 @@ def run_login_provisioning_flow(
             }
             if actual_username and actual_username.strip().lstrip("@").lower() == safe_expected_username.strip().lstrip("@").lower():
                 classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+                identity_metadata, identity_failure = _connected_identity_gate(
+                    {
+                        **old_logged_in_metadata,
+                        "selected_route": "already_connected_expected",
+                        "selected_route_reason": "active_profile_matches_expected",
+                        "password_required": False,
+                        "ready_for_password_submit": False,
+                    }
+                )
+                if identity_failure is not None:
+                    return identity_failure
                 return _finalize(
                     ok=True,
                     completed=True,
@@ -826,13 +901,7 @@ def run_login_provisioning_flow(
                     actions_taken=actions_taken,
                     timings=timings,
                     warnings=warnings,
-                    extra_metadata={
-                        **old_logged_in_metadata,
-                        "selected_route": "already_connected_expected",
-                        "selected_route_reason": "active_profile_matches_expected",
-                        "password_required": False,
-                        "ready_for_password_submit": False,
-                    },
+                    extra_metadata=identity_metadata,
                     total_start=total_start,
                     timer=timer,
                     publisher=publisher,
@@ -1030,6 +1099,7 @@ def run_login_provisioning_flow(
                     device_serial=device_serial,
                     device_id=safe_device_id,
                     expected_app_instance_id=safe_expected_app_instance_id,
+                    connected_identity_verifier=identity_verifier,
                     timer=timer,
                     sleeper=sleeper,
                 )
@@ -1560,6 +1630,19 @@ def run_login_provisioning_flow(
                 old_logged_in_metadata["selected_route"] = "orphan_email_challenge_resume"
                 old_logged_in_metadata["selected_route_reason"] = provenance.reason
             classification = classify_login_probe_outcome(post_action_outcome)
+            post_action_metadata = {
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **route_metadata,
+                "post_action_status_candidate": post_action_outcome,
+                "password_required": False,
+                "ready_for_password_smoke": False,
+                "would_submit_password": False,
+            }
+            if post_action_outcome == LoginProbeOutcome.CONNECTED.value:
+                post_action_metadata, identity_failure = _connected_identity_gate(post_action_metadata)
+                if identity_failure is not None:
+                    return identity_failure
             return _finalize(
                 ok=post_action_outcome == LoginProbeOutcome.CONNECTED.value,
                 completed=post_action_outcome
@@ -1586,15 +1669,7 @@ def run_login_provisioning_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=warnings,
-                extra_metadata={
-                    **_flow_metadata(previous_account_lifecycle),
-                    **old_logged_in_metadata,
-                    **route_metadata,
-                    "post_action_status_candidate": post_action_outcome,
-                    "password_required": False,
-                    "ready_for_password_smoke": False,
-                    "would_submit_password": False,
-                },
+                extra_metadata=post_action_metadata,
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -1909,6 +1984,19 @@ def run_login_provisioning_flow(
         post_action_outcome = _post_action_outcome_from_signals(signals)
         if post_action_outcome:
             classification = classify_login_probe_outcome(post_action_outcome)
+            post_action_metadata = {
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                "post_action_status_candidate": post_action_outcome,
+                "password_required": False,
+                "ready_for_password_smoke": False,
+                "would_submit_password": False,
+            }
+            if post_action_outcome == LoginProbeOutcome.CONNECTED.value:
+                post_action_metadata, identity_failure = _connected_identity_gate(post_action_metadata)
+                if identity_failure is not None:
+                    return identity_failure
             return _finalize(
                 ok=post_action_outcome == LoginProbeOutcome.CONNECTED.value,
                 completed=post_action_outcome
@@ -1935,15 +2023,7 @@ def run_login_provisioning_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=warnings,
-                extra_metadata={
-                    **_flow_metadata(previous_account_lifecycle),
-                    **old_logged_in_metadata,
-                    **post_continue_metadata,
-                    "post_action_status_candidate": post_action_outcome,
-                    "password_required": False,
-                    "ready_for_password_smoke": False,
-                    "would_submit_password": False,
-                },
+                extra_metadata=post_action_metadata,
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -2404,6 +2484,25 @@ def run_login_provisioning_flow(
             "screen_type": password_meta.get("post_submit_screen_type"),
         },
     )
+    final_metadata = {
+        **_flow_metadata(previous_account_lifecycle),
+        **old_logged_in_metadata,
+        **post_continue_metadata,
+        **_pre_submit_observation_metadata(signals),
+        **password_result_metadata,
+    }
+    if outcome == LoginProbeOutcome.CONNECTED.value:
+        final_metadata, identity_failure = _connected_identity_gate(
+            final_metadata,
+            failure_timings=_merge_timings(timings, password_result.timings),
+            failure_warnings=[*warnings, *password_result.warnings],
+        )
+        if identity_failure is not None:
+            return replace(
+                identity_failure,
+                retry_attempted=retry_attempted,
+                retry_count=retry_count,
+            )
     dashboard_action_type = _dashboard_action_for_outcome(
         outcome,
         challenge_type=str(password_meta.get("challenge_type") or ""),
@@ -2435,13 +2534,7 @@ def run_login_provisioning_flow(
         actions_taken=actions_taken,
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
-        extra_metadata={
-            **_flow_metadata(previous_account_lifecycle),
-            **old_logged_in_metadata,
-            **post_continue_metadata,
-            **_pre_submit_observation_metadata(signals),
-            **password_result_metadata,
-        },
+        extra_metadata=final_metadata,
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -5092,8 +5185,17 @@ def _finalize(
         dict(extra_metadata or {}),
         final_outcome=final_outcome,
     )
-    if ok and completed and final_outcome == LoginProbeOutcome.CONNECTED.value:
+    expected_identity = _normalize_identity_username(extra_metadata.get("expected_username"))
+    actual_identity = _normalize_identity_username(extra_metadata.get("actual_logged_in_username"))
+    if (
+        ok
+        and completed
+        and final_outcome == LoginProbeOutcome.CONNECTED.value
+        and expected_identity
+        and actual_identity == expected_identity
+    ):
         extra_metadata.setdefault("expected_identity_verified", True)
+        extra_metadata.setdefault("identity_verification_status", "verified")
     publish_payload = _publish_payload(
         account_id=account_id,
         final_login_status=final_login_status,
@@ -5109,14 +5211,15 @@ def _finalize(
     publish_attempted = False
     publish_result_label = "skipped"
     publish_error_code = ""
-    publish_allowed = _connected_status_publishable(
+    connected_publish_allowed = _connected_status_publishable(
         ok=ok,
         completed=completed,
         final_outcome=final_outcome,
         final_login_status=final_login_status,
         account_id=account_id,
         extra_metadata=extra_metadata,
-    ) or _verification_status_publishable(
+    )
+    publish_allowed = connected_publish_allowed or _verification_status_publishable(
         should_publish_status=should_publish_status,
         final_outcome=final_outcome,
         final_login_status=final_login_status,
@@ -5168,7 +5271,7 @@ def _finalize(
         publish_warnings.extend(challenge_side_effects["warnings"])
 
     follow_source_rotation_provision: dict[str, Any] = {"skipped": True, "db_mutation_performed": False}
-    if account_id and str(final_provisioning_status or "") == "ready":
+    if account_id and str(final_provisioning_status or "") == "ready" and connected_publish_allowed:
         try:
             from follow_source_rotation_settings import maybe_provision_follow_source_rotation_on_ready
 
@@ -5329,6 +5432,12 @@ def _connected_status_publishable(
         return False
     if str(final_login_status or "") != "connected":
         return False
+    if extra_metadata.get("expected_identity_verified") is not True:
+        return False
+    expected_username = _normalize_identity_username(extra_metadata.get("expected_username"))
+    actual_username = _normalize_identity_username(extra_metadata.get("actual_logged_in_username"))
+    if not expected_username or not actual_username or actual_username != expected_username:
+        return False
     selected_route = str(extra_metadata.get("selected_route") or "")
     router_decision = str(extra_metadata.get("router_decision") or "")
     safe_routes = {
@@ -5344,6 +5453,80 @@ def _connected_status_publishable(
         "logout_fallback",
     }
     return bool(selected_route in safe_routes or router_decision or extra_metadata.get("central_orchestrator_used"))
+
+
+def _default_connected_identity_verifier(d: Any, **kwargs: Any) -> Any:
+    from account_identity_guard import verify_active_instagram_account_matches_expected
+
+    return verify_active_instagram_account_matches_expected(d, **kwargs)
+
+
+def _verify_connected_identity_before_ready(
+    d: Any,
+    *,
+    verifier: ConnectedIdentityVerifier,
+    account_id: str,
+    expected_username: str,
+    run_id: str | None,
+    run_type: str,
+) -> Any:
+    try:
+        return verifier(
+            d,
+            expected_account_username=expected_username,
+            account_id=account_id,
+            run_id=run_id,
+            run_type=run_type,
+            stage="login_provisioning_post_login_identity",
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "expected_account_username": expected_username,
+            "actual_logged_in_username": "",
+            "failure_reason": "identity_verification_internal_error",
+            "verification_method": "account_identity_guard_exception",
+            "meta": {"error_type": type(exc).__name__},
+        }
+
+
+def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
+    if hasattr(result, "to_dict") and callable(result.to_dict):
+        raw = result.to_dict()
+    elif isinstance(result, dict):
+        raw = dict(result)
+    else:
+        raw = {
+            "ok": bool(getattr(result, "ok", False)),
+            "expected_account_username": getattr(result, "expected_account_username", ""),
+            "actual_logged_in_username": getattr(result, "actual_logged_in_username", ""),
+            "failure_reason": getattr(result, "failure_reason", ""),
+            "verification_method": getattr(result, "verification_method", ""),
+            "identity_evidence": getattr(result, "identity_evidence", ""),
+        }
+    expected = _safe_public_text(raw.get("expected_account_username"))
+    actual = _safe_public_text(raw.get("actual_logged_in_username"))
+    normalized_expected = _normalize_identity_username(expected)
+    normalized_actual = _normalize_identity_username(actual)
+    verified = bool(raw.get("ok")) and bool(normalized_expected) and normalized_actual == normalized_expected
+    failure_reason = _safe_public_text(raw.get("failure_reason"))
+    if not verified and not failure_reason:
+        failure_reason = (
+            "active_instagram_account_mismatch"
+            if normalized_actual and normalized_actual != normalized_expected
+            else "expected_instagram_identity_not_verified"
+        )
+    verification_method = _safe_public_text(raw.get("verification_method"))
+    identity_evidence = _safe_public_text(raw.get("identity_evidence"))
+    return {
+        "expected_identity_verified": verified,
+        "identity_verification_status": "verified" if verified else "failed",
+        "identity_verification_failure_reason": "" if verified else failure_reason,
+        "expected_username": expected,
+        "actual_logged_in_username": actual,
+        "identity_verification_method": verification_method,
+        "identity_evidence": identity_evidence,
+    }
 
 
 def _verification_status_publishable(

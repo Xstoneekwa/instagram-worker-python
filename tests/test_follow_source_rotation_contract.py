@@ -191,9 +191,42 @@ class FollowSourceRotationContractTest(unittest.TestCase):
                 final_login_status="connected",
                 final_provisioning_status="ready",
                 final_onboarding_status="ready",
+                extra_metadata={
+                    "central_orchestrator_used": True,
+                    "expected_username": "mythyl_fitness",
+                    "actual_logged_in_username": "mythyl_fitness",
+                    "expected_identity_verified": True,
+                    "identity_verification_status": "verified",
+                },
             )
         provision_mock.assert_called_once()
         self.assertIn("follow_source_rotation_provision", result.safe_metadata)
+
+    def test_finalize_ready_without_identity_proof_does_not_provision_rotation(self) -> None:
+        with patch.object(
+            contract,
+            "maybe_provision_follow_source_rotation_on_ready",
+        ) as provision_mock:
+            result = provisioner._finalize(
+                ok=True,
+                completed=True,
+                final_outcome="connected",
+                reason="connected",
+                account_id="acct-1",
+                expected_username="mythyl_fitness",
+                actions_taken=[],
+                timings={},
+                warnings=[],
+                total_start=0.0,
+                timer=lambda: 0.0,
+                publisher=None,
+                publish_enabled=False,
+                final_login_status="connected",
+                final_provisioning_status="ready",
+                final_onboarding_status="ready",
+            )
+        provision_mock.assert_not_called()
+        self.assertTrue(result.safe_metadata["follow_source_rotation_provision"]["skipped"])
 
 
 if __name__ == "__main__":

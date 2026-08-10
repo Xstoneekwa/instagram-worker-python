@@ -386,9 +386,31 @@ def credentials():
     return {"username": USERNAME, "password": SecretValue(PASSWORD), "secret_ref": SECRET_REF}
 
 
+def verified_identity_result(**kwargs):
+    expected = str(kwargs.get("expected_account_username") or "")
+    return {
+        "ok": True,
+        "expected_account_username": expected,
+        "actual_logged_in_username": expected,
+        "failure_reason": "",
+        "verification_method": "unit_test_exact_profile_username",
+        "identity_evidence": "username_exact_match",
+    }
+
+
 class LoginProvisionerOrchestratorTest(unittest.TestCase):
+    def setUp(self) -> None:
+        default_identity_patcher = patch.object(
+            provisioner_orchestrator,
+            "_default_connected_identity_verifier",
+            side_effect=lambda _device, **meta: verified_identity_result(**meta),
+        )
+        default_identity_patcher.start()
+        self.addCleanup(default_identity_patcher.stop)
+
     def run_flow(self, *args, **kwargs):
         kwargs.setdefault("observe_current_screen_only", True)
+        kwargs.setdefault("connected_identity_verifier", lambda _device, **meta: verified_identity_result(**meta))
         return run_login_provisioning_flow(*args, **kwargs)
 
     def _canceled_lifecycle(self) -> Mock:
@@ -2631,6 +2653,107 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["publish_result"], "published")
         publisher.assert_called_once()
 
+    def test_connected_ready_publication_requires_exact_identity_guard_success(self) -> None:
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+        identity_verifier = Mock(
+            return_value={
+                "ok": True,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": USERNAME,
+                "failure_reason": "",
+                "verification_method": "own_profile_username_exact:action_bar_title",
+                "identity_evidence": "username_exact_match",
+            }
+        )
+
+        result = self._run_login_form(
+            CONNECTED_XML,
+            publisher=publisher,
+            publish_enabled=True,
+            connected_identity_verifier=identity_verifier,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.published)
+        self.assertTrue(result.safe_metadata["expected_identity_verified"])
+        self.assertEqual(result.safe_metadata["actual_logged_in_username"], USERNAME)
+        self.assertEqual(result.safe_metadata["identity_verification_status"], "verified")
+        identity_verifier.assert_called_once()
+        publisher.assert_called_once()
+
+    def test_connected_screen_without_identity_proof_fails_closed_before_ready_publication(self) -> None:
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+        identity_verifier = Mock(
+            return_value={
+                "ok": False,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": "",
+                "failure_reason": "actual_logged_in_username_not_detected",
+                "verification_method": "own_profile_username_exact:own_profile_username_not_found",
+                "identity_evidence": "username_mismatch_stable_id_unavailable",
+            }
+        )
+
+        result = self._run_login_form(
+            CONNECTED_XML,
+            publisher=publisher,
+            publish_enabled=True,
+            connected_identity_verifier=identity_verifier,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.final_login_status, "logged_out")
+        self.assertEqual(result.final_provisioning_status, "login_pending")
+        self.assertEqual(result.final_onboarding_status, "credentials_submitted")
+        self.assertFalse(result.should_publish_status)
+        self.assertFalse(result.published)
+        self.assertFalse(result.safe_metadata["expected_identity_verified"])
+        self.assertEqual(result.safe_metadata["identity_verification_status"], "failed")
+        self.assertIn("connected_identity_not_verified_safe", result.warnings)
+        publisher.assert_not_called()
+
+    def test_connected_identity_verifier_exception_fails_closed_without_secret_or_ready_publish(self) -> None:
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+
+        result = self._run_login_form(
+            CONNECTED_XML,
+            publisher=publisher,
+            publish_enabled=True,
+            connected_identity_verifier=Mock(side_effect=RuntimeError("sensitive internal failure")),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "identity_verification_internal_error")
+        self.assertFalse(result.published)
+        self.assertNotIn("sensitive internal failure", json.dumps(result.safe_metadata, sort_keys=True))
+        publisher.assert_not_called()
+
+    def test_connected_identity_verifier_inconsistent_success_fails_closed(self) -> None:
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+
+        result = self._run_login_form(
+            CONNECTED_XML,
+            publisher=publisher,
+            publish_enabled=True,
+            connected_identity_verifier=Mock(
+                return_value={
+                    "ok": True,
+                    "expected_account_username": USERNAME,
+                    "actual_logged_in_username": "another_profile",
+                    "failure_reason": "",
+                    "verification_method": "inconsistent_test_double",
+                }
+            ),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.reason, "active_instagram_account_mismatch")
+        self.assertEqual(result.final_login_status, "mismatch")
+        self.assertEqual(result.final_provisioning_status, "blocked")
+        publisher.assert_not_called()
+
     def test_publish_payload_matches_real_publisher_signature(self) -> None:
         calls = []
 
@@ -2859,6 +2982,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 "credential_runtime_read_started",
                 "credential_runtime_read_ok",
                 "login_form_submit",
+                "verify_connected_account_identity",
             ],
         )
 
@@ -4653,8 +4777,18 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         for forbidden in (PASSWORD, SECRET_REF, VAULT_ID, "secret_ref", "vault", "Vault", "token", "emulator-5554", "xml", "screenshot"):
             self.assertNotIn(forbidden, rendered)
 
-    def _run_login_form(self, xml: str, *, publisher=None, publish_enabled: bool = False):
+    def _run_login_form(
+        self,
+        xml: str,
+        *,
+        publisher=None,
+        publish_enabled: bool = False,
+        connected_identity_verifier=None,
+    ):
         device, _selectors = configured_device(xml)
+        kwargs = {}
+        if connected_identity_verifier is not None:
+            kwargs["connected_identity_verifier"] = connected_identity_verifier
         return self.run_flow(
             device,
             account_id=ACCOUNT_ID,
@@ -4663,6 +4797,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=LOGIN_FORM_SIGNALS,
             publisher=publisher,
             publish_enabled=publish_enabled,
+            **kwargs,
         )
 
     def _run_continue_password_only(self, post_submit_xml: str):
