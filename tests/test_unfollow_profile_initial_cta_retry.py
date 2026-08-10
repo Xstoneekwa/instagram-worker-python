@@ -22,7 +22,7 @@ class _WideButtonDevice(_Device):
             '<hierarchy><node text="Following" content-desc="Following e-baie.be" '
             'resource-id="com.instagram.androif:id/profile_header_follow_button" '
             'class="android.widget.Button" clickable="true" '
-            'bounds="[33,752][941,842]" /></hierarchy>'
+            'bounds="[33,539][1047,629]" /></hierarchy>'
         )
 
 
@@ -99,7 +99,62 @@ class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["following_detection_method"], "verified_profile_wide_resource_button")
-        self.assertEqual(device.clicks, [(487, 797)])
+        self.assertEqual(device.clicks, [(540, 584)])
+
+    def test_same_wide_shape_without_native_following_resource_remains_rejected(self) -> None:
+        self.assertFalse(
+            probe._verified_profile_wide_following_cta(
+                bounds={"left": 33, "top": 539, "right": 1047, "bottom": 629},
+                screen_w=1080,
+                reject_reason="bounds_shape_rejected",
+                resource_id="com.instagram.androif:id/unrelated_button",
+                class_name="android.widget.Button",
+                clickable=True,
+                text="Following",
+            )
+        )
+
+    def test_post_tap_evidence_treats_native_full_row_following_as_still_following(self) -> None:
+        device = _WideButtonDevice()
+        self.assertTrue(
+            probe._following_button_visible_in_hierarchy(
+                device.dump_hierarchy(),
+                d=device,
+            )
+        )
+
+    def test_strict_verify_cannot_report_success_while_full_row_following_remains(self) -> None:
+        device = _WideButtonDevice()
+        with patch.object(
+            probe,
+            "_detect_actions_sheet_signals",
+            return_value={},
+        ), patch.object(
+            probe,
+            "_exact_follow_button_visible_after_unfollow",
+            return_value=False,
+        ), patch.object(
+            probe,
+            "detect_profile_following_button_for_unfollow",
+            return_value={"ok": True},
+        ) as detector, patch.object(
+            probe.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.1, 0.6],
+        ), patch.object(probe, "log"):
+            result = probe.verify_unfollow_action_success_after_tap(
+                device,
+                target_username="saad123_ak",
+                timeout_s=0.5,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["profile_follow_state_after"], "following")
+        detector.assert_called_once_with(
+            device,
+            expected_target_username="",
+            allow_verified_wide_cta=True,
+        )
 
 
 if __name__ == "__main__":

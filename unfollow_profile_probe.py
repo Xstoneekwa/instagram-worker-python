@@ -224,6 +224,37 @@ def _unfollow_button_bounds_reject_reason(
     return ""
 
 
+def _verified_profile_wide_following_cta(
+    *,
+    bounds: dict[str, int],
+    screen_w: int,
+    reject_reason: str,
+    resource_id: str,
+    class_name: str,
+    clickable: bool,
+    text: str,
+) -> bool:
+    """Accept Instagram's native full-row Following CTA after profile proof.
+
+    Some profiles render the same native header button with symmetric 3% side
+    margins (1014px on a 1080px viewport).  Keep this exception bound to the
+    exact Instagram resource/class/label and to an otherwise-valid profile CTA
+    band; arbitrary wide clickables remain rejected.
+    """
+    width = int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+    return bool(
+        reject_reason == "bounds_shape_rejected"
+        and width > int(screen_w * 0.62)
+        and width <= int(screen_w * 0.96)
+        and int(bounds.get("left", 0)) >= 0
+        and int(bounds.get("right", 0)) <= int(screen_w)
+        and resource_id.rsplit("/", 1)[-1] == "profile_header_follow_button"
+        and class_name == "android.widget.Button"
+        and clickable
+        and text in _FOLLOWING_BUTTON_LABELS
+    )
+
+
 def _positive_not_following_relationship_state(
     root: ET.Element | None,
     *,
@@ -442,15 +473,15 @@ def detect_profile_following_button_for_unfollow(
         )
         verified_wide_cta = bool(
             allow_verified_wide_cta
-            and reject_reason == "bounds_shape_rejected"
-            and int(bounds.get("right", 0)) - int(bounds.get("left", 0))
-            <= int(screen_w * 0.92)
-            and int(bounds.get("right", 0)) - int(bounds.get("left", 0))
-            > int(screen_w * 0.62)
-            and rid.rsplit("/", 1)[-1] == "profile_header_follow_button"
-            and cls == "android.widget.Button"
-            and clickable
-            and text in _FOLLOWING_BUTTON_LABELS
+            and _verified_profile_wide_following_cta(
+                bounds=bounds,
+                screen_w=screen_w,
+                reject_reason=reject_reason,
+                resource_id=rid,
+                class_name=cls,
+                clickable=clickable,
+                text=text,
+            )
         )
         if verified_wide_cta:
             reject_reason = ""
@@ -879,7 +910,11 @@ def _exact_follow_button_visible_after_unfollow(d: u2.Device) -> bool:
 def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
     if _exact_follow_button_visible_after_unfollow(d):
         return "follow"
-    det = detect_profile_following_button_for_unfollow(d, expected_target_username="")
+    det = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username="",
+        allow_verified_wide_cta=True,
+    )
     if det.get("ok"):
         return "following"
     return "following_absent"
@@ -1251,7 +1286,11 @@ def verify_unfollow_action_success_after_tap(
         time.sleep(0.25)
 
     fallback_start = time.perf_counter()
-    det = detect_profile_following_button_for_unfollow(d, expected_target_username="")
+    det = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username="",
+        allow_verified_wide_cta=True,
+    )
     fallback_ms = _elapsed_ms(fallback_start)
     profile_follow_state_after = "following" if det.get("ok") else "following_absent"
     following_absent = profile_follow_state_after != "following"
@@ -1314,7 +1353,23 @@ def _following_button_visible_in_hierarchy(hierarchy_xml: str, *, d: u2.Device) 
         if not label_ok:
             continue
         bounds = _parse_bounds_attr(el.get("bounds"))
-        if not _unfollow_button_bounds_reject_reason(bounds, screen_w=screen_w, screen_h=screen_h):
+        reject_reason = _unfollow_button_bounds_reject_reason(
+            bounds,
+            screen_w=screen_w,
+            screen_h=screen_h,
+        )
+        resource_id = str(el.get("resource-id") or "")
+        class_name = str(el.get("class") or "")
+        clickable = str(el.get("clickable") or "").casefold() == "true"
+        if not reject_reason or _verified_profile_wide_following_cta(
+            bounds=bounds,
+            screen_w=screen_w,
+            reject_reason=reject_reason,
+            resource_id=resource_id,
+            class_name=class_name,
+            clickable=clickable,
+            text=text,
+        ):
             return True
     return False
 
