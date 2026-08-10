@@ -23,6 +23,7 @@ from login_challenge_provenance import (
     ChallengeProvenanceLoader,
     default_challenge_provenance_loader,
     evaluate_pre_input_email_challenge,
+    evaluate_pre_input_verification_challenge,
     PROVENANCE_KIND_ACTIVE_RUN,
 )
 from login_orphan_recovery_state import ORPHAN_RECOVERY_EVENT_DETECTED, record_orphan_recovery_event
@@ -1568,10 +1569,18 @@ def run_login_provisioning_flow(
         if post_action_outcome:
             if (
                 post_action_outcome == LoginProbeOutcome.VERIFICATION_PENDING.value
-                and str(routing_signals.get("screen_type") or "") == "email_code_challenge"
+                and (
+                    routing_signals.get("verification_code_challenge_present") is True
+                    or str(routing_signals.get("screen_type") or "") in {
+                        "email_code_challenge",
+                        "sms_code_challenge",
+                        "whatsapp_code_challenge",
+                        "authenticator_app_code_challenge",
+                    }
+                )
             ):
                 historical_action = provenance_loader(safe_account_id)
-                provenance = evaluate_pre_input_email_challenge(
+                provenance = evaluate_pre_input_verification_challenge(
                     routing_signals=routing_signals,
                     package_guard_mismatch=bool(screen_preparation_metadata.get("package_guard_mismatch")),
                     account_id=safe_account_id,
@@ -1619,7 +1628,7 @@ def run_login_provisioning_flow(
                             **_flow_metadata(previous_account_lifecycle),
                             **old_logged_in_metadata,
                             **route_metadata,
-                            "selected_route": "orphan_email_challenge_blocked",
+                            "selected_route": "orphan_verification_challenge_blocked",
                             "selected_route_reason": provenance.reason,
                         },
                         total_start=total_start,
@@ -1627,7 +1636,7 @@ def run_login_provisioning_flow(
                         publisher=publisher,
                         publish_enabled=publish_enabled,
                     )
-                old_logged_in_metadata["selected_route"] = "orphan_email_challenge_resume"
+                old_logged_in_metadata["selected_route"] = "orphan_verification_challenge_resume"
                 old_logged_in_metadata["selected_route_reason"] = provenance.reason
             classification = classify_login_probe_outcome(post_action_outcome)
             post_action_metadata = {
@@ -3901,6 +3910,9 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         "continue_password_only",
         "join_instagram_landing",
         "email_code_challenge",
+        "sms_code_challenge",
+        "whatsapp_code_challenge",
+        "authenticator_app_code_challenge",
         "active_account_home",
         "active_account_profile",
         "connected_home",
@@ -4315,7 +4327,12 @@ def _pre_submit_observation_metadata(signals: dict[str, Any]) -> dict[str, Any]:
 
 def _post_action_outcome_from_signals(signals: dict[str, Any]) -> str:
     screen_type = str(signals.get("screen_type") or "").strip()
-    if screen_type == "email_code_challenge":
+    if signals.get("verification_code_challenge_present") is True or screen_type in {
+        "email_code_challenge",
+        "sms_code_challenge",
+        "whatsapp_code_challenge",
+        "authenticator_app_code_challenge",
+    }:
         return LoginProbeOutcome.VERIFICATION_PENDING.value
     outcome = str(signals.get("login_probe_outcome") or "unknown").strip()
     if outcome in {
@@ -4888,7 +4905,10 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "post_submit_interval_ms",
             "post_submit_loading_timeout",
             "email_code_challenge_detected",
+            "verification_code_challenge_detected",
             "challenge_type",
+            "verification_channel",
+            "verification_code_expired",
             "masked_email_present",
             "post_submit_screens",
             "final_terminal_screen",
@@ -4974,7 +4994,12 @@ def _dashboard_action_for_outcome(
     post_submit_screen_type: str = "",
 ) -> str | None:
     if outcome == LoginProbeOutcome.VERIFICATION_PENDING.value:
-        if challenge_type == "email" or post_submit_screen_type == "email_code_challenge":
+        if challenge_type in {"email", "sms", "whatsapp", "authenticator_app"} or post_submit_screen_type in {
+            "email_code_challenge",
+            "sms_code_challenge",
+            "whatsapp_code_challenge",
+            "authenticator_app_code_challenge",
+        }:
             return "enter_email_verification_code"
         return None
     if outcome == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value:
@@ -5724,7 +5749,7 @@ def _post_email_code_password_screen_ready(signals: dict[str, Any]) -> bool:
 def _signals_indicate_password_entry_ready(signals: dict[str, Any]) -> bool:
     if _post_email_code_password_screen_ready(signals):
         return True
-    if signals.get("email_code_challenge_present") is True:
+    if signals.get("verification_code_challenge_present") is True:
         return False
     return bool(signals.get("has_password_field")) and bool(signals.get("has_login_button"))
 
@@ -5740,7 +5765,10 @@ def _should_chain_password_after_email_code_resume(resume_result: Any, password_
         return True
     failure = str(getattr(resume_result, "failure_reason", "") or "")
     reason = str(getattr(resume_result, "reason", "") or "")
-    if failure in {"email_code_challenge_screen_required"} or reason in {"post_code_password_required"}:
+    if failure in {
+        "email_code_challenge_screen_required",
+        "verification_code_challenge_screen_required",
+    } or reason in {"post_code_password_required"}:
         return _signals_indicate_password_entry_ready(password_signals)
     if failure.startswith("verification_code") or reason in {"verification_code_input_empty", "adb_not_available"}:
         return _signals_indicate_password_entry_ready(password_signals)
@@ -5773,6 +5801,7 @@ def _submit_password_after_email_code(
     action_id: str | None,
     consume_from_action: bool,
     resume_extra_metadata: dict[str, Any],
+    connected_identity_verifier: ConnectedIdentityVerifier,
 ) -> LoginProvisioningFlowResult:
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
@@ -5908,6 +5937,26 @@ def _submit_password_after_email_code(
     outcome = _password_result_outcome(password_result)
     password_result_metadata = {"password_result": _safe_password_result_metadata(password_result)}
     password_meta = password_result_metadata["password_result"]
+    identity_metadata: dict[str, Any] = {}
+    identity_failure_reason = ""
+    if outcome == LoginProbeOutcome.CONNECTED.value:
+        identity_result = _verify_connected_identity_before_ready(
+            d,
+            verifier=connected_identity_verifier,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            run_id=run_id,
+            run_type=run_type,
+        )
+        identity_metadata = _connected_identity_safe_metadata(identity_result)
+        actions_taken.append("verify_connected_account_identity")
+        if identity_metadata.get("expected_identity_verified") is not True:
+            identity_failure_reason = str(
+                identity_metadata.get("identity_verification_failure_reason")
+                or "expected_instagram_identity_not_verified"
+            )
+            outcome = "identity_verification_failed"
+            warnings.append("connected_identity_not_verified_safe")
     classification = classify_login_probe_outcome(
         outcome,
         metadata={
@@ -5920,7 +5969,11 @@ def _submit_password_after_email_code(
         challenge_type=str(password_meta.get("challenge_type") or ""),
         post_submit_screen_type=str(password_meta.get("post_submit_screen_type") or ""),
     )
+    if identity_failure_reason:
+        dashboard_action_type = "enter_email_verification_code"
     final_reason = _final_reason_for_password_outcome(outcome, password_result, classification.reason)
+    if identity_failure_reason:
+        final_reason = identity_failure_reason
 
     action_sync: dict[str, Any] | None = None
     if consume_from_action and action_id:
@@ -5929,9 +5982,13 @@ def _submit_password_after_email_code(
                 action_id=action_id,
                 account_id=safe_account_id,
                 run_id=run_id,
-                ok=outcome == LoginProbeOutcome.CONNECTED.value,
+                ok=outcome == LoginProbeOutcome.CONNECTED.value and not identity_failure_reason,
                 final_outcome=outcome,
-                failure_reason=None if outcome == LoginProbeOutcome.CONNECTED.value else outcome,
+                failure_reason=(
+                    None
+                    if outcome == LoginProbeOutcome.CONNECTED.value and not identity_failure_reason
+                    else identity_failure_reason or outcome
+                ),
                 screen_type=str(password_meta.get("post_submit_screen_type") or ""),
             )
         except Exception:
@@ -5939,7 +5996,8 @@ def _submit_password_after_email_code(
 
     return _finalize(
         ok=outcome == LoginProbeOutcome.CONNECTED.value,
-        completed=outcome
+        completed=bool(identity_failure_reason)
+        or outcome
         in {
             LoginProbeOutcome.CONNECTED.value,
             LoginProbeOutcome.NEEDS_2FA.value,
@@ -5950,14 +6008,20 @@ def _submit_password_after_email_code(
         },
         final_outcome=outcome,
         reason=final_reason,
-        failure_reason=None if outcome == LoginProbeOutcome.CONNECTED.value else outcome,
-        final_login_status=classification.login_status,
-        final_provisioning_status=classification.provisioning_status,
-        final_onboarding_status=classification.onboarding_status,
+        failure_reason=(
+            None
+            if outcome == LoginProbeOutcome.CONNECTED.value
+            else identity_failure_reason or outcome
+        ),
+        final_login_status="verification_pending" if identity_failure_reason else classification.login_status,
+        final_provisioning_status=(
+            "login_verification_pending" if identity_failure_reason else classification.provisioning_status
+        ),
+        final_onboarding_status="verification_pending" if identity_failure_reason else classification.onboarding_status,
         retry_attempted=retry_attempted,
         retry_count=retry_count,
         dashboard_action_type=dashboard_action_type,
-        should_publish_status=classification.should_publish,
+        should_publish_status=classification.should_publish or bool(identity_failure_reason),
         account_id=safe_account_id,
         expected_username=safe_expected_username,
         actions_taken=actions_taken,
@@ -5968,6 +6032,7 @@ def _submit_password_after_email_code(
             **({"verification_action_sync": action_sync} if action_sync else {}),
             **_pre_submit_observation_metadata(signals),
             **password_result_metadata,
+            **identity_metadata,
             "post_email_code_password_submit": True,
         },
         total_start=total_start,
@@ -5998,8 +6063,9 @@ def run_email_code_resume_flow(
     max_retry_attempts: int = MAX_RETRY_ATTEMPTS,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
+    connected_identity_verifier: ConnectedIdentityVerifier | None = None,
 ) -> LoginProvisioningFlowResult:
-    """Resume login from the email verification code screen without reloading credentials."""
+    """Resume the canonical verification-code challenge without reloading credentials."""
 
     timer = timer or time.perf_counter
     sleeper = sleeper or time.sleep
@@ -6015,6 +6081,7 @@ def run_email_code_resume_flow(
     safe_expected_app_instance_id = str(expected_app_instance_id or "").strip() or None
     safe_adb_serial_masked = _mask_adb_serial(device_serial)
     code_value = verification_code
+    identity_verifier = connected_identity_verifier or _default_connected_identity_verifier
     resume_extra_base: dict[str, Any] = {
         "resume_mode": "consume_action" if consume_from_action else "stdin",
         "run_id": run_id,
@@ -6137,6 +6204,7 @@ def run_email_code_resume_flow(
             action_id=action_id,
             consume_from_action=consume_from_action,
             resume_extra_metadata={**resume_extra_base, "email_code_entry_skipped": True},
+            connected_identity_verifier=identity_verifier,
         )
 
     resume_result = execute_email_code_challenge_resume(
@@ -6158,6 +6226,61 @@ def run_email_code_resume_flow(
     }
 
     if resume_result.ok:
+        identity_result = _verify_connected_identity_before_ready(
+            d,
+            verifier=identity_verifier,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            run_id=run_id,
+            run_type=safe_run_type,
+        )
+        identity_metadata = _connected_identity_safe_metadata(identity_result)
+        if identity_metadata.get("expected_identity_verified") is not True:
+            identity_failure_reason = str(
+                identity_metadata.get("identity_verification_failure_reason")
+                or "expected_instagram_identity_not_verified"
+            )
+            action_sync: dict[str, Any] | None = None
+            if consume_from_action and action_id:
+                try:
+                    action_sync = sync_verification_action_after_email_code_resume(
+                        action_id=action_id,
+                        account_id=safe_account_id,
+                        run_id=run_id,
+                        ok=False,
+                        final_outcome="identity_verification_failed",
+                        failure_reason=identity_failure_reason,
+                        screen_type=str(resume_result.post_submit_screen_type or ""),
+                    )
+                except Exception:
+                    warnings.append("verification_action_sync_failed_safe")
+            return _finalize(
+                ok=False,
+                completed=True,
+                final_outcome="identity_verification_failed",
+                reason=identity_failure_reason,
+                failure_reason=identity_failure_reason,
+                final_login_status="verification_pending",
+                final_provisioning_status="login_verification_pending",
+                final_onboarding_status="verification_pending",
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=[*actions_taken, "verify_connected_account_identity"],
+                timings=_merge_timings(timings, resume_result.timings),
+                warnings=[*warnings, *resume_result.warnings, "connected_identity_not_verified_safe"],
+                extra_metadata={
+                    **resume_extra_base,
+                    **email_code_metadata,
+                    **identity_metadata,
+                    **({"verification_action_sync": action_sync} if action_sync else {}),
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+                dashboard_action_type="enter_email_verification_code",
+                should_publish_status=True,
+            )
         action_sync: dict[str, Any] | None = None
         if consume_from_action and action_id:
             try:
@@ -6197,6 +6320,7 @@ def run_email_code_resume_flow(
             extra_metadata={
                 **resume_extra_base,
                 **email_code_metadata,
+                **identity_metadata,
                 **({"verification_action_sync": action_sync} if action_sync else {}),
             },
             total_start=total_start,
@@ -6243,6 +6367,7 @@ def run_email_code_resume_flow(
             action_id=action_id,
             consume_from_action=consume_from_action,
             resume_extra_metadata={**resume_extra_base, **email_code_metadata},
+            connected_identity_verifier=identity_verifier,
         )
 
     classification = classify_login_probe_outcome(

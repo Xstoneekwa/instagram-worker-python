@@ -1,4 +1,4 @@
-"""Canonical provenance rules for adopting an email-code challenge screen."""
+"""Canonical provenance rules for adopting verification-code challenge screens."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ ACTIVE_EMAIL_CODE_ACTION_STATUSES = frozenset(
 )
 PROVENANCE_KIND_ACTIVE_RUN = "active_run_post_submit"
 EMAIL_CODE_CHALLENGE_TTL = timedelta(minutes=10)
+SUPPORTED_VERIFICATION_CHANNELS = frozenset(
+    {"email", "sms", "whatsapp", "authenticator_app"}
+)
 
 
 @dataclass(frozen=True)
@@ -47,11 +50,52 @@ def evaluate_pre_input_email_challenge(
     historical_action: Optional[dict[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> ChallengeProvenanceVerdict:
+    """Backward-compatible wrapper for the generic challenge provenance gate."""
+
+    return evaluate_pre_input_verification_challenge(
+        routing_signals=routing_signals,
+        package_guard_mismatch=package_guard_mismatch,
+        account_id=account_id,
+        run_id=run_id,
+        expected_app_instance_id=expected_app_instance_id,
+        assignment_id=assignment_id,
+        credentials_version=credentials_version,
+        assignment_updated_at=assignment_updated_at,
+        historical_action=historical_action,
+        now=now,
+    )
+
+
+def evaluate_pre_input_verification_challenge(
+    *,
+    routing_signals: dict[str, Any],
+    package_guard_mismatch: bool,
+    account_id: str,
+    run_id: str | None,
+    expected_app_instance_id: str | None,
+    assignment_id: str | None = None,
+    credentials_version: int | None = None,
+    assignment_updated_at: str | None = None,
+    historical_action: Optional[dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+) -> ChallengeProvenanceVerdict:
     """Reject orphan pre-input challenges unless server-side strong provenance exists."""
 
     screen_type = str(routing_signals.get("screen_type") or "")
-    if screen_type != "email_code_challenge":
-        return ChallengeProvenanceVerdict.blocked("not_email_code_challenge")
+    channel = str(
+        routing_signals.get("verification_channel")
+        or routing_signals.get("challenge_type")
+        or ""
+    ).strip()
+    if (
+        routing_signals.get("verification_code_challenge_present") is not True
+        and screen_type != "email_code_challenge"
+    ):
+        return ChallengeProvenanceVerdict.blocked("not_verification_code_challenge")
+    if not channel and screen_type == "email_code_challenge":
+        channel = "email"
+    if channel not in SUPPORTED_VERIFICATION_CHANNELS:
+        return ChallengeProvenanceVerdict.blocked("verification_channel_unsupported")
     if package_guard_mismatch:
         return ChallengeProvenanceVerdict.blocked("unexpected_foreground_package")
     if not str(account_id or "").strip():
@@ -61,7 +105,7 @@ def evaluate_pre_input_email_challenge(
     if not historical_action:
         return ChallengeProvenanceVerdict.blocked("pre_input_challenge_orphan")
 
-    return evaluate_historical_email_challenge_provenance(
+    return evaluate_historical_verification_challenge_provenance(
         action_row=historical_action,
         account_id=account_id,
         run_id=run_id,
@@ -69,6 +113,7 @@ def evaluate_pre_input_email_challenge(
         assignment_id=assignment_id,
         credentials_version=credentials_version,
         assignment_updated_at=assignment_updated_at,
+        expected_channel=channel,
         now=now,
     )
 
@@ -82,6 +127,33 @@ def evaluate_historical_email_challenge_provenance(
     assignment_id: str | None = None,
     credentials_version: int | None = None,
     assignment_updated_at: str | None = None,
+    now: datetime | None = None,
+) -> ChallengeProvenanceVerdict:
+    """Backward-compatible wrapper for historical generic provenance."""
+
+    return evaluate_historical_verification_challenge_provenance(
+        action_row=action_row,
+        account_id=account_id,
+        run_id=run_id,
+        expected_app_instance_id=expected_app_instance_id,
+        assignment_id=assignment_id,
+        credentials_version=credentials_version,
+        assignment_updated_at=assignment_updated_at,
+        expected_channel="email",
+        now=now,
+    )
+
+
+def evaluate_historical_verification_challenge_provenance(
+    *,
+    action_row: dict[str, Any] | None,
+    account_id: str,
+    run_id: str | None,
+    expected_app_instance_id: str | None,
+    assignment_id: str | None = None,
+    credentials_version: int | None = None,
+    assignment_updated_at: str | None = None,
+    expected_channel: str | None = None,
     now: datetime | None = None,
 ) -> ChallengeProvenanceVerdict:
     """Accept only when every strong provenance field is present and consistent."""
@@ -102,6 +174,12 @@ def evaluate_historical_email_challenge_provenance(
         return ChallengeProvenanceVerdict.blocked("historical_account_mismatch")
 
     metadata = _read_metadata(action_row)
+    historical_channel = str(
+        metadata.get("verification_channel") or metadata.get("challenge_type") or "email"
+    ).strip()
+    channel = str(expected_channel or "").strip()
+    if channel and historical_channel != channel:
+        return ChallengeProvenanceVerdict.blocked("historical_verification_channel_mismatch")
     if str(metadata.get("session_invalidated") or "").lower() in {"1", "true", "yes"}:
         return ChallengeProvenanceVerdict.blocked("historical_session_invalidated")
 

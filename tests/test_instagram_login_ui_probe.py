@@ -74,7 +74,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         signals = extract_login_screen_signals_from_hierarchy(xml)
 
         self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
-        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.reason, "verification_code_required")
         self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
         self.assertEqual(result.metadata["challenge_type"], "email")
         self.assertTrue(result.metadata["masked_email_present"])
@@ -92,7 +92,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
 
         self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
-        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.reason, "verification_code_required")
         self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
         self.assertEqual(result.metadata["challenge_type"], "email")
         self.assertTrue(result.metadata["masked_email_present"])
@@ -109,7 +109,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
 
         self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
-        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.reason, "verification_code_required")
         self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
         self.assertEqual(result.metadata["challenge_type"], "email")
 

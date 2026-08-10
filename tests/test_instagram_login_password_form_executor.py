@@ -1044,7 +1044,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.post_submit_outcome, "verification_pending")
-        self.assertEqual(result.post_submit_probe_reason, "email_verification_code_required")
+        self.assertEqual(result.post_submit_probe_reason, "verification_code_required")
         self.assertEqual(result.post_submit_screen_type, "email_code_challenge")
         self.assertEqual(
             result.safe_metadata["post_submit_screens"],
@@ -1342,7 +1342,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.post_submit_outcome, "verification_pending")
-        self.assertEqual(result.post_submit_probe_reason, "email_verification_code_required")
+        self.assertEqual(result.post_submit_probe_reason, "verification_code_required")
         self.assertEqual(result.post_submit_screen_type, "email_code_challenge")
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 2)
         self.assertEqual(result.safe_metadata["post_submit_screens"], ["loading", "email_code_challenge"])

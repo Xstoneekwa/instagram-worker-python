@@ -20,7 +20,7 @@ class LoginChallengeRuntimeTests(unittest.TestCase):
                 masked_email_present=True,
             )
         kwargs = publish.call_args.kwargs
-        self.assertEqual(kwargs["incident_type"], "email_verification_code_required")
+        self.assertEqual(kwargs["incident_type"], "login_verification_code_required")
         self.assertEqual(kwargs["metadata"]["dashboard_action_type"], "enter_email_verification_code")
         self.assertNotIn("verification_code", kwargs["metadata"])
 

@@ -1035,6 +1035,234 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn(PASSWORD, rendered)
         self.assertNotIn("123456", rendered)
 
+    def test_verification_code_submission_cannot_mark_connected_without_identity_proof(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML], foreground_package="com.instagram.android")
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=True,
+            executed=True,
+            action="email_code_submit",
+            reason="connected_ui_signal",
+            post_submit_outcome="connected",
+            post_submit_probe_reason="connected_ui_signal",
+            post_submit_screen_type="active_account_home",
+            code_entered=True,
+            continue_tapped=True,
+            safe_metadata={"verification_channel": "sms"},
+        )
+        identity_verifier = Mock(
+            return_value={
+                "ok": False,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": "other_account",
+                "profile_opened": True,
+                "failure_reason": "active_instagram_account_mismatch",
+                "verification_method": "account_identity_guard",
+            }
+        )
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                return_value={
+                    "screen_type": "sms_code_challenge",
+                    "verification_code_challenge_present": True,
+                    "verification_channel": "sms",
+                },
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue("123456"),
+                run_id="run-1",
+                connected_identity_verifier=identity_verifier,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.final_login_status, "verification_pending")
+        self.assertFalse(result.safe_metadata["expected_identity_verified"])
+        self.assertIn("verify_connected_account_identity", result.actions_taken)
+        identity_verifier.assert_called_once()
+
+    def test_verification_code_resume_keeps_lineage_and_connects_after_exact_identity(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML], foreground_package="com.instagram.android")
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=True,
+            executed=True,
+            action="email_code_submit",
+            reason="connected_ui_signal",
+            post_submit_outcome="connected",
+            post_submit_probe_reason="connected_ui_signal",
+            post_submit_screen_type="active_account_home",
+            code_entered=True,
+            continue_tapped=True,
+            safe_metadata={"verification_channel": "authenticator_app"},
+        )
+        identity_verifier = Mock(
+            return_value={
+                "ok": True,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": USERNAME,
+                "profile_opened": True,
+                "verification_method": "account_identity_guard",
+            }
+        )
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                return_value={
+                    "screen_type": "authenticator_app_code_challenge",
+                    "verification_code_challenge_present": True,
+                    "verification_channel": "authenticator_app",
+                },
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue("123456"),
+                run_id="same-login-lineage-1",
+                connected_identity_verifier=identity_verifier,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_login_status, "connected")
+        self.assertTrue(result.safe_metadata["expected_identity_verified"])
+        self.assertEqual(result.safe_metadata["run_id"], "same-login-lineage-1")
+
+    def test_post_code_password_cannot_mark_connected_without_identity_proof(self) -> None:
+        device = FakeDevice([PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML])
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=False,
+            executed=True,
+            action="verification_code_submit",
+            reason="post_code_password_required",
+            failure_reason=None,
+            post_submit_outcome="post_code_password_required",
+            post_submit_probe_reason="post_code_password_required",
+            post_submit_screen_type="continue_password_only",
+            code_entered=True,
+            continue_tapped=False,
+            safe_metadata={"verification_channel": "whatsapp"},
+        )
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "connected",
+                "post_submit_probe_reason": "connected",
+                "post_submit_screen_type": "connected",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": [],
+                "safe_metadata": {"post_submit_screen_type": "connected"},
+            },
+        )()
+        identity_verifier = Mock(
+            return_value={
+                "ok": False,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": "other_account",
+                "profile_opened": True,
+                "failure_reason": "active_instagram_account_mismatch",
+                "verification_method": "account_identity_guard",
+            }
+        )
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_login_form_credentials",
+                return_value=password_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                side_effect=[
+                    {
+                        "screen_type": "whatsapp_code_challenge",
+                        "verification_code_challenge_present": True,
+                        "verification_channel": "whatsapp",
+                    },
+                    {
+                        "screen_type": "continue_password_only",
+                        "suggested_username": USERNAME,
+                        "has_password_field": True,
+                        "has_login_button": True,
+                    },
+                ],
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "sync_verification_action_after_email_code_resume",
+                return_value={"ok": True, "action_id": "same-action-1", "resolved": False},
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue("123456"),
+                credentials_getter=Mock(
+                    return_value={"username": USERNAME, "password": SecretValue("x")}
+                ),
+                action_id="same-action-1",
+                consume_from_action=True,
+                run_id="same-login-lineage-1",
+                connected_identity_verifier=identity_verifier,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.completed)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.failure_reason, "active_instagram_account_mismatch")
+        self.assertEqual(result.final_login_status, "verification_pending")
+        self.assertEqual(result.final_provisioning_status, "login_verification_pending")
+        self.assertFalse(result.safe_metadata["expected_identity_verified"])
+        self.assertIn("verify_connected_account_identity", result.actions_taken)
+        identity_verifier.assert_called_once()
+
     def test_email_code_resume_chains_password_after_code_input_empty_on_password_screen(self) -> None:
         device = FakeDevice([PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML])
         from instagram_login_email_code_executor import EmailCodeResumeResult
@@ -1438,7 +1666,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         result = self._run_login_form(EMAIL_CODE_CHALLENGE_XML)
 
         self.assertEqual(result.final_outcome, "verification_pending")
-        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.reason, "verification_code_required")
         self.assertEqual(result.final_login_status, "verification_pending")
         self.assertEqual(result.final_provisioning_status, "login_verification_pending")
         self.assertEqual(result.final_onboarding_status, "verification_pending")

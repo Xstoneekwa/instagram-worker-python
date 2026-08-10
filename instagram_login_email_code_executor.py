@@ -1,4 +1,8 @@
-"""Resume Instagram login from the email verification code challenge screen."""
+"""Resume Instagram login from the canonical verification-code challenge.
+
+The module name and public email entrypoint remain for backward compatibility;
+email, SMS, WhatsApp, and authenticator codes all use this one executor.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,10 @@ from instagram_login_status_classifier import LoginProbeOutcome, clean_login_pro
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
 
 ACTION_EMAIL_CODE_SUBMIT = "email_code_submit"
+ACTION_VERIFICATION_CODE_SUBMIT = ACTION_EMAIL_CODE_SUBMIT
+SUPPORTED_VERIFICATION_CHANNELS = frozenset(
+    {"email", "sms", "whatsapp", "authenticator_app"}
+)
 DEFAULT_POST_SUBMIT_OBSERVATIONS = 4
 DEFAULT_POST_SUBMIT_INTERVAL_MS = 1000
 DEFAULT_INITIAL_WAIT_MS = 750
@@ -52,6 +60,7 @@ def execute_email_code_challenge_resume(
     post_submit_wait_ms: int = 0,
     post_submit_observation_interval_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS,
     max_post_submit_observations: int = DEFAULT_POST_SUBMIT_OBSERVATIONS,
+    expected_channel: str | None = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> EmailCodeResumeResult:
@@ -62,7 +71,20 @@ def execute_email_code_challenge_resume(
     warnings: list[str] = []
 
     screen = _observe_current_screen(d, warnings=warnings)
-    if not screen.get("email_code_challenge_present"):
+    verification_channel = str(
+        screen.get("verification_channel") or screen.get("challenge_type") or ""
+    ).strip()
+    screen_type = str(screen.get("screen_type") or "verification_code_challenge")
+    safe_channel_metadata = {
+        "screen_type": screen_type,
+        "stage": "email_code_resume",
+        "verification_channel": verification_channel,
+        "challenge_type": verification_channel,
+        "verification_code_challenge_present": bool(
+            screen.get("verification_code_challenge_present")
+        ),
+    }
+    if not screen.get("verification_code_challenge_present"):
         if _password_screen_ready_after_code(d):
             observed = _observe_current_screen(d, warnings=warnings)
             screen_type = str(observed.get("screen_type") or "continue_password_only")
@@ -83,6 +105,7 @@ def execute_email_code_challenge_resume(
                             "screen_type": screen_type,
                             "post_code_password_required": True,
                             "email_code_challenge_present": False,
+                            "verification_code_challenge_present": False,
                         }
                     )
                 ),
@@ -90,11 +113,26 @@ def execute_email_code_challenge_resume(
         return _result(
             ok=False,
             executed=False,
-            reason="email_code_challenge_screen_required",
-            failure_reason="email_code_challenge_screen_required",
+            reason="verification_code_challenge_screen_required",
+            failure_reason="verification_code_challenge_screen_required",
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": screen.get("screen_type"), "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
+        )
+
+    requested_channel = str(expected_channel or "").strip().lower()
+    if requested_channel and (
+        requested_channel not in SUPPORTED_VERIFICATION_CHANNELS
+        or requested_channel != verification_channel
+    ):
+        return _result(
+            ok=False,
+            executed=False,
+            reason="verification_channel_mismatch",
+            failure_reason="verification_channel_mismatch",
+            timings=_finish_timings(timings, total_start, timer),
+            warnings=warnings,
+            safe_metadata=safe_channel_metadata,
         )
 
     code_target = _find_code_input_target(d)
@@ -106,7 +144,7 @@ def execute_email_code_challenge_resume(
             failure_reason=str(code_target["failure_reason"]),
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
         )
 
     try:
@@ -119,7 +157,7 @@ def execute_email_code_challenge_resume(
             failure_reason="verification_code_secret_invalid",
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
         )
 
     if not isinstance(revealed_code, str) or not revealed_code.strip():
@@ -130,7 +168,7 @@ def execute_email_code_challenge_resume(
             failure_reason="verification_code_missing",
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
         )
 
     input_start = timer()
@@ -145,8 +183,7 @@ def execute_email_code_challenge_resume(
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
             safe_metadata={
-                "screen_type": "email_code_challenge",
-                "stage": "email_code_resume",
+                **safe_channel_metadata,
                 "code_input_method": input_result.get("method"),
                 "code_input_confirmed": False,
                 "code_input_confirm_method": input_result.get("confirm_method"),
@@ -229,7 +266,7 @@ def execute_email_code_challenge_resume(
             code_entered=code_entered,
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
         )
 
     submit_start = timer()
@@ -245,7 +282,7 @@ def execute_email_code_challenge_resume(
             code_entered=code_entered,
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata=safe_channel_metadata,
         )
     timings["continue_tap_ms"] = _elapsed_ms(submit_start, timer)
 
@@ -287,7 +324,9 @@ def execute_email_code_challenge_resume(
             redact_credentials_payload(
                 {
                     "stage": "email_code_resume",
-                    "screen_type": "email_code_challenge",
+                    "screen_type": screen_type,
+                    "verification_channel": verification_channel,
+                    "challenge_type": verification_channel,
                     "post_submit_outcome": outcome,
                     "post_submit_probe_reason": reason,
                     "post_submit_screen_type": observed.get("screen_type"),
@@ -308,6 +347,23 @@ def execute_email_code_challenge_resume(
     )
 
 
+def execute_verification_code_challenge_resume(
+    d: Any,
+    *,
+    verification_code: SecretValue,
+    expected_channel: str | None = None,
+    **kwargs: Any,
+) -> EmailCodeResumeResult:
+    """Canonical channel-neutral entrypoint backed by the existing executor."""
+
+    return execute_email_code_challenge_resume(
+        d,
+        verification_code=verification_code,
+        expected_channel=expected_channel,
+        **kwargs,
+    )
+
+
 def _observe_current_screen(d: Any, *, warnings: list[str]) -> dict[str, Any]:
     try:
         try:
@@ -316,7 +372,12 @@ def _observe_current_screen(d: Any, *, warnings: list[str]) -> dict[str, Any]:
             hierarchy_xml = d.dump_hierarchy()
     except Exception as exc:
         warnings.append("email_code_resume_dump_failed")
-        return {"screen_type": "unknown", "email_code_challenge_present": False, "error": type(exc).__name__}
+        return {
+            "screen_type": "unknown",
+            "email_code_challenge_present": False,
+            "verification_code_challenge_present": False,
+            "error": type(exc).__name__,
+        }
     return extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
 
 
@@ -626,7 +687,7 @@ def _code_input_confirmed(d: Any) -> bool:
     except Exception:
         return False
     signals = extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
-    if signals.get("email_code_challenge_present") is not True:
+    if signals.get("verification_code_challenge_present") is not True:
         return True
     return _hierarchy_has_filled_code_field(str(hierarchy_xml or ""))
 

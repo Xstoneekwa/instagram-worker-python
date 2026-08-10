@@ -90,7 +90,7 @@ class EmailCodeExecutorTests(unittest.TestCase):
             sleeper=Mock(),
         )
         self.assertFalse(result.ok)
-        self.assertEqual(result.failure_reason, "email_code_challenge_screen_required")
+        self.assertEqual(result.failure_reason, "verification_code_challenge_screen_required")
 
     def test_resume_happy_path_connected(self) -> None:
         device = FakeDevice([EMAIL_CODE_CHALLENGE_XML, CONNECTED_XML])

@@ -75,6 +75,45 @@ EMAIL_CODE_RESEND_PATTERNS = (
     "obtenir un nouveau code",
     "envoyer un nouveau code",
 )
+SMS_CODE_HEADER_PATTERNS = (
+    "check your sms",
+    "check your text messages",
+    "vérifiez vos sms",
+    "verifiez vos sms",
+)
+WHATSAPP_CODE_HEADER_PATTERNS = (
+    "check your whatsapp messages",
+    "check whatsapp",
+    "vérifiez vos messages whatsapp",
+    "verifiez vos messages whatsapp",
+)
+AUTHENTICATOR_CODE_HEADER_PATTERNS = (
+    "go to your authentication app",
+    "go to your authenticator app",
+    "ouvrez votre application d’authentification",
+    "ouvrez votre application d'authentification",
+)
+AUTHENTICATOR_CODE_BODY_PATTERNS = (
+    "enter the 6-digit code",
+    "two-factor authentication app",
+    "google authenticator",
+    "duo mobile",
+    "code à 6 chiffres",
+    "code a 6 chiffres",
+)
+VERIFICATION_CODE_EXPIRED_PATTERNS = (
+    "code expired",
+    "code has expired",
+    "request a new code",
+    "code a expiré",
+    "code a expire",
+)
+VERIFICATION_CODE_SCREEN_TYPES = {
+    "email": "email_code_challenge",
+    "sms": "sms_code_challenge",
+    "whatsapp": "whatsapp_code_challenge",
+    "authenticator_app": "authenticator_app_code_challenge",
+}
 UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS = (
     "try another way",
     "confirm your identity",
@@ -292,7 +331,9 @@ def extract_login_screen_signals_from_hierarchy(
     has_save_password_for_instagram = _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS)
     has_google_save_password_prompt = has_google_password_manager and has_save_password_for_instagram and has_continue_button
     has_samsung_save_password_prompt = has_samsung_pass and has_save_password_for_instagram and has_cancel and has_save_button
-    has_email_code_challenge = _is_email_code_challenge_text(text)
+    verification_channel = _verification_code_challenge_channel(text)
+    has_verification_code_challenge = bool(verification_channel)
+    has_email_code_challenge = verification_channel == "email"
     has_post_login_location_services_prompt = _is_post_login_location_services_prompt_text(text)
     has_instagram_turn_on_notifications_prompt = _is_instagram_turn_on_notifications_prompt_text(text)
     has_android_instagram_notification_settings = _is_android_instagram_notification_settings_text(text)
@@ -314,8 +355,8 @@ def extract_login_screen_signals_from_hierarchy(
     username_prefilled_present = bool(prefilled_username)
     username_field_editable_present = has_username_field or bool(edit_text_values)
 
-    if has_email_code_challenge:
-        screen_type = "email_code_challenge"
+    if has_verification_code_challenge:
+        screen_type = VERIFICATION_CODE_SCREEN_TYPES[verification_channel]
     elif has_samsung_save_password_prompt:
         screen_type = "samsung_pass_save_password_prompt"
     elif has_google_save_password_prompt:
@@ -401,8 +442,28 @@ def extract_login_screen_signals_from_hierarchy(
         "google_password_manager_save_prompt": screen_type == "google_password_manager_save_prompt",
         "save_password_prompt": screen_type
         in {"google_password_manager_save_prompt", "samsung_pass_save_password_prompt"},
-        "email_code_challenge_present": screen_type == "email_code_challenge",
-        "challenge_type": "email" if screen_type == "email_code_challenge" else "",
+        "verification_code_challenge_present": has_verification_code_challenge,
+        "email_code_challenge_present": has_email_code_challenge,
+        "challenge_type": verification_channel,
+        "verification_channel": verification_channel,
+        "verification_code_expired": bool(
+            has_verification_code_challenge
+            and _contains_any(text, VERIFICATION_CODE_EXPIRED_PATTERNS)
+        ),
+        "trust_device_option_present": bool(
+            has_verification_code_challenge
+            and _contains_any(
+                text,
+                (
+                    "trust this device and skip this step from now on",
+                    "faire confiance à cet appareil",
+                    "faire confiance a cet appareil",
+                ),
+            )
+        ),
+        "try_another_way_present": bool(
+            has_verification_code_challenge and _has_phrase(text, "try another way")
+        ),
         "masked_email_present": bool(masked_email_present) if screen_type == "email_code_challenge" else False,
         "username_editable_present": screen_type in {"login_form_empty", "login_form_prefilled_username"}
         and username_field_editable_present,
@@ -524,17 +585,27 @@ def probe_login_ui_from_hierarchy(
             },
         )
 
-    if _is_email_code_challenge_text(text):
+    verification_channel = _verification_code_challenge_channel(text)
+    if verification_channel:
+        screen_type = VERIFICATION_CODE_SCREEN_TYPES[verification_channel]
         return LoginUiProbeResult(
             outcome=LoginProbeOutcome.VERIFICATION_PENDING,
             ok=False,
-            reason="email_verification_code_required",
+            reason="verification_code_required",
             metadata={
                 **metadata,
-                "detection_reason": "email_verification_code_required",
-                "screen_type": "email_code_challenge",
-                "challenge_type": "email",
-                "masked_email_present": _has_masked_email_signal(text),
+                "detection_reason": "verification_code_required",
+                "screen_type": screen_type,
+                "challenge_type": verification_channel,
+                "verification_channel": verification_channel,
+                "verification_code_challenge_present": True,
+                "email_code_challenge_present": verification_channel == "email",
+                "masked_email_present": (
+                    _has_masked_email_signal(text) if verification_channel == "email" else False
+                ),
+                "verification_code_expired": _contains_any(
+                    text, VERIFICATION_CODE_EXPIRED_PATTERNS
+                ),
             },
         )
 
@@ -864,30 +935,50 @@ def _has_phrase(text: str, phrase: str) -> bool:
 
 
 def _is_email_code_challenge_text(text: str) -> bool:
-    if _contains_any(text, EMAIL_CODE_SENT_PATTERNS):
-        return True
+    return _verification_code_challenge_channel(text) == "email"
+
+
+def _verification_code_challenge_channel(text: str) -> str:
+    """Classify only semantically complete Instagram code challenges.
+
+    A generic EditText or an isolated "enter code" phrase is deliberately not
+    enough.  Channel identity must come from the challenge header/body.
+    """
+
+    has_entry = _contains_any(text, EMAIL_CODE_ENTRY_PATTERNS)
+    has_sent_code = _contains_any(text, EMAIL_CODE_SENT_PATTERNS)
+    has_resend = _contains_any(text, EMAIL_CODE_RESEND_PATTERNS)
+
+    if _contains_any(text, WHATSAPP_CODE_HEADER_PATTERNS) and (has_entry or has_sent_code):
+        return "whatsapp"
+    if _contains_any(text, SMS_CODE_HEADER_PATTERNS) and (has_entry or has_sent_code):
+        return "sms"
+    if _contains_any(text, AUTHENTICATOR_CODE_HEADER_PATTERNS) and (
+        has_entry or _contains_any(text, AUTHENTICATOR_CODE_BODY_PATTERNS)
+    ):
+        return "authenticator_app"
 
     has_header = _contains_any(text, EMAIL_CODE_HEADER_PATTERNS)
-    has_entry = _contains_any(text, EMAIL_CODE_ENTRY_PATTERNS)
-    has_resend = _contains_any(text, EMAIL_CODE_RESEND_PATTERNS)
     has_masked_email = _has_masked_email_signal(text)
 
-    if has_header and has_entry:
-        return True
-    if has_resend and (has_header or has_masked_email or has_entry):
-        return True
+    if has_header and (has_entry or has_sent_code):
+        return "email"
+    if has_resend and (has_header or has_masked_email):
+        return "email"
 
     # Preserve the original strict English quartet for stable regression coverage.
-    return (
+    if (
         _has_phrase(text, "check your email")
         and _has_phrase(text, "enter the code we sent")
         and _has_phrase(text, "enter code")
         and _has_phrase(text, "try another way")
-    )
+    ):
+        return "email"
+    return ""
 
 
 def _is_unsupported_post_submit_challenge_text(text: str) -> bool:
-    if _is_email_code_challenge_text(text):
+    if _verification_code_challenge_channel(text):
         return False
     if _contains_any(text, NEEDS_2FA_PATTERNS) and _has_phrase(text, "authentication code"):
         return False

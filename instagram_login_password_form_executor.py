@@ -42,6 +42,12 @@ MAX_POST_SUBMIT_OBSERVATIONS = 15
 MAX_POST_SUBMIT_INTERVAL_MS = 1500
 MAX_POST_SUBMIT_TIMEOUT_MS = 15000
 MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS = 2
+VERIFICATION_CODE_SCREEN_TYPES = {
+    "email_code_challenge",
+    "sms_code_challenge",
+    "whatsapp_code_challenge",
+    "authenticator_app_code_challenge",
+}
 POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS = 3
 POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS = 1000
 POST_DISMISS_FINAL_OBSERVATIONS = 4
@@ -203,7 +209,7 @@ def advance_login_username_step(
             "continue_password_only",
             "login_form_empty",
             "login_form_prefilled_username",
-            "email_code_challenge",
+            *VERIFICATION_CODE_SCREEN_TYPES,
             "active_account_home",
             "active_account_profile",
         }:
@@ -214,7 +220,7 @@ def advance_login_username_step(
         "continue_password_only",
         "login_form_empty",
         "login_form_prefilled_username",
-        "email_code_challenge",
+        *VERIFICATION_CODE_SCREEN_TYPES,
         "active_account_home",
         "active_account_profile",
     }
@@ -565,6 +571,7 @@ def execute_login_form_credentials(
     post_submit_challenge_type = ""
     post_submit_masked_email_present = False
     email_code_challenge_detected = False
+    verification_code_challenge_detected = False
     failure_reason: str | None = None
 
     if dump_after_submit:
@@ -627,6 +634,9 @@ def execute_login_form_credentials(
             )
             post_submit_loading_timeout = bool(observed.get("post_submit_loading_timeout"))
             email_code_challenge_detected = bool(observed.get("email_code_challenge_detected"))
+            verification_code_challenge_detected = bool(
+                observed.get("verification_code_challenge_detected")
+            )
             post_submit_challenge_type = str(observed.get("challenge_type") or "")
             post_submit_masked_email_present = bool(observed.get("masked_email_present"))
             password_required_dialog_detected = observed["password_required_dialog_present"]
@@ -753,6 +763,10 @@ def execute_login_form_credentials(
                             email_code_challenge_detected = email_code_challenge_detected or bool(
                                 observed.get("email_code_challenge_detected")
                             )
+                            verification_code_challenge_detected = (
+                                verification_code_challenge_detected
+                                or bool(observed.get("verification_code_challenge_detected"))
+                            )
                             post_submit_challenge_type = (
                                 str(observed.get("challenge_type") or "") or post_submit_challenge_type
                             )
@@ -832,6 +846,7 @@ def execute_login_form_credentials(
         post_submit_interval_ms=observation_interval_ms,
         post_submit_loading_timeout=post_submit_loading_timeout,
         email_code_challenge_detected=email_code_challenge_detected,
+        verification_code_challenge_detected=verification_code_challenge_detected,
         challenge_type=post_submit_challenge_type,
         masked_email_present=post_submit_masked_email_present,
         save_password_prompt_detected=save_password_prompt_detected,
@@ -2130,18 +2145,25 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "terminal": False,
             "screen_label": "instagram_turn_on_notifications_prompt",
         }
-    if signals.get("email_code_challenge_present") is True:
+    if signals.get("verification_code_challenge_present") is True:
+        challenge_type = str(signals.get("challenge_type") or "").strip()
+        screen_type = str(signals.get("screen_type") or "verification_code_challenge")
         return {
             "outcome": "verification_pending",
-            "screen_type": "email_code_challenge",
-            "reason": "email_verification_code_required",
+            "screen_type": screen_type,
+            "reason": "verification_code_required",
             "password_required_dialog_present": False,
             "save_password_prompt_present": False,
-            "email_code_challenge_detected": True,
-            "challenge_type": "email",
-            "masked_email_present": bool(signals.get("masked_email_present")),
+            "verification_code_challenge_detected": True,
+            "email_code_challenge_detected": challenge_type == "email",
+            "challenge_type": challenge_type,
+            "verification_channel": challenge_type,
+            "masked_email_present": bool(signals.get("masked_email_present"))
+            if challenge_type == "email"
+            else False,
+            "verification_code_expired": bool(signals.get("verification_code_expired")),
             "terminal": True,
-            "screen_label": "email_code_challenge",
+            "screen_label": screen_type,
         }
     if probe.outcome == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE:
         return {
@@ -2420,7 +2442,7 @@ def _observe_post_submit_settled(
             screens.extend(final_recheck_screens)
             wait_total_ms += int(final_recheck.get("wait_total_ms") or 0)
         final_observed = dict(final_recheck.get("observed") or {})
-        if final_observed.get("terminal") is True or final_observed.get("email_code_challenge_detected") is True:
+        if final_observed.get("terminal") is True or final_observed.get("verification_code_challenge_detected") is True:
             last_observed = final_observed
             outcome = str(last_observed.get("outcome") or "unknown")
             warnings.append("post_submit_final_recheck_terminal")
@@ -2469,6 +2491,9 @@ def _observe_post_submit_settled(
         "final_terminal_screen": screens[-1] if screens else "",
         "post_submit_loading_timeout": str(last_observed.get("reason") or "") == "post_submit_loading_timeout",
         "email_code_challenge_detected": bool(last_observed.get("email_code_challenge_detected")),
+        "verification_code_challenge_detected": bool(
+            last_observed.get("verification_code_challenge_detected")
+        ),
         "challenge_type": str(last_observed.get("challenge_type") or ""),
         "masked_email_present": bool(last_observed.get("masked_email_present")),
         "save_password_prompt_detected": save_password_prompt_detected,
@@ -2838,6 +2863,7 @@ def _result(
     post_submit_interval_ms: int = 0,
     post_submit_loading_timeout: bool = False,
     email_code_challenge_detected: bool = False,
+    verification_code_challenge_detected: bool = False,
     challenge_type: str = "",
     masked_email_present: bool = False,
     save_password_prompt_detected: bool = False,
@@ -2907,6 +2933,7 @@ def _result(
                 "post_submit_interval_ms": post_submit_interval_ms,
                 "post_submit_loading_timeout": post_submit_loading_timeout,
                 "email_code_challenge_detected": email_code_challenge_detected,
+                "verification_code_challenge_detected": verification_code_challenge_detected,
                 "challenge_type": challenge_type,
                 "masked_email_present": masked_email_present,
                 "save_password_prompt_detected": save_password_prompt_detected,

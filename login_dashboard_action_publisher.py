@@ -11,9 +11,9 @@ from supabase_client import call_rpc
 
 LOGIN_CHALLENGE_ACTIONS = {
     "enter_email_verification_code": {
-        "title": "Code email Instagram requis",
-        "safe_client_message": "Instagram demande le code reçu par email pour continuer la connexion.",
-        "action_label": "Saisir le code email",
+        "title": "Code de vérification Instagram requis",
+        "safe_client_message": "Instagram demande un code de vérification pour continuer la connexion.",
+        "action_label": "Saisir le code",
         "audience": "client",
         "requires_client_action": True,
         "severity": "warning",
@@ -56,6 +56,18 @@ FORBIDDEN_METADATA_KEYS = {
 }
 
 EMAIL_CODE_ACTION_TTL_MINUTES = 10
+SUPPORTED_VERIFICATION_CHANNELS = frozenset(
+    {"email", "sms", "whatsapp", "authenticator_app"}
+)
+
+
+def _verification_channel_label(channel: str | None) -> str:
+    return {
+        "email": "Email",
+        "sms": "SMS",
+        "whatsapp": "WhatsApp",
+        "authenticator_app": "Authenticator app",
+    }.get(str(channel or "").strip().lower(), "Unknown")
 
 
 def _enabled() -> bool:
@@ -97,7 +109,26 @@ def upsert_login_challenge_dashboard_action(
     if not aid or atype not in LOGIN_CHALLENGE_ACTIONS:
         return {"published": False, "reason": "invalid_payload", "action_type": atype or None}
 
-    spec = LOGIN_CHALLENGE_ACTIONS[atype]
+    spec = dict(LOGIN_CHALLENGE_ACTIONS[atype])
+    channel = str(challenge_type or "").strip().lower()
+    if not channel and str(screen_type or "").strip() == "email_code_challenge":
+        channel = "email"
+    if not channel and atype == "enter_email_verification_code":
+        channel = "email"
+    if atype == "enter_email_verification_code":
+        if channel not in SUPPORTED_VERIFICATION_CHANNELS:
+            return {"published": False, "reason": "verification_channel_invalid", "action_type": atype}
+        channel_label = _verification_channel_label(channel)
+        spec.update(
+            {
+                "title": f"Code de vérification Instagram requis · {channel_label}",
+                "safe_client_message": (
+                    "Instagram demande un code de vérification pour continuer la connexion. "
+                    f"Canal : {channel_label}."
+                ),
+                "action_label": "Saisir le code",
+            }
+        )
     action_expires_at = (
         (datetime.now(timezone.utc) + timedelta(minutes=EMAIL_CODE_ACTION_TTL_MINUTES)).isoformat()
         if atype == "enter_email_verification_code"
@@ -107,7 +138,8 @@ def upsert_login_challenge_dashboard_action(
         {
             **(metadata or {}),
             "run_id": run_id,
-            "challenge_type": challenge_type,
+            "challenge_type": channel or challenge_type,
+            "verification_channel": channel or challenge_type,
             "screen_type": screen_type,
             "stage": stage,
             "masked_email_present": masked_email_present,

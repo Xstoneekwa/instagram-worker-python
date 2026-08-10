@@ -40,8 +40,15 @@ def publish_login_challenge_pending_incident(
     dashboard_action_type: str | None,
     masked_email_present: bool | None = None,
 ) -> dict[str, Any]:
+    channel = str(challenge_type or "").strip().lower()
+    channel_label = {
+        "email": "Email",
+        "sms": "SMS",
+        "whatsapp": "WhatsApp",
+        "authenticator_app": "Authenticator app",
+    }.get(channel, "Unknown")
     incident_type = (
-        "email_verification_code_required"
+        "login_verification_code_required"
         if dashboard_action_type == "enter_email_verification_code"
         else "login_challenge_pending"
     )
@@ -58,18 +65,19 @@ def publish_login_challenge_pending_incident(
         reason=reason,
         action_required=dashboard_action_type,
         safe_client_message=(
-            "Instagram requires an email code to continue signing in."
+            f"Instagram requires a verification code to continue signing in. Channel: {channel_label}."
             if dashboard_action_type == "enter_email_verification_code"
             else "Instagram is showing a verification challenge that requires human review."
         ),
         admin_message=(
-            "Email verification challenge detected after password submit."
+            f"Verification-code challenge detected after password submit. Channel: {channel_label}."
             if dashboard_action_type == "enter_email_verification_code"
             else "Unsupported post-submit login challenge detected."
         ),
         metadata={
             "stage": "post_submit",
-            "challenge_type": challenge_type,
+            "challenge_type": channel,
+            "verification_channel": channel,
             "screen_type": screen_type,
             "dashboard_action_type": dashboard_action_type,
             "masked_email_present": masked_email_present,
@@ -463,3 +471,9 @@ def sync_verification_action_after_email_code_resume(
             "run_id": run_id,
         },
     ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
+
+
+def sync_verification_action_after_code_resume(**kwargs: Any) -> dict[str, Any]:
+    """Channel-neutral alias preserving the existing durable action lineage."""
+
+    return sync_verification_action_after_email_code_resume(**kwargs)

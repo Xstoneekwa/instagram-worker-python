@@ -50,6 +50,12 @@ CREDENTIALS_DIAGNOSTIC_KEYS = (
     "guard_would_block_revealed_value",
 )
 OPERATOR_SMOKE_LIFECYCLE_STATUSES = ("active", "paused", "canceled", "onboarding", "archived", "stopped", "unknown")
+VERIFICATION_CODE_SCREEN_TYPES = {
+    "email_code_challenge",
+    "sms_code_challenge",
+    "whatsapp_code_challenge",
+    "authenticator_app_code_challenge",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -313,13 +319,14 @@ def _preflight_email_code_resume(
                     },
                 )
         return None
-    if screen_type != "email_code_challenge":
+    if screen_type not in VERIFICATION_CODE_SCREEN_TYPES:
         return _resume_preflight_result(
             run_id=run_id,
             reason="resume_email_code_screen_not_active",
             screen_type=screen_type,
             safe_metadata={
                 "resume_preflight_email_code_challenge_present": False,
+                "resume_preflight_verification_code_challenge_present": False,
                 "resume_preflight_recommended_next_run": (
                     "full_login_retry" if screen_type in {"login_form_empty", "login_form_prefilled_username"} else ""
                 ),
@@ -338,8 +345,21 @@ def _preflight_email_code_resume(
                 screen_type=screen_type,
                 safe_metadata={
                     "resume_preflight_email_code_challenge_present": True,
+                    "resume_preflight_verification_code_challenge_present": True,
                     "verification_action_status": str(code_state.get("action_status") or ""),
                     "verification_submission_present": bool(code_state.get("submission_present")),
+                },
+            )
+        expected_channel = str(code_state.get("verification_channel") or "").strip()
+        observed_channel = str(signals.get("verification_channel") or signals.get("challenge_type") or "").strip()
+        if expected_channel and observed_channel and expected_channel != observed_channel:
+            return _resume_preflight_result(
+                run_id=run_id,
+                reason="verification_channel_mismatch",
+                screen_type=screen_type,
+                safe_metadata={
+                    "verification_channel": observed_channel,
+                    "expected_verification_channel": expected_channel,
                 },
             )
 
@@ -415,7 +435,7 @@ def _verification_code_action_state(*, action_id: str, account_id: str) -> dict[
             "GET",
             "account_dashboard_actions",
             query={
-                "select": "id,status,action_type",
+                "select": "id,status,action_type,metadata",
                 "id": f"eq.{action_id}",
                 "account_id": f"eq.{account_id}",
                 "limit": "1",
@@ -436,10 +456,16 @@ def _verification_code_action_state(*, action_id: str, account_id: str) -> dict[
     except Exception:
         return {"ready": False, "reason": "verification_action_lookup_failed"}
     action_status = str(actions[0].get("status") or "") if actions else ""
+    action_metadata = dict(actions[0].get("metadata") or {}) if actions else {}
     return {
         "ready": action_status == "code_submitted" and bool(submissions),
         "action_status": action_status,
         "submission_present": bool(submissions),
+        "verification_channel": str(
+            action_metadata.get("verification_channel")
+            or action_metadata.get("challenge_type")
+            or "email"
+        ).strip(),
     }
 
 
