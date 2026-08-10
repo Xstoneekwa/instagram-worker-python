@@ -83,6 +83,7 @@ from unfollow_action_outcome import (
     is_action_attempted_ambiguous_reason,
 )
 from unfollow_search_health_policy import SearchSurfaceCircuitBreaker
+from unfollow_session_completion_policy import UnfollowSessionCompletionPolicy
 from instagram_navigation import return_to_search_from_profile
 
 _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY: dict[str, Any] = {}
@@ -1612,6 +1613,7 @@ def _run_real_unfollow_multi_loop(
     scroll_surface_failures_count = 0
     scroll_v2_lite_fallback_count = 0
     direct_search_attempted: set[str] = set()
+    direct_search_attempted_all: set[str] = set()
     direct_search_unavailable: set[str] = set()
     direct_search_ambiguous: set[str] = set()
     direct_search_verified_profiles = 0
@@ -1620,6 +1622,7 @@ def _run_real_unfollow_multi_loop(
     candidate_availability_persistence_failures = 0
     candidate_availability_persistence_failure_usernames: list[str] = []
     search_surface_health = SearchSurfaceCircuitBreaker()
+    session_completion_policy = UnfollowSessionCompletionPolicy()
     direct_fallback_armed = False
     direct_fallback_candidate_limit = len(planned_usernames)
 
@@ -2071,7 +2074,7 @@ def _run_real_unfollow_multi_loop(
             ),
             "phase_duration_seconds": round(coverage_elapsed_seconds(), 3),
             "hybrid_unfollow_strategy": "progressive_cursor_direct_v1",
-            "direct_search_attempted_count": len(direct_search_attempted),
+            "direct_search_attempted_count": len(direct_search_attempted_all),
             "direct_search_verified_profiles": direct_search_verified_profiles,
             "direct_search_session_reused_count": direct_search_session_reused_count,
             "direct_search_retryable_failures": direct_search_retryable_failures,
@@ -2079,6 +2082,7 @@ def _run_real_unfollow_multi_loop(
             "direct_search_ambiguous_count": len(direct_search_ambiguous),
             "candidate_availability_persistence_failures": candidate_availability_persistence_failures,
             "candidate_availability_persistence_failure_usernames": candidate_availability_persistence_failure_usernames[:50],
+            **session_completion_policy.as_dict(),
             **search_surface_health.as_dict(),
             "cleanup_reserve_seconds": SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
             "stop_reason": exploration_stop,
@@ -2214,6 +2218,7 @@ def _run_real_unfollow_multi_loop(
                     target_username = str(hybrid.usernames[0])
                     target_key = normalize_unfollow_username(target_username)
                     direct_search_attempted.add(target_key)
+                    direct_search_attempted_all.add(target_key)
                     direct_result = open_exact_profile_for_unfollow(d, target_username)
                     log(
                         "info",
@@ -2253,36 +2258,34 @@ def _run_real_unfollow_multi_loop(
                         else "search_surface_unhealthy"
                     )
                     availability_state: dict[str, Any] = {}
-                    try:
-                        availability_state = (
-                            supabase_client.record_unfollow_candidate_availability_v2(
-                                aid,
-                                target_key,
-                                source_run_id=run_id,
-                                classification=classification,
-                                reason=stable_failure_reason,
-                                technical_cooldown_minutes=30,
-                            )
-                        )
-                    except Exception as exc:
-                        candidate_availability_persistence_failures += 1
-                        if target_key not in candidate_availability_persistence_failure_usernames:
-                            candidate_availability_persistence_failure_usernames.append(target_key)
-                        log(
-                            "error",
-                            "unfollow_candidate_availability_v2_persist_failed",
-                            account_id=aid,
-                            run_id=run_id,
-                            username=target_username,
-                            classification=classification,
-                            reason="unfollow_candidate_availability_persistence_failed",
-                            error=str(exc)[:500],
-                        )
-                        stop_reason = (
-                            "unfollow_candidate_availability_persistence_failed"
-                        )
-                        return emit_final("failed_unfollow_multi_action", stop_reason)
                     if classification == "username_not_found_confirmed":
+                        try:
+                            availability_state = (
+                                supabase_client.record_unfollow_candidate_availability_v2(
+                                    aid,
+                                    target_key,
+                                    source_run_id=run_id,
+                                    classification=classification,
+                                    reason=stable_failure_reason,
+                                    technical_cooldown_minutes=30,
+                                )
+                            )
+                        except Exception as exc:
+                            candidate_availability_persistence_failures += 1
+                            if target_key not in candidate_availability_persistence_failure_usernames:
+                                candidate_availability_persistence_failure_usernames.append(target_key)
+                            log(
+                                "error",
+                                "unfollow_candidate_availability_v2_persist_failed",
+                                account_id=aid,
+                                run_id=run_id,
+                                username=target_username,
+                                classification=classification,
+                                reason="unfollow_candidate_availability_persistence_failed",
+                                error=str(exc)[:500],
+                            )
+                            stop_reason = "unfollow_candidate_availability_persistence_failed"
+                            return emit_final("failed_unfollow_multi_action", stop_reason)
                         search_surface_health.record(classification)
                         coverage_tracker.mark_candidate_unavailable(target_key)
                         direct_search_unavailable.add(target_key)
@@ -2309,8 +2312,55 @@ def _run_real_unfollow_multi_loop(
                     direct_search_retryable_failures += 1
                     if direct_status == "ambiguous":
                         direct_search_ambiguous.add(target_key)
-                    coverage_tracker.mark_candidate_technical_hold(target_key)
                     breaker_opened = search_surface_health.record(classification)
+                    candidate_decision = session_completion_policy.record_candidate_failure(
+                        target_key,
+                        safe_state_restored=True,
+                    )
+                    breaker_opened = bool(
+                        breaker_opened or candidate_decision.global_circuit_open
+                    )
+                    if candidate_decision.retry_in_same_session and not breaker_opened:
+                        coverage_tracker.mark_candidate_retryable(target_key)
+                        log(
+                            "warning",
+                            "unfollow_direct_exact_candidate_retry_deferred_same_session",
+                            username=target_username,
+                            reason=stable_failure_reason,
+                            candidate_failure_count=session_completion_policy.candidate_failure_counts.get(target_key, 0),
+                            retry_generation_pending=True,
+                            candidate_recovery_exhausted=False,
+                            global_circuit_open=False,
+                        )
+                        continue
+                    coverage_tracker.mark_candidate_technical_hold(target_key)
+                    try:
+                        availability_state = (
+                            supabase_client.record_unfollow_candidate_availability_v2(
+                                aid,
+                                target_key,
+                                source_run_id=run_id,
+                                classification=classification,
+                                reason=stable_failure_reason,
+                                technical_cooldown_minutes=30,
+                            )
+                        )
+                    except Exception as exc:
+                        candidate_availability_persistence_failures += 1
+                        if target_key not in candidate_availability_persistence_failure_usernames:
+                            candidate_availability_persistence_failure_usernames.append(target_key)
+                        log(
+                            "error",
+                            "unfollow_candidate_availability_v2_persist_failed",
+                            account_id=aid,
+                            run_id=run_id,
+                            username=target_username,
+                            classification=classification,
+                            reason="unfollow_candidate_availability_persistence_failed",
+                            error=str(exc)[:500],
+                        )
+                        stop_reason = "unfollow_candidate_availability_persistence_failed"
+                        return emit_final("failed_unfollow_multi_action", stop_reason)
                     log(
                         "warning",
                         "unfollow_direct_exact_technical_candidate_held",
@@ -2367,6 +2417,23 @@ def _run_real_unfollow_multi_loop(
                     stop_reason = "eligible_targets_exhausted"
                     return emit_final("success_real_unfollow_multi_partial_exhausted")
                 if hybrid.mode == "partial_resumable":
+                    retry_generation = session_completion_policy.begin_retry_generation(
+                        coverage_tracker.remaining_planned_usernames,
+                        direct_search_attempted,
+                    )
+                    if retry_generation:
+                        direct_search_attempted = (
+                            set(coverage_tracker.remaining_planned_usernames)
+                            - set(retry_generation)
+                        )
+                        log(
+                            "info",
+                            "unfollow_direct_exact_retry_generation_started",
+                            generation=session_completion_policy.retry_generations_started,
+                            retry_usernames=sorted(retry_generation),
+                            remaining_count=len(coverage_tracker.remaining_planned_usernames),
+                        )
+                        continue
                     stop_reason = hybrid.reason
                     return emit_final(
                         "success_real_unfollow_multi_partial_exhausted",
@@ -3199,32 +3266,53 @@ def _run_real_unfollow_multi_loop(
             if recoverable and coverage_tracker is not None:
                 coverage_tracker.mark_candidate_retryable(target_key)
                 refresh_coverage_summary_totals()
-            if (
-                recoverable
-                and return_ok
-                and recoverable_action_failures_count < max_recoverable_action_failures
-            ):
+            if recoverable:
                 recoverable_action_failures_count += 1
-                session_continued_after_recoverable_failure = True
-                failed_usernames_this_run.add(target_key)
-                completed_usernames.add(target_key)
-                visible_eligibility_row_cache[target_key] = None
                 if target_username not in recoverable_action_failure_usernames:
                     recoverable_action_failure_usernames.append(target_username)
                 recoverable_action_failure_reasons[target_username] = sheet_failure_reason
+                candidate_decision = session_completion_policy.record_candidate_failure(
+                    target_key,
+                    safe_state_restored=return_ok,
+                )
                 refresh_recoverable_action_summary_totals()
                 log(
                     "info",
-                    "unfollow_recoverable_action_failure_skipped_target",
+                    "unfollow_recoverable_action_failure_classified",
                     username=target_username,
                     username_normalized=target_key,
                     failure_reason=sheet_failure_reason,
                     recoverable_action_failures_count=recoverable_action_failures_count,
-                    max_recoverable_action_failures=max_recoverable_action_failures,
+                    candidate_failure_count=session_completion_policy.candidate_failure_counts.get(target_key, 0),
+                    candidate_recovery_limit=session_completion_policy.candidate_recovery_limit,
+                    retry_in_same_session=candidate_decision.retry_in_same_session,
+                    candidate_recovery_exhausted=candidate_decision.candidate_recovery_exhausted,
+                    global_circuit_open=candidate_decision.global_circuit_open,
                     candidate_outcome_class=(
                         UnfollowActionOutcomeClass.TRANSIENT_UI_FAILURE.value
                     ),
                 )
+                if not candidate_decision.continue_session:
+                    stop_reason = str(
+                        recovery_stop_reason or candidate_decision.stable_reason
+                    )
+                    return emit_final(
+                        "success_real_unfollow_multi_partial_exhausted",
+                        stop_reason,
+                    )
+                session_continued_after_recoverable_failure = True
+                failed_usernames_this_run.add(target_key)
+                # A candidate whose local budget is exhausted is deferred, but
+                # must not block the rest of the authoritative queue.  A first
+                # transient failure stays unresolved and is retried by the
+                # bounded direct-Search generation later in this session.
+                if candidate_decision.candidate_recovery_exhausted:
+                    completed_usernames.add(target_key)
+                    if coverage_tracker is not None:
+                        coverage_tracker.mark_candidate_technical_hold(target_key)
+                else:
+                    session_completion_policy.retry_pending.add(target_key)
+                visible_eligibility_row_cache[target_key] = None
                 if not bool(ret.get("search_session_reused")):
                     rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
                         d,
@@ -3246,24 +3334,6 @@ def _run_real_unfollow_multi_loop(
                     return_to_following_list_ok=return_ok,
                 )
                 continue
-            if recoverable:
-                log(
-                    "info",
-                    "unfollow_recoverable_action_failure_limit_reached",
-                    username=target_username,
-                    username_normalized=target_key,
-                    failure_reason=sheet_failure_reason,
-                    recoverable_action_failures_count=recoverable_action_failures_count,
-                    max_recoverable_action_failures=max_recoverable_action_failures,
-                )
-                stop_reason = (
-                    recovery_stop_reason
-                    or "recoverable_action_failure_budget_exhausted"
-                )
-                return emit_final(
-                    "success_real_unfollow_multi_partial_exhausted",
-                    sheet_failure_reason,
-                )
             stop_reason = "actions_sheet_open_failed"
             return emit_final("failed_unfollow_multi_action", sheet_failure_reason)
         if not bool(sheet.get("unfollow_option_visible")):
@@ -3425,6 +3495,7 @@ def _run_real_unfollow_multi_loop(
         if verify_ok and persist_ok:
             recoverable_verify_failure_streak_class = ""
             recoverable_verify_failure_streak_count = 0
+            session_completion_policy.record_verified_success(target_key)
             refresh_recoverable_action_summary_totals()
             verified += 1
             completed_usernames.add(target_key)

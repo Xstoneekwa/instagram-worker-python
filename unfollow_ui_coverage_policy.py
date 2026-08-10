@@ -572,6 +572,8 @@ class FollowingCoverageTracker:
         if not normalized or normalized not in self.remaining_planned_usernames:
             raise ValueError("duplicate_or_unplanned_unfollow")
         self.verified_usernames.add(normalized)
+        self.retryable_usernames.discard(normalized)
+        self.technical_hold_usernames.discard(normalized)
         self._reset_search("unfollow_verified")
         self._reset_stagnation("unfollow_verified")
         self.progress_credit_pending = True
