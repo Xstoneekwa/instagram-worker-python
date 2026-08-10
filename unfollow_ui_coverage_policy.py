@@ -27,12 +27,6 @@ HISTORICAL_VIEWPORT_SAMPLE_COUNT = 4
 SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS = 10 * 60
 UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT = 3
 UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT = 2
-UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT = 10
-UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT = 5
-UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT = (
-    UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT
-    + UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT
-)
 
 
 def normalize_username(value: str) -> str:
@@ -179,14 +173,6 @@ def derive_adaptive_coverage_budget(
             int(time_bounded_viewports),
         ),
     )
-    if eligible and max_scroll_passes_absolute >= UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT:
-        # Search is a fallback only.  When the deadline can afford it, reserve
-        # enough primary Following-list coverage for the full 10 + recovery +
-        # 5 contract instead of letting a small adaptive estimate pre-empt it.
-        max_scroll_passes = max(
-            max_scroll_passes,
-            UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT,
-        )
     return AdaptiveCoverageBudget(
         max_scroll_passes=max_scroll_passes,
         max_scroll_passes_absolute=max_scroll_passes_absolute,
@@ -209,7 +195,7 @@ def derive_adaptive_coverage_budget(
         recent_candidates_found_per_viewport=round(recent_candidate_yield, 4),
         effective_candidate_yield_per_viewport=round(effective_candidate_yield, 4),
         observation_window_viewports=observation_window,
-        budget_formula_version="handoff_capacity_v4_progressive_floor",
+        budget_formula_version="handoff_capacity_v5_no_fixed_search_limit",
         deadline_source=str(deadline_source or "fallback"),
         recovery_reserve_seconds=recovery_reserve,
         outreach_reserve_seconds=outreach_reserve,
@@ -500,25 +486,10 @@ class FollowingCoverageTracker:
             and self.post_recovery_stagnation_count >= UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT
         ):
             return self._stop("ui_repeated_viewport_limit_after_recovery", fingerprint)
-        if (
-            self.search_post_recovery_active
-            and self.post_recovery_search_scroll_count
-            >= UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT
-        ):
-            return self._stop("ui_progressive_search_limit_after_recovery", fingerprint)
-        if (
-            not self.search_recovery_attempted
-            and self.pre_recovery_search_scroll_count
-            >= UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT
-        ):
-            self.search_recovery_attempted = True
-            self.pending_recovery_reason = "ui_progressive_search_limit"
-            return CoverageDecision(
-                "recover",
-                "ui_progressive_search_limit",
-                fingerprint,
-                len(new_usernames),
-            )
+        # Progressive discovery has no fixed 10/15-scroll terminal boundary.
+        # It continues while the immutable adaptive/deadline budget allows it.
+        # Recovery is reserved for proved stagnation; direct exact Search is
+        # armed by the runtime only after this primary budget is exhausted.
         if self.pre_recovery_stagnation_count >= UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT:
             if self.viewport_recoveries_used < self.budget.max_viewport_recoveries:
                 return CoverageDecision("recover", "ui_repeated_viewport_limit", fingerprint)

@@ -40,7 +40,6 @@ class HybridSelection:
 
 _DIRECT_SEARCH_FALLBACK_SAFE_REASONS = frozenset(
     {
-        "ui_progressive_search_limit_after_recovery",
         "ui_end_of_list_with_candidates_unresolved",
         "ui_coverage_budget_exhausted_with_actionable_remaining",
     }

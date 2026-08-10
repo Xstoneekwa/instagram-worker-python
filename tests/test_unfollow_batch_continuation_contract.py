@@ -31,12 +31,9 @@ class UnfollowBatchContinuationContractTests(unittest.TestCase):
         self.assertIn("record_unfollow_phase_circuit_breaker_v1", self.source)
         self.assertIn("continue_to_next_candidate=not breaker_opened", self.source)
 
-    def test_direct_search_is_armed_only_after_progressive_recovery_and_five(self) -> None:
-        self.assertIn("coverage_tracker.search_recovery_attempted", self.source)
-        self.assertIn(
-            "coverage_tracker.post_recovery_search_scroll_count >= 5",
-            self.source,
-        )
+    def test_direct_search_is_armed_after_adaptive_primary_budget_not_fixed_ten_plus_five(self) -> None:
+        self.assertNotIn("coverage_tracker.search_recovery_attempted", self.source)
+        self.assertNotIn("coverage_tracker.post_recovery_search_scroll_count >= 5", self.source)
         self.assertIn(
             '"ui_coverage_budget_exhausted_with_actionable_remaining"',
             self.source,

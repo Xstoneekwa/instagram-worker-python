@@ -199,8 +199,8 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertEqual(out.mode, "direct_exact")
         self.assertEqual(out.usernames, ("one",))
 
-    def test_direct_fallback_arms_after_ten_recovery_five_contract(self) -> None:
-        self.assertTrue(
+    def test_removed_ten_recovery_five_reason_cannot_arm_direct_search(self) -> None:
+        self.assertFalse(
             can_arm_direct_search_fallback(
                 "ui_progressive_search_limit_after_recovery",
                 remaining_count=10,

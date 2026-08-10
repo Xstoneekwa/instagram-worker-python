@@ -8,9 +8,7 @@ from unfollow_ui_coverage_policy import (
     HISTORICAL_VIEWPORT_P90_SECONDS,
     SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
     UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT,
-    UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT,
     UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT,
-    UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT,
     build_unfollow_outcome,
     derive_adaptive_coverage_budget,
     viewport_fingerprint,
@@ -64,13 +62,13 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         self.assertFalse(tracker.search_recovery_attempted)
         self.assertEqual(tracker.search_scroll_count, 0)
 
-    def test_first_candidate_on_fifteenth_progressive_scroll_after_recovery(self) -> None:
+    def test_first_candidate_on_fifteenth_progressive_scroll_needs_no_fixed_recovery(self) -> None:
         tracker, decision = self._progressive_search_tracker(15)
         self.assertEqual(decision.action, "act")
-        self.assertEqual(tracker.viewport_recoveries_used, 1)
+        self.assertEqual(tracker.viewport_recoveries_used, 0)
         self.assertEqual(tracker.search_scroll_count, 0)
 
-    def test_fifteen_progressive_scrolls_without_candidate_stop_resumable(self) -> None:
+    def test_unfollow_no_search_limit_10_or_15(self) -> None:
         budget = derive_adaptive_coverage_budget(
             quota_remaining=35,
             eligible_remaining=35,
@@ -83,23 +81,16 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         )
         tracker.observe_viewport(["initial"], elapsed_seconds=0, following_confirmed=True)
         decision = None
-        for scroll_index in range(1, 16):
+        for scroll_index in range(1, 17):
             tracker.mark_scroll(moved=True)
             decision = tracker.observe_viewport(
                 [f"unrelated_{scroll_index}"],
                 elapsed_seconds=float(scroll_index),
                 following_confirmed=True,
             )
-            if decision.action == "recover":
-                self.assertEqual(scroll_index, UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT)
-                self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=True))
-        self.assertEqual(decision.action, "stop")
-        self.assertEqual(decision.stop_reason, "ui_progressive_search_limit_after_recovery")
-        self.assertEqual(
-            tracker.post_recovery_search_scroll_count,
-            UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT,
-        )
-        self.assertEqual(tracker.total_search_scroll_count, 15)
+        self.assertEqual(decision.action, "scroll")
+        self.assertEqual(tracker.viewport_recoveries_used, 0)
+        self.assertEqual(tracker.total_search_scroll_count, 16)
 
     def test_eight_actions_then_next_progressive_search_starts_from_one(self) -> None:
         names = {f"candidate_{index:02d}" for index in range(35)}
@@ -223,7 +214,7 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         self.assertLessEqual(out.adaptive_scroll_budget, out.max_scroll_passes_absolute)
         self.assertEqual(
             out.budget_formula_version,
-            "handoff_capacity_v4_progressive_floor",
+            "handoff_capacity_v5_no_fixed_search_limit",
         )
 
     def test_mythyl_fixture_allows_first_scroll_without_all_or_nothing_reservation(self) -> None:
@@ -244,15 +235,15 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         self.assertEqual(out.conservative_capacity, 1393)
         self.assertEqual(out.recovery_reserve_seconds, 75)
 
-    def test_progressive_primary_gets_full_ten_recovery_five_budget_when_affordable(self) -> None:
+    def test_progressive_primary_budget_is_cohort_derived_not_fixed_at_fifteen(self) -> None:
         out = derive_adaptive_coverage_budget(
-            quota_remaining=1,
-            eligible_remaining=1,
+            quota_remaining=35,
+            eligible_remaining=35,
             session_remaining_seconds=3600,
         )
-        self.assertGreaterEqual(out.adaptive_scroll_budget, 15)
+        self.assertGreater(out.adaptive_scroll_budget, 15)
 
-    def test_progressive_floor_never_overruns_absolute_deadline_capacity(self) -> None:
+    def test_progressive_budget_never_overruns_absolute_deadline_capacity(self) -> None:
         out = derive_adaptive_coverage_budget(
             quota_remaining=1,
             eligible_remaining=1,

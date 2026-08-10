@@ -1373,7 +1373,7 @@ def _scroll_following_list_for_unfollow(
         log("warning", "unfollow_scroll_7_plus_1_overlap_failed", **safe_log_fields())
         return out
     # An unchanged viewport is valid stagnation evidence but not progressive
-    # depth. It must not consume one of the 10+recovery+5 scrolls.
+    # depth. It must not consume the adaptive primary-discovery budget.
     if continuity.unchanged:
         out["ok"] = True
         log("info", "unfollow_scroll_7_plus_1_no_progress", **safe_log_fields())
@@ -2689,8 +2689,6 @@ def _run_real_unfollow_multi_loop(
                     coverage_tracker is not None
                     and remaining_planned_count > 0
                     and not direct_fallback_armed
-                    and coverage_tracker.search_recovery_attempted
-                    and coverage_tracker.post_recovery_search_scroll_count >= 5
                 ):
                     stop_reason = (
                         "ui_coverage_budget_exhausted_with_actionable_remaining"
