@@ -241,7 +241,7 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
 
 
 class RecoveryResumeFailureEnrichmentTest(unittest.TestCase):
-    """A failed human-confirmed resume must enrich the ORIGINAL incident."""
+    """A failed resume keeps original dedupe but owns its physical run."""
 
     REQUEST_ID = "7d3b4a4d-0000-4e0f-8a53-51e529a0a001"
     RESUME_RUN_ID = "ab46c4a5-72c5-4b16-9f0f-96f6f2ff22bb"
@@ -294,8 +294,9 @@ class RecoveryResumeFailureEnrichmentTest(unittest.TestCase):
             kwargs["dedupe_key"],
             f"account:{ACCOUNT_ID}:run:{ORIGINAL_RUN_ID}:run_identity_verification_failed",
         )
-        self.assertEqual(kwargs["run_id"], ORIGINAL_RUN_ID)
+        self.assertEqual(kwargs["run_id"], self.RESUME_RUN_ID)
         self.assertEqual(kwargs["metadata"]["resume_run_id"], self.RESUME_RUN_ID)
+        self.assertEqual(kwargs["metadata"]["original_run_id"], ORIGINAL_RUN_ID)
         mark_outcome.assert_called_once_with(
             original_run_id=ORIGINAL_RUN_ID,
             succeeded=False,

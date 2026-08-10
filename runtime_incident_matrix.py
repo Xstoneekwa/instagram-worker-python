@@ -785,9 +785,10 @@ def build_run_failure_incident_payload(
 ) -> dict[str, Any]:
     """Pure builder: IncidentDecision -> upsert_account_incident payload.
 
-    ``dedupe_run_ref`` lets a failed human-confirmed resume run enrich the
-    ORIGINAL incident (deduped on the original run) instead of opening a new
-    one; the new run id stays visible in metadata.
+    ``dedupe_run_ref`` keeps a failed human-confirmed resume in the ORIGINAL
+    incident's dedupe lineage.  ``run_id`` remains the physical failed run so
+    canonical recovery can bind the incident to the latest resume plan; the
+    original lineage and current run are both retained in metadata.
     """
     run_ref = (
         str(dedupe_run_ref or "").strip()

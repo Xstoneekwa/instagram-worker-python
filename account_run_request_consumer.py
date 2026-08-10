@@ -1855,8 +1855,12 @@ def _publish_run_failure_incident(
             if isinstance(payload_metadata, dict):
                 payload_metadata["phase_summary"] = phase_summary
         if original_run_ref and run_id:
-            payload["run_id"] = original_run_ref
+            # Preserve the original incident's dedupe lineage without replacing
+            # the authoritative physical run.  Recovery finalization is
+            # intentionally latest-run scoped and must resolve the resume plan
+            # that actually failed.
             payload["metadata"]["resume_run_id"] = run_id
+            payload["metadata"]["original_run_id"] = original_run_ref
         result = runtime_incidents.publish_account_incident(**payload)
         incident_id = str(result.get("incident_id") or "").strip()
         if run_id and incident_id:
