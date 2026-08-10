@@ -366,13 +366,12 @@ def _detect_component_mismatch(component: str, payload: dict[str, Any], root: Ru
         cwd = _pid_cwd(pid)
         matching.append({"pid": pid, "ppid": ppid, "cwd": cwd, "command": command[:240]})
 
-    if payload.get("processRunning"):
-        real_root = str(payload.get("processRoot") or root.resolved_root)
-        if real_root and _safe_resolve(Path(real_root)) != _safe_resolve(Path(root.resolved_root)):
-            return {**payload, "ok": False, "status": "runtime_root_mismatch", "processes": matching}
-        return {**payload, "processes": matching}
-
-    foreign = [row for row in matching if row.get("cwd") and _safe_resolve(Path(str(row["cwd"]))) != _safe_resolve(Path(root.resolved_root))]
+    active_root = _safe_resolve(Path(root.resolved_root))
+    foreign = [
+        row
+        for row in matching
+        if row.get("cwd") and _safe_resolve(Path(str(row["cwd"]))) != active_root
+    ]
     if foreign:
         return {
             **payload,
@@ -382,6 +381,13 @@ def _detect_component_mismatch(component: str, payload: dict[str, Any], root: Ru
             "message": "Service process exists, but not from the active runtime root.",
             "processes": matching,
         }
+
+    if payload.get("processRunning"):
+        real_root = str(payload.get("processRoot") or "")
+        if real_root and _safe_resolve(Path(real_root)) != active_root:
+            return {**payload, "ok": False, "status": "runtime_root_mismatch", "processes": matching}
+        return {**payload, "processes": matching}
+
     return {**payload, "processes": matching}
 
 

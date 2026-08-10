@@ -102,6 +102,27 @@ class PhoneFarmRuntimeControlTest(TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "runtime_root_mismatch")
 
+    def test_running_heartbeat_cannot_hide_foreign_release_process(self) -> None:
+        root = ctl.RuntimeRoot(True, "valid", "/tmp/current", "/tmp/releases/current", "abc1234")
+        payload = {
+            "ok": True,
+            "status": "running",
+            "processRunning": True,
+            "pid": 96246,
+            "processCount": 1,
+        }
+        with mock.patch.object(
+            ctl,
+            "_ps_rows",
+            return_value=[(96246, 96223, "python /tmp/releases/old/device_heartbeat_publisher.py --serve")],
+        ):
+            with mock.patch.object(ctl, "_pid_cwd", return_value="/tmp/releases/old"):
+                result = ctl._detect_component_mismatch("heartbeat", payload, root)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "runtime_root_mismatch")
+        self.assertEqual(result["lastError"], "service_running_from_non_active_root")
+        self.assertEqual(result["processes"][0]["pid"], 96246)
+
     def _make_valid_runtime(self, tmp: Path) -> dict[str, Path]:
         releases = tmp / "releases"
         release = releases / "abc1234"
