@@ -148,6 +148,7 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
         self.assertEqual(body["login_status"], "connected")
         self.assertFalse(body["reauth_required"])
         self.assertEqual(body["metadata"]["source"], "python_status_publisher")
+        self.assertRegex(body["metadata"]["source_timestamp"], r"^\d{4}-\d{2}-\d{2}T")
         log_payload = json.dumps(log.call_args.kwargs)
         self.assertNotIn(TOKEN, log_payload)
         self.assertNotIn("Authorization", log_payload)
@@ -393,6 +394,80 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
         self.assertEqual(rpc_calls[0][1]["p_login_status"], "connected")
         self.assertFalse(rpc_calls[0][1]["p_reauth_required"])
         self.assertEqual(rpc_calls[0][1]["p_actor_type"], "provisioner")
+        self.assertRegex(rpc_calls[0][1]["p_metadata"]["source_timestamp"], r"^\d{4}-\d{2}-\d{2}T")
+        urlopen.assert_not_called()
+
+    def test_explicit_login_invalidation_uses_ordered_service_role_rpc(self) -> None:
+        rpc_calls = []
+
+        def fake_rpc(name, params=None):  # type: ignore[no-untyped-def]
+            rpc_calls.append((name, params))
+            return {"ok": True, "applied": True, "reason": "instagram_login_screen_confirmed"}
+
+        with (
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", True, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_API_URL", API_URL, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN", TOKEN, create=True),
+            patch.dict(
+                "os.environ",
+                {
+                    "LOGIN_PROVISIONER_PUBLISH_ENABLED": "true",
+                    "SUPABASE_URL": "https://example.supabase.co",
+                    "SUPABASE_SERVICE_ROLE_KEY": "service-role-not-real",
+                },
+            ),
+            patch.object(supabase_client, "call_rpc", side_effect=fake_rpc),
+            patch.object(publisher.request, "urlopen") as urlopen,
+        ):
+            out = publisher.publish_instagram_account_status(
+                ACCOUNT_ID,
+                login_status="logged_out",
+                provisioning_status="login_pending",
+                onboarding_status="credentials_submitted",
+                reason="session_expired",
+                metadata={
+                    "source": "worker",
+                    "source_timestamp": "2026-08-10T12:34:56.000Z",
+                },
+            )
+
+        self.assertTrue(out["published"])
+        self.assertEqual(rpc_calls[0][0], "invalidate_client_instagram_login_v1")
+        self.assertEqual(rpc_calls[0][1]["p_invalidation_reason"], "instagram_login_screen_confirmed")
+        self.assertEqual(rpc_calls[0][1]["p_source_timestamp"], "2026-08-10T12:34:56.000Z")
+        self.assertEqual(
+            rpc_calls[0][1]["p_metadata"]["canonical_login_invalidation_reason"],
+            "instagram_login_screen_confirmed",
+        )
+        urlopen.assert_not_called()
+
+    def test_noncanonical_social_failure_never_routes_to_login_invalidation(self) -> None:
+        self.assertIsNone(
+            publisher._canonical_login_invalidation_reason(
+                login_status="unknown",
+                reason="social_snapshot_unavailable",
+                reauth_reason=None,
+                metadata={"social_status": "unavailable"},
+            )
+        )
+
+    def test_explicit_invalidation_fails_closed_without_ordered_rpc(self) -> None:
+        with (
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", True, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_API_URL", API_URL, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN", TOKEN, create=True),
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(publisher.request, "urlopen") as urlopen,
+        ):
+            out = publisher.publish_instagram_account_status(
+                ACCOUNT_ID,
+                login_status="mismatch",
+                provisioning_status="blocked",
+                onboarding_status="blocked",
+                reason="account_identity_mismatch",
+            )
+        self.assertFalse(out["published"])
+        self.assertEqual(out["reason"], "canonical_invalidation_rpc_unavailable")
         urlopen.assert_not_called()
 
     def test_fail_open_false_http_error_raises_controlled_error(self) -> None:

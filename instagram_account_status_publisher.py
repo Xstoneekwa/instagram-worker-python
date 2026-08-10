@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from urllib import error, request
 
@@ -35,6 +36,29 @@ FORBIDDEN_METADATA_KEYS = {
     "xml",
     "screenshot",
     "session_cookie",
+}
+
+CANONICAL_LOGIN_INVALIDATION_REASONS = {
+    "explicit_logout": "explicit_logout",
+    "logout_confirmed": "explicit_logout",
+    "account_identity_mismatch": "identity_mismatch",
+    "active_instagram_account_mismatch": "identity_mismatch",
+    "identity_mismatch": "identity_mismatch",
+    "auth_session_invalidated": "auth_session_invalidated",
+    "session_expired": "instagram_login_screen_confirmed",
+    "login_screen_signal": "instagram_login_screen_confirmed",
+    "login_screen_detected": "instagram_login_screen_confirmed",
+    "instagram_login_screen_confirmed": "instagram_login_screen_confirmed",
+    "credentials_invalid": "credential_invalidation",
+    "credential_invalidation": "credential_invalidation",
+    "account_disabled": "account_disabled",
+    "two_factor_required": "security_challenge_requires_login",
+    "checkpoint_required": "security_challenge_requires_login",
+    "verification_code_required": "security_challenge_requires_login",
+    "verification_pending": "security_challenge_requires_login",
+    "unsupported_post_submit_challenge": "security_challenge_requires_login",
+    "security_challenge_requires_login": "security_challenge_requires_login",
+    "other_explicit_canonical_invalidation": "other_explicit_canonical_invalidation",
 }
 
 
@@ -120,7 +144,33 @@ def _clean_metadata(metadata: dict | None) -> dict:
     clean = dict(metadata or {})
     if "source" not in clean or not str(clean.get("source") or "").strip():
         clean["source"] = "python_status_publisher"
+    if "source_timestamp" not in clean or not str(clean.get("source_timestamp") or "").strip():
+        clean["source_timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return clean
+
+
+def _canonical_login_invalidation_reason(
+    *,
+    login_status: str | None,
+    reason: str | None,
+    reauth_reason: str | None,
+    metadata: dict | None,
+) -> str | None:
+    normalized_login_status = str(login_status or "").strip().lower()
+    if not normalized_login_status or normalized_login_status == "connected":
+        return None
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
+    for candidate in (
+        safe_metadata.get("canonical_login_invalidation_reason"),
+        reason,
+        reauth_reason,
+    ):
+        mapped = CANONICAL_LOGIN_INVALIDATION_REASONS.get(str(candidate or "").strip().lower())
+        if mapped:
+            return mapped
+    if str(reason or "").strip().lower() == "login_failed" and str(reauth_reason or "").strip().lower() == "login_failed":
+        return "credential_invalidation"
+    return None
 
 
 def _rpc_error_reason(exc: Exception) -> str:
@@ -156,27 +206,47 @@ def _publish_via_service_role_rpc(
     reason: str | None,
     external_request_id: str | None,
     metadata: dict | None,
+    canonical_invalidation_reason: str | None = None,
 ) -> dict:
     try:
         from supabase_client import call_rpc
 
-        source = str((_clean_metadata(metadata).get("source") or "")).strip().lower()
+        clean_metadata = _clean_metadata(metadata)
+        source = str((clean_metadata.get("source") or "")).strip().lower()
         actor_type = "provisioner" if "provisioner" in source else "worker" if source == "worker" else "internal"
-        body = call_rpc(
-            "update_client_instagram_account_status",
-            {
-                "p_account_id": account_id,
-                "p_login_status": login_status,
-                "p_provisioning_status": provisioning_status,
-                "p_onboarding_status": onboarding_status,
-                "p_reauth_required": reauth_required,
-                "p_reauth_reason": reauth_reason,
-                "p_actor_type": actor_type,
-                "p_reason": reason,
-                "p_external_request_id": external_request_id,
-                "p_metadata": _clean_metadata(metadata),
-            },
-        )
+        if canonical_invalidation_reason:
+            body = call_rpc(
+                "invalidate_client_instagram_login_v1",
+                {
+                    "p_account_id": account_id,
+                    "p_invalidation_reason": canonical_invalidation_reason,
+                    "p_source_timestamp": clean_metadata["source_timestamp"],
+                    "p_login_status": login_status,
+                    "p_provisioning_status": provisioning_status,
+                    "p_onboarding_status": onboarding_status,
+                    "p_reauth_required": reauth_required,
+                    "p_reauth_reason": reauth_reason,
+                    "p_actor_type": actor_type,
+                    "p_external_request_id": external_request_id,
+                    "p_metadata": clean_metadata,
+                },
+            )
+        else:
+            body = call_rpc(
+                "update_client_instagram_account_status",
+                {
+                    "p_account_id": account_id,
+                    "p_login_status": login_status,
+                    "p_provisioning_status": provisioning_status,
+                    "p_onboarding_status": onboarding_status,
+                    "p_reauth_required": reauth_required,
+                    "p_reauth_reason": reauth_reason,
+                    "p_actor_type": actor_type,
+                    "p_reason": reason,
+                    "p_external_request_id": external_request_id,
+                    "p_metadata": clean_metadata,
+                },
+            )
         return {
             "published": True,
             "status_code": 200,
@@ -251,6 +321,41 @@ def publish_instagram_account_status(
     if forbidden:
         return _safe_fail("forbidden_metadata", error_message=forbidden)
 
+    clean_metadata = _clean_metadata(metadata)
+    canonical_invalidation_reason = _canonical_login_invalidation_reason(
+        login_status=login_status,
+        reason=reason,
+        reauth_reason=reauth_reason,
+        metadata=clean_metadata,
+    )
+    if canonical_invalidation_reason:
+        clean_metadata["canonical_login_invalidation_reason"] = canonical_invalidation_reason
+        if not _service_role_rpc_configured():
+            return _safe_fail("canonical_invalidation_rpc_unavailable")
+        result = _publish_via_service_role_rpc(
+            account_id=aid,
+            login_status=login_status,
+            provisioning_status=provisioning_status,
+            onboarding_status=onboarding_status,
+            reauth_required=reauth_required,
+            reauth_reason=reauth_reason,
+            reason=reason,
+            external_request_id=external_request_id,
+            metadata=clean_metadata,
+            canonical_invalidation_reason=canonical_invalidation_reason,
+        )
+        _log_publish_result(
+            account_id=aid,
+            login_status=login_status,
+            provisioning_status=provisioning_status,
+            onboarding_status=onboarding_status,
+            published=bool(result.get("published")),
+            reason="published" if result.get("published") else str(result.get("reason") or "status_update_failed"),
+            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
+            external_request_id=external_request_id,
+        )
+        return result
+
     url = _api_url()
     token = _token()
     if not url or not token:
@@ -265,7 +370,7 @@ def publish_instagram_account_status(
             reauth_reason=reauth_reason,
             reason=reason,
             external_request_id=external_request_id,
-            metadata=metadata,
+            metadata=clean_metadata,
         )
         _log_publish_result(
             account_id=aid,
@@ -284,7 +389,7 @@ def publish_instagram_account_status(
     body: dict[str, Any] = {
         "action": "update_status",
         "account_id": aid,
-        "metadata": _clean_metadata(metadata),
+        "metadata": clean_metadata,
     }
     for key, value in (
         ("login_status", login_status),
