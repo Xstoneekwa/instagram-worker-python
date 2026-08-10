@@ -18,6 +18,7 @@ from unfollow_hybrid_strategy import (
     cursor_anchor_matches,
     exact_search_result_count,
     open_exact_profile_for_unfollow,
+    _wait_for_exact_search_result,
 )
 
 
@@ -329,6 +330,65 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             out["bounds"],
             {"left": 20, "top": 120, "right": 540, "bottom": 220},
         )
+
+    def test_modern_exact_account_row_with_profile_picture_is_clickable(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="lesquisse.be" bounds="[60,40][500,100]" />'
+            '<node clickable="true" bounds="[0,190][540,310]">'
+            '<node resource-id="com.instagram.android:id/avatar_container" '
+            'content-desc="Profile picture" bounds="[20,205][100,285]" />'
+            '<node text="lesquisse.be" bounds="[120,210][430,250]" />'
+            '<node text="L Esquisse" bounds="[120,255][430,290]" />'
+            '</node></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "lesquisse.be")
+        self.assertEqual(out["state"], SEARCH_EXACT_RESULT_VISIBLE)
+        self.assertEqual(out["exact_match_count"], 1)
+        self.assertEqual(
+            out["bounds"],
+            {"left": 0, "top": 190, "right": 540, "bottom": 310},
+        )
+
+    def test_stable_query_suggestion_only_proves_terminal_absence(self) -> None:
+        suggestion_only = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="faydesdjinns" bounds="[0,0][540,90]" />'
+            '<node clickable="true" '
+            'resource-id="com.instagram.android:id/search_query_suggestion" '
+            'bounds="[0,100][540,200]">'
+            '<node resource-id="com.instagram.android:id/search_icon" '
+            'content-desc="Search" bounds="[20,120][80,180]" />'
+            '<node text="faydesdjinns" bounds="[100,120][480,180]" />'
+            '</node></hierarchy>'
+        )
+
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                return suggestion_only
+
+        with patch("unfollow_hybrid_strategy.time.sleep"):
+            out = _wait_for_exact_search_result(Device(), "faydesdjinns")
+        self.assertEqual(out["status"], "username_not_found_confirmed")
+        self.assertEqual(
+            out["reason"],
+            "username_not_found_confirmed_suggestion_only_stable",
+        )
+        self.assertGreaterEqual(out["stable_suggestion_only_poll_count"], 6)
+
+    def test_blank_loading_surface_never_becomes_terminal_absence(self) -> None:
+        loading = _search_xml(query="faydesdjinns")
+
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                return loading
+
+        with patch("unfollow_hybrid_strategy.time.sleep"):
+            out = _wait_for_exact_search_result(Device(), "faydesdjinns")
+        self.assertEqual(out["status"], "search_surface_unhealthy")
+        self.assertEqual(out["reason"], "search_results_loading_timeout")
 
     def test_duplicate_xml_labels_for_one_canonical_row_are_not_ambiguous(self) -> None:
         xml = (

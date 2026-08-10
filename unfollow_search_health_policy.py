@@ -15,6 +15,8 @@ class SearchSurfaceCircuitBreaker:
     healthy_outcomes: int = 0
     opened: bool = False
     stable_reason: str = ""
+    recovery_attempted: bool = False
+    recovery_succeeded: bool = False
 
     def record(self, classification: str) -> bool:
         value = str(classification or "").strip()
@@ -35,6 +37,17 @@ class SearchSurfaceCircuitBreaker:
                 )
         return self.opened
 
+    def can_attempt_bounded_recovery(self) -> bool:
+        return bool(self.opened and not self.recovery_attempted)
+
+    def record_bounded_recovery(self, succeeded: bool) -> None:
+        self.recovery_attempted = True
+        self.recovery_succeeded = bool(succeeded)
+        if succeeded:
+            self.consecutive_technical_failures = 0
+            self.opened = False
+            self.stable_reason = ""
+
     def as_dict(self) -> dict[str, object]:
         return {
             "search_surface_consecutive_technical_failures": (
@@ -47,4 +60,6 @@ class SearchSurfaceCircuitBreaker:
             "search_surface_consecutive_failure_limit": (
                 SEARCH_SURFACE_CONSECUTIVE_FAILURE_LIMIT
             ),
+            "search_surface_recovery_attempted": self.recovery_attempted,
+            "search_surface_recovery_succeeded": self.recovery_succeeded,
         }

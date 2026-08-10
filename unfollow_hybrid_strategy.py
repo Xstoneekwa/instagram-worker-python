@@ -23,6 +23,7 @@ SEARCH_RESULT_POLL_INTERVAL_S = 0.35
 SEARCH_LOCAL_REFRESH_RETRY_LIMIT = 1
 SEARCH_RESULT_STABLE_EXACT_POLLS = 2
 SEARCH_RESULT_STABLE_NO_RESULTS_POLLS = 2
+SEARCH_RESULT_STABLE_SUGGESTION_ONLY_POLLS = 6
 SEARCH_ROW_TAP_RETRY_LIMIT = 1
 
 SEARCH_EXACT_RESULT_VISIBLE = "SEARCH_EXACT_RESULT_VISIBLE"
@@ -192,6 +193,10 @@ def _row_semantics(node: ET.Element | None) -> dict[str, bool]:
             "search_user_username",
             "search_user_avatar",
             "user_search_result",
+            "follow_list_user",
+            "row_recommended_user",
+            "profile picture",
+            "avatar_container",
         )
     )
     suggestion_signal = any(
@@ -416,6 +421,12 @@ def classify_search_surface_xml(
         )
         by_bounds[key] = match
     unique_matches = _logical_exact_result_rows(list(by_bounds.values()))
+    suggestion_only_matches = [
+        match
+        for match in unique_matches
+        if bool(match.get("suggestion_signal"))
+        and not bool(match.get("account_signal"))
+    ]
     canonical_matches = [
         match for match in unique_matches if bool(match.get("canonical_username_rid"))
     ]
@@ -465,10 +476,21 @@ def classify_search_surface_xml(
 
     return {
         "state": SEARCH_RESULTS_LOADING,
-        "reason": "search_results_loading",
+        "reason": (
+            "search_query_suggestion_only"
+            if suggestion_only_matches
+            else "search_results_loading"
+        ),
         "exact_match_count": 0,
         "bounds": {},
         "query_field_confirmed": True,
+        "suggestion_only": bool(suggestion_only_matches),
+        "suggestion_signature": ":".join(
+            sorted(
+                _bounds_signature(dict(match.get("bounds") or {}))
+                for match in suggestion_only_matches
+            )
+        ),
     }
 
 
@@ -553,6 +575,8 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
     observed_poll_count = 0
     stable_exact_poll_count = 0
     stable_no_results_poll_count = 0
+    stable_suggestion_only_poll_count = 0
+    previous_suggestion_signature = ""
     previous_exact_signature = ""
     previous_exact_bounds: dict[str, int] = {}
     result_visible_at = ""
@@ -605,6 +629,18 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
             if state == SEARCH_NO_RESULTS_CONFIRMED
             else 0
         )
+        suggestion_signature = str(classification.get("suggestion_signature") or "")
+        suggestion_only = bool(classification.get("suggestion_only"))
+        stable_suggestion_only_poll_count = (
+            stable_suggestion_only_poll_count + 1
+            if suggestion_only
+            and suggestion_signature
+            and suggestion_signature == previous_suggestion_signature
+            else (1 if suggestion_only and suggestion_signature else 0)
+        )
+        previous_suggestion_signature = (
+            suggestion_signature if suggestion_only else ""
+        )
         log(
             "info",
             "unfollow_direct_exact_result_poll",
@@ -617,6 +653,7 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
             committed_surface_count=committed_surface_count,
             stable_exact_poll_count=stable_exact_poll_count,
             stable_no_results_poll_count=stable_no_results_poll_count,
+            stable_suggestion_only_poll_count=stable_suggestion_only_poll_count,
             exact_bounds_present=bool(classification.get("bounds")),
         )
         if state == SEARCH_SURFACE_UNHEALTHY and count > 1:
@@ -662,6 +699,22 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
                 "confirmed_surface_count": committed_surface_count,
                 "poll_count": observed_poll_count,
                 "stable_no_results_poll_count": stable_no_results_poll_count,
+            }
+        if (
+            stable_suggestion_only_poll_count
+            >= SEARCH_RESULT_STABLE_SUGGESTION_ONLY_POLLS
+        ):
+            return {
+                "ok": False,
+                "status": "username_not_found_confirmed",
+                "reason": "username_not_found_confirmed_suggestion_only_stable",
+                "search_surface_state": SEARCH_NO_RESULTS_CONFIRMED,
+                "exact_match_count": 0,
+                "confirmed_surface_count": committed_surface_count + 1,
+                "poll_count": observed_poll_count,
+                "stable_suggestion_only_poll_count": (
+                    stable_suggestion_only_poll_count
+                ),
             }
     return {
         "ok": False,

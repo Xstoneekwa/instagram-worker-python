@@ -2320,6 +2320,37 @@ def _run_real_unfollow_multi_loop(
                     breaker_opened = bool(
                         breaker_opened or candidate_decision.global_circuit_open
                     )
+                    if (
+                        breaker_opened
+                        and search_surface_health.can_attempt_bounded_recovery()
+                    ):
+                        recovery_ok, recovery_reason = recover_following_viewport(
+                            trigger_reason=(
+                                "unfollow_search_surface_consecutive_failure_limit_reached"
+                            )
+                        )
+                        policy_recovered = (
+                            session_completion_policy.record_bounded_global_recovery(
+                                safe_state_restored=recovery_ok,
+                            )
+                        )
+                        recovered = bool(recovery_ok and policy_recovered)
+                        search_surface_health.record_bounded_recovery(recovered)
+                        log(
+                            "warning" if not recovered else "info",
+                            "unfollow_search_surface_bounded_recovery_completed",
+                            username=target_username,
+                            recovery_ok=recovered,
+                            recovery_reason=recovery_reason,
+                            continue_same_session=recovered,
+                            remaining_count=len(
+                                coverage_tracker.remaining_planned_usernames
+                            ),
+                        )
+                        if recovered:
+                            coverage_tracker.mark_candidate_retryable(target_key)
+                            continue
+                        breaker_opened = True
                     if candidate_decision.retry_in_same_session and not breaker_opened:
                         coverage_tracker.mark_candidate_retryable(target_key)
                         log(

@@ -39,6 +39,7 @@ class UnfollowSessionCompletionPolicy:
     total_candidate_failures: int = 0
     successful_resets: int = 0
     retry_generations_started: int = 0
+    global_recoveries_used: int = 0
 
     def record_candidate_failure(
         self,
@@ -110,6 +111,13 @@ class UnfollowSessionCompletionPolicy:
             self.successful_resets += 1
         self.consecutive_candidate_failures = 0
 
+    def record_bounded_global_recovery(self, *, safe_state_restored: bool) -> bool:
+        if not safe_state_restored or self.global_recoveries_used >= 1:
+            return False
+        self.global_recoveries_used += 1
+        self.consecutive_candidate_failures = 0
+        return True
+
     def begin_retry_generation(
         self,
         remaining_usernames: Iterable[str],
@@ -153,6 +161,7 @@ class UnfollowSessionCompletionPolicy:
             "total_candidate_failures": self.total_candidate_failures,
             "successful_recovery_counter_resets": self.successful_resets,
             "direct_search_retry_generations_started": self.retry_generations_started,
+            "bounded_global_recoveries_used": self.global_recoveries_used,
         }
 
 

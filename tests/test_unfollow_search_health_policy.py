@@ -34,6 +34,25 @@ class UnfollowSearchHealthPolicyTests(unittest.TestCase):
             "unfollow_search_surface_consecutive_failure_limit_reached",
         )
 
+    def test_first_open_circuit_gets_one_bounded_same_session_recovery(self) -> None:
+        policy = SearchSurfaceCircuitBreaker()
+        for _ in range(3):
+            policy.record("search_surface_unhealthy")
+        self.assertTrue(policy.can_attempt_bounded_recovery())
+        policy.record_bounded_recovery(True)
+        self.assertFalse(policy.opened)
+        self.assertEqual(policy.consecutive_technical_failures, 0)
+        self.assertFalse(policy.can_attempt_bounded_recovery())
+        self.assertTrue(policy.recovery_succeeded)
+
+    def test_failed_bounded_recovery_keeps_circuit_fail_closed(self) -> None:
+        policy = SearchSurfaceCircuitBreaker()
+        for _ in range(3):
+            policy.record("search_surface_unhealthy")
+        policy.record_bounded_recovery(False)
+        self.assertTrue(policy.opened)
+        self.assertFalse(policy.can_attempt_bounded_recovery())
+
     def test_mixed_healthy_results_prevent_global_failure_accumulation(self) -> None:
         policy = SearchSurfaceCircuitBreaker()
         sequence = [

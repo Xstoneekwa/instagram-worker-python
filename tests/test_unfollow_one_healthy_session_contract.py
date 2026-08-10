@@ -92,6 +92,27 @@ class UnfollowOneHealthySessionContractTests(unittest.TestCase):
             policy.record_candidate_failure("three", safe_state_restored=True).global_circuit_open
         )
 
+    def test_one_bounded_global_recovery_resets_s1_and_cannot_repeat(self) -> None:
+        policy = UnfollowSessionCompletionPolicy()
+        for username in ("one", "two", "three"):
+            policy.record_candidate_failure(username, safe_state_restored=True)
+        self.assertTrue(
+            policy.record_bounded_global_recovery(safe_state_restored=True)
+        )
+        self.assertEqual(policy.consecutive_candidate_failures, 0)
+        self.assertFalse(
+            policy.record_bounded_global_recovery(safe_state_restored=True)
+        )
+
+    def test_terminal_not_found_is_removed_from_active_plan_and_persisted(self) -> None:
+        source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
+        terminal = source.split(
+            'if classification == "username_not_found_confirmed":', 1
+        )[1].split("direct_search_retryable_failures += 1", 1)[0]
+        self.assertIn("record_unfollow_candidate_availability_v2", terminal)
+        self.assertIn("mark_candidate_unavailable", terminal)
+        self.assertIn("backlog_actionable=False", terminal)
+
 
 if __name__ == "__main__":
     unittest.main()
