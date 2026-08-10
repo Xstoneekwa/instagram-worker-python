@@ -964,18 +964,30 @@ def classify_private_unfollow_confirmation_snapshot(
     if not profile_identity_certified or not target:
         base["failure_reason"] = "private_confirmation_identity_not_certified"
         return base
-    actual_raw, _method, _meta = _extract_profile_username_from_hierarchy(
+    actual_raw, _method, identity_meta = _extract_profile_username_from_hierarchy(
         hierarchy_xml
     )
-    actual = normalize_unfollow_username(actual_raw)
-    if actual != target:
+    # A modal can hide the profile action-bar node and expose its own generic
+    # title resource (for example the word ``Unfollow``).  That generic title
+    # must not override the exact profile identity already certified before
+    # the actions-sheet tap.  An explicit action-bar identity remains
+    # authoritative and a mismatch still fails closed.
+    action_bar_actual = normalize_unfollow_username(
+        str(identity_meta.get("action_bar_title") or "")
+    )
+    if action_bar_actual and action_bar_actual != target:
         base["failure_reason"] = "private_confirmation_profile_identity_mismatch"
-        base["actual_profile_username"] = actual
+        base["actual_profile_username"] = action_bar_actual
+        base["snapshot_identity_candidate"] = normalize_unfollow_username(actual_raw)
         return base
     if any(marker in joined for marker in _PRIVATE_UNFOLLOW_UNSAFE_MARKERS):
         base["failure_reason"] = "private_confirmation_unsafe_surface"
         return base
-    if target not in " ".join(all_labels).casefold():
+    target_token = re.compile(
+        rf"(?<![a-z0-9._]){re.escape(target)}(?![a-z0-9._])",
+        flags=re.IGNORECASE,
+    )
+    if not any(target_token.search(label) for label in all_labels):
         base["failure_reason"] = "private_confirmation_target_context_missing"
         return base
     parent_map = {child: parent for parent in root.iter() for child in parent}
@@ -1021,7 +1033,12 @@ def classify_private_unfollow_confirmation_snapshot(
             "snapshot_generation": hashlib.sha256(
                 generation_material.encode("utf-8")
             ).hexdigest()[:20],
-            "actual_profile_username": actual,
+            "actual_profile_username": action_bar_actual or target,
+            "identity_verification_method": (
+                "action_bar_title_exact_plus_modal_target_context"
+                if action_bar_actual
+                else "prior_profile_exact_plus_modal_target_context"
+            ),
             "context_proved": True,
             "cancel_control_proved": True,
             "action_candidate_count": 1,
