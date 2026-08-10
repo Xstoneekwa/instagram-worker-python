@@ -183,12 +183,16 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertEqual(out.mode, "progressive_scan")
         self.assertEqual(out.reason, "progressive_scan_primary_not_exhausted")
 
-    def test_more_than_ten_scans_until_exhausted(self) -> None:
+    def test_more_than_ten_scans_then_exposes_the_full_authoritative_remainder(self) -> None:
         names = [f"user{i}" for i in range(11)]
         self.assertEqual(choose_hybrid_selection(names).mode, "progressive_scan")
         fallback = choose_hybrid_selection(names, scan_exhausted=True)
         self.assertEqual(fallback.mode, "direct_exact")
-        self.assertEqual(len(fallback.usernames), 10)
+        self.assertEqual(len(fallback.usernames), 11)
+        self.assertEqual(
+            fallback.reason,
+            "progressive_scan_exhausted_authoritative_fallback",
+        )
 
     def test_one_remaining_uses_direct_exact_only_after_progressive_exhaustion(self) -> None:
         out = choose_hybrid_selection(["one"], scan_exhausted=True)

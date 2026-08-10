@@ -64,11 +64,15 @@ from unfollow_ui_coverage_policy import (
 )
 from unfollow_hybrid_strategy import (
     CURSOR_RESTORE_SCROLL_LIMIT,
-    DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
     can_arm_direct_search_fallback,
     choose_hybrid_selection,
     cursor_anchor_matches,
     open_exact_profile_for_unfollow,
+)
+from unfollow_daily_plan import (
+    checkpoint_daily_plan,
+    contract_version as unfollow_daily_plan_contract_version,
+    prepare_authoritative_daily_plan,
 )
 from unfollow_diagnostic_contract_v2 import UnfollowDiagnosticSession
 from unfollow_action_outcome import (
@@ -650,6 +654,23 @@ def _base_session_summary(
         "candidate_skip_counts": dict(plan.get("skipped_counts") or {}),
         "candidate_skipped_total": int(plan.get("skipped_total") or 0),
         "scan_as_of": str(plan.get("scan_as_of") or ""),
+        "unfollow_daily_plan_id": str(plan.get("unfollow_daily_plan_id") or ""),
+        "unfollow_daily_plan_schema": str(plan.get("unfollow_daily_plan_schema") or ""),
+        "unfollow_daily_plan_business_date_sast": str(
+            plan.get("unfollow_daily_plan_business_date_sast") or ""
+        ),
+        "unfollow_daily_plan_resume_reused": bool(
+            plan.get("unfollow_daily_plan_resume_reused")
+        ),
+        "unfollow_daily_plan_initial_cohort_size": int(
+            plan.get("unfollow_daily_plan_initial_cohort_size") or 0
+        ),
+        "newly_eligible_after_plan_freeze_count": int(
+            plan.get("newly_eligible_after_plan_freeze_count") or 0
+        ),
+        "multi_session_required_by_explicit_cap_override": bool(
+            plan.get("multi_session_required_by_explicit_cap_override")
+        ),
         "following_surface_ok": False,
         "visible_rows_count": 0,
         "row_cta_counts": {},
@@ -1491,6 +1512,7 @@ def _run_real_unfollow_multi_loop(
     business_action_deadline: str | None,
     adaptive_coverage_budget: Any,
     resume_checkpoint: dict[str, Any] | None,
+    daily_plan_context: dict[str, Any],
     diagnostic_session: UnfollowDiagnosticSession | None,
     t0: float,
 ) -> int:
@@ -1599,6 +1621,7 @@ def _run_real_unfollow_multi_loop(
     candidate_availability_persistence_failure_usernames: list[str] = []
     search_surface_health = SearchSurfaceCircuitBreaker()
     direct_fallback_armed = False
+    direct_fallback_candidate_limit = len(planned_usernames)
 
     def safe_diagnostic_call(method_name: str, **kwargs: Any) -> Any:
         if diagnostic_session is None:
@@ -1989,6 +2012,21 @@ def _run_real_unfollow_multi_loop(
                 base_summary.get("unplanned_eligible_count") or 0
             ),
         )
+        authoritative_checkpoint = checkpoint_daily_plan(
+            daily_plan_context,
+            canonical_outcome.get("checkpoint"),
+        )
+        canonical_outcome["checkpoint"] = authoritative_checkpoint
+        canonical_outcome["daily_plan_id"] = str(
+            daily_plan_context.get("plan_id") or ""
+        )
+        canonical_outcome["daily_plan_resume_reused"] = bool(
+            daily_plan_context.get("resume_reused")
+        )
+        if canonical_outcome.get("resume_recommended"):
+            canonical_outcome["resume_strategy"] = (
+                "reuse_authoritative_daily_plan_remaining_queue"
+            )
         global_remaining_count = int(canonical_outcome.get("remaining_count") or 0)
         summary = {
             **base_summary,
@@ -2172,17 +2210,7 @@ def _run_real_unfollow_multi_loop(
                     scan_exhausted=direct_fallback_armed,
                     already_direct_searched=direct_search_attempted,
                 )
-                fallback_batch_exhausted = bool(
-                    direct_fallback_armed
-                    and len(direct_search_attempted) >= DIRECT_SEARCH_FALLBACK_BATCH_LIMIT
-                )
-                if fallback_batch_exhausted:
-                    stop_reason = "direct_fallback_batch_limit_reached"
-                    return emit_final(
-                        "success_real_unfollow_multi_partial_exhausted",
-                        stop_reason,
-                    )
-                if hybrid.mode == "direct_exact" and not fallback_batch_exhausted:
+                if hybrid.mode == "direct_exact":
                     target_username = str(hybrid.usernames[0])
                     target_key = normalize_unfollow_username(target_username)
                     direct_search_attempted.add(target_key)
@@ -2439,7 +2467,7 @@ def _run_real_unfollow_multi_loop(
                             "unfollow_direct_fallback_armed",
                             reason=stop_reason,
                             remaining_count=len(coverage_tracker.remaining_planned_usernames),
-                            direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+                            direct_candidate_limit=direct_fallback_candidate_limit,
                         )
                         continue
                     status = (
@@ -2677,7 +2705,7 @@ def _run_real_unfollow_multi_loop(
                             "unfollow_direct_fallback_armed_after_coverage_budget",
                             reason=stop_reason,
                             remaining_count=remaining_planned_count,
-                            direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+                            direct_candidate_limit=direct_fallback_candidate_limit,
                             progressive_primary_completed=True,
                         )
                         continue
@@ -3769,6 +3797,66 @@ def run_unfollow_session(
         settings=settings,
         protected_usernames=protected_usernames,
     )
+    business_date_sast, _business_day_start, _business_day_end = (
+        supabase_client.sast_business_day_window()
+    )
+    current_eligible_candidates = list(
+        plan.get("diagnostic_eligible_candidates_at_start")
+        or plan.get("candidates")
+        or []
+    )
+    daily_plan_resolution = prepare_authoritative_daily_plan(
+        account_id=aid,
+        business_date_sast=business_date_sast,
+        package_contract_version=unfollow_daily_plan_contract_version(settings),
+        daily_quota_target=db_unfollow_day_limit,
+        session_quota_target=db_unfollow_session_limit,
+        current_eligible_candidates=current_eligible_candidates,
+        resume_checkpoint=resume_checkpoint,
+    )
+    daily_plan_context = dict(daily_plan_resolution["daily_plan"])
+    plan = {
+        **plan,
+        "plan_reason": "authoritative_daily_cohort",
+        "candidates": list(daily_plan_resolution["candidates"]),
+        "candidates_count": len(daily_plan_resolution["candidates"]),
+        "unplanned_eligible_count": 0,
+        "unfollow_daily_plan_id": str(daily_plan_context.get("plan_id") or ""),
+        "unfollow_daily_plan_schema": str(daily_plan_context.get("schema") or ""),
+        "unfollow_daily_plan_business_date_sast": business_date_sast,
+        "unfollow_daily_plan_resume_reused": bool(
+            daily_plan_resolution.get("resume_reused")
+        ),
+        "unfollow_daily_plan_initial_cohort_size": int(
+            daily_plan_context.get("initial_db_eligible_count") or 0
+        ),
+        "newly_eligible_after_plan_freeze_count": len(
+            daily_plan_context.get("newly_eligible_after_plan_freeze") or []
+        ),
+        "multi_session_required_by_explicit_cap_override": bool(
+            daily_plan_context.get("multi_session_required_by_explicit_cap_override")
+        ),
+    }
+    log(
+        "info",
+        "unfollow_authoritative_daily_plan_resolved",
+        account_id=aid,
+        run_id=run_id,
+        plan_id=plan["unfollow_daily_plan_id"],
+        business_date_sast=business_date_sast,
+        package_contract_version=str(
+            daily_plan_context.get("package_contract_version") or ""
+        ),
+        initial_db_eligible_count=int(
+            daily_plan_context.get("initial_db_eligible_count") or 0
+        ),
+        actionable_remaining_count=len(plan["candidates"]),
+        newly_eligible_after_plan_freeze_count=plan[
+            "newly_eligible_after_plan_freeze_count"
+        ],
+        resume_reused=plan["unfollow_daily_plan_resume_reused"],
+        cohort_rebuilt=False,
+    )
     planned_usernames = _planned_username_set(plan)
     planned_by_username = _planned_candidates_by_username(plan)
     unexpected_protected_candidates = planned_usernames.intersection(protected_usernames)
@@ -4213,6 +4301,7 @@ def run_unfollow_session(
             business_action_deadline=resolved_deadline,
             adaptive_coverage_budget=handoff_budget,
             resume_checkpoint=resume_checkpoint,
+            daily_plan_context=daily_plan_context,
             diagnostic_session=diagnostic_session,
             t0=t0,
         )

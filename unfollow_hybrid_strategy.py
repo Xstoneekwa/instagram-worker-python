@@ -17,7 +17,6 @@ from target_followers_progressive_resume_v2 import (
 from unfollow_ui_coverage_policy import normalize_username
 
 
-DIRECT_SEARCH_FALLBACK_BATCH_LIMIT = 10
 CURSOR_RESTORE_SCROLL_LIMIT = 10
 SEARCH_RESULT_MAX_WAIT_S = 3.5
 SEARCH_RESULT_POLL_INTERVAL_S = 0.35
@@ -86,8 +85,8 @@ def choose_hybrid_selection(
     if scan_exhausted:
         return HybridSelection(
             "direct_exact",
-            pending[:DIRECT_SEARCH_FALLBACK_BATCH_LIMIT],
-            "progressive_scan_exhausted_bounded_fallback",
+            pending,
+            "progressive_scan_exhausted_authoritative_fallback",
         )
     # The own Following list is the primary discovery path at every backlog
     # size.  A small remainder is not evidence that progressive discovery has
