@@ -874,7 +874,14 @@ def verify_active_instagram_account_matches_expected(
                 else "stable_id_not_checked_username_matched"
             ),
             verification_method=f"own_profile_username_exact:{method}",
-            meta=meta,
+            meta={
+                **meta,
+                # A successful identity result is only emitted after the
+                # canonical own-profile navigation above completed. Persist
+                # that boundary explicitly so downstream status writers do
+                # not have to infer it from a username match alone.
+                "profile_opened": True,
+            },
         )
         log(
             "info",

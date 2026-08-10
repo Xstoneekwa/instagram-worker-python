@@ -395,6 +395,7 @@ def verified_identity_result(**kwargs):
         "failure_reason": "",
         "verification_method": "unit_test_exact_profile_username",
         "identity_evidence": "username_exact_match",
+        "meta": {"profile_opened": True},
     }
 
 
@@ -2663,6 +2664,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 "failure_reason": "",
                 "verification_method": "own_profile_username_exact:action_bar_title",
                 "identity_evidence": "username_exact_match",
+                "meta": {"profile_opened": True},
             }
         )
 
@@ -2676,10 +2678,38 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertTrue(result.published)
         self.assertTrue(result.safe_metadata["expected_identity_verified"])
+        self.assertTrue(result.safe_metadata["profile_opened"])
         self.assertEqual(result.safe_metadata["actual_logged_in_username"], USERNAME)
         self.assertEqual(result.safe_metadata["identity_verification_status"], "verified")
         identity_verifier.assert_called_once()
         publisher.assert_called_once()
+
+    def test_exact_username_without_profile_open_proof_fails_closed(self) -> None:
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+        identity_verifier = Mock(
+            return_value={
+                "ok": True,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": USERNAME,
+                "failure_reason": "",
+                "verification_method": "unit_test_missing_profile_boundary",
+                "identity_evidence": "username_exact_match",
+            }
+        )
+
+        result = self._run_login_form(
+            CONNECTED_XML,
+            publisher=publisher,
+            publish_enabled=True,
+            connected_identity_verifier=identity_verifier,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.failure_reason, "own_profile_not_opened")
+        self.assertFalse(result.safe_metadata["profile_opened"])
+        self.assertFalse(result.safe_metadata["expected_identity_verified"])
+        publisher.assert_not_called()
 
     def test_connected_screen_without_identity_proof_fails_closed_before_ready_publication(self) -> None:
         publisher = Mock(return_value={"published": True, "reason": "published"})
@@ -2788,6 +2818,11 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.published)
         self.assertEqual(result.publish_reason, "published_connected")
         self.assertEqual(calls[0]["login_status"], "connected")
+        self.assertTrue(calls[0]["metadata"]["expected_identity_verified"])
+        self.assertEqual(calls[0]["metadata"]["identity_verification_status"], "verified")
+        self.assertTrue(calls[0]["metadata"]["profile_opened"])
+        self.assertEqual(calls[0]["metadata"]["expected_username"], USERNAME)
+        self.assertEqual(calls[0]["metadata"]["actual_logged_in_username"], USERNAME)
         rendered_payload = json.dumps(result.publish_payload, sort_keys=True)
         self.assertNotIn('"stage"', rendered_payload.split('"metadata"')[0])
         self.assertNotIn('"probe_version"', rendered_payload.split('"metadata"')[0])

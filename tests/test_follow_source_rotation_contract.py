@@ -197,6 +197,7 @@ class FollowSourceRotationContractTest(unittest.TestCase):
                     "actual_logged_in_username": "mythyl_fitness",
                     "expected_identity_verified": True,
                     "identity_verification_status": "verified",
+                    "profile_opened": True,
                 },
             )
         provision_mock.assert_called_once()

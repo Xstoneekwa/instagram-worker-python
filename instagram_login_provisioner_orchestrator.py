@@ -5434,6 +5434,8 @@ def _connected_status_publishable(
         return False
     if extra_metadata.get("expected_identity_verified") is not True:
         return False
+    if extra_metadata.get("profile_opened") is not True:
+        return False
     expected_username = _normalize_identity_username(extra_metadata.get("expected_username"))
     actual_username = _normalize_identity_username(extra_metadata.get("actual_logged_in_username"))
     if not expected_username or not actual_username or actual_username != expected_username:
@@ -5508,14 +5510,22 @@ def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
     actual = _safe_public_text(raw.get("actual_logged_in_username"))
     normalized_expected = _normalize_identity_username(expected)
     normalized_actual = _normalize_identity_username(actual)
-    verified = bool(raw.get("ok")) and bool(normalized_expected) and normalized_actual == normalized_expected
+    raw_meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    profile_opened = raw.get("profile_opened") is True or raw_meta.get("profile_opened") is True
+    verified = (
+        bool(raw.get("ok"))
+        and bool(normalized_expected)
+        and normalized_actual == normalized_expected
+        and profile_opened
+    )
     failure_reason = _safe_public_text(raw.get("failure_reason"))
     if not verified and not failure_reason:
-        failure_reason = (
-            "active_instagram_account_mismatch"
-            if normalized_actual and normalized_actual != normalized_expected
-            else "expected_instagram_identity_not_verified"
-        )
+        if normalized_actual and normalized_actual != normalized_expected:
+            failure_reason = "active_instagram_account_mismatch"
+        elif not profile_opened:
+            failure_reason = "own_profile_not_opened"
+        else:
+            failure_reason = "expected_instagram_identity_not_verified"
     verification_method = _safe_public_text(raw.get("verification_method"))
     identity_evidence = _safe_public_text(raw.get("identity_evidence"))
     return {
@@ -5524,6 +5534,7 @@ def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
         "identity_verification_failure_reason": "" if verified else failure_reason,
         "expected_username": expected,
         "actual_logged_in_username": actual,
+        "profile_opened": profile_opened,
         "identity_verification_method": verification_method,
         "identity_evidence": identity_evidence,
     }
@@ -5577,11 +5588,20 @@ def _publish_skip_reason(
 
 def _publish_safe_metadata(extra_metadata: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = (
+        "run_id",
         "central_orchestrator_version",
         "selected_route",
         "final_terminal_screen",
         "screen_type",
         "screen_before_submit",
+        "expected_identity_verified",
+        "identity_verification_status",
+        "identity_verification_failure_reason",
+        "expected_username",
+        "actual_logged_in_username",
+        "profile_opened",
+        "identity_verification_method",
+        "identity_evidence",
     )
     safe: dict[str, Any] = {}
     for key in allowed_keys:
