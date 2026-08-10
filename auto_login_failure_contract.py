@@ -221,7 +221,10 @@ def normalize_auto_login_failure(
         recommended_action = "Review the Instagram login form detector before retrying."
         retryable = bool(correction_deployed)
     elif mapped == FALLBACK_ERROR_CODE:
-        operator_message = "Auto Login failed with an unclassified internal worker condition."
+        operator_message = (
+            "The Instagram login could not be completed automatically and "
+            "requires human intervention."
+        )
         recommended_action = "Review the server-only worker failure details before retrying."
         retryable = False
     else:
