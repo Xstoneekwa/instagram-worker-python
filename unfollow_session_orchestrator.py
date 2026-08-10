@@ -3754,6 +3754,10 @@ def run_unfollow_session(
         else max(0, int(real_action_max_override))
     )
     db_unfollow_day_limit = max(0, int(getattr(settings, "day_limit", 0) or 0))
+    db_unfollow_session_limit = max(
+        0,
+        int(getattr(settings, "session_limit", 0) or 0),
+    )
     try:
         unfollows_done_today = supabase_client.count_successful_unfollows_today(aid)
     except Exception as exc:
@@ -3775,7 +3779,7 @@ def run_unfollow_session(
     effective_unfollows_done_at_start = int(day_progress["effective_done"] or 0)
     unfollow_day_remaining_today = int(day_progress["remaining"] or 0)
     runtime_cap_resolution = resolve_unfollow_runtime_cap(
-        db_unfollow_per_session_limit=getattr(settings, "session_limit", 0),
+        db_unfollow_per_session_limit=db_unfollow_session_limit,
         runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
         runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
         env_real_action_max_per_run=env_real_action_max,
@@ -3891,7 +3895,7 @@ def run_unfollow_session(
         account_id=aid,
         run_id=run_id,
         unfollow_mode=str(getattr(settings, "mode", "") or ""),
-        db_unfollow_per_session_limit=int(getattr(settings, "session_limit", 0) or 0),
+        db_unfollow_per_session_limit=db_unfollow_session_limit,
         db_unfollow_per_day_limit=db_unfollow_day_limit,
         unfollows_done_today=int(unfollows_done_today or 0),
         quota_remaining_hint=hinted_remaining,
