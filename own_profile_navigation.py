@@ -22,6 +22,7 @@ from instagram_navigation import (
     verify_profile,
 )
 from logs import log
+from instagram_post_verification_completion import hierarchy_proves_expected_instagram_foreground
 
 _PROFILE_TAB_RID_SUFFIXES: tuple[str, ...] = (
     "profile_tab",
@@ -52,8 +53,33 @@ def open_own_profile_from_bottom_nav(d: u2.Device) -> bool:
     log("info", "welcome_baseline_own_profile_open_started")
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     if not verify_app_foreground(d, pkg):
-        log("info", "welcome_baseline_own_profile_open_failed", reason="not_foreground")
-        return False
+        actual_package = ""
+        try:
+            actual_package = str((d.app_current() or {}).get("package") or "").strip()
+        except Exception:
+            actual_package = ""
+        hierarchy = ""
+        if not actual_package:
+            try:
+                hierarchy = str(d.dump_hierarchy(compressed=False) or "")
+            except TypeError:
+                hierarchy = str(d.dump_hierarchy() or "")
+            except Exception:
+                hierarchy = ""
+        if not hierarchy_proves_expected_instagram_foreground(hierarchy, pkg):
+            log(
+                "info",
+                "welcome_baseline_own_profile_open_failed",
+                reason="not_foreground",
+                actual_package=actual_package,
+                hierarchy_foreground_proof=False,
+            )
+            return False
+        log(
+            "info",
+            "welcome_baseline_foreground_proved_by_fresh_hierarchy",
+            hierarchy_foreground_proof=True,
+        )
 
     clicked = False
     click_name = ""

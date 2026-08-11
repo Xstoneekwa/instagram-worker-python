@@ -19,11 +19,13 @@ from typing import Any
 
 import uiautomator2 as u2
 
+import config
 from instagram_login_status_classifier import LoginProbeOutcome
 from instagram_login_ui_probe import (
     detect_login_probe_outcome_from_hierarchy,
     extract_login_screen_signals_from_hierarchy,
 )
+from instagram_post_verification_completion import prepare_post_verification_identity_surface
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav
 
@@ -796,6 +798,41 @@ def verify_active_instagram_account_matches_expected(
         )
         return result
 
+    post_verification_metadata: dict[str, Any] = {}
+    if stage == "login_provisioning_post_login_identity" or str(run_type or "").startswith("login_"):
+        completion = prepare_post_verification_identity_surface(
+            d,
+            expected_package_name=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        )
+        post_verification_metadata = {
+            "post_verification_screen_type": completion.screen_type,
+            "post_verification_recovery_count": completion.recovery_count,
+            "post_verification_recovered_screen_types": list(completion.recovered_screen_types),
+            "post_verification_fingerprint_changed": completion.fingerprint_changed,
+            **completion.metadata,
+        }
+        if not completion.safe_for_identity_guard:
+            result = _identity_failure_result(
+                expected_raw=expected_raw,
+                expected_stable_id=expected_stable_id,
+                failure_reason=completion.failure_reason or "post_verification_human_assistance_required",
+                verification_method="post_verification_completion_gate",
+                meta={
+                    **post_verification_metadata,
+                    "screen_type": completion.screen_type,
+                    "detection_reason": completion.failure_reason,
+                    "identity_guard_stage": "post_verification_completion_gate",
+                },
+            )
+            _log_identity_failure(
+                result,
+                account_id=account_id,
+                run_type=run_type,
+                run_id=run_id,
+                stage=stage,
+            )
+            return result
+
     pre_profile = _pre_classify_screen_before_profile_open(d, expected_raw=expected_raw)
     if isinstance(pre_profile, AccountIdentityCheckResult):
         hierarchy = _dump_hierarchy(d)
@@ -808,6 +845,7 @@ def verify_active_instagram_account_matches_expected(
             verification_method=pre_profile.verification_method,
             meta={
                 **pre_profile.meta,
+                **post_verification_metadata,
                 **_capture_identity_failure_artifacts(
                     d,
                     hierarchy,
@@ -840,6 +878,7 @@ def verify_active_instagram_account_matches_expected(
                     {"screen_type": "own_profile_open_failed", "detection_reason": "profile_tab_not_found"},
                     identity_guard_stage="open_own_profile_from_bottom_nav",
                 ),
+                **post_verification_metadata,
                 **_capture_identity_failure_artifacts(
                     d,
                     hierarchy,
@@ -876,6 +915,7 @@ def verify_active_instagram_account_matches_expected(
             verification_method=f"own_profile_username_exact:{method}",
             meta={
                 **meta,
+                **post_verification_metadata,
                 # A successful identity result is only emitted after the
                 # canonical own-profile navigation above completed. Persist
                 # that boundary explicitly so downstream status writers do
@@ -936,6 +976,7 @@ def verify_active_instagram_account_matches_expected(
         verification_method=f"own_profile_username_exact_mismatch:{method}",
         meta={
             **meta,
+            **post_verification_metadata,
             **_screen_classification_meta(
                 screen_meta,
                 identity_guard_stage=identity_stage,
