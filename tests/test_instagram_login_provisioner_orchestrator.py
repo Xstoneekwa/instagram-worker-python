@@ -3600,6 +3600,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_active_account_home_expected_profile_connected_without_password(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
+        publisher = Mock(return_value={"published": True, "reason": "published"})
         device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_EXPECTED_XML, ACTIVE_PROFILE_EXPECTED_XML]
 
         result = self.run_flow(
@@ -3608,6 +3609,8 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             expected_username="random_expected",
             credentials_getter=getter,
             initial_signals=self._active_home_connected_signals(),
+            publisher=publisher,
+            publish_enabled=True,
         )
 
         self.assertEqual(result.final_outcome, "connected")
@@ -3615,6 +3618,18 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["selected_route"], "already_connected_expected")
         self.assertNotEqual(result.reason, "connected_no_password_needed")
         self.assertFalse(result.safe_metadata.get("recovery_path"))
+        self.assertTrue(result.published)
+        self.assertEqual(result.publish_reason, "published_connected")
+        self.assertTrue(result.safe_metadata["publish_attempted"])
+        publish_call = publisher.call_args.kwargs
+        self.assertEqual(publish_call["login_status"], "connected")
+        self.assertEqual(publish_call["provisioning_status"], "ready")
+        self.assertEqual(publish_call["onboarding_status"], "ready")
+        self.assertTrue(publish_call["metadata"]["expected_identity_verified"])
+        self.assertEqual(publish_call["metadata"]["identity_verification_status"], "verified")
+        self.assertEqual(publish_call["metadata"]["expected_username"], "random_expected")
+        self.assertEqual(publish_call["metadata"]["actual_logged_in_username"], "random_expected")
+        self.assertTrue(publish_call["metadata"]["profile_opened"])
         getter.assert_not_called()
 
     def test_active_account_home_mismatch_unknown_lifecycle_blocks_without_add_account(self) -> None:

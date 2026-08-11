@@ -996,7 +996,7 @@ def run_login_provisioning_flow(
                     final_login_status=classification.login_status,
                     final_provisioning_status=classification.provisioning_status,
                     final_onboarding_status=classification.onboarding_status,
-                    should_publish_status=False,
+                    should_publish_status=True,
                     account_id=safe_account_id,
                     expected_username=safe_expected_username,
                     actions_taken=actions_taken,

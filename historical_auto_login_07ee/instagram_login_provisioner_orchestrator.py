@@ -882,7 +882,7 @@ def run_login_provisioning_flow(
                     final_login_status=classification.login_status,
                     final_provisioning_status=classification.provisioning_status,
                     final_onboarding_status=classification.onboarding_status,
-                    should_publish_status=False,
+                    should_publish_status=True,
                     account_id=safe_account_id,
                     expected_username=safe_expected_username,
                     actions_taken=actions_taken,
@@ -892,6 +892,8 @@ def run_login_provisioning_flow(
                         **old_logged_in_metadata,
                         "selected_route": "already_connected_expected",
                         "selected_route_reason": "active_profile_matches_expected",
+                        "expected_identity_verified": True,
+                        "identity_verification_status": "verified",
                         "password_required": False,
                         "ready_for_password_submit": False,
                     },
@@ -4889,6 +4891,14 @@ def _connected_status_publishable(
         return False
     if str(final_login_status or "") != "connected":
         return False
+    if extra_metadata.get("expected_identity_verified") is not True:
+        return False
+    if extra_metadata.get("profile_opened") is not True:
+        return False
+    expected_username = _normalize_identity_username(extra_metadata.get("expected_username"))
+    actual_username = _normalize_identity_username(extra_metadata.get("actual_logged_in_username"))
+    if not expected_username or not actual_username or actual_username != expected_username:
+        return False
     selected_route = str(extra_metadata.get("selected_route") or "")
     router_decision = str(extra_metadata.get("router_decision") or "")
     safe_routes = {
@@ -4934,11 +4944,20 @@ def _publish_skip_reason(
 
 def _publish_safe_metadata(extra_metadata: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = (
+        "run_id",
         "central_orchestrator_version",
         "selected_route",
         "final_terminal_screen",
         "screen_type",
         "screen_before_submit",
+        "expected_identity_verified",
+        "identity_verification_status",
+        "identity_verification_failure_reason",
+        "expected_username",
+        "actual_logged_in_username",
+        "profile_opened",
+        "identity_verification_method",
+        "identity_evidence",
     )
     safe: dict[str, Any] = {}
     for key in allowed_keys:
