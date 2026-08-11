@@ -336,6 +336,18 @@ def execute_email_code_challenge_resume(
                     "save_login_info_prompt_detected": observed.get("save_login_info_prompt_detected"),
                     "save_login_info_not_now_tapped": observed.get("save_login_info_not_now_tapped"),
                     "save_login_info_dismiss_attempt_count": observed.get("save_login_info_dismiss_attempt_count"),
+                    "post_login_location_services_prompt_detected": observed.get(
+                        "post_login_location_services_prompt_detected"
+                    ),
+                    "post_login_location_services_prompt_dismissed": observed.get(
+                        "post_login_location_services_prompt_dismissed"
+                    ),
+                    "post_login_location_services_prompt_dismiss_method": observed.get(
+                        "post_login_location_services_prompt_dismiss_method"
+                    ),
+                    "post_login_location_services_prompt_dismiss_attempt_count": observed.get(
+                        "post_login_location_services_prompt_dismiss_attempt_count"
+                    ),
                     "code_entered": code_entered,
                     "code_input_method": input_result.get("method"),
                     "code_input_confirmed": code_entered,
@@ -392,13 +404,19 @@ def _observe_post_submit_settled(
     interval_ms: int,
     max_observations: int,
 ) -> dict[str, Any]:
-    from instagram_login_password_form_executor import _classify_post_submit_hierarchy
+    from instagram_login_password_form_executor import (
+        _classify_post_submit_hierarchy,
+        _dismiss_post_login_location_services_prompt_once,
+    )
 
     screens: list[str] = []
     wait_total_ms = 0
     save_login_info_prompt_detected = False
     save_login_info_not_now_tapped = False
     save_login_info_dismiss_attempt_count = 0
+    post_login_location_services_prompt_detected = False
+    post_login_location_services_prompt_dismissed = False
+    post_login_location_services_prompt_dismiss_attempt_count = 0
     last_observed: dict[str, Any] = {
         "outcome": "unknown",
         "screen_type": "unknown",
@@ -451,6 +469,40 @@ def _observe_post_submit_settled(
             save_login_info_not_now_tapped = True
             warnings.append("instagram_save_login_info_prompt_not_now")
             continue
+        if observed.get("post_login_location_services_prompt_present") is True:
+            post_login_location_services_prompt_detected = True
+            warnings.append("post_login_location_services_prompt_detected")
+            if post_login_location_services_prompt_dismiss_attempt_count >= 1:
+                last_observed = {
+                    **last_observed,
+                    "outcome": "post_login_location_services_prompt_blocking",
+                    "screen_type": "connected_post_login_location_services_prompt",
+                    "reason": "post_login_location_services_prompt_not_dismissed_after_back",
+                    "terminal": True,
+                }
+                warnings.append("post_login_location_services_prompt_blocking")
+                break
+            post_login_location_services_prompt_dismiss_attempt_count += 1
+            if not _dismiss_post_login_location_services_prompt_once(d, warnings):
+                last_observed = {
+                    **last_observed,
+                    "outcome": "post_login_location_services_prompt_blocking",
+                    "screen_type": "connected_post_login_location_services_prompt",
+                    "reason": "post_login_location_services_prompt_back_failed",
+                    "terminal": True,
+                }
+                warnings.append("post_login_location_services_prompt_back_failed")
+                break
+            post_login_location_services_prompt_dismissed = True
+            warnings.append("post_login_location_services_prompt_dismiss_back")
+            last_observed = {
+                "outcome": "unknown",
+                "screen_type": "post_login_location_services_prompt_dismissed",
+                "reason": "awaiting_home_after_location_services_prompt",
+                "screen_label": "post_login_location_services_prompt_dismissed",
+                "terminal": False,
+            }
+            continue
         if observed.get("terminal"):
             break
 
@@ -463,6 +515,14 @@ def _observe_post_submit_settled(
         "save_login_info_prompt_detected": save_login_info_prompt_detected,
         "save_login_info_not_now_tapped": save_login_info_not_now_tapped,
         "save_login_info_dismiss_attempt_count": save_login_info_dismiss_attempt_count,
+        "post_login_location_services_prompt_detected": post_login_location_services_prompt_detected,
+        "post_login_location_services_prompt_dismissed": post_login_location_services_prompt_dismissed,
+        "post_login_location_services_prompt_dismiss_method": (
+            "back" if post_login_location_services_prompt_dismissed else ""
+        ),
+        "post_login_location_services_prompt_dismiss_attempt_count": (
+            post_login_location_services_prompt_dismiss_attempt_count
+        ),
     }
 
 

@@ -32,6 +32,12 @@ CONNECTED_XML = (
     '<node content-desc="Reels" />'
     '<node content-desc="Profile" />'
 )
+POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
+    '<node text="Set up on new device" />'
+    '<node text="To use Location services, allow Instagram to access your location" />'
+    '<node text="How you can use location services" />'
+    '<node text="Continue" clickable="true" />'
+)
 
 
 class FakeTarget:
@@ -67,6 +73,7 @@ class FakeDevice:
         self.code_target = FakeTarget("Enter code", set_text_updates=set_text_updates)
         self.continue_target = FakeTarget("Continue")
         self.not_now_target = FakeTarget("Not now")
+        self.press_calls: list[str] = []
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
         return self.hierarchies.pop(0) if self.hierarchies else CONNECTED_XML
@@ -79,6 +86,9 @@ class FakeDevice:
         if selector.get("text") == "Not now":
             return self.not_now_target
         return FakeTarget()
+
+    def press(self, key: str) -> None:
+        self.press_calls.append(key)
 
 
 class EmailCodeExecutorTests(unittest.TestCase):
@@ -126,6 +136,34 @@ class EmailCodeExecutorTests(unittest.TestCase):
         self.assertTrue(result.safe_metadata["save_login_info_prompt_detected"])
         self.assertTrue(result.safe_metadata["save_login_info_not_now_tapped"])
         self.assertIn("instagram_save_login_info_prompt_not_now", result.warnings)
+
+    def test_resume_dismisses_post_login_location_services_once_and_confirms_home(self) -> None:
+        device = FakeDevice(
+            [
+                EMAIL_CODE_CHALLENGE_XML,
+                EMAIL_CODE_FILLED_XML,
+                POST_LOGIN_LOCATION_SERVICES_PROMPT_XML,
+                CONNECTED_XML,
+            ]
+        )
+
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=3,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_detected"])
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["post_login_location_services_prompt_dismiss_method"], "back")
+        self.assertEqual(result.safe_metadata["post_login_location_services_prompt_dismiss_attempt_count"], 1)
+        self.assertIn("post_login_location_services_prompt_dismiss_back", result.warnings)
 
     def test_resume_uses_adb_keyboard_fallback_when_set_text_not_confirmed(self) -> None:
         device = FakeDevice(
