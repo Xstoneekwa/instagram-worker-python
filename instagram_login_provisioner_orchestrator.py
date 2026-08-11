@@ -97,6 +97,7 @@ NO_RETRY_FAILURES = {
 MAX_RETRY_ATTEMPTS = 1
 CENTRAL_ORCHESTRATOR_VERSION = "entry2e5p19-central-v1"
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
+POST_LOGIN_LOCATION_DISMISS_WAIT_MS = 300
 PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
 PROFILE_REFRESH_WAIT_MS = 500
 DEFAULT_INSTAGRAM_PACKAGE_NAME = "com.instagram.android"
@@ -399,6 +400,101 @@ def run_login_provisioning_flow(
         )
         return merged_metadata, failure
 
+    def _dismiss_initial_location_prompt_before_connected_exit(
+        current_signals: dict[str, Any],
+    ) -> tuple[dict[str, Any], LoginProvisioningFlowResult | None]:
+        screen_type = str(current_signals.get("screen_type") or "")
+        prompt_present = bool(
+            current_signals.get("post_login_location_services_prompt")
+            or current_signals.get("connected_post_login_location_services_prompt")
+            or screen_type == "connected_post_login_location_services_prompt"
+        )
+        if not prompt_present:
+            return current_signals, None
+
+        screen_preparation_metadata.update(
+            {
+                "post_login_location_services_prompt_detected": True,
+                "post_login_location_services_prompt_dismiss_attempt_count": 1,
+                "post_login_location_services_prompt_dismiss_method": "back",
+            }
+        )
+        press = getattr(d, "press", None)
+        try:
+            if not callable(press):
+                raise RuntimeError("device_back_unavailable")
+            press("back")
+            actions_taken.append("dismiss_post_login_location_services_prompt_back")
+            warnings.append("post_login_location_services_prompt_dismiss_back")
+        except Exception:
+            screen_preparation_metadata["post_login_location_services_prompt_dismissed"] = False
+            failure = _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="blocked",
+                reason="post_login_location_services_prompt_dismiss_failed",
+                failure_reason="post_login_location_services_prompt_dismiss_failed",
+                final_login_status="connected",
+                final_provisioning_status="login_pending",
+                final_onboarding_status="credentials_submitted",
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, "post_login_location_services_prompt_back_failed"],
+                extra_metadata=screen_preparation_metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+            return current_signals, failure
+
+        sleeper(POST_LOGIN_LOCATION_DISMISS_WAIT_MS / 1000.0)
+        refreshed_signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        refreshed_screen_type = _screen_after_app_start(refreshed_signals)
+        prompt_still_present = bool(
+            refreshed_signals.get("post_login_location_services_prompt")
+            or refreshed_signals.get("connected_post_login_location_services_prompt")
+            or refreshed_screen_type == "connected_post_login_location_services_prompt"
+        )
+        connected_after_dismiss = (
+            _post_action_outcome_from_signals(refreshed_signals) == LoginProbeOutcome.CONNECTED.value
+        )
+        dismissed = bool(connected_after_dismiss and not prompt_still_present)
+        screen_preparation_metadata.update(
+            {
+                "post_login_location_services_prompt_dismissed": dismissed,
+                "post_login_location_services_prompt_post_screen": refreshed_screen_type,
+            }
+        )
+        if dismissed:
+            return refreshed_signals, None
+
+        failure = _finalize(
+            ok=False,
+            completed=False,
+            final_outcome="blocked",
+            reason="post_login_location_services_prompt_not_dismissed",
+            failure_reason="post_login_location_services_prompt_not_dismissed",
+            final_login_status="connected",
+            final_provisioning_status="login_pending",
+            final_onboarding_status="credentials_submitted",
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=[*warnings, "post_login_location_services_prompt_not_dismissed"],
+            extra_metadata=screen_preparation_metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+        return refreshed_signals, failure
+
     if app_start_attempted:
         app_start_result = _attempt_app_start(
             d,
@@ -595,6 +691,10 @@ def run_login_provisioning_flow(
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+    signals, initial_location_prompt_failure = _dismiss_initial_location_prompt_before_connected_exit(signals)
+    if initial_location_prompt_failure is not None:
+        return initial_location_prompt_failure
+
     if app_start_attempted:
         if not screen_preparation_metadata["screen_after_app_start"]:
             screen_type = _screen_after_app_start(signals)

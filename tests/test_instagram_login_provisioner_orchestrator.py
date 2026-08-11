@@ -453,6 +453,47 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["app_start_ok"])
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "connected")
 
+    def test_initial_location_services_prompt_is_dismissed_before_connected_fast_exit(self) -> None:
+        device = FakeDevice([POST_LOGIN_LOCATION_SERVICES_PROMPT_XML, CONNECTED_XML])
+        credentials_getter = Mock(return_value=credentials())
+        sleeper = Mock()
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            sleeper=sleeper,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.reason, "connected_no_password_needed")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertIn("dismiss_post_login_location_services_prompt_back", result.actions_taken)
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_detected"])
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["post_login_location_services_prompt_dismiss_method"], "back")
+        self.assertEqual(result.safe_metadata["post_login_location_services_prompt_post_screen"], "connected")
+        credentials_getter.assert_not_called()
+
+    def test_initial_location_services_prompt_persistent_fails_closed_without_second_back(self) -> None:
+        device = FakeDevice([POST_LOGIN_LOCATION_SERVICES_PROMPT_XML])
+        credentials_getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "post_login_location_services_prompt_not_dismissed")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertFalse(result.safe_metadata["post_login_location_services_prompt_dismissed"])
+        credentials_getter.assert_not_called()
+
     def test_startup_email_code_challenge_without_provenance_is_blocked(self) -> None:
         device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
         credentials_getter = Mock(return_value=credentials())
