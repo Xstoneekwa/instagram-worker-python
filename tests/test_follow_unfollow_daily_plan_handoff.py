@@ -12,12 +12,12 @@ ACCOUNT_ID = "00000000-0000-4000-8000-000000000001"
 BUSINESS_DATE = "2026-08-10"
 
 
-def _settings() -> SimpleNamespace:
+def _settings(*, after_days: int = 3) -> SimpleNamespace:
     return SimpleNamespace(
         enabled=True,
         unfollow_only=False,
         do_unfollow_first=False,
-        after_days=3,
+        after_days=after_days,
         mode="unfollow",
         sort_mode="default",
         session_limit=120,
@@ -40,6 +40,7 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
         self,
         *,
         resume_checkpoint: dict | None = None,
+        after_days: int = 3,
     ) -> tuple[int, dict]:
         captured: dict = {}
         real_prepare = prepare_authoritative_daily_plan
@@ -56,8 +57,20 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
             failure_reason="test_stop_after_plan_resolution",
             verification_method="test",
         )
+        def capture_candidates(_account_id, *, settings, **_kwargs):
+            captured["planning_after_days"] = settings.after_days
+            return {
+                "candidates": _candidates(),
+                "candidates_count": 2,
+                "diagnostic_eligible_candidates_at_start": _candidates(),
+            }
+
         with (
-            patch.object(unfollow, "load_unfollow_settings", return_value=_settings()),
+            patch.object(
+                unfollow,
+                "load_unfollow_settings",
+                return_value=_settings(after_days=after_days),
+            ),
             patch.object(unfollow.supabase_client, "count_successful_unfollows_today", return_value=0),
             patch.object(
                 unfollow.supabase_client,
@@ -72,11 +85,7 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
             patch.object(
                 unfollow,
                 "plan_unfollow_targets",
-                return_value={
-                    "candidates": _candidates(),
-                    "candidates_count": 2,
-                    "diagnostic_eligible_candidates_at_start": _candidates(),
-                },
+                side_effect=capture_candidates,
             ),
             patch.object(unfollow, "prepare_authoritative_daily_plan", side_effect=capture_prepare),
             patch.object(
@@ -116,6 +125,7 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
             package_contract_version=unfollow.unfollow_daily_plan_contract_version(_settings()),
             daily_quota_target=120,
             session_quota_target=120,
+            current_unfollow_after_days=3,
             current_eligible_candidates=_candidates(),
             created_at="2026-08-10T16:00:00+00:00",
         )
@@ -136,6 +146,32 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
             [row["username_normalized"] for row in captured["result"]["candidates"]],
             ["candidate_two"],
         )
+
+    def test_same_day_resume_uses_frozen_after_days_for_candidate_planning(self) -> None:
+        first = prepare_authoritative_daily_plan(
+            account_id=ACCOUNT_ID,
+            business_date_sast=BUSINESS_DATE,
+            package_contract_version=unfollow.unfollow_daily_plan_contract_version(_settings()),
+            daily_quota_target=120,
+            session_quota_target=120,
+            current_unfollow_after_days=3,
+            current_eligible_candidates=_candidates(),
+        )
+        checkpoint = checkpoint_daily_plan(
+            first["daily_plan"],
+            {"remaining_usernames": ["candidate_two"]},
+        )
+
+        exit_code, captured = self._run_until_identity_guard(
+            resume_checkpoint=checkpoint,
+            after_days=10,
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(captured["planning_after_days"], 3)
+        self.assertEqual(captured["current_unfollow_after_days"], 10)
+        self.assertTrue(captured["result"]["resume_reused"])
+        self.assertEqual(captured["result"]["daily_plan"]["plan_id"], first["daily_plan"]["plan_id"])
 
 
 if __name__ == "__main__":

@@ -86,9 +86,10 @@ def _resolve_eligible_unfollow_at(
     *,
     after_days: int,
 ) -> datetime | None:
-    stored = supabase_client.parse_utc_iso_timestamp(row.get("eligible_unfollow_at"))
-    if stored is not None:
-        return stored
+    # ``eligible_unfollow_at`` is an immutable audit snapshot of the policy
+    # that was active when Follow was persisted.  Runtime eligibility must be
+    # derived from the current (or daily-plan-frozen) account policy so a
+    # settings change applies to existing candidates without a mass backfill.
     followed_at = supabase_client.parse_utc_iso_timestamp(row.get("followed_at"))
     if followed_at is None:
         return None
@@ -196,9 +197,8 @@ def _candidate_payload_from_row(
             else "unknown"
         ),
         "eligible_unfollow_at": eligible_at.isoformat() if eligible_at is not None else "",
-        "eligible_unfollow_at_source": (
-            "column" if row.get("eligible_unfollow_at") else "computed_from_followed_at"
-        ),
+        "eligible_unfollow_at_source": "current_policy_from_followed_at",
+        "historical_eligible_unfollow_at_snapshot": row.get("eligible_unfollow_at"),
         "is_following_back": _row_is_following_back(row),
         "source_profile": str(
             row.get("last_source_profile")

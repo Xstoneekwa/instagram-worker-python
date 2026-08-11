@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import time
+from copy import copy
+from dataclasses import is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -72,6 +74,7 @@ from unfollow_hybrid_strategy import (
 from unfollow_daily_plan import (
     checkpoint_daily_plan,
     contract_version as unfollow_daily_plan_contract_version,
+    frozen_unfollow_after_days,
     prepare_authoritative_daily_plan,
 )
 from unfollow_diagnostic_contract_v2 import UnfollowDiagnosticSession
@@ -3910,14 +3913,25 @@ def run_unfollow_session(
         business_action_deadline or os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
     ).strip() or None
     domain_real_action_max = real_action_max
+    business_date_sast, _business_day_start, _business_day_end = (
+        supabase_client.sast_business_day_window()
+    )
+    plan_after_days = frozen_unfollow_after_days(
+        account_id=aid,
+        business_date_sast=business_date_sast,
+        current_after_days=settings.after_days,
+        resume_checkpoint=resume_checkpoint,
+    )
+    if is_dataclass(settings):
+        planning_settings = replace(settings, after_days=plan_after_days)
+    else:
+        planning_settings = copy(settings)
+        planning_settings.after_days = plan_after_days
     protected_usernames = account_protection_lists.unfollow_whitelist_for_run(aid)
     plan = plan_unfollow_targets(
         aid,
-        settings=settings,
+        settings=planning_settings,
         protected_usernames=protected_usernames,
-    )
-    business_date_sast, _business_day_start, _business_day_end = (
-        supabase_client.sast_business_day_window()
     )
     current_eligible_candidates = list(
         plan.get("diagnostic_eligible_candidates_at_start")
@@ -3930,6 +3944,7 @@ def run_unfollow_session(
         package_contract_version=unfollow_daily_plan_contract_version(settings),
         daily_quota_target=db_unfollow_day_limit,
         session_quota_target=db_unfollow_session_limit,
+        current_unfollow_after_days=settings.after_days,
         current_eligible_candidates=current_eligible_candidates,
         resume_checkpoint=resume_checkpoint,
     )
@@ -3966,6 +3981,8 @@ def run_unfollow_session(
         package_contract_version=str(
             daily_plan_context.get("package_contract_version") or ""
         ),
+        current_unfollow_after_days=int(settings.after_days),
+        effective_plan_unfollow_after_days=int(plan_after_days),
         initial_db_eligible_count=int(
             daily_plan_context.get("initial_db_eligible_count") or 0
         ),

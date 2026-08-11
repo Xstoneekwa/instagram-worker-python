@@ -74,6 +74,31 @@ def _daily_plan_from_checkpoint(checkpoint: dict[str, Any] | None) -> dict[str, 
     return {}
 
 
+def frozen_unfollow_after_days(
+    *,
+    account_id: str,
+    business_date_sast: str,
+    current_after_days: int,
+    resume_checkpoint: dict[str, Any] | None,
+) -> int:
+    """Return the policy frozen by today's authoritative plan, when present."""
+
+    prior = _daily_plan_from_checkpoint(resume_checkpoint)
+    snapshot = prior.get("policy_snapshot")
+    if not isinstance(snapshot, dict):
+        return max(0, int(current_after_days or 0))
+    valid_prior = bool(
+        prior.get("schema") == SCHEMA
+        and str(prior.get("account_id") or "") == str(account_id or "").strip()
+        and str(prior.get("business_date_sast") or "")
+        == str(business_date_sast or "").strip()
+        and str(prior.get("plan_id") or "")
+    )
+    if not valid_prior or snapshot.get("unfollow_after_days") is None:
+        return max(0, int(current_after_days or 0))
+    return max(0, int(snapshot["unfollow_after_days"]))
+
+
 def prepare_authoritative_daily_plan(
     *,
     account_id: str,
@@ -81,6 +106,7 @@ def prepare_authoritative_daily_plan(
     package_contract_version: str,
     daily_quota_target: int,
     session_quota_target: int | None = None,
+    current_unfollow_after_days: int,
     current_eligible_candidates: Iterable[dict[str, Any]],
     resume_checkpoint: dict[str, Any] | None = None,
     created_at: str | None = None,
@@ -108,7 +134,6 @@ def prepare_authoritative_daily_plan(
         prior.get("schema") == SCHEMA
         and str(prior.get("account_id") or "") == aid
         and str(prior.get("business_date_sast") or "") == business_date
-        and str(prior.get("package_contract_version") or "") == version
         and str(prior.get("plan_id") or "")
     )
 
@@ -135,6 +160,10 @@ def prepare_authoritative_daily_plan(
             "last_loaded_at": datetime.now(timezone.utc).isoformat(),
             "session_quota_target": session_quota,
             "multi_session_required_by_explicit_cap_override": explicit_lower_session_cap,
+            "current_package_contract_version_observed": version,
+            "package_contract_changed_after_plan_freeze": str(
+                prior.get("package_contract_version") or ""
+            ) != version,
         }
         return {
             "daily_plan": plan,
@@ -155,6 +184,10 @@ def prepare_authoritative_daily_plan(
         "account_id": aid,
         "business_date_sast": business_date,
         "package_contract_version": version,
+        "policy_snapshot": {
+            "unfollow_after_days": max(0, int(current_unfollow_after_days or 0)),
+            "source": "ig_account_unfollow_settings_at_plan_freeze",
+        },
         "cohort_created_at": now,
         "initial_db_eligible_count": len(ordered),
         "daily_quota_target": daily_quota,

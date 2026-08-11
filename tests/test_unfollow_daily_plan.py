@@ -6,6 +6,7 @@ from pathlib import Path
 from unfollow_daily_plan import (
     SCHEMA,
     checkpoint_daily_plan,
+    frozen_unfollow_after_days,
     prepare_authoritative_daily_plan,
 )
 
@@ -24,6 +25,7 @@ class UnfollowDailyPlanTests(unittest.TestCase):
             business_date_sast="2026-08-10",
             package_contract_version="growth-v1",
             daily_quota_target=quota,
+            current_unfollow_after_days=3,
             current_eligible_candidates=rows,
             resume_checkpoint=checkpoint,
             created_at="2026-08-10T08:00:00+00:00",
@@ -42,6 +44,7 @@ class UnfollowDailyPlanTests(unittest.TestCase):
                 business_date_sast="2026-08-10",
                 package_contract_version=package_version,
                 daily_quota_target=120,
+                current_unfollow_after_days=3,
                 current_eligible_candidates=candidates(140),
                 created_at="2026-08-10T08:00:00+00:00",
             )
@@ -91,6 +94,7 @@ class UnfollowDailyPlanTests(unittest.TestCase):
             business_date_sast="2026-08-11",
             package_contract_version="growth-v1",
             daily_quota_target=80,
+            current_unfollow_after_days=10,
             current_eligible_candidates=candidates(4),
             resume_checkpoint=checkpoint,
         )
@@ -104,6 +108,7 @@ class UnfollowDailyPlanTests(unittest.TestCase):
             package_contract_version="growth-80-80",
             daily_quota_target=80,
             session_quota_target=80,
+            current_unfollow_after_days=3,
             current_eligible_candidates=candidates(100),
         )
         override = prepare_authoritative_daily_plan(
@@ -112,10 +117,86 @@ class UnfollowDailyPlanTests(unittest.TestCase):
             package_contract_version="growth-80-20-explicit",
             daily_quota_target=80,
             session_quota_target=20,
+            current_unfollow_after_days=3,
             current_eligible_candidates=candidates(100),
         )
         self.assertFalse(canonical["daily_plan"]["multi_session_required_by_explicit_cap_override"])
         self.assertTrue(override["daily_plan"]["multi_session_required_by_explicit_cap_override"])
+
+    def test_same_business_day_reuses_plan_after_policy_change(self):
+        first = self.prepare(candidates(4))
+        checkpoint = checkpoint_daily_plan(
+            first["daily_plan"],
+            {"remaining_usernames": ["candidate_001", "candidate_002"]},
+        )
+        resumed = prepare_authoritative_daily_plan(
+            account_id="account-1",
+            business_date_sast="2026-08-10",
+            package_contract_version="growth-v2-after-days-10",
+            daily_quota_target=80,
+            current_unfollow_after_days=10,
+            current_eligible_candidates=candidates(2, start=1),
+            resume_checkpoint=checkpoint,
+        )
+        self.assertTrue(resumed["resume_reused"])
+        self.assertEqual(resumed["daily_plan"]["plan_id"], first["daily_plan"]["plan_id"])
+        self.assertEqual(resumed["daily_plan"]["policy_snapshot"]["unfollow_after_days"], 3)
+        self.assertTrue(resumed["daily_plan"]["package_contract_changed_after_plan_freeze"])
+
+    def test_lower_policy_same_day_does_not_append_newly_eligible_candidate(self):
+        first = self.prepare(candidates(2))
+        checkpoint = checkpoint_daily_plan(
+            first["daily_plan"],
+            {"remaining_usernames": ["candidate_001"]},
+        )
+        resumed = prepare_authoritative_daily_plan(
+            account_id="account-1",
+            business_date_sast="2026-08-10",
+            package_contract_version="growth-v2-after-days-2",
+            daily_quota_target=80,
+            current_unfollow_after_days=2,
+            current_eligible_candidates=[candidates(2)[1], *candidates(1, start=10)],
+            resume_checkpoint=checkpoint,
+        )
+        self.assertEqual(
+            [row["username_normalized"] for row in resumed["candidates"]],
+            ["candidate_001"],
+        )
+        self.assertEqual(
+            resumed["daily_plan"]["newly_eligible_after_plan_freeze"],
+            ["candidate_010"],
+        )
+
+    def test_policy_snapshot_is_used_only_for_matching_account_and_business_date(self):
+        first = self.prepare(candidates(1))
+        checkpoint = {"daily_plan": first["daily_plan"]}
+        self.assertEqual(
+            frozen_unfollow_after_days(
+                account_id="account-1",
+                business_date_sast="2026-08-10",
+                current_after_days=10,
+                resume_checkpoint=checkpoint,
+            ),
+            3,
+        )
+        self.assertEqual(
+            frozen_unfollow_after_days(
+                account_id="other-account",
+                business_date_sast="2026-08-10",
+                current_after_days=10,
+                resume_checkpoint=checkpoint,
+            ),
+            10,
+        )
+        self.assertEqual(
+            frozen_unfollow_after_days(
+                account_id="account-1",
+                business_date_sast="2026-08-11",
+                current_after_days=10,
+                resume_checkpoint=checkpoint,
+            ),
+            10,
+        )
 
     def test_same_session_search_is_not_artificially_limited_to_ten_candidates(self):
         root = Path(__file__).resolve().parents[1]

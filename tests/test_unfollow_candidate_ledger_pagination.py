@@ -55,13 +55,18 @@ def _row(
     }
 
 
-def _settings(*, mode: str = "unfollow", session_limit: int = 50) -> UnfollowSettings:
+def _settings(
+    *,
+    mode: str = "unfollow",
+    session_limit: int = 50,
+    after_days: int = 3,
+) -> UnfollowSettings:
     return UnfollowSettings(
         account_id="account-1",
         enabled=True,
         unfollow_only=False,
         do_unfollow_first=False,
-        after_days=3,
+        after_days=after_days,
         mode=mode,
         sort_mode="default",
         session_limit=session_limit,
@@ -257,10 +262,9 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
         self.assertTrue(plan["candidate_funnel_reconciled"])
 
     def test_exact_j3_boundary_is_inclusive_and_microsecond_before_is_not(self) -> None:
-        due_at = AS_OF
         rows = [
-            _row(1, eligible_at=due_at),
-            _row(2, eligible_at=due_at + timedelta(microseconds=1)),
+            _row(1, followed_at=AS_OF - timedelta(days=3)),
+            _row(2, followed_at=AS_OF - timedelta(days=3) + timedelta(microseconds=1)),
         ]
         with patch(
             "supabase_client.fetch_unfollow_strict_candidate_rows",
@@ -289,9 +293,106 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
         self.assertEqual(plan["eligible_total"], 1)
         self.assertEqual(
             plan["candidates"][0]["eligible_unfollow_at_source"],
-            "computed_from_followed_at",
+            "current_policy_from_followed_at",
         )
         self.assertEqual(plan["candidates"][0]["eligible_unfollow_at"], AS_OF.isoformat())
+
+    def test_setting_change_from_three_to_two_requalifies_existing_candidate(self) -> None:
+        row = _row(
+            1,
+            followed_at=AS_OF - timedelta(days=2, hours=12),
+            eligible_at=AS_OF + timedelta(hours=12),
+        )
+        with patch("supabase_client.fetch_unfollow_strict_candidate_rows", return_value=[row]):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(after_days=2),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+        self.assertEqual(
+            plan["candidates"][0]["eligible_unfollow_at"],
+            (AS_OF - timedelta(hours=12)).isoformat(),
+        )
+        self.assertEqual(
+            plan["candidates"][0]["historical_eligible_unfollow_at_snapshot"],
+            (AS_OF + timedelta(hours=12)).isoformat(),
+        )
+
+    def test_setting_change_from_three_to_ten_dequalifies_existing_candidate(self) -> None:
+        row = _row(
+            1,
+            followed_at=AS_OF - timedelta(days=3),
+            eligible_at=AS_OF,
+        )
+        with patch("supabase_client.fetch_unfollow_strict_candidate_rows", return_value=[row]):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(after_days=10),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 0)
+        self.assertEqual(plan["skipped_counts"]["too_soon"], 1)
+
+    def test_successive_policy_changes_are_recomputed_without_backfill(self) -> None:
+        row = _row(1, followed_at=AS_OF - timedelta(days=4))
+        with patch("supabase_client.fetch_unfollow_strict_candidate_rows", return_value=[row]):
+            totals = [
+                plan_unfollow_targets(
+                    "account-1",
+                    settings=_settings(after_days=days),
+                    as_of=AS_OF,
+                )["eligible_total"]
+                for days in (3, 2, 10, 5)
+            ]
+        self.assertEqual(totals, [1, 1, 0, 0])
+
+    def test_setting_change_from_ten_to_two_uses_current_policy(self) -> None:
+        row = _row(
+            1,
+            followed_at=AS_OF - timedelta(days=2),
+            eligible_at=AS_OF + timedelta(days=8),
+        )
+        with patch("supabase_client.fetch_unfollow_strict_candidate_rows", return_value=[row]):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(after_days=2),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+
+    def test_missing_followed_at_remains_ineligible_even_with_historical_snapshot(self) -> None:
+        row = _row(1)
+        row["followed_at"] = None
+        row["eligible_unfollow_at"] = (AS_OF - timedelta(days=1)).isoformat()
+        with patch("supabase_client.fetch_unfollow_strict_candidate_rows", return_value=[row]):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(after_days=0),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 0)
+        self.assertEqual(plan["skipped_counts"]["missing_followed_at"], 1)
+
+    def test_dynamic_delay_is_package_agnostic(self) -> None:
+        row = _row(1, followed_at=AS_OF - timedelta(days=2))
+        for package_name in ("growth", "pro", "premium"):
+            with self.subTest(package=package_name), patch(
+                "supabase_client.fetch_unfollow_strict_candidate_rows",
+                return_value=[row],
+            ):
+                settings = _settings(after_days=2)
+                object.__setattr__(
+                    settings,
+                    "package_default_snapshot",
+                    {"package": package_name},
+                )
+                plan = plan_unfollow_targets(
+                    "account-1",
+                    settings=settings,
+                    as_of=AS_OF,
+                )
+                self.assertEqual(plan["eligible_total"], 1)
 
     def test_whitelist_status_and_duplicate_exclusions_are_explicit(self) -> None:
         rows = [
