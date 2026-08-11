@@ -201,6 +201,16 @@ def _following_cta_reason(detection_method: str) -> str:
     return "following_cta_detected_xml"
 
 
+def _profile_header_following_cta_owned(resource_id: str) -> bool:
+    """Accept only Instagram's profile-header relationship CTA.
+
+    A profile may expose Suggested-account rows whose button also says
+    ``Following``.  Those rows are not owned by the currently verified target
+    profile and must never be eligible for the destructive sheet-open path.
+    """
+    return str(resource_id or "").rsplit("/", 1)[-1] == "profile_header_follow_button"
+
+
 def _unfollow_button_bounds_reject_reason(
     bounds: dict[str, int],
     *,
@@ -380,6 +390,16 @@ def _detect_following_cta_from_accessibility(
         )
         if not label_ok:
             continue
+        resource_id = str(info.get("resourceName") or info.get("resource-id") or "")
+        if not _profile_header_following_cta_owned(resource_id):
+            log(
+                "info",
+                "unfollow_profile_following_button_accessibility_rejected",
+                expected_target_username=expected_target_username,
+                resource_id=resource_id,
+                rejection_reason="following_cta_not_profile_header_owned",
+            )
+            continue
         bounds_raw = info.get("bounds") or {}
         try:
             bounds = {
@@ -400,7 +420,7 @@ def _detect_following_cta_from_accessibility(
         return {
             "text": text,
             "content_desc": content_desc,
-            "resource_id": str(info.get("resourceName") or info.get("resource-id") or ""),
+            "resource_id": resource_id,
             "class_name": str(info.get("className") or info.get("class") or ""),
             "bounds": bounds,
             "center_x": int(center[0]),
@@ -514,6 +534,20 @@ def detect_profile_following_button_for_unfollow(
             "expected_target_username": expected_target_username,
         }
         log("info", "unfollow_profile_following_button_candidate_seen", **candidate)
+
+        if not _profile_header_following_cta_owned(rid):
+            reject_reason = "following_cta_not_profile_header_owned"
+            candidates_rejected += 1
+            reject_reasons_count[reject_reason] = int(
+                reject_reasons_count.get(reject_reason, 0)
+            ) + 1
+            log(
+                "info",
+                "unfollow_profile_following_button_candidate_rejected",
+                **candidate,
+                reject_reason=reject_reason,
+            )
+            continue
 
         reject_reason = _unfollow_button_bounds_reject_reason(
             bounds,

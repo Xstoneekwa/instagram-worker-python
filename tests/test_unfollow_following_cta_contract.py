@@ -70,6 +70,22 @@ class _AccessibilityDevice(_XmlDevice):
         return _MissingElement()
 
 
+class _SuggestedAccessibilityDevice(_XmlDevice):
+    def __call__(self, **selector):
+        if selector.get("text") == "Following":
+            return _LiveElement(
+                {
+                    "text": "Following",
+                    "contentDescription": "Following Hélène Wallemacq",
+                    "resourceName": "follow_list_row_large_follow_button",
+                    "className": "android.widget.Button",
+                    "clickable": True,
+                    "bounds": {"left": 720, "top": 583, "right": 1035, "bottom": 673},
+                }
+            )
+        return _MissingElement()
+
+
 class FollowingCtaContractTests(unittest.TestCase):
     def test_cta_present_immediately_is_detected_from_xml(self):
         out = probe.detect_profile_following_button_for_unfollow(
@@ -124,6 +140,54 @@ class FollowingCtaContractTests(unittest.TestCase):
         )
         self.assertTrue(out["ok"])
         self.assertEqual(out["stable_reason"], "following_cta_detected_accessibility")
+
+    def test_suggested_following_row_is_not_a_profile_header_cta(self):
+        xml = (
+            '<hierarchy><node resource-id="com.instagram.android:id/follow_list_row_large_follow_button" '
+            'class="android.widget.Button" clickable="true" text="Following" '
+            'content-desc="Following Hélène Wallemacq" bounds="[720,583][1035,673]" /></hierarchy>'
+        )
+        out = probe.detect_profile_following_button_for_unfollow(
+            _XmlDevice(xml),
+            expected_target_username="getch_officiel",
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(
+            out["reject_reasons_count"],
+            {"following_cta_not_profile_header_owned": 1},
+        )
+
+    def test_profile_header_cta_wins_when_suggested_following_row_is_also_visible(self):
+        xml = (
+            '<hierarchy>'
+            '<node resource-id="com.instagram.android:id/profile_header_follow_button" '
+            'class="android.widget.Button" clickable="true" text="Following" '
+            'bounds="[33,752][532,842]" />'
+            '<node resource-id="com.instagram.android:id/follow_list_row_large_follow_button" '
+            'class="android.widget.Button" clickable="true" text="Following" '
+            'content-desc="Following Hélène Wallemacq" bounds="[720,583][1035,673]" />'
+            '</hierarchy>'
+        )
+        out = probe.detect_profile_following_button_for_unfollow(
+            _XmlDevice(xml),
+            expected_target_username="getch_officiel",
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(
+            out["resource_id"],
+            "com.instagram.android:id/profile_header_follow_button",
+        )
+        self.assertEqual(out["tap_x"], 282)
+        self.assertEqual(out["tap_y"], 797)
+
+    def test_suggested_accessibility_cta_is_rejected_without_tap(self):
+        device = _SuggestedAccessibilityDevice(_missing_xml())
+        out = probe.detect_profile_following_button_for_unfollow(
+            device,
+            expected_target_username="getch_officiel",
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(device.clicks, [])
 
     def test_content_desc_exact_profile_variant_is_accepted(self):
         out = probe.detect_profile_following_button_for_unfollow(
