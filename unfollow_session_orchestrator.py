@@ -2312,10 +2312,24 @@ def _run_real_unfollow_multi_loop(
                     direct_search_retryable_failures += 1
                     if direct_status == "ambiguous":
                         direct_search_ambiguous.add(target_key)
-                    breaker_opened = search_surface_health.record(classification)
+                    global_search_reasons = {
+                        "search_hierarchy_unparseable",
+                        "search_query_field_missing",
+                        "search_query_field_mismatch",
+                    }
+                    failure_scope = (
+                        "global"
+                        if stable_failure_reason in global_search_reasons
+                        else "candidate_local"
+                    )
+                    breaker_opened = search_surface_health.record(
+                        classification,
+                        failure_scope=failure_scope,
+                    )
                     candidate_decision = session_completion_policy.record_candidate_failure(
                         target_key,
                         safe_state_restored=True,
+                        failure_scope=failure_scope,
                     )
                     breaker_opened = bool(
                         breaker_opened or candidate_decision.global_circuit_open
@@ -3305,6 +3319,7 @@ def _run_real_unfollow_multi_loop(
                 candidate_decision = session_completion_policy.record_candidate_failure(
                     target_key,
                     safe_state_restored=return_ok,
+                    failure_scope=("candidate_local" if return_ok else "global"),
                 )
                 refresh_recoverable_action_summary_totals()
                 log(

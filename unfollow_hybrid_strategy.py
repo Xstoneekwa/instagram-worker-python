@@ -216,6 +216,65 @@ def _row_semantics(node: ET.Element | None) -> dict[str, bool]:
     }
 
 
+def _row_structural_semantics(
+    node: ET.Element | None,
+    *,
+    expected_username: str,
+) -> dict[str, bool]:
+    """Classify modern Search rows whose resource ids are intentionally sparse.
+
+    Instagram field variants can omit ``row_search_user_*`` ids while still
+    exposing a strict username, a profile-sized visual and account metadata in
+    one clickable row.  Conversely, the type-ahead row normally contains only
+    the query plus a small Search icon.  Require the combined structure; exact
+    text alone remains insufficient.
+    """
+    if node is None:
+        return {
+            "account_signal": False,
+            "suggestion_signal": False,
+        }
+    expected = normalize_username(expected_username)
+    secondary_identity_text = False
+    profile_visual_signal = False
+    small_search_visual_signal = False
+    for member in node.iter():
+        raw_value = _node_value(member)
+        normalized_value = normalize_username(raw_value)
+        if raw_value.strip() and normalized_value not in {"", expected}:
+            label = _normalized_ui_label(raw_value)
+            if label not in {"search", "accounts", "for you"}:
+                secondary_identity_text = True
+        class_name = str(member.attrib.get("class") or "").casefold()
+        if not class_name.endswith("imageview"):
+            continue
+        bounds = _parse_bounds(str(member.attrib.get("bounds") or ""))
+        if not bounds:
+            continue
+        width = int(bounds["right"]) - int(bounds["left"])
+        height = int(bounds["bottom"]) - int(bounds["top"])
+        tokens = " ".join(
+            str(member.attrib.get(key) or "").casefold()
+            for key in ("resource-id", "content-desc")
+        )
+        is_search_visual = any(
+            token in tokens for token in ("search", "magnifying", "suggestion")
+        )
+        if is_search_visual or max(width, height) <= 48:
+            small_search_visual_signal = True
+        elif min(width, height) >= 48 and max(width, height) <= 180:
+            profile_visual_signal = True
+    account_signal = bool(profile_visual_signal and secondary_identity_text)
+    return {
+        "account_signal": account_signal,
+        "suggestion_signal": bool(
+            not account_signal
+            and small_search_visual_signal
+            and not secondary_identity_text
+        ),
+    }
+
+
 def _is_no_results_label(value: str) -> bool:
     """Recognize static and username-qualified empty Search states."""
     label = _normalized_ui_label(value)
@@ -382,11 +441,31 @@ def classify_search_surface_xml(
         }
 
     matches: list[dict[str, object]] = []
+    committed_non_match_rows: list[dict[str, object]] = []
     query_node_ids = {id(node) for node in query_nodes}
     for node in root.iter():
         if id(node) in query_node_ids:
             continue
-        if normalize_username(_node_value(node)) != expected:
+        normalized_node_value = normalize_username(_node_value(node))
+        resource_id = str(node.attrib.get("resource-id") or "")
+        if normalized_node_value != expected:
+            if (
+                normalized_node_value
+                and re.search(
+                    r"(?:^|[:/])id/row_search_user_username$",
+                    resource_id,
+                )
+            ):
+                own_bounds = _parse_bounds(str(node.attrib.get("bounds") or ""))
+                if not query_bottom or not own_bounds or int(own_bounds.get("top") or 0) >= query_bottom:
+                    row_bounds = _clickable_ancestor_bounds(node, parent_by_id)
+                    if row_bounds:
+                        committed_non_match_rows.append(
+                            {
+                                "username": normalized_node_value,
+                                "bounds": row_bounds,
+                            }
+                        )
             continue
         own_bounds = _parse_bounds(str(node.attrib.get("bounds") or ""))
         if query_bottom and own_bounds and int(own_bounds.get("top") or 0) < query_bottom:
@@ -394,8 +473,11 @@ def classify_search_surface_xml(
         clickable_ancestor = _clickable_ancestor_node(node, parent_by_id)
         bounds = _clickable_ancestor_bounds(node, parent_by_id)
         if bounds:
-            resource_id = str(node.attrib.get("resource-id") or "")
             semantics = _row_semantics(clickable_ancestor)
+            structural_semantics = _row_structural_semantics(
+                clickable_ancestor,
+                expected_username=expected,
+            )
             matches.append(
                 {
                     "bounds": bounds,
@@ -405,8 +487,14 @@ def classify_search_surface_xml(
                             resource_id,
                         )
                     ),
-                    "account_signal": bool(semantics["account_signal"]),
-                    "suggestion_signal": bool(semantics["suggestion_signal"]),
+                    "account_signal": bool(
+                        semantics["account_signal"]
+                        or structural_semantics["account_signal"]
+                    ),
+                    "suggestion_signal": bool(
+                        semantics["suggestion_signal"]
+                        or structural_semantics["suggestion_signal"]
+                    ),
                 }
             )
 
@@ -479,6 +567,8 @@ def classify_search_surface_xml(
         "reason": (
             "search_query_suggestion_only"
             if suggestion_only_matches
+            else "search_results_non_match_only"
+            if committed_non_match_rows
             else "search_results_loading"
         ),
         "exact_match_count": 0,
@@ -489,6 +579,13 @@ def classify_search_surface_xml(
             sorted(
                 _bounds_signature(dict(match.get("bounds") or {}))
                 for match in suggestion_only_matches
+            )
+        ),
+        "non_match_only": bool(committed_non_match_rows),
+        "non_match_signature": ":".join(
+            sorted(
+                f"{item['username']}:{_bounds_signature(dict(item['bounds']))}"
+                for item in committed_non_match_rows
             )
         ),
     }
@@ -576,7 +673,9 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
     stable_exact_poll_count = 0
     stable_no_results_poll_count = 0
     stable_suggestion_only_poll_count = 0
+    stable_non_match_only_poll_count = 0
     previous_suggestion_signature = ""
+    previous_non_match_signature = ""
     previous_exact_signature = ""
     previous_exact_bounds: dict[str, int] = {}
     result_visible_at = ""
@@ -641,6 +740,16 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
         previous_suggestion_signature = (
             suggestion_signature if suggestion_only else ""
         )
+        non_match_signature = str(classification.get("non_match_signature") or "")
+        non_match_only = bool(classification.get("non_match_only"))
+        stable_non_match_only_poll_count = (
+            stable_non_match_only_poll_count + 1
+            if non_match_only
+            and non_match_signature
+            and non_match_signature == previous_non_match_signature
+            else (1 if non_match_only and non_match_signature else 0)
+        )
+        previous_non_match_signature = non_match_signature if non_match_only else ""
         log(
             "info",
             "unfollow_direct_exact_result_poll",
@@ -654,6 +763,7 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
             stable_exact_poll_count=stable_exact_poll_count,
             stable_no_results_poll_count=stable_no_results_poll_count,
             stable_suggestion_only_poll_count=stable_suggestion_only_poll_count,
+            stable_non_match_only_poll_count=stable_non_match_only_poll_count,
             exact_bounds_present=bool(classification.get("bounds")),
         )
         if state == SEARCH_SURFACE_UNHEALTHY and count > 1:
@@ -715,6 +825,20 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
                 "stable_suggestion_only_poll_count": (
                     stable_suggestion_only_poll_count
                 ),
+            }
+        if (
+            stable_non_match_only_poll_count
+            >= SEARCH_RESULT_STABLE_SUGGESTION_ONLY_POLLS
+        ):
+            return {
+                "ok": False,
+                "status": "username_not_found_confirmed",
+                "reason": "username_not_found_confirmed_non_match_only_stable",
+                "search_surface_state": SEARCH_NO_RESULTS_CONFIRMED,
+                "exact_match_count": 0,
+                "confirmed_surface_count": committed_surface_count + 1,
+                "poll_count": observed_poll_count,
+                "stable_non_match_only_poll_count": stable_non_match_only_poll_count,
             }
     return {
         "ok": False,

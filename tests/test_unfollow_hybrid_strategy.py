@@ -351,6 +351,41 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             {"left": 0, "top": 190, "right": 540, "bottom": 310},
         )
 
+    def test_sparse_modern_exact_account_row_uses_visual_and_metadata_structure(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="target_parentalite" bounds="[60,40][500,100]" />'
+            '<node class="android.view.ViewGroup" clickable="true" '
+            'bounds="[0,150][540,285]">'
+            '<node class="android.widget.ImageView" bounds="[18,170][98,250]" />'
+            '<node class="android.widget.TextView" text="target_parentalite" '
+            'bounds="[120,170][430,210]" />'
+            '<node class="android.widget.TextView" '
+            'text="Diane | Facilitatrice en parentalité" '
+            'bounds="[120,215][510,255]" />'
+            '</node></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "target_parentalite")
+        self.assertEqual(out["state"], SEARCH_EXACT_RESULT_VISIBLE)
+        self.assertEqual(out["exact_match_count"], 1)
+
+    def test_sparse_typeahead_row_is_suggestion_only_not_exact_account(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="albertoralfred" bounds="[60,40][500,100]" />'
+            '<node class="android.view.ViewGroup" clickable="true" '
+            'bounds="[0,120][540,205]">'
+            '<node class="android.widget.ImageView" bounds="[20,140][52,172]" />'
+            '<node class="android.widget.TextView" text="albertoralfred" '
+            'bounds="[75,140][430,180]" />'
+            '</node></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "albertoralfred")
+        self.assertEqual(out["state"], SEARCH_RESULTS_LOADING)
+        self.assertTrue(out["suggestion_only"])
+
     def test_stable_query_suggestion_only_proves_terminal_absence(self) -> None:
         suggestion_only = (
             '<hierarchy><node class="android.widget.EditText" '
@@ -377,6 +412,30 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             "username_not_found_confirmed_suggestion_only_stable",
         )
         self.assertGreaterEqual(out["stable_suggestion_only_poll_count"], 6)
+
+    def test_stable_canonical_non_match_rows_prove_terminal_absence(self) -> None:
+        non_match_only = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="target" bounds="[0,0][540,90]" />'
+            '<node clickable="true" bounds="[0,120][540,230]">'
+            '<node resource-id="com.instagram.android:id/row_search_user_username" '
+            'text="target_backup" bounds="[110,145][430,205]" />'
+            '</node></hierarchy>'
+        )
+
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                return non_match_only
+
+        with patch("unfollow_hybrid_strategy.time.sleep"):
+            out = _wait_for_exact_search_result(Device(), "target")
+        self.assertEqual(out["status"], "username_not_found_confirmed")
+        self.assertEqual(
+            out["reason"],
+            "username_not_found_confirmed_non_match_only_stable",
+        )
+        self.assertGreaterEqual(out["stable_non_match_only_poll_count"], 6)
 
     def test_blank_loading_surface_never_becomes_terminal_absence(self) -> None:
         loading = _search_xml(query="faydesdjinns")
@@ -678,7 +737,7 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             preverified_exact_result_method="unfollow_direct_stable_exact_xml",
         )
 
-    def test_partial_result_never_authorizes_a_tap(self) -> None:
+    def test_stable_non_matching_result_terminalizes_without_tap(self) -> None:
         class Device:
             def dump_hierarchy(self, compressed=False):
                 del compressed
@@ -691,7 +750,11 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         ):
             out = open_exact_profile_for_unfollow(Device(), "target")
         self.assertFalse(out["ok"])
-        self.assertEqual(out["status"], "search_surface_unhealthy")
+        self.assertEqual(out["status"], "username_not_found_confirmed")
+        self.assertEqual(
+            out["reason"],
+            "username_not_found_confirmed_non_match_only_stable",
+        )
         tap_mock.assert_not_called()
 
     def test_wrong_profile_after_exact_row_is_refused(self) -> None:

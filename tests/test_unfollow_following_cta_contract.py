@@ -242,6 +242,41 @@ class FollowingCtaContractTests(unittest.TestCase):
         self.assertEqual(out["positive_not_following_state"], "follow")
         self.assertEqual(device.clicks, [])
 
+    def test_positive_full_width_follow_cta_terminalizes_without_second_unfollow(self):
+        xml = (
+            '<hierarchy><node '
+            'resource-id="com.instagram.android:id/profile_header_follow_button" '
+            'class="android.widget.Button" clickable="true" text="Follow" '
+            'bounds="[32,600][1046,690]" /></hierarchy>'
+        )
+        device = _XmlDevice(xml)
+        with patch.object(probe.time, "sleep"):
+            out = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="target",
+                profile_exact_confirmed=True,
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["terminal_reason"], "already_not_following_confirmed")
+        self.assertEqual(out["positive_not_following_state"], "follow")
+        self.assertEqual(device.clicks, [])
+
+    def test_ambiguous_full_width_follow_looking_surface_is_rejected(self):
+        xml = (
+            '<hierarchy><node resource-id="generic_button" '
+            'class="android.widget.Button" clickable="true" text="Follow" '
+            'bounds="[32,600][1046,690]" /></hierarchy>'
+        )
+        device = _XmlDevice(xml)
+        with patch.object(probe.time, "sleep"):
+            out = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="target",
+                profile_exact_confirmed=True,
+            )
+        self.assertEqual(out["terminal_reason"], "following_cta_terminally_absent")
+        self.assertEqual(out.get("positive_not_following_state"), "")
+
     def test_follow_text_outside_profile_cta_band_is_not_terminal_proof(self):
         xml = (
             '<hierarchy><node clickable="true" text="Follow" '

@@ -83,19 +83,42 @@ class UnfollowOneHealthySessionContractTests(unittest.TestCase):
     def test_three_consecutive_systemic_failures_open_global_circuit(self) -> None:
         policy = UnfollowSessionCompletionPolicy()
         self.assertFalse(
-            policy.record_candidate_failure("one", safe_state_restored=True).global_circuit_open
+            policy.record_candidate_failure(
+                "one", safe_state_restored=True, failure_scope="global"
+            ).global_circuit_open
         )
         self.assertFalse(
-            policy.record_candidate_failure("two", safe_state_restored=True).global_circuit_open
+            policy.record_candidate_failure(
+                "two", safe_state_restored=True, failure_scope="global"
+            ).global_circuit_open
         )
         self.assertTrue(
-            policy.record_candidate_failure("three", safe_state_restored=True).global_circuit_open
+            policy.record_candidate_failure(
+                "three", safe_state_restored=True, failure_scope="global"
+            ).global_circuit_open
         )
+
+    def test_three_unrelated_candidate_local_failures_do_not_stop_later_success(self) -> None:
+        policy = UnfollowSessionCompletionPolicy()
+        decisions = [
+            policy.record_candidate_failure(
+                username,
+                safe_state_restored=True,
+                failure_scope="candidate_local",
+            )
+            for username in ("one", "two", "three")
+        ]
+        self.assertTrue(all(item.continue_session for item in decisions))
+        self.assertFalse(any(item.global_circuit_open for item in decisions))
+        policy.record_verified_success("four")
+        self.assertEqual(policy.consecutive_global_failures, 0)
 
     def test_one_bounded_global_recovery_resets_s1_and_cannot_repeat(self) -> None:
         policy = UnfollowSessionCompletionPolicy()
         for username in ("one", "two", "three"):
-            policy.record_candidate_failure(username, safe_state_restored=True)
+            policy.record_candidate_failure(
+                username, safe_state_restored=True, failure_scope="global"
+            )
         self.assertTrue(
             policy.record_bounded_global_recovery(safe_state_restored=True)
         )

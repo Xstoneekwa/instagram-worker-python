@@ -255,6 +255,37 @@ def _verified_profile_wide_following_cta(
     )
 
 
+def _verified_profile_wide_not_following_cta(
+    *,
+    bounds: dict[str, int],
+    screen_w: int,
+    screen_h: int,
+    reject_reason: str,
+    resource_id: str,
+    class_name: str,
+    clickable: bool,
+    state: str,
+) -> bool:
+    """Accept only Instagram's native full-row positive non-Following CTA."""
+    width = int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+    height = int(bounds.get("bottom", 0)) - int(bounds.get("top", 0))
+    center = _bounds_center(bounds)
+    return bool(
+        reject_reason == "bounds_shape_rejected"
+        and center is not None
+        and int(screen_h * 0.16) <= int(center[1]) <= int(screen_h * 0.62)
+        and width > int(screen_w * 0.62)
+        and width <= int(screen_w * 0.96)
+        and 28 <= height <= int(screen_h * 0.11)
+        and int(bounds.get("left", 0)) >= 0
+        and int(bounds.get("right", 0)) <= int(screen_w)
+        and resource_id.rsplit("/", 1)[-1] == "profile_header_follow_button"
+        and class_name == "android.widget.Button"
+        and clickable
+        and state in set(_NOT_FOLLOWING_BUTTON_LABELS.values())
+    )
+
+
 def _positive_not_following_relationship_state(
     root: ET.Element | None,
     *,
@@ -284,10 +315,28 @@ def _positive_not_following_relationship_state(
                 continue
             tap_element = ancestor
         bounds = _parse_bounds_attr(tap_element.get("bounds"))
-        if _unfollow_button_bounds_reject_reason(
+        reject_reason = _unfollow_button_bounds_reject_reason(
             bounds,
             screen_w=screen_w,
             screen_h=screen_h,
+        )
+        if reject_reason and not _verified_profile_wide_not_following_cta(
+            bounds=bounds,
+            screen_w=screen_w,
+            screen_h=screen_h,
+            reject_reason=reject_reason,
+            resource_id=str(
+                tap_element.get("resource-id")
+                or element.get("resource-id")
+                or ""
+            ),
+            class_name=str(
+                tap_element.get("class") or element.get("class") or ""
+            ),
+            clickable=(
+                str(tap_element.get("clickable") or "").casefold() == "true"
+            ),
+            state=state,
         ):
             continue
         return state

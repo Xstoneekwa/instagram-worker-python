@@ -6,19 +6,27 @@ from dataclasses import dataclass
 
 
 SEARCH_SURFACE_CONSECUTIVE_FAILURE_LIMIT = 3
+SEARCH_FAILURE_SCOPE_CANDIDATE_LOCAL = "candidate_local"
+SEARCH_FAILURE_SCOPE_GLOBAL = "global"
 
 
 @dataclass
 class SearchSurfaceCircuitBreaker:
     consecutive_technical_failures: int = 0
     total_technical_failures: int = 0
+    candidate_local_failures: int = 0
     healthy_outcomes: int = 0
     opened: bool = False
     stable_reason: str = ""
     recovery_attempted: bool = False
     recovery_succeeded: bool = False
 
-    def record(self, classification: str) -> bool:
+    def record(
+        self,
+        classification: str,
+        *,
+        failure_scope: str = SEARCH_FAILURE_SCOPE_GLOBAL,
+    ) -> bool:
         value = str(classification or "").strip()
         if value in {"exact_result_visible", "username_not_found_confirmed"}:
             self.consecutive_technical_failures = 0
@@ -26,6 +34,10 @@ class SearchSurfaceCircuitBreaker:
             return False
         if value == "search_surface_unhealthy":
             self.total_technical_failures += 1
+            if str(failure_scope) != SEARCH_FAILURE_SCOPE_GLOBAL:
+                self.candidate_local_failures += 1
+                self.consecutive_technical_failures = 0
+                return False
             self.consecutive_technical_failures += 1
             if (
                 self.consecutive_technical_failures
@@ -54,6 +66,7 @@ class SearchSurfaceCircuitBreaker:
                 self.consecutive_technical_failures
             ),
             "search_surface_total_technical_failures": self.total_technical_failures,
+            "search_surface_candidate_local_failures": self.candidate_local_failures,
             "search_surface_healthy_outcomes": self.healthy_outcomes,
             "search_surface_circuit_breaker_open": self.opened,
             "search_surface_circuit_breaker_reason": self.stable_reason,

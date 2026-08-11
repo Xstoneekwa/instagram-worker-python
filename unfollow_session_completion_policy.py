@@ -17,6 +17,8 @@ from unfollow_ui_coverage_policy import normalize_username
 
 CANDIDATE_RECOVERY_LIMIT = 1
 SESSION_CONSECUTIVE_FAILURE_LIMIT = 3
+FAILURE_SCOPE_CANDIDATE_LOCAL = "candidate_local"
+FAILURE_SCOPE_GLOBAL = "global"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ class UnfollowSessionCompletionPolicy:
     retry_pending: set[str] = field(default_factory=set)
     deferred_for_later_session: set[str] = field(default_factory=set)
     consecutive_candidate_failures: int = 0
+    consecutive_global_failures: int = 0
     total_candidate_failures: int = 0
     successful_resets: int = 0
     retry_generations_started: int = 0
@@ -47,6 +50,7 @@ class UnfollowSessionCompletionPolicy:
         *,
         safe_state_restored: bool,
         replay_forbidden: bool = False,
+        failure_scope: str = FAILURE_SCOPE_CANDIDATE_LOCAL,
     ) -> CandidateFailureDecision:
         normalized = normalize_username(username)
         if not normalized:
@@ -59,11 +63,16 @@ class UnfollowSessionCompletionPolicy:
             )
         self.total_candidate_failures += 1
         self.consecutive_candidate_failures += 1
+        normalized_scope = str(failure_scope or FAILURE_SCOPE_CANDIDATE_LOCAL)
+        if normalized_scope == FAILURE_SCOPE_GLOBAL:
+            self.consecutive_global_failures += 1
+        else:
+            self.consecutive_global_failures = 0
         count = self.candidate_failure_counts.get(normalized, 0) + 1
         self.candidate_failure_counts[normalized] = count
         global_open = (
             not safe_state_restored
-            or self.consecutive_candidate_failures
+            or self.consecutive_global_failures
             >= max(1, int(self.session_consecutive_failure_limit))
         )
         if global_open:
@@ -76,7 +85,7 @@ class UnfollowSessionCompletionPolicy:
                 (
                     "unfollow_global_safe_state_not_restored"
                     if not safe_state_restored
-                    else "unfollow_session_consecutive_candidate_failure_limit_reached"
+                    else "unfollow_session_consecutive_global_failure_limit_reached"
                 ),
             )
         recovery_exhausted = bool(
@@ -110,12 +119,14 @@ class UnfollowSessionCompletionPolicy:
         if self.consecutive_candidate_failures:
             self.successful_resets += 1
         self.consecutive_candidate_failures = 0
+        self.consecutive_global_failures = 0
 
     def record_bounded_global_recovery(self, *, safe_state_restored: bool) -> bool:
         if not safe_state_restored or self.global_recoveries_used >= 1:
             return False
         self.global_recoveries_used += 1
         self.consecutive_candidate_failures = 0
+        self.consecutive_global_failures = 0
         return True
 
     def begin_retry_generation(
@@ -155,6 +166,7 @@ class UnfollowSessionCompletionPolicy:
             "candidate_deferred_count": len(self.deferred_for_later_session),
             "candidate_deferred_usernames": sorted(self.deferred_for_later_session),
             "session_consecutive_candidate_failures": self.consecutive_candidate_failures,
+            "session_consecutive_global_failures": self.consecutive_global_failures,
             "session_consecutive_failure_limit": int(
                 self.session_consecutive_failure_limit
             ),

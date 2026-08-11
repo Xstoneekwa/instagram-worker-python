@@ -89,6 +89,20 @@ class UnfollowSearchHealthPolicyTests(unittest.TestCase):
         self.assertEqual(policy.consecutive_technical_failures, 0)
         self.assertFalse(policy.opened)
 
+    def test_candidate_local_timeouts_never_open_global_search_breaker(self) -> None:
+        policy = SearchSurfaceCircuitBreaker()
+        outcomes = [
+            policy.record(
+                "search_surface_unhealthy",
+                failure_scope="candidate_local",
+            )
+            for _ in range(6)
+        ]
+        self.assertEqual(outcomes, [False] * 6)
+        self.assertEqual(policy.candidate_local_failures, 6)
+        self.assertEqual(policy.consecutive_technical_failures, 0)
+        self.assertFalse(policy.opened)
+
 
 if __name__ == "__main__":
     unittest.main()
