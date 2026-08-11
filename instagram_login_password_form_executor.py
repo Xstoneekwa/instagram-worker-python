@@ -75,6 +75,7 @@ _USERNAME_PLACEHOLDER_PHRASES = {
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
+ReturnedLoginFormRecovery = Callable[[], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -483,6 +484,44 @@ def execute_login_form_credentials(
             username_input_result=username_input_result,
         )
 
+    fresh_submit = _resolve_fresh_login_submit_target(
+        d,
+        expected_username=username,
+        password_only_mode=password_only_mode,
+        prefilled_username=str((prevalidated_signals or {}).get("prefilled_username") or ""),
+        password_field_proof=str((prevalidated_signals or {}).get("password_field_proof") or ""),
+        sleeper=sleeper,
+        warnings=warnings,
+    )
+    if fresh_submit["failure_reason"]:
+        timings["total_ms"] = _elapsed_ms(total_start, timer())
+        return _result(
+            ok=False,
+            executed=False,
+            action=ACTION_LOGIN_FORM_SUBMIT,
+            reason=str(fresh_submit["failure_reason"]),
+            failure_reason=str(fresh_submit["failure_reason"]),
+            username_entered=username_entered,
+            password_entered=password_entered,
+            submit_tapped=False,
+            timings=timings,
+            warnings=warnings,
+            expected_username=username,
+            password_only_mode=password_only_mode,
+            input_method_used=password_input_method_used,
+            password_field_target_kind=password_field_target_kind,
+            password_input_method=password_input_method,
+            password_input_result=password_input_result,
+            password_confirm_method=password_confirm_method,
+            password_field_focused_before_input=password_field_focused_before_input,
+            input_action_reported_success=input_call_reported_success,
+            password_field_non_empty_confirmed=password_field_non_empty_confirmed,
+            username_replaced=username_replaced,
+            username_input_confirmed=username_input_confirmed,
+            username_input_result=username_input_result,
+        )
+    targets = {**targets, **fresh_submit["targets"]}
+
     try:
         start = timer()
         _click_target(targets["login_button"])
@@ -577,6 +616,48 @@ def execute_login_form_credentials(
     if dump_after_submit:
         try:
             warnings.append("post_submit_observe_started")
+            def _recover_returned_login_form_once() -> dict[str, Any]:
+                nonlocal password_refill_attempted, second_submit_executed
+                recovery = _resolve_fresh_login_submit_target(
+                    d,
+                    expected_username=username,
+                    password_only_mode=password_only_mode,
+                    prefilled_username=str((prevalidated_signals or {}).get("prefilled_username") or ""),
+                    password_field_proof=str((prevalidated_signals or {}).get("password_field_proof") or ""),
+                    sleeper=sleeper,
+                    warnings=warnings,
+                )
+                if recovery["failure_reason"]:
+                    return recovery
+                recovery_targets = dict(recovery["targets"])
+                password_state = _password_field_non_empty_state(recovery_targets["password"])
+                if password_state == "false":
+                    password_refill_attempted = True
+                    refill = _input_password_robust(
+                        d,
+                        recovery_targets["password"],
+                        revealed_password,
+                        warnings,
+                    )
+                    if not _password_injection_confirmed(refill):
+                        return {"failure_reason": "password_input_not_confirmed"}
+                    recovery = _resolve_fresh_login_submit_target(
+                        d,
+                        expected_username=username,
+                        password_only_mode=password_only_mode,
+                        prefilled_username=str((prevalidated_signals or {}).get("prefilled_username") or ""),
+                        password_field_proof=str((prevalidated_signals or {}).get("password_field_proof") or ""),
+                        sleeper=sleeper,
+                        warnings=warnings,
+                    )
+                    if recovery["failure_reason"]:
+                        return recovery
+                    recovery_targets = dict(recovery["targets"])
+                _click_target(recovery_targets["login_button"])
+                second_submit_executed = True
+                warnings.append("login_submit_returned_form_recovery_tap_sent")
+                return {"failure_reason": "", "executed": True}
+
             observed = _observe_post_submit_settled(
                 d,
                 timings=timings,
@@ -586,6 +667,7 @@ def execute_login_form_credentials(
                 initial_wait_ms=wait_ms,
                 interval_ms=observation_interval_ms,
                 max_observations=observation_limit,
+                returned_login_form_recovery=_recover_returned_login_form_once,
             )
             post_submit_observation_count = int(observed.get("observation_count") or 0)
             post_submit_wait_total_ms = int(observed.get("wait_total_ms") or 0)
@@ -1480,6 +1562,143 @@ def _click_target(target: Any) -> None:
     click()
 
 
+def _resolve_fresh_login_submit_target(
+    d: Any,
+    *,
+    expected_username: str,
+    password_only_mode: bool,
+    prefilled_username: str,
+    password_field_proof: str,
+    sleeper: Sleeper,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Re-prove the login surface and resolve new selector handles before submit.
+
+    A sparse hierarchy may omit field/button nodes, so live unique selectors are
+    accepted only when the hierarchy does not prove a conflicting destination.
+    If a proven login form temporarily loses its CTA (normally because of the
+    IME/layout), Back is sent once and every proof is rebuilt afterwards.
+    """
+
+    try:
+        hierarchy_xml = _dump_login_submit_hierarchy_once(d)
+    except Exception:
+        return {"failure_reason": "login_form_fresh_observation_failed", "targets": {}}
+    signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
+    if _fresh_submit_conflicting_surface(signals, hierarchy_xml=hierarchy_xml):
+        return {"failure_reason": "login_submit_wrong_surface", "targets": {}}
+
+    targets = _resolve_login_form_targets(
+        d,
+        password_only_mode=password_only_mode,
+        prefilled_username=prefilled_username,
+        password_field_proof=password_field_proof,
+    )
+    if targets.get("failure_reason") == "login_button_not_found" and _fresh_submit_login_form_proved(signals):
+        press = getattr(d, "press", None)
+        if callable(press):
+            press("back")
+            warnings.append("login_submit_ime_hide_recovery_sent")
+            sleeper(0.15)
+            try:
+                hierarchy_xml = _dump_login_submit_hierarchy_once(d)
+            except Exception:
+                return {"failure_reason": "login_form_fresh_observation_failed", "targets": {}}
+            signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
+            if _fresh_submit_conflicting_surface(signals, hierarchy_xml=hierarchy_xml):
+                return {"failure_reason": "login_submit_wrong_surface", "targets": {}}
+            targets = _resolve_login_form_targets(
+                d,
+                password_only_mode=password_only_mode,
+                prefilled_username=prefilled_username,
+                password_field_proof=password_field_proof,
+            )
+    if targets.get("failure_reason"):
+        return {"failure_reason": str(targets["failure_reason"]), "targets": {}}
+
+    username_target = targets.get("username")
+    if not password_only_mode and username_target is not None:
+        actual_username = _normalize_username(
+            str(signals.get("prefilled_username") or "")
+            or _read_username_field_value(
+                d,
+                username_target,
+                prefilled_username=prefilled_username,
+                prefer_hierarchy=False,
+            )
+        )
+        if actual_username and actual_username != _normalize_username(expected_username):
+            return {"failure_reason": "login_submit_username_mismatch", "targets": {}}
+
+    button_info = _selector_info(targets["login_button"])
+    if button_info.get("enabled") is False:
+        sleeper(0.15)
+        refreshed = _resolve_login_form_targets(
+            d,
+            password_only_mode=password_only_mode,
+            prefilled_username=prefilled_username,
+            password_field_proof=password_field_proof,
+        )
+        if refreshed.get("failure_reason"):
+            return {"failure_reason": str(refreshed["failure_reason"]), "targets": {}}
+        targets = refreshed
+        button_info = _selector_info(targets["login_button"])
+        if button_info.get("enabled") is False:
+            return {"failure_reason": "login_button_disabled", "targets": {}}
+
+    warnings.append("login_submit_fresh_surface_proved")
+    return {"failure_reason": "", "targets": targets}
+
+
+def _dump_login_submit_hierarchy_once(d: Any) -> str:
+    """Capture the submit boundary through the device adapter when available."""
+
+    provider = getattr(d, "dump_login_submit_hierarchy", None)
+    if callable(provider):
+        hierarchy = provider()
+        if not isinstance(hierarchy, str) or not hierarchy.strip():
+            raise RuntimeError("empty login submit hierarchy")
+        return hierarchy
+    return _dump_hierarchy_once(d)
+
+
+def _fresh_submit_login_form_proved(signals: dict[str, Any]) -> bool:
+    return str(signals.get("screen_type") or "") in {
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "continue_password_only",
+    } or (
+        signals.get("has_password_field") is True
+        and signals.get("has_username_field") is True
+    )
+
+
+def _fresh_submit_conflicting_surface(signals: dict[str, Any], *, hierarchy_xml: str) -> bool:
+    explicit_signal = any(
+        signals.get(key) is True
+        for key in (
+            "active_account_home",
+            "active_account_profile",
+            "verification_code_challenge_present",
+            "post_login_location_services_prompt",
+            "instagram_turn_on_notifications_prompt",
+            "android_instagram_notification_settings",
+            "save_login_info_prompt",
+        )
+    )
+    if explicit_signal:
+        return True
+    probe = probe_login_ui_from_hierarchy(hierarchy_xml, stage="login_submit_fresh_observation")
+    return probe.outcome in {
+        LoginProbeOutcome.CONNECTED,
+        LoginProbeOutcome.NEEDS_2FA,
+        LoginProbeOutcome.CHECKPOINT,
+        LoginProbeOutcome.VERIFICATION_PENDING,
+        LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE,
+        LoginProbeOutcome.LOGIN_FAILED,
+    }
+
+
 def _input_password_robust(d: Any, target: Any, value: str, warnings: list[str]) -> dict[str, Any]:
     target = _refresh_password_target_if_needed(d, target, warnings)
     target_kind = _password_target_kind(target)
@@ -2240,6 +2459,7 @@ def _observe_post_submit_settled(
     initial_wait_ms: int,
     interval_ms: int,
     max_observations: int,
+    returned_login_form_recovery: ReturnedLoginFormRecovery | None = None,
 ) -> dict[str, Any]:
     screens: list[str] = []
     wait_total_ms = 0
@@ -2447,7 +2667,37 @@ def _observe_post_submit_settled(
             outcome = str(last_observed.get("outcome") or "unknown")
             warnings.append("post_submit_final_recheck_terminal")
 
-    if outcome == "logged_out":
+    if outcome == "logged_out" and "loading" in screens and returned_login_form_recovery is not None:
+        warnings.append("post_submit_returned_login_form_recovery_started")
+        recovery = returned_login_form_recovery()
+        if recovery.get("executed") is True:
+            recovered = _observe_post_submit_settled(
+                d,
+                timings=timings,
+                warnings=warnings,
+                timer=timer,
+                sleeper=sleeper,
+                initial_wait_ms=initial_wait_ms,
+                interval_ms=interval_ms,
+                max_observations=max_observations,
+                returned_login_form_recovery=None,
+            )
+            recovered_screens = list(recovered.get("screens") or [])
+            return {
+                **recovered,
+                "observation_count": len(screens) + int(recovered.get("observation_count") or 0),
+                "wait_total_ms": wait_total_ms + int(recovered.get("wait_total_ms") or 0),
+                "screens": [*screens, *recovered_screens],
+                "returned_login_form_recovery_attempted": True,
+                "returned_login_form_recovery_executed": True,
+            }
+        last_observed = {
+            **last_observed,
+            "reason": str(recovery.get("failure_reason") or "login_submit_returned_form_recovery_failed"),
+            "terminal": True,
+        }
+        warnings.append("post_submit_returned_login_form_recovery_failed")
+    elif outcome == "logged_out":
         last_observed = {
             **last_observed,
             "reason": "session_expired_after_settling",

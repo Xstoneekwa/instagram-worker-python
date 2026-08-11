@@ -325,6 +325,7 @@ class FakeDevice:
         self.bounds_clicks: list[tuple[int, int]] = []
         self.press_calls: list[str] = []
         self.app_start = Mock()
+        self.login_submit_hierarchy = LOGIN_FORM_XML
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -342,6 +343,9 @@ class FakeDevice:
         if len(self.hierarchies) == 1:
             return self.hierarchies[0]
         return self.hierarchies.pop(0)
+
+    def dump_login_submit_hierarchy(self) -> str:
+        return self.login_submit_hierarchy
 
     def click(self, x: int, y: int) -> None:
         self.bounds_clicks.append((int(x), int(y)))
@@ -2379,6 +2383,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             PREFILLED_LOGIN_FORM_XML,
             CONNECTED_XML,
         ]
+        device.login_submit_hierarchy = PREFILLED_LOGIN_FORM_XML.replace("random_old_profile", USERNAME)
         lookup = Mock(
             return_value={
                 "lifecycle_status": "canceled",
@@ -2447,6 +2452,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         selectors["username"]._count = 0
         prefilled_username = device.add_selector("text", "random_old_profile", FakeSelector(1))
         device.hierarchies = [PREFILLED_LOGIN_FORM_XML, CONNECTED_XML]
+        device.login_submit_hierarchy = PREFILLED_LOGIN_FORM_XML.replace("random_old_profile", USERNAME)
         lookup = self._canceled_lifecycle()
 
         result = self.run_flow(
@@ -2587,6 +2593,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             PREFILLED_LOGIN_FORM_XML,
             CONNECTED_XML,
         ]
+        device.login_submit_hierarchy = PREFILLED_LOGIN_FORM_XML.replace("random_old_profile", USERNAME)
 
         result = self.run_flow(
             device,
@@ -3468,6 +3475,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         prefilled_username = device.add_selector("text", "random_old_profile", FakeSelector(1))
         getter = Mock(return_value=credentials())
         device.hierarchies = [ACCOUNT_PICKER_XML, PREFILLED_LOGIN_FORM_XML, PREFILLED_LOGIN_FORM_XML, CONNECTED_XML]
+        device.login_submit_hierarchy = PREFILLED_LOGIN_FORM_XML.replace("random_old_profile", "random_expected")
 
         result = self.run_flow(
             device,

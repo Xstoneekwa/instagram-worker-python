@@ -118,6 +118,11 @@ INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML = (
     '<node text="Save" clickable="true" />'
     '<node text="Not now" clickable="true" />'
 )
+FILLED_LOGIN_FORM_XML = (
+    '<node class="android.widget.EditText" text="cinema_catchup" editable="true" />'
+    '<node class="android.widget.EditText" text="••••••••" password="true" editable="true" />'
+    '<node text="Log in" clickable="true" enabled="true" />'
+)
 
 
 class TrackingSecretValue(SecretValue):
@@ -274,6 +279,7 @@ class FakeDevice:
         self.press_calls: list[str] = []
         self.hierarchies: list[str] | None = None
         self.serial: str | None = None
+        self.login_submit_hierarchy = FILLED_LOGIN_FORM_XML
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -299,12 +305,45 @@ class FakeDevice:
             return self.hierarchies.pop(0)
         return self.hierarchy
 
+    def dump_login_submit_hierarchy(self) -> str:
+        return self.login_submit_hierarchy
+
     def press(self, key: str) -> None:
         self.press_calls.append(str(key))
 
 
+class RefreshingLoginButtonDevice(FakeDevice):
+    def __init__(self, *, stale: FakeSelector, fresh: FakeSelector) -> None:
+        super().__init__(FILLED_LOGIN_FORM_XML)
+        self.stale = stale
+        self.fresh = fresh
+        self.login_lookup_count = 0
+
+    def __call__(self, **kwargs):
+        if kwargs == {"text": "Log in"}:
+            self.login_lookup_count += 1
+            return self.stale if self.login_lookup_count == 1 else self.fresh
+        return super().__call__(**kwargs)
+
+
+class SequencedLoginButtonDevice(FakeDevice):
+    def __init__(self, buttons: list[FakeSelector], hierarchies: list[str]) -> None:
+        super().__init__(FILLED_LOGIN_FORM_XML)
+        self.buttons = list(buttons)
+        self.login_lookup_count = 0
+        self.hierarchies = list(hierarchies)
+
+    def __call__(self, **kwargs):
+        if kwargs == {"text": "Log in"}:
+            index = min(self.login_lookup_count, len(self.buttons) - 1)
+            self.login_lookup_count += 1
+            return self.buttons[index]
+        return super().__call__(**kwargs)
+
+
 def configured_device(hierarchy: str = CONNECTED_XML) -> tuple[FakeDevice, FakeSelector, FakeSelector, FakeSelector]:
     device = FakeDevice(hierarchy)
+    device.hierarchies = [hierarchy]
     username = device.add_selector("text", "Username, email or mobile number", FakeSelector(1))
     password = device.add_selector("text", "Password", FakeSelector(1))
     login = device.add_selector("text", "Log in", FakeSelector(1))
@@ -2238,6 +2277,143 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         rendered = json.dumps({"warnings": result.warnings, "metadata": result.safe_metadata}, sort_keys=True)
         for forbidden in (PASSWORD, secret_ref, vault_uuid, "len(", "hash("):
             self.assertNotIn(forbidden, rendered)
+
+    def test_submit_re_resolves_fresh_login_button_after_password_fill(self) -> None:
+        stale = FakeSelector(1)
+        fresh = FakeSelector(1)
+        device = RefreshingLoginButtonDevice(stale=stale, fresh=fresh)
+        device.add_selector("text", "Username, email or mobile number", FakeSelector(1))
+        device.add_selector("text", "Password", FakeSelector(1))
+        device.hierarchies = [FILLED_LOGIN_FORM_XML, EMAIL_CODE_CHALLENGE_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(stale.click_calls, 0)
+        self.assertEqual(fresh.click_calls, 1)
+        self.assertIn("login_submit_fresh_surface_proved", result.warnings)
+
+    def test_ime_hidden_login_button_uses_one_back_then_fresh_layout_target(self) -> None:
+        initial = FakeSelector(1)
+        hidden = FakeSelector(0)
+        fresh_after_back = FakeSelector(1)
+        device = SequencedLoginButtonDevice(
+            [initial, hidden, fresh_after_back],
+            [FILLED_LOGIN_FORM_XML, FILLED_LOGIN_FORM_XML, EMAIL_CODE_CHALLENGE_XML],
+        )
+        device.add_selector("text", "Username, email or mobile number", FakeSelector(1))
+        device.add_selector("text", "Password", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(initial.click_calls, 0)
+        self.assertEqual(hidden.click_calls, 0)
+        self.assertEqual(fresh_after_back.click_calls, 1)
+        self.assertIn("login_submit_ime_hide_recovery_sent", result.warnings)
+
+    def test_disabled_login_button_is_re_resolved_once_then_clicked_when_enabled(self) -> None:
+        initial = FakeSelector(1)
+        disabled = FakeSelector(1)
+        disabled.info = {"enabled": False}
+        enabled = FakeSelector(1)
+        enabled.info = {"enabled": True}
+        device = SequencedLoginButtonDevice(
+            [initial, disabled, enabled],
+            [FILLED_LOGIN_FORM_XML, EMAIL_CODE_CHALLENGE_XML],
+        )
+        device.add_selector("text", "Username, email or mobile number", FakeSelector(1))
+        device.add_selector("text", "Password", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(initial.click_calls, 0)
+        self.assertEqual(disabled.click_calls, 0)
+        self.assertEqual(enabled.click_calls, 1)
+
+    def test_loading_then_returned_form_gets_one_fresh_bounded_submit_recovery(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        device.hierarchies = [
+            LOADING_XML,
+            LOGGED_OUT_XML,
+            LOGGED_OUT_XML,
+            LOGGED_OUT_XML,
+            FILLED_LOGIN_FORM_XML,
+            EMAIL_CODE_CHALLENGE_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(login.click_calls, 2)
+        self.assertTrue(result.safe_metadata["second_submit_executed"])
+        self.assertIn("login_submit_returned_form_recovery_tap_sent", result.warnings)
+
+    def test_stable_logged_out_without_loading_never_double_submits(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        device.hierarchies = [LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_probe_reason, "session_expired_after_settling")
+        self.assertEqual(login.click_calls, 1)
+        self.assertFalse(result.safe_metadata["second_submit_executed"])
+
+    def test_challenge_surface_before_submit_fails_closed_without_tap(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        device.login_submit_hierarchy = EMAIL_CODE_CHALLENGE_XML
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.failure_reason, "login_submit_wrong_surface")
+        self.assertEqual(login.click_calls, 0)
 
 
 if __name__ == "__main__":
