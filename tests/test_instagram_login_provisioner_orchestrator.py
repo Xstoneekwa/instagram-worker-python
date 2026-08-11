@@ -345,7 +345,32 @@ class FakeDevice:
         return self.hierarchies.pop(0)
 
     def dump_login_submit_hierarchy(self) -> str:
-        return self.login_submit_hierarchy
+        username_selector = self.selectors.get(("text", "Username, email or mobile number"))
+        password_selector = self.selectors.get(("text", "Password"))
+        username = ""
+        if username_selector is not None:
+            info = getattr(username_selector, "info", None)
+            if callable(info):
+                username = str((info() or {}).get("text") or "")
+            if not username and username_selector.set_text_calls:
+                username = str(username_selector.set_text_calls[-1])
+        if not username:
+            for selector in self.selectors.values():
+                if selector.set_text_calls and selector.set_text_calls[-1] != PASSWORD:
+                    username = str(selector.set_text_calls[-1])
+                    break
+        password_filled = bool(password_selector is not None and password_selector.set_text_calls)
+        if not password_filled:
+            password_filled = any(
+                bool(selector.set_text_calls and selector.set_text_calls[-1] == PASSWORD)
+                for selector in self.selectors.values()
+            )
+        password_mask = "••••••••" if password_filled else "Password"
+        return (
+            f'<node class="android.widget.EditText" text="{username}" editable="true" />'
+            f'<node class="android.widget.EditText" text="{password_mask}" password="true" editable="true" />'
+            '<node text="Log in" clickable="true" enabled="true" />'
+        )
 
     def click(self, x: int, y: int) -> None:
         self.bounds_clicks.append((int(x), int(y)))

@@ -53,6 +53,7 @@ POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS = 1000
 POST_DISMISS_FINAL_OBSERVATIONS = 4
 POST_DISMISS_FINAL_INTERVAL_MS = 1000
 PASSWORD_CONFIRM_SETTLE_MS = 150
+LOGIN_FORM_EVENT_SETTLE_MS = 250
 USERNAME_INPUT_FAILURE_REASONS = {
     "username_input_failed",
     "username_clear_failed",
@@ -338,6 +339,10 @@ def execute_login_form_credentials(
     username_clear_method = ""
     username_input_method = ""
     username_placeholder_ignored = False
+    field_content_stable_before_submit = False
+    autofill_interference_detected = False
+    fresh_xml_before_tap = False
+    form_events_settled = False
 
     start = timer()
     targets = _resolve_login_form_targets(
@@ -493,6 +498,10 @@ def execute_login_form_credentials(
         sleeper=sleeper,
         warnings=warnings,
     )
+    field_content_stable_before_submit = bool(fresh_submit.get("field_content_stable_before_submit"))
+    autofill_interference_detected = bool(fresh_submit.get("autofill_interference_detected"))
+    fresh_xml_before_tap = bool(fresh_submit.get("fresh_xml_before_tap"))
+    form_events_settled = bool(fresh_submit.get("form_events_settled"))
     if fresh_submit["failure_reason"]:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
         return _result(
@@ -519,6 +528,10 @@ def execute_login_form_credentials(
             username_replaced=username_replaced,
             username_input_confirmed=username_input_confirmed,
             username_input_result=username_input_result,
+            field_content_stable_before_submit=field_content_stable_before_submit,
+            autofill_interference_detected=autofill_interference_detected,
+            fresh_xml_before_tap=fresh_xml_before_tap,
+            form_events_settled=form_events_settled,
         )
     targets = {**targets, **fresh_submit["targets"]}
 
@@ -961,6 +974,10 @@ def execute_login_form_credentials(
         username_clear_method=username_clear_method,
         username_input_method=username_input_method,
         username_placeholder_ignored=username_placeholder_ignored,
+        field_content_stable_before_submit=field_content_stable_before_submit,
+        autofill_interference_detected=autofill_interference_detected,
+        fresh_xml_before_tap=fresh_xml_before_tap,
+        form_events_settled=form_events_settled,
     )
 
 
@@ -1481,8 +1498,6 @@ def _clear_username_field(target: Any, warnings: list[str]) -> str:
 
 
 def _set_username_field_value(d: Any, target: Any, expected_username: str, warnings: list[str]) -> str:
-    if _set_target_text_checked(target, expected_username):
-        return "set_text"
     serial = _direct_device_serial(d)
     fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
     if serial and fast_ime_id and is_fast_ime_available(serial):
@@ -1500,8 +1515,12 @@ def _set_username_field_value(d: Any, target: Any, expected_username: str, warni
         except Exception:
             command_ok, method_tag, broadcast_ok = False, "", False
         if command_ok and broadcast_ok:
+            warnings.append("username_human_event_input_used")
             return method_tag or "adb_keyboard_b64"
         warnings.append("username_adb_keyboard_input_failed")
+    if _set_target_text_checked(target, expected_username):
+        warnings.append("username_set_text_fallback_used")
+        return "set_text"
     return ""
 
 
@@ -1572,21 +1591,15 @@ def _resolve_fresh_login_submit_target(
     sleeper: Sleeper,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Re-prove the login surface and resolve new selector handles before submit.
-
-    A sparse hierarchy may omit field/button nodes, so live unique selectors are
-    accepted only when the hierarchy does not prove a conflicting destination.
-    If a proven login form temporarily loses its CTA (normally because of the
-    IME/layout), Back is sent once and every proof is rebuilt afterwards.
-    """
+    """Re-prove a stable, event-settled login form before the only submit tap."""
 
     try:
         hierarchy_xml = _dump_login_submit_hierarchy_once(d)
     except Exception:
-        return {"failure_reason": "login_form_fresh_observation_failed", "targets": {}}
+        return _fresh_submit_failure("login_form_fresh_observation_failed")
     signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
     if _fresh_submit_conflicting_surface(signals, hierarchy_xml=hierarchy_xml):
-        return {"failure_reason": "login_submit_wrong_surface", "targets": {}}
+        return _fresh_submit_failure("login_submit_wrong_surface", fresh_xml_before_tap=True)
 
     targets = _resolve_login_form_targets(
         d,
@@ -1603,10 +1616,10 @@ def _resolve_fresh_login_submit_target(
             try:
                 hierarchy_xml = _dump_login_submit_hierarchy_once(d)
             except Exception:
-                return {"failure_reason": "login_form_fresh_observation_failed", "targets": {}}
+                return _fresh_submit_failure("login_form_fresh_observation_failed")
             signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
             if _fresh_submit_conflicting_surface(signals, hierarchy_xml=hierarchy_xml):
-                return {"failure_reason": "login_submit_wrong_surface", "targets": {}}
+                return _fresh_submit_failure("login_submit_wrong_surface", fresh_xml_before_tap=True)
             targets = _resolve_login_form_targets(
                 d,
                 password_only_mode=password_only_mode,
@@ -1614,12 +1627,13 @@ def _resolve_fresh_login_submit_target(
                 password_field_proof=password_field_proof,
             )
     if targets.get("failure_reason"):
-        return {"failure_reason": str(targets["failure_reason"]), "targets": {}}
+        return _fresh_submit_failure(str(targets["failure_reason"]), fresh_xml_before_tap=True)
 
     username_target = targets.get("username")
     if not password_only_mode and username_target is not None:
         actual_username = _normalize_username(
             str(signals.get("prefilled_username") or "")
+            or _username_value_from_hierarchy_xml(hierarchy_xml)
             or _read_username_field_value(
                 d,
                 username_target,
@@ -1627,8 +1641,69 @@ def _resolve_fresh_login_submit_target(
                 prefer_hierarchy=False,
             )
         )
-        if actual_username and actual_username != _normalize_username(expected_username):
-            return {"failure_reason": "login_submit_username_mismatch", "targets": {}}
+        if actual_username != _normalize_username(expected_username):
+            return _fresh_submit_failure(
+                "login_submit_username_not_exact",
+                fresh_xml_before_tap=True,
+                autofill_interference_detected=bool(actual_username),
+            )
+
+    if not _password_is_proved_non_empty(targets["password"], hierarchy_xml):
+        return _fresh_submit_failure(
+            "login_submit_password_not_stable",
+            fresh_xml_before_tap=True,
+        )
+
+    sleeper(LOGIN_FORM_EVENT_SETTLE_MS / 1000.0)
+    try:
+        settled_hierarchy_xml = _dump_login_submit_hierarchy_once(d)
+    except Exception:
+        return _fresh_submit_failure("login_form_settled_observation_failed")
+    settled_signals = extract_login_screen_signals_from_hierarchy(settled_hierarchy_xml)
+    if _fresh_submit_conflicting_surface(settled_signals, hierarchy_xml=settled_hierarchy_xml):
+        return _fresh_submit_failure(
+            "login_submit_wrong_surface",
+            fresh_xml_before_tap=True,
+            form_events_settled=True,
+        )
+    settled_targets = _resolve_login_form_targets(
+        d,
+        password_only_mode=password_only_mode,
+        prefilled_username=prefilled_username,
+        password_field_proof=password_field_proof,
+    )
+    if settled_targets.get("failure_reason"):
+        return _fresh_submit_failure(
+            str(settled_targets["failure_reason"]),
+            fresh_xml_before_tap=True,
+            form_events_settled=True,
+        )
+    if not password_only_mode:
+        settled_username = _normalize_username(
+            str(settled_signals.get("prefilled_username") or "")
+            or _username_value_from_hierarchy_xml(settled_hierarchy_xml)
+            or _read_username_field_value(
+                d,
+                settled_targets["username"],
+                prefilled_username=prefilled_username,
+                prefer_hierarchy=False,
+            )
+        )
+        if settled_username != _normalize_username(expected_username):
+            return _fresh_submit_failure(
+                "login_submit_username_changed_before_tap",
+                fresh_xml_before_tap=True,
+                form_events_settled=True,
+                autofill_interference_detected=True,
+            )
+    if not _password_is_proved_non_empty(settled_targets["password"], settled_hierarchy_xml):
+        return _fresh_submit_failure(
+            "login_submit_password_changed_before_tap",
+            fresh_xml_before_tap=True,
+            form_events_settled=True,
+            autofill_interference_detected=True,
+        )
+    targets = settled_targets
 
     button_info = _selector_info(targets["login_button"])
     if button_info.get("enabled") is False:
@@ -1644,10 +1719,59 @@ def _resolve_fresh_login_submit_target(
         targets = refreshed
         button_info = _selector_info(targets["login_button"])
         if button_info.get("enabled") is False:
-            return {"failure_reason": "login_button_disabled", "targets": {}}
+            return _fresh_submit_failure(
+                "login_button_disabled",
+                fresh_xml_before_tap=True,
+                form_events_settled=True,
+            )
 
     warnings.append("login_submit_fresh_surface_proved")
-    return {"failure_reason": "", "targets": targets}
+    warnings.append("login_form_events_settled_before_submit")
+    return {
+        "failure_reason": "",
+        "targets": targets,
+        "field_content_stable_before_submit": True,
+        "autofill_interference_detected": False,
+        "fresh_xml_before_tap": True,
+        "form_events_settled": True,
+    }
+
+
+def _fresh_submit_failure(
+    failure_reason: str,
+    *,
+    fresh_xml_before_tap: bool = False,
+    form_events_settled: bool = False,
+    autofill_interference_detected: bool = False,
+) -> dict[str, Any]:
+    return {
+        "failure_reason": failure_reason,
+        "targets": {},
+        "field_content_stable_before_submit": False,
+        "autofill_interference_detected": autofill_interference_detected,
+        "fresh_xml_before_tap": fresh_xml_before_tap,
+        "form_events_settled": form_events_settled,
+    }
+
+
+def _username_value_from_hierarchy_xml(hierarchy_xml: str) -> str:
+    for match in re.finditer(r"<node\b[^>]*>", str(hierarchy_xml or "")):
+        node = match.group(0)
+        if "EditText" not in node and 'editable="true"' not in node:
+            continue
+        text_match = re.search(r'text="([^"]*)"', node)
+        value = text_match.group(1).strip() if text_match else ""
+        if not value or _is_username_placeholder_text(value) or _looks_like_masked_password(value):
+            continue
+        return value
+    return ""
+
+
+def _password_is_proved_non_empty(target: Any, hierarchy_xml: str) -> bool:
+    if _password_field_non_empty_state(target) == "true":
+        return True
+    values = _password_candidate_values_from_hierarchy(hierarchy_xml)
+    return any(_looks_like_masked_password(value) for value in values)
 
 
 def _dump_login_submit_hierarchy_once(d: Any) -> str:
@@ -1706,7 +1830,29 @@ def _input_password_robust(d: Any, target: Any, value: str, warnings: list[str])
     _clear_target_text(target)
     time.sleep(0.1)
 
-    warnings.append("password_input_method_attempted:set_text")
+    adb_result: dict[str, Any] = {}
+    serial = _direct_device_serial(d)
+    fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
+    if serial and fast_ime_id and is_fast_ime_available(serial):
+        warnings.append("password_human_event_input_attempted")
+        adb_result = _attempt_password_adb_keyboard_injection(
+            d,
+            target,
+            value,
+            focused_before=focused_before,
+            target_kind=target_kind,
+        )
+        if _password_injection_confirmed(adb_result):
+            warnings.append("password_human_event_input_used")
+            warnings.extend(adb_result.get("injection_trace") or [])
+            return adb_result
+        warnings.append("password_human_event_input_failed_safe")
+
+    if adb_result:
+        _focus_password_target(d, target, warnings)
+        _clear_target_text(target)
+        time.sleep(0.1)
+    warnings.append("password_input_fallback_set_text_attempted")
     set_text_result = _attempt_password_set_text_injection(
         d,
         target,
@@ -1715,49 +1861,27 @@ def _input_password_robust(d: Any, target: Any, value: str, warnings: list[str])
         target_kind=target_kind,
     )
     if _password_injection_confirmed(set_text_result):
+        warnings.append("password_set_text_fallback_used")
         warnings.extend(set_text_result.get("injection_trace") or [])
         return set_text_result
-
-    if set_text_result.get("password_input_result") == "password_input_failed":
-        warnings.extend(set_text_result.get("injection_trace") or [])
-        return set_text_result
-
-    if set_text_result.get("password_input_result") == "password_input_empty":
-        warnings.append("password_input_set_text_empty")
-
-    _focus_password_target(d, target, warnings)
-    _clear_target_text(target)
-    time.sleep(0.1)
-    warnings.append("password_input_fallback_adb_keyboard_b64_attempted")
-    adb_result = _attempt_password_adb_keyboard_injection(
-        d,
-        target,
-        value,
-        focused_before=focused_before,
-        target_kind=target_kind,
-    )
-    if _password_injection_confirmed(adb_result):
-        warnings.append("password_input_confirmed_after_fallback")
-        warnings.extend(adb_result.get("injection_trace") or [])
-        return adb_result
 
     warnings.append("password_input_fallback_failed")
     failure_reason = "password_input_missing_or_not_accepted"
-    if adb_result.get("reason"):
-        failure_reason = str(adb_result["reason"])
-    elif set_text_result.get("reason"):
+    if set_text_result.get("reason"):
         failure_reason = str(set_text_result["reason"])
+    elif adb_result.get("reason"):
+        failure_reason = str(adb_result["reason"])
     return _password_input_result(
-        str(adb_result.get("password_input_method") or set_text_result.get("password_input_method") or ""),
+        str(set_text_result.get("password_input_method") or adb_result.get("password_input_method") or ""),
         focused_before,
         False,
-        str(adb_result.get("password_field_non_empty_confirmed") or "false"),
+        str(set_text_result.get("password_field_non_empty_confirmed") or "false"),
         failure_reason,
         target_kind=target_kind,
         input_result="password_input_empty",
         confirm_method=str(
-            adb_result.get("password_confirm_method")
-            or set_text_result.get("password_confirm_method")
+            set_text_result.get("password_confirm_method")
+            or adb_result.get("password_confirm_method")
             or "not_attempted"
         ),
         injection_trace=["password_input_fallback_failed"],
@@ -3150,6 +3274,10 @@ def _result(
     password_input_method: str = "",
     password_input_result: str = "",
     password_confirm_method: str = "",
+    field_content_stable_before_submit: bool = False,
+    autofill_interference_detected: bool = False,
+    fresh_xml_before_tap: bool = False,
+    form_events_settled: bool = False,
 ) -> LoginPasswordExecutionResult:
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -3217,6 +3345,10 @@ def _result(
                 "username_clear_method": username_clear_method,
                 "username_input_method": username_input_method,
                 "username_placeholder_ignored": username_placeholder_ignored,
+                "field_content_stable_before_submit": field_content_stable_before_submit,
+                "autofill_interference_detected": autofill_interference_detected,
+                "fresh_form_observation_before_tap": fresh_xml_before_tap,
+                "form_events_settled": form_events_settled,
             }
         )
     )

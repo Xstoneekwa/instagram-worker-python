@@ -1811,6 +1811,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with (
             patch.object(password_executor, "is_fast_ime_available", return_value=True),
+            patch.object(password_executor, "adb_available", return_value=True),
             patch.object(
                 password_executor,
                 "ensure_adb_keyboard_ready",
@@ -1834,11 +1835,10 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["input_method_used"], "adb_keyboard_b64")
         self.assertTrue(result.safe_metadata["input_action_reported_success"])
         self.assertEqual(result.safe_metadata["password_field_non_empty_confirmed"], "true")
-        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(password_selector.set_text_calls, [])
         self.assertEqual(login.click_calls, 1)
-        fast_input.assert_called_once()
-        self.assertIn("password_input_set_text_empty", result.warnings)
-        self.assertIn("password_input_confirmed_after_fallback", result.warnings)
+        self.assertEqual(fast_input.call_count, 1)
+        self.assertIn("password_human_event_input_used", result.warnings)
 
     def test_prefilled_password_bullets_after_adb_input_allows_submit(self) -> None:
         device = FakeDevice(
@@ -2060,9 +2060,9 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             )
 
         self.assertFalse(result.executed)
-        self.assertEqual(result.failure_reason, "adb_keyboard_package_missing")
+        self.assertEqual(result.failure_reason, "password_input_missing_or_not_accepted")
         self.assertEqual(login.click_calls, 0)
-        self.assertEqual(result.safe_metadata["password_confirm_method"], "adb_keyboard_package_missing")
+        self.assertEqual(result.safe_metadata["password_confirm_method"], "target_accessibility_empty")
 
     def test_adb_keyboard_broadcast_failure_blocks_submit(self) -> None:
         device, _username, _password_selector, login = configured_device(CONNECTED_XML)
@@ -2097,9 +2097,9 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             )
 
         self.assertFalse(result.executed)
-        self.assertEqual(result.failure_reason, "adb_keyboard_broadcast_failed")
+        self.assertEqual(result.failure_reason, "password_input_missing_or_not_accepted")
         self.assertEqual(login.click_calls, 0)
-        self.assertEqual(result.safe_metadata["password_confirm_method"], "adb_keyboard_broadcast_failed")
+        self.assertEqual(result.safe_metadata["password_confirm_method"], "target_accessibility_empty")
 
     def test_result_safe_dict_contains_no_password(self) -> None:
         device, _username, _password_selector, _login = configured_device(SENSITIVE_XML)
@@ -2200,11 +2200,15 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             CONNECTED_XML,
         ]
 
-        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
-            password_executor,
-            "run_adb_keyboard_b64_input",
-            return_value=(True, "adb_keyboard_b64", True, True),
-        ) as fast_input:
+        with (
+            patch.object(password_executor, "is_fast_ime_available", return_value=True),
+            patch.object(password_executor, "adb_available", return_value=True),
+            patch.object(
+                password_executor,
+                "run_adb_keyboard_b64_input",
+                return_value=(True, "adb_keyboard_b64", True, True),
+            ) as fast_input,
+        ):
             result = execute_login_form_credentials(
                 device,
                 expected_username=USERNAME,
@@ -2214,14 +2218,13 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             )
 
         self.assertTrue(result.executed)
-        self.assertEqual(username.set_text_calls, [USERNAME])
-        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(username.set_text_calls, [])
+        self.assertEqual(password_selector.set_text_calls, [])
         self.assertEqual(result.safe_metadata["input_method_used"], "adb_keyboard_b64")
         self.assertEqual(login.click_calls, 1)
-        fast_input.assert_called_once()
-        self.assertIn("password_input_method_attempted:set_text", result.warnings)
-        self.assertIn("password_input_fallback_adb_keyboard_b64_attempted", result.warnings)
-        self.assertIn("password_input_confirmed_after_fallback", result.warnings)
+        self.assertEqual(fast_input.call_count, 2)
+        self.assertIn("username_human_event_input_used", result.warnings)
+        self.assertIn("password_human_event_input_used", result.warnings)
 
     def test_set_text_empty_and_adb_fallback_failure_blocks_submit_without_leak(self) -> None:
         device, _username, password_selector, login = configured_device()

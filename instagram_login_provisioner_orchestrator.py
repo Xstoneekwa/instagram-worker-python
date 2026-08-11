@@ -5061,6 +5061,10 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "post_dismiss_final_wait_total_ms",
             "post_dismiss_final_screen_type",
             "connected_detected_after_save_prompt_dismiss",
+            "field_content_stable_before_submit",
+            "autofill_interference_detected",
+            "fresh_form_observation_before_tap",
+            "form_events_settled",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
