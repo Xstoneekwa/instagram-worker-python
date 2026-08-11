@@ -3400,6 +3400,9 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         "continue_password_only",
         "join_instagram_landing",
         "email_code_challenge",
+        "sms_code_challenge",
+        "whatsapp_code_challenge",
+        "authenticator_app_code_challenge",
         "active_account_home",
         "active_account_profile",
         "connected_home",
@@ -3715,7 +3718,12 @@ def _pre_submit_observation_metadata(signals: dict[str, Any]) -> dict[str, Any]:
 
 def _post_action_outcome_from_signals(signals: dict[str, Any]) -> str:
     screen_type = str(signals.get("screen_type") or "").strip()
-    if screen_type == "email_code_challenge":
+    if signals.get("verification_code_challenge_present") is True or screen_type in {
+        "email_code_challenge",
+        "sms_code_challenge",
+        "whatsapp_code_challenge",
+        "authenticator_app_code_challenge",
+    }:
         return LoginProbeOutcome.VERIFICATION_PENDING.value
     outcome = str(signals.get("login_probe_outcome") or "unknown").strip()
     if outcome in {
@@ -4363,7 +4371,12 @@ def _dashboard_action_for_outcome(
     post_submit_screen_type: str = "",
 ) -> str | None:
     if outcome == LoginProbeOutcome.VERIFICATION_PENDING.value:
-        if challenge_type == "email" or post_submit_screen_type == "email_code_challenge":
+        if challenge_type in {"email", "sms", "whatsapp", "authenticator_app"} or post_submit_screen_type in {
+            "email_code_challenge",
+            "sms_code_challenge",
+            "whatsapp_code_challenge",
+            "authenticator_app_code_challenge",
+        }:
             return "enter_email_verification_code"
         return None
     if outcome == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value:

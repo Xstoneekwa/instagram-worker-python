@@ -150,6 +150,12 @@ def classify_login_probe_outcome(
         screen_type = str(safe_metadata.get("screen_type") or "").strip().lower()
         if challenge_type == "email" or screen_type == "email_code_challenge":
             reason = "email_verification_code_required"
+        elif challenge_type in {"sms", "whatsapp", "authenticator_app"} or screen_type in {
+            "sms_code_challenge",
+            "whatsapp_code_challenge",
+            "authenticator_app_code_challenge",
+        }:
+            reason = "verification_code_required"
         else:
             reason = str(safe_metadata.get("reason") or "verification_pending").strip() or "verification_pending"
         return LoginStatusClassification(

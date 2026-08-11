@@ -113,6 +113,44 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
         self.assertEqual(result.metadata["challenge_type"], "email")
 
+    def test_detects_all_non_email_verification_channels(self) -> None:
+        fixtures = {
+            "sms": (
+                "Check your SMS",
+                "Enter the code we sent to +41 ** *** ** 81.",
+                "sms_code_challenge",
+            ),
+            "whatsapp": (
+                "Check your WhatsApp messages",
+                "Enter the code we sent to your WhatsApp account.",
+                "whatsapp_code_challenge",
+            ),
+            "authenticator_app": (
+                "Go to your authentication app",
+                "Enter the 6-digit code for this account from Google Authenticator.",
+                "authenticator_app_code_challenge",
+            ),
+        }
+        for channel, (header, body, screen_type) in fixtures.items():
+            with self.subTest(channel=channel):
+                xml = (
+                    f'<node text="{header}" />'
+                    f'<node text="{body}" />'
+                    '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+                    '<node text="Try another way" />'
+                )
+
+                result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+                signals = extract_login_screen_signals_from_hierarchy(xml)
+
+                self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
+                self.assertEqual(result.reason, "verification_code_required")
+                self.assertEqual(result.metadata["screen_type"], screen_type)
+                self.assertEqual(result.metadata["verification_channel"], channel)
+                self.assertEqual(signals["screen_type"], screen_type)
+                self.assertEqual(signals["verification_channel"], channel)
+                self.assertTrue(signals["verification_code_challenge_present"])
+
     def test_detects_unsupported_post_submit_challenge(self) -> None:
         xml = (
             '<node text="Was this you?" />'

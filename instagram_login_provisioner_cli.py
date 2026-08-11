@@ -457,16 +457,34 @@ def _verification_code_action_state(*, action_id: str, account_id: str) -> dict[
         return {"ready": False, "reason": "verification_action_lookup_failed"}
     action_status = str(actions[0].get("status") or "") if actions else ""
     action_metadata = dict(actions[0].get("metadata") or {}) if actions else {}
+    verification_channel = _normalize_verification_channel(
+        action_metadata.get("verification_channel")
+        or action_metadata.get("challenge_type")
+        or action_metadata.get("screen_type")
+    )
     return {
         "ready": action_status == "code_submitted" and bool(submissions),
         "action_status": action_status,
         "submission_present": bool(submissions),
-        "verification_channel": str(
-            action_metadata.get("verification_channel")
-            or action_metadata.get("challenge_type")
-            or "email"
-        ).strip(),
+        # Missing historical channel remains unknown. The preflight may safely
+        # use the live Instagram challenge, but it must never invent email.
+        "verification_channel": verification_channel,
     }
+
+
+def _normalize_verification_channel(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "email": "email",
+        "email_code_challenge": "email",
+        "sms": "sms",
+        "sms_code_challenge": "sms",
+        "whatsapp": "whatsapp",
+        "whatsapp_code_challenge": "whatsapp",
+        "authenticator_app": "authenticator_app",
+        "authenticator_app_code_challenge": "authenticator_app",
+    }
+    return aliases.get(normalized, "")
 
 
 def _resume_preflight_result(

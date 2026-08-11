@@ -237,6 +237,64 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertFalse(summary["submit_executed"])
         resume_flow.assert_not_called()
 
+    def test_missing_historical_channel_does_not_default_to_email_on_whatsapp_resume(self) -> None:
+        device = FakeDevice(
+            '<node text="Check your WhatsApp messages" />'
+            '<node text="Enter the code we sent to your WhatsApp account." />'
+            '<node class="android.widget.EditText" text="Code" editable="true" />'
+            '<node text="Continue" clickable="true" />'
+        )
+        resume_result = _fake_result(
+            ok=True,
+            completed=True,
+            final_outcome="connected",
+            reason="connected",
+        )
+
+        def fake_request(_method, table, *, query=None, **_kwargs):
+            if table == "account_dashboard_actions":
+                return [{
+                    "id": "action-id",
+                    "status": "code_submitted",
+                    "action_type": "enter_email_verification_code",
+                    "metadata": {"challenge_type": "unknown"},
+                }]
+            if table == "account_verification_code_submissions":
+                return [{"id": "submission-id", "status": "code_submitted"}]
+            raise AssertionError(f"unexpected table {table}")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(cli, "_request_json", side_effect=fake_request),
+            patch.object(cli, "run_email_code_resume_flow", return_value=resume_result) as resume_flow,
+        ):
+            code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--resume-email-code-from-action",
+                    "--verification-action-id",
+                    "action-id",
+                    "--json",
+                ),
+                connect_func=lambda _serial: device,
+            )
+
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(summary["final_outcome"], "connected")
+        resume_flow.assert_called_once()
+
+    def test_verification_channel_normalization_covers_all_supported_channels(self) -> None:
+        aliases = {
+            "email_code_challenge": "email",
+            "sms_code_challenge": "sms",
+            "whatsapp_code_challenge": "whatsapp",
+            "authenticator_app_code_challenge": "authenticator_app",
+        }
+        for source, expected in aliases.items():
+            with self.subTest(source=source):
+                self.assertEqual(cli._normalize_verification_channel(source), expected)
+        self.assertEqual(cli._normalize_verification_channel("unknown"), "")
+
     def test_submit_uses_app_start_by_default(self) -> None:
         device = FakeDevice()
         captured: dict = {}
