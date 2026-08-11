@@ -360,6 +360,7 @@ def run_login_provisioning_flow(
             verifier=identity_verifier,
             account_id=safe_account_id,
             expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
             run_id=safe_run_id,
             run_type=safe_run_type,
         )
@@ -459,8 +460,9 @@ def run_login_provisioning_flow(
             or refreshed_signals.get("connected_post_login_location_services_prompt")
             or refreshed_screen_type == "connected_post_login_location_services_prompt"
         )
-        connected_after_dismiss = (
+        connected_after_dismiss = bool(
             _post_action_outcome_from_signals(refreshed_signals) == LoginProbeOutcome.CONNECTED.value
+            or refreshed_screen_type in CONNECTED_HOME_IDENTITY_SCREENS
         )
         dismissed = bool(connected_after_dismiss and not prompt_still_present)
         screen_preparation_metadata.update(
@@ -705,14 +707,7 @@ def run_login_provisioning_flow(
             screen_preparation_metadata["startup_screens"] = [screen_type]
             screen_preparation_metadata["startup_final_screen_type"] = screen_type
         post_app_start_outcome = _post_action_outcome_from_signals(signals)
-        if (
-            post_app_start_outcome == LoginProbeOutcome.CONNECTED.value
-            and not _defer_connected_no_password_early_exit(
-                signals,
-                screen_preparation_metadata,
-                expected_username=safe_expected_username,
-            )
-        ):
+        if post_app_start_outcome == LoginProbeOutcome.CONNECTED.value:
             classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
             identity_metadata, identity_failure = _connected_identity_gate(
                 {
@@ -768,20 +763,51 @@ def run_login_provisioning_flow(
                 publisher=publisher,
                 publish_enabled=publish_enabled,
             )
-    elif (
-        _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value
-        and not _defer_connected_no_password_early_exit(
-            signals,
-            screen_preparation_metadata,
-            expected_username=safe_expected_username,
-        )
-    ):
+    elif _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value:
         classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
         identity_metadata, identity_failure = _connected_identity_gate(
             {
                 **screen_preparation_metadata,
                 "selected_route": "already_connected_expected",
                 "selected_route_reason": "connected_probe_identity_confirmed",
+                "password_required": False,
+                "ready_for_password_submit": False,
+            }
+        )
+        if identity_failure is not None:
+            return identity_failure
+        return _finalize(
+            ok=True,
+            completed=True,
+            final_outcome=LoginProbeOutcome.CONNECTED.value,
+            reason="connected_no_password_needed",
+            failure_reason=None,
+            final_login_status=classification.login_status,
+            final_provisioning_status=classification.provisioning_status,
+            final_onboarding_status=classification.onboarding_status,
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata=identity_metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    if (
+        signals.get("screen_type") in {"active_account_home", "active_account_profile"}
+        and bool(screen_preparation_metadata.get("post_login_location_services_prompt_dismissed"))
+    ):
+        classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+        identity_metadata, identity_failure = _connected_identity_gate(
+            {
+                **screen_preparation_metadata,
+                "selected_route": "post_login_location_prompt_connected_identity_gate",
+                "selected_route_reason": "post_login_location_prompt_dismissed_identity_required",
                 "password_required": False,
                 "ready_for_password_submit": False,
             }
@@ -5594,6 +5620,7 @@ def _verify_connected_identity_before_ready(
     verifier: ConnectedIdentityVerifier,
     account_id: str,
     expected_username: str,
+    expected_package_name: str,
     run_id: str | None,
     run_type: str,
 ) -> Any:
@@ -5601,6 +5628,7 @@ def _verify_connected_identity_before_ready(
         return verifier(
             d,
             expected_account_username=expected_username,
+            expected_package_name=expected_package_name,
             account_id=account_id,
             run_id=run_id,
             run_type=run_type,
@@ -6045,6 +6073,7 @@ def _submit_password_after_email_code(
             verifier=connected_identity_verifier,
             account_id=safe_account_id,
             expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
             run_id=run_id,
             run_type=run_type,
         )
@@ -6331,6 +6360,7 @@ def run_email_code_resume_flow(
             verifier=identity_verifier,
             account_id=safe_account_id,
             expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
             run_id=run_id,
             run_type=safe_run_type,
         )

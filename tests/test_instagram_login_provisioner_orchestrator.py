@@ -3538,22 +3538,67 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             expected_username=USERNAME,
         )
 
-    def test_active_account_home_connected_probe_without_identity_stops_safe(self) -> None:
+    def test_active_account_home_connected_probe_without_inline_identity_uses_canonical_guard(self) -> None:
         getter = Mock(return_value=credentials())
+        identity_verifier = Mock(return_value=verified_identity_result(expected_account_username=USERNAME))
         result = self.run_flow(
-            FakeDevice([ACTIVE_HOME_XML, ACTIVE_HOME_XML]),
+            FakeDevice([ACTIVE_HOME_XML]),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
             credentials_getter=getter,
-            initial_signals=self._active_home_connected_signals(),
+            initial_signals=provisioner_orchestrator._observe_login_signals(
+                FakeDevice([POST_LOGIN_LOCATION_SERVICES_PROMPT_XML]),
+                expected_username=USERNAME,
+            ),
+            connected_identity_verifier=identity_verifier,
+            package_name="com.instagram.androig",
         )
 
-        self.assertEqual(result.reason, "identity_unknown_on_connected_home")
-        self.assertEqual(result.safe_metadata["selected_route"], "identity_unknown_on_connected_home")
-        self.assertNotEqual(result.reason, "connected_no_password_needed")
+        self.assertEqual(result.reason, "connected_no_password_needed")
+        self.assertEqual(
+            result.safe_metadata["selected_route"],
+            "post_login_location_prompt_connected_identity_gate",
+        )
+        self.assertTrue(result.safe_metadata["expected_identity_verified"])
         self.assertFalse(result.safe_metadata.get("would_submit_password"))
         self.assertFalse(result.published)
         getter.assert_not_called()
+        identity_verifier.assert_called_once()
+        self.assertEqual(
+            identity_verifier.call_args.kwargs["expected_package_name"],
+            "com.instagram.androig",
+        )
+
+    def test_active_account_home_connected_probe_guard_failure_stays_fail_closed(self) -> None:
+        identity_verifier = Mock(
+            return_value={
+                "ok": False,
+                "expected_account_username": USERNAME,
+                "actual_logged_in_username": "",
+                "failure_reason": "own_profile_open_failed",
+                "verification_method": "canonical_identity_guard",
+                "meta": {"profile_opened": False},
+            }
+        )
+
+        result = self.run_flow(
+            FakeDevice([ACTIVE_HOME_XML]),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=provisioner_orchestrator._observe_login_signals(
+                FakeDevice([POST_LOGIN_LOCATION_SERVICES_PROMPT_XML]),
+                expected_username=USERNAME,
+            ),
+            connected_identity_verifier=identity_verifier,
+            package_name="com.instagram.androig",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "identity_verification_failed")
+        self.assertEqual(result.reason, "own_profile_open_failed")
+        self.assertFalse(result.published)
+        identity_verifier.assert_called_once()
 
     def test_active_account_home_operator_smoke_mismatch_starts_add_existing_recovery(self) -> None:
         device, _selectors = configured_device()

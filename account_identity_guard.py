@@ -761,6 +761,7 @@ def verify_active_instagram_account_matches_expected(
     *,
     expected_account_username: str,
     expected_instagram_user_id: str | None = None,
+    expected_package_name: str | None = None,
     account_id: str | None = None,
     run_type: str | None = None,
     run_id: str | None = None,
@@ -802,7 +803,11 @@ def verify_active_instagram_account_matches_expected(
     if stage == "login_provisioning_post_login_identity" or str(run_type or "").startswith("login_"):
         completion = prepare_post_verification_identity_surface(
             d,
-            expected_package_name=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+            expected_package_name=str(
+                expected_package_name
+                or getattr(config, "INSTAGRAM_PACKAGE", "")
+                or ""
+            ),
         )
         post_verification_metadata = {
             "post_verification_screen_type": completion.screen_type,

@@ -135,6 +135,43 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
         self.assertTrue(result.ok)
         open_profile.assert_called_once()
 
+    def test_login_identity_completion_uses_bound_clone_package(self) -> None:
+        device = Mock()
+        completion = Mock(
+            safe_for_identity_guard=True,
+            screen_type="active_account_home",
+            recovery_count=1,
+            recovered_screen_types=("connected_post_login_location_services_prompt",),
+            fingerprint_changed=True,
+            metadata={},
+            failure_reason=None,
+        )
+        with (
+            patch.object(guard, "prepare_post_verification_identity_surface", return_value=completion) as prepare,
+            patch.object(guard, "_dump_hierarchy", side_effect=[HOME_XML, PROFILE_USERNAME_XML]),
+            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(
+                guard,
+                "_extract_own_profile_username_from_hierarchy",
+                return_value=("cinema_catchup", "action_bar_title", {"hierarchy_xml_len": 100}),
+            ),
+        ):
+            result = guard.verify_active_instagram_account_matches_expected(
+                device,
+                expected_account_username="cinema_catchup",
+                expected_package_name="com.instagram.androig",
+                account_id="42c625c2-e761-4100-8a9d-7ae1373de97d",
+                run_type="login_provisioning",
+                run_id="login-run-1",
+                stage="login_provisioning_post_login_identity",
+            )
+
+        self.assertTrue(result.ok)
+        prepare.assert_called_once_with(
+            device,
+            expected_package_name="com.instagram.androig",
+        )
+
     def test_identity_failure_captures_screenshot_and_xml(self) -> None:
         device = Mock()
         device.screenshot = Mock()
