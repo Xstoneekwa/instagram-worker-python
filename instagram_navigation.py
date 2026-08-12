@@ -10181,10 +10181,18 @@ def perform_follow_safe(
             _priv_terminal = visual_detect_private_profile(
                 d, source_profile_username=_src_prof or None
             )
-        if bool(_priv_terminal.get("private_profile_detected")):
+        if bool(_priv_terminal.get("private_profile_detected")) or not bool(
+            _priv_terminal.get("public_profile_proven")
+        ):
+            _private_detected = bool(_priv_terminal.get("private_profile_detected"))
+            _blocked_reason = (
+                "follow_blocked_private_account"
+                if _private_detected
+                else "follow_blocked_public_status_unproven"
+            )
             log(
                 "info",
-                "follow_blocked_private_account",
+                _blocked_reason,
                 target_username=str(username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
                 source_profile_username=_src_prof or None,
@@ -10201,8 +10209,11 @@ def perform_follow_safe(
                 "follow_state_after": state_before,
                 "verify_attempts": 0,
                 "events": events,
-                "visual_follow_failure_reason": "follow_blocked_private_account",
-                "private_profile_detected": True,
+                "visual_follow_failure_reason": _blocked_reason,
+                "private_profile_detected": _private_detected,
+                "public_profile_proven": bool(
+                    _priv_terminal.get("public_profile_proven")
+                ),
             }
 
     if tap_exact:
@@ -10441,6 +10452,33 @@ def perform_follow_safe(
         state_after_success: str,
         attempts_success: int,
     ) -> dict[str, Any]:
+        # "Requested" is authoritative evidence that Instagram treated the
+        # target as private.  When private follows are disabled it must never
+        # pass through any success exit, including the early RID fast path.
+        if state_after_success == "requested" and dont_follow_private_accounts:
+            log(
+                "error",
+                "follow_requested_rejected_by_private_policy",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                follow_state_before=state_before,
+                follow_state_after=state_after_success,
+                verify_attempts=attempts_success,
+                tapped=True,
+            )
+            return {
+                "ok": False,
+                "failure_code": 35,
+                "tapped": True,
+                "follow_state_before": state_before,
+                "follow_state_after": state_after_success,
+                "verify_attempts": attempts_success,
+                "events": events,
+                "visual_follow_failure_reason": (
+                    "follow_requested_rejected_by_private_policy"
+                ),
+                "private_follow_request_after_tap": True,
+            }
         if tap_exact:
             log(
                 "info",
@@ -25254,6 +25292,8 @@ def visual_detect_private_profile(
     src = source_profile_username or ""
     base_out: dict[str, Any] = {
         "private_profile_detected": False,
+        "public_profile_proven": False,
+        "public_profile_proof_method": "none",
         "detection_method": "none",
         "confidence": 0.0,
         "probe_ms": 0.0,
@@ -25407,6 +25447,16 @@ def visual_detect_private_profile(
             )
             _private_detect_done()
             return out
+
+    public_profile_markers = (
+        ":id/profile_tabs_container",
+        ":id/profile_tab_layout",
+        ":id/profile_tab_icon_view",
+    )
+    public_marker = next((marker for marker in public_profile_markers if marker in hl), "")
+    if public_marker:
+        base_out["public_profile_proven"] = True
+        base_out["public_profile_proof_method"] = f"hierarchy:{public_marker.rsplit('/', 1)[-1]}"
 
     log(
         "info",
@@ -60382,7 +60432,17 @@ def acquire_pre_follow_mono_capture(
         if any(any(token in label for token in tokens) for label in labels_lower)
     }
     profile_header_rid = any("profile_header" in value for value in resource_lower)
-    profile_tabs_rid = any("profile_tabs_container" in value for value in resource_lower)
+    profile_tabs_rid = any(
+        any(
+            marker in value
+            for marker in (
+                "profile_tabs_container",
+                "profile_tab_layout",
+                "profile_tab_icon_view",
+            )
+        )
+        for value in resource_lower
+    )
     profile_surface = bool(
         len(stat_kinds) >= 2
         or (profile_header_rid and (follow_button_rid or profile_tabs_rid))
@@ -60394,7 +60454,17 @@ def acquire_pre_follow_mono_capture(
     private_detected = any(
         marker.lower() in value.lower() for marker in private_markers for value in labels
     )
-    public_ready = bool(exact_identity and profile_surface and follow_cta and not private_detected)
+    # A Follow CTA + stats also exists on private profiles.  Publicness must be
+    # positively proved by profile-body chrome from the *same* immutable XML;
+    # absence of a localized private string is never a public proof.
+    public_profile_proven = bool(profile_tabs_rid and not private_detected)
+    public_ready = bool(
+        exact_identity
+        and profile_surface
+        and follow_cta
+        and public_profile_proven
+        and not private_detected
+    )
     meta_t0 = time.perf_counter()
     live_meta = _followers_current_pkg_activity(d)
     package_activity_ms = round((time.perf_counter() - meta_t0) * 1000.0, 2)
@@ -60476,6 +60546,10 @@ def acquire_pre_follow_mono_capture(
             "profile_header_resource": profile_header_rid,
             "profile_tabs_resource": profile_tabs_rid,
         },
+        "public_profile_proven": public_profile_proven,
+        "public_profile_proof_method": (
+            "single_xml_profile_tabs" if public_profile_proven else "none"
+        ),
         "follow_cta_positive": follow_cta,
         "follow_cta_bounds": follow_bounds,
         "package": current_package,
@@ -60508,6 +60582,10 @@ def acquire_pre_follow_mono_capture(
         "action_bar_title": follower_username if exact_identity else "",
         "private_probe_payload": {
             "private_profile_detected": private_detected,
+            "public_profile_proven": public_profile_proven,
+            "public_profile_proof_method": (
+                "single_xml_profile_tabs" if public_profile_proven else "none"
+            ),
             "detection_method": "single_xml_positive_profile_surface",
             "confidence": 1.0 if private_detected or public_ready else 0.0,
             "probe_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -60677,6 +60755,8 @@ def _pre_follow_observation_proof_reuse_block_reason(
         return "private_probe_not_reusable"
     if bool(private_probe.get("private_profile_detected")):
         return "private_profile_detected"
+    if not bool(private_probe.get("public_profile_proven")):
+        return "public_profile_not_proven"
     return ""
 
 
@@ -60730,6 +60810,7 @@ def build_pre_follow_tap_context(
     if not _is_reusable_prior_private_probe(priv_payload):
         priv_payload = {
             "private_profile_detected": bool(pg.get("private_profile_detected")),
+            "public_profile_proven": bool(pg.get("public_profile_proven")),
             "detection_method": str(pg.get("detection_method") or "none"),
             "confidence": float(pg.get("confidence") or 0.0),
             "probe_ms": float(pg.get("probe_ms") or 0.0),
@@ -60810,6 +60891,8 @@ def _pre_follow_tap_context_reuse_block_reason(
         return "private_probe_payload_not_reusable"
     if bool(priv_payload.get("private_profile_detected")):
         return "private_probe_detected_private"
+    if not bool(priv_payload.get("public_profile_proven")):
+        return "public_profile_not_proven"
     return ""
 
 
@@ -60865,6 +60948,7 @@ def visual_candidate_pre_follow_private_gate(
         "reject": False,
         "reason": "private_follow_allowed_by_setting",
         "private_profile_detected": False,
+        "public_profile_proven": False,
         "dont_follow_private_accounts": bool(dont_follow_private_accounts),
         "detection_method": "none",
         "confidence": 0.0,
@@ -60903,6 +60987,10 @@ def visual_candidate_pre_follow_private_gate(
         priv = visual_detect_private_profile(d, source_profile_username=src or None)
         out["probe_reused"] = False
     out["private_profile_detected"] = bool(priv.get("private_profile_detected"))
+    out["public_profile_proven"] = bool(priv.get("public_profile_proven"))
+    out["public_profile_proof_method"] = str(
+        priv.get("public_profile_proof_method") or "none"
+    )
     out["detection_method"] = str(priv.get("detection_method") or "none")
     out["confidence"] = float(priv.get("confidence") or 0.0)
     out["probe_ms"] = float(priv.get("probe_ms") or 0.0)
@@ -60925,7 +61013,7 @@ def visual_candidate_pre_follow_private_gate(
             dont_follow_private_accounts=True,
             probe_reused=bool(out.get("probe_reused")),
         )
-    else:
+    elif out["public_profile_proven"]:
         out["reason"] = "private_not_detected"
         log(
             "info",
@@ -60934,6 +61022,19 @@ def visual_candidate_pre_follow_private_gate(
             follower_username=cand or None,
             visual_candidate_id=vcid or None,
             private_profile_probe_ms=out["probe_ms"],
+            probe_reused=bool(out.get("probe_reused")),
+        )
+    else:
+        out["reject"] = True
+        out["reason"] = "candidate_public_status_unproven"
+        log(
+            "warning",
+            "visual_pre_follow_public_status_unproven",
+            source_profile_username=src or None,
+            follower_username=cand or None,
+            visual_candidate_id=vcid or None,
+            private_profile_probe_ms=out["probe_ms"],
+            dont_follow_private_accounts=True,
             probe_reused=bool(out.get("probe_reused")),
         )
     return out

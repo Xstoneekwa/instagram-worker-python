@@ -6,7 +6,10 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +65,103 @@ def runtime_paths() -> RuntimePaths:
         runtime_home=_path_from_env("PHONEFARM_RUNTIME_HOME", DEFAULT_RUNTIME_HOME),
         legacy_root=_path_from_env("PHONEFARM_RUNTIME_LEGACY_ROOT", DEFAULT_LEGACY_ROOT),
     )
+
+
+def _runtime_secret_env(paths: RuntimePaths) -> dict[str, str]:
+    """Load only the two service credentials needed for a read-only gate."""
+    values = {
+        "SUPABASE_URL": str(os.environ.get("SUPABASE_URL") or "").strip(),
+        "SUPABASE_SERVICE_ROLE_KEY": str(
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or ""
+        ).strip(),
+    }
+    env_file = paths.env_dir / "run-control-dispatcher.env"
+    if env_file.exists() and (not values["SUPABASE_URL"] or not values["SUPABASE_SERVICE_ROLE_KEY"]):
+        try:
+            for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key not in values or values[key]:
+                    continue
+                values[key] = value.strip().strip("'\"")
+        except Exception:
+            pass
+    return values
+
+
+def _rest_select_ids(
+    *,
+    base_url: str,
+    service_key: str,
+    table: str,
+    filters: dict[str, str],
+) -> list[dict[str, Any]]:
+    query = {"select": "id", "limit": "1", **filters}
+    url = f"{base_url.rstrip('/')}/rest/v1/{table}?{urllib.parse.urlencode(query)}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        value = json.loads(response.read().decode("utf-8"))
+    if not isinstance(value, list):
+        raise ValueError(f"unexpected_rest_payload:{table}")
+    return [row for row in value if isinstance(row, dict)]
+
+
+def deployment_zero_gate(paths: RuntimePaths | None = None) -> dict[str, Any]:
+    """Fail-closed production gate shared by switch and dispatcher restart."""
+    paths = paths or runtime_paths()
+    secrets = _runtime_secret_env(paths)
+    base_url = secrets["SUPABASE_URL"]
+    service_key = secrets["SUPABASE_SERVICE_ROLE_KEY"]
+    if not base_url or not service_key:
+        return {
+            "ok": False,
+            "status": "deployment_gate_unavailable",
+            "reason": "supabase_runtime_credentials_missing",
+        }
+    now_iso = datetime.now(timezone.utc).isoformat()
+    specs = {
+        "account_run_requests": {"status": "in.(queued,claimed,starting,running)"},
+        "ig_runs": {"status": "in.(pending,running)"},
+        "auto_restart_device_locks": {"lease_expires_at": f"gt.{now_iso}"},
+        "auto_restart_tick_locks": {"status": "eq.started"},
+    }
+    counts: dict[str, int] = {}
+    try:
+        for table, filters in specs.items():
+            counts[table] = len(
+                _rest_select_ids(
+                    base_url=base_url,
+                    service_key=service_key,
+                    table=table,
+                    filters=filters,
+                )
+            )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "deployment_gate_unavailable",
+            "reason": f"deployment_gate_read_failed:{type(exc).__name__}",
+            "counts": counts,
+        }
+    blockers = [name for name, count in counts.items() if count != 0]
+    return {
+        "ok": not blockers,
+        "status": "ready" if not blockers else "deployment_gate_blocked",
+        "reason": "zero_gate" if not blockers else "active_runtime_work_present",
+        "counts": counts,
+        "blockers": blockers,
+    }
 
 
 def _safe_resolve(path: Path) -> Path:
@@ -447,6 +547,13 @@ def scheduler_status() -> dict[str, Any]:
 
 def switch_release(target: str) -> dict[str, Any]:
     paths = runtime_paths()
+    gate = deployment_zero_gate(paths)
+    if not gate.get("ok"):
+        return {
+            **gate,
+            "command": "switch-release",
+            "message": "Release switch refused: production deployment gate is not zero.",
+        }
     target_path = Path(target)
     if not target_path.is_absolute():
         target_path = paths.releases_dir / target
@@ -476,7 +583,7 @@ def _print(payload: dict[str, Any], json_mode: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical Phone Farm runtime controller.")
-    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "dispatcher", "heartbeat", "notifier", "scheduler", "switch-release"])
+    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "deployment-gate", "dispatcher", "heartbeat", "notifier", "scheduler", "switch-release"])
     parser.add_argument("command", nargs="?", default="status")
     parser.add_argument("extra", nargs="*")
     parser.add_argument("--json", action="store_true")
@@ -484,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.target in {"status", "validate"}:
         return _print(runtime_status(), args.json)
+    if args.target == "deployment-gate":
+        return _print(deployment_zero_gate(), args.json)
     if args.target in {"dispatcher", "heartbeat", "notifier"}:
         if args.command == "serve":
             # launchd-only entry point: exec the release wrapper, no timeout.

@@ -90,9 +90,39 @@ while True:
     time.sleep(0.1)
 """.lstrip()
     )
+    (root / "phonefarm_runtime_control.py").write_text(
+        """
+import json
+import os
+import sys
+
+if len(sys.argv) > 1 and sys.argv[1] == "deployment-gate":
+    active = int(os.environ.get("DUMMY_DEPLOYMENT_GATE_ACTIVE", "0"))
+    print(json.dumps({"ok": active == 0, "status": "ready" if active == 0 else "deployment_gate_blocked"}))
+    raise SystemExit(0 if active == 0 else 2)
+raise SystemExit(2)
+""".lstrip(),
+        encoding="utf-8",
+    )
     adb = root / "adb"
     adb.write_text("#!/usr/bin/env sh\nexit 0\n")
     adb.chmod(0o755)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Phone Farm Tests",
+            "-c",
+            "user.email=phonefarm-tests@example.invalid",
+            "commit",
+            "-qm",
+            "dispatcher harness",
+        ],
+        cwd=root,
+        check=True,
+    )
     return {"root": root, "wrapper": scripts / "run_control_dispatcher_service.sh", "run_dir": run_dir, "logs": logs, "adb": adb}
 
 
@@ -169,6 +199,20 @@ def test_prepare_startup_tick_skip_creates_private_one_shot_token(tmp_path):
     assert result.stdout.strip() == "auto_restart_startup_tick_skip_once_prepared"
     assert token_path.read_text().strip() == "phonefarm-auto-restart-startup-skip-v1"
     assert token_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_restart_refuses_to_kill_dispatcher_when_deployment_gate_is_active(tmp_path):
+    harness = _make_harness(tmp_path)
+    events = tmp_path / "events.log"
+    result = subprocess.run(
+        [str(harness["wrapper"]), "restart"],
+        cwd=harness["root"],
+        env=_env(harness, events, DUMMY_DEPLOYMENT_GATE_ACTIVE="1"),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "dispatcher_restart_blocked_deployment_gate" in result.stderr
 
 
 def test_start_tracks_single_child_and_wrapper_waits(tmp_path):

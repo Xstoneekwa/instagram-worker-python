@@ -60,6 +60,19 @@ Les surfaces **Contact** (et assimilés) peuvent être **marquées pour usage fu
 - En cas de doute : **pas de tap** ; préférer **observation** supplémentaire ou **échec explicite** avec `failure_reason` stable.
 - Toute régression “Contact tapé comme Follow” est **bloquante** : prioriser tests / logs sur les jeux de labels Instagram multilingues.
 
+## Contrat public / privé avant Follow
+
+Lorsque `dont_follow_private_accounts=true`, l'absence du texte « private »
+n'est jamais une preuve publique. Le tap exige une identité exacte, le package
+Instagram exact, le CTA Follow et une preuve positive de surface profil
+publique (onglets profil dans le même snapshot frais). Une surface incomplète
+ou inconnue échoue fermée avec `candidate_public_status_unproven`.
+
+Après le tap, l'état `Requested` est une preuve autoritaire de compte privé. Il
+est rejeté par le point de sortie commun avec
+`follow_requested_rejected_by_private_policy`, y compris sur le fast path RID,
+et ne peut jamais publier `follow_completed` ni déclencher le Post-Follow.
+
 ## Limite globale avant action — Active SAST Days V1
 
 Le moteur Follow conserve ses gardes d'action existantes, mais leur budget

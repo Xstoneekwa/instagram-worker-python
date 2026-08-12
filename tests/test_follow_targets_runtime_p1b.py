@@ -3158,8 +3158,11 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
             "follow_cta_positive": True,
             "package_exact": True,
             "activity": "ProfileActivity",
+            "public_profile_proven": True,
             "private_probe_payload": {
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "single_xml_profile_tabs",
                 "detection_method": "single_xml_positive_profile_surface",
             },
         }

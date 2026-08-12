@@ -88,10 +88,66 @@ class PhoneFarmRuntimeControlTest(TestCase):
             current.symlink_to(old)
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
                 with mock.patch.object(ctl, "_git_commit", return_value="newsha"):
-                    result = ctl.switch_release("new")
+                    with mock.patch.object(
+                        ctl, "deployment_zero_gate", return_value={"ok": True}
+                    ):
+                        result = ctl.switch_release("new")
             self.assertTrue(result["ok"])
             self.assertEqual(current.resolve(), new.resolve())
             self.assertEqual(result["previousRoot"], str(old.resolve()))
+
+    def test_switch_release_refuses_non_zero_production_gate(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            releases = tmp / "releases"
+            old = releases / "old"
+            new = releases / "new"
+            legacy = tmp / "legacy"
+            current = tmp / "current"
+            _worker_release(old)
+            _worker_release(new)
+            legacy.mkdir()
+            current.symlink_to(old)
+            with mock.patch.dict(
+                os.environ, self._env(tmp, current, releases, legacy), clear=False
+            ):
+                with mock.patch.object(
+                    ctl,
+                    "deployment_zero_gate",
+                    return_value={
+                        "ok": False,
+                        "status": "deployment_gate_blocked",
+                        "reason": "active_runtime_work_present",
+                        "counts": {"account_run_requests": 1},
+                    },
+                ):
+                    result = ctl.switch_release("new")
+            self.assertFalse(result["ok"])
+            self.assertEqual(current.resolve(), old.resolve())
+
+    def test_deployment_zero_gate_is_fail_closed_and_generic(self) -> None:
+        with mock.patch.object(
+            ctl,
+            "_runtime_secret_env",
+            return_value={"SUPABASE_URL": "https://example.test", "SUPABASE_SERVICE_ROLE_KEY": "key"},
+        ), mock.patch.object(ctl, "_rest_select_ids", return_value=[]) as rest:
+            result = ctl.deployment_zero_gate()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(rest.call_count, 4)
+
+        with mock.patch.object(
+            ctl,
+            "_runtime_secret_env",
+            return_value={"SUPABASE_URL": "https://example.test", "SUPABASE_SERVICE_ROLE_KEY": "key"},
+        ), mock.patch.object(
+            ctl, "_rest_select_ids", side_effect=[[{"id": "active"}], [], [], []]
+        ):
+            blocked = ctl.deployment_zero_gate()
+        self.assertFalse(blocked["ok"])
+        self.assertIn("account_run_requests", blocked["blockers"])
 
     def test_runtime_root_mismatch_is_reported_for_foreign_process(self) -> None:
         root = ctl.RuntimeRoot(True, "valid", "/tmp/current", "/tmp/releases/current", "abc1234")

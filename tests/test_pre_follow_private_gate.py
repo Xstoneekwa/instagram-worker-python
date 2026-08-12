@@ -55,6 +55,8 @@ class PreFollowPrivateGateTest(unittest.TestCase):
             "visual_detect_private_profile",
             return_value={
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "hierarchy:profile_tabs_container",
                 "detection_method": "none",
                 "confidence": 0.0,
                 "probe_ms": 8.0,
@@ -69,6 +71,29 @@ class PreFollowPrivateGateTest(unittest.TestCase):
         self.assertFalse(out["reject"])
         self.assertEqual(out["reason"], "private_not_detected")
 
+    def test_unknown_private_status_fails_closed_without_tap(self) -> None:
+        device = MagicMock()
+        with patch.object(
+            nav,
+            "visual_detect_private_profile",
+            return_value={
+                "private_profile_detected": False,
+                "public_profile_proven": False,
+                "detection_method": "none",
+                "confidence": 0.0,
+                "probe_ms": 8.0,
+                "hierarchy_fallback_used": True,
+            },
+        ):
+            out = nav.visual_candidate_pre_follow_private_gate(
+                device,
+                dont_follow_private_accounts=True,
+                follower_username="private_shape_without_accessible_copy",
+            )
+        self.assertTrue(out["reject"])
+        self.assertFalse(out["private_profile_detected"])
+        self.assertEqual(out["reason"], "candidate_public_status_unproven")
+
     def test_reuses_prior_private_probe_without_second_device_probe(self) -> None:
         device = MagicMock()
         with patch.object(nav, "visual_detect_private_profile") as mock_detect:
@@ -78,6 +103,8 @@ class PreFollowPrivateGateTest(unittest.TestCase):
                 follower_username="public_user",
                 prior_private_probe={
                     "private_profile_detected": False,
+                    "public_profile_proven": True,
+                    "public_profile_proof_method": "hierarchy:profile_tabs_container",
                     "detection_method": "cached_guard_probe",
                     "confidence": 0.0,
                     "probe_ms": 3010.0,
@@ -203,6 +230,7 @@ class PreFollowPrivateGateTest(unittest.TestCase):
             "captured_at_mono": time.monotonic(),
             "private_probe_payload": {
                 "private_profile_detected": False,
+                "public_profile_proven": True,
                 "package_exact": True,
                 "package": "com.instagram.android",
                 "activity": "ProfileActivity",
@@ -376,6 +404,8 @@ class PreFollowTapContextTest(unittest.TestCase):
                 "reason": "private_not_detected",
                 "private_probe_payload": {
                     "private_profile_detected": False,
+                    "public_profile_proven": True,
+                    "public_profile_proof_method": "hierarchy:profile_tabs_container",
                     "detection_method": "none",
                     "confidence": 0.0,
                     "probe_ms": 3333.0,
@@ -437,6 +467,8 @@ class PreFollowObservationProofTest(unittest.TestCase):
             "follow_header_state": "follow",
             "private_probe_payload": {
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "hierarchy:profile_tabs_container",
                 "detection_method": "none",
                 "confidence": 0.0,
                 "probe_ms": 8.0,
@@ -622,6 +654,8 @@ class PerformFollowSafePrivateGateTest(unittest.TestCase):
             "visual_detect_private_profile",
             return_value={
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "hierarchy:profile_tabs_container",
                 "detection_method": "none",
                 "confidence": 0.0,
                 "probe_ms": 8.0,
@@ -688,6 +722,8 @@ class PerformFollowSafePrivateGateTest(unittest.TestCase):
                 "probe_reused": False,
                 "private_probe_payload": {
                     "private_profile_detected": False,
+                    "public_profile_proven": True,
+                    "public_profile_proof_method": "hierarchy:profile_tabs_container",
                     "detection_method": "none",
                     "confidence": 0.0,
                     "probe_ms": 3010.0,

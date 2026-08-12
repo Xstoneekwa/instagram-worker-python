@@ -70,3 +70,12 @@ Toute sortie d’échec ou d’abandon doit porter une **reason** lisible et sta
 - L'identity guard reste le safe-stop final inchangé sur la reprise ; un
   nouvel échec enrichit l'incident original (« Nouvelle intervention
   requise ») sans boucle ni spam de notifications.
+
+## Barrière de déploiement du dispatcher
+
+Un switch de release ou un restart canonique échoue fermé tant que l'une des
+frontières globales n'est pas à zéro : requests actives, runs pending/running,
+device locks valides ou tick locks `started`. Le contrôle est exécuté avant le
+switch et de nouveau avant tout signal envoyé au dispatcher. Une indisponibilité
+Supabase bloque également l'opération. Cette barrière empêche un déploiement de
+transformer une reprise canonique en arrêt `SIGTERM`/143 au milieu du bootstrap.

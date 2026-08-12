@@ -229,6 +229,30 @@ _kill_all_dispatcher_processes() {
   done < <(pgrep -f "run_control_dispatcher_service\\.sh start" 2>/dev/null || true)
 }
 
+_assert_deployment_zero_gate() {
+  local gate_json gate_status
+  set +e
+  gate_json="$("$PYTHON_BIN" phonefarm_runtime_control.py deployment-gate --json 2>&1)"
+  gate_status="$?"
+  set -e
+  if [[ "$gate_status" != "0" ]]; then
+    echo "FAIL dispatcher_restart_blocked_deployment_gate detail=${gate_json:0:600}" >&2
+    return 1
+  fi
+  echo "$gate_json" | "$PYTHON_BIN" -c '
+import json, sys
+lines = [line.strip() for line in sys.stdin if line.strip().startswith("{")]
+try:
+    payload = json.loads(lines[-1])
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if payload.get("ok") and payload.get("status") == "ready" else 3)
+' || {
+    echo "FAIL dispatcher_restart_blocked_deployment_gate reason=non_zero_or_invalid" >&2
+    return 1
+  }
+}
+
 _clear_pid_and_lock() {
   rm -f "$PID_FILE"
   rm -f "$LOCK_OWNER_FILE"
@@ -731,6 +755,7 @@ case "$cmd" in
     ;;
   restart)
     rm -f "$PAUSE_FILE"
+    _assert_deployment_zero_gate
     launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST_TARGET" >/dev/null 2>&1 || true
     _kill_all_dispatcher_processes
     sleep 1

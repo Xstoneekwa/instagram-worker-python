@@ -375,6 +375,8 @@ class PreFollowTapInstrumentationTest(unittest.TestCase):
             "visual_detect_private_profile",
             return_value={
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "hierarchy:profile_tabs_container",
                 "detection_method": "none",
                 "confidence": 0.0,
                 "probe_ms": 1.0,

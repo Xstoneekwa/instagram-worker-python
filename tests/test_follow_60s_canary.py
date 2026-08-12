@@ -938,7 +938,9 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         <node text="candidate"/><node text="Posts"/><node text="Followers"/>
         <node text="Following"/><node text="Follow"
         resource-id="com.instagram.android:id/profile_header_follow_button"
-        bounds="[700,420][1040,560]"/></hierarchy>"""
+        bounds="[700,420][1040,560]"/>
+        <node resource-id="com.instagram.android:id/profile_tabs_container"/>
+        </hierarchy>"""
         with patch.object(
             nav,
             "_followers_current_pkg_activity",
@@ -954,7 +956,35 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             )
         self.assertTrue(out["ok"])
         self.assertFalse(out["private_probe_payload"]["private_profile_detected"])
+        self.assertTrue(out["private_probe_payload"]["public_profile_proven"])
         device.dump_hierarchy.assert_called_once()
+
+    def test_pre_follow_mono_capture_fails_closed_for_private_shape_without_marker(self) -> None:
+        device = MagicMock()
+        # Regression fixture for dant9491_: identity, stats and Follow are not
+        # sufficient when Instagram omits the private copy from accessibility.
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node text="dant9491_"/><node text="26 posts"/>
+        <node text="41 followers"/><node text="114 following"/>
+        <node text="Follow"
+        resource-id="com.instagram.android:id/profile_header_follow_button"
+        bounds="[10,280][430,320]"/></hierarchy>"""
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "ProfileActivity",
+            },
+        ):
+            out = nav.acquire_pre_follow_mono_capture(
+                device,
+                follower_username="dant9491_",
+                expected_package="com.instagram.android",
+            )
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["private_probe_payload"]["private_profile_detected"])
+        self.assertFalse(out["private_probe_payload"]["public_profile_proven"])
 
     def test_pre_follow_mono_capture_precomputes_v2_grid_once_when_requested(self) -> None:
         device = MagicMock()

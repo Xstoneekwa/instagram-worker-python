@@ -479,11 +479,13 @@ def _private_skip_fast_path_handle(
         mono_capture = None
     mono_private = dict((mono_capture or {}).get("private_probe_payload") or {})
     mono_positive_surface = bool(
-        (mono_capture or {}).get("exact_identity")
+        (mono_capture or {}).get("ok")
+        and (mono_capture or {}).get("exact_identity")
         and (mono_capture or {}).get("profile_surface")
         and (mono_capture or {}).get("follow_cta_positive")
         and (mono_capture or {}).get("package_exact")
         and str((mono_capture or {}).get("activity") or "").strip()
+        and (mono_capture or {}).get("public_profile_proven")
     )
     if mono_positive_surface:
         probe = {

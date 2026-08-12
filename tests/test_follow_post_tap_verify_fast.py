@@ -66,10 +66,13 @@ def _context(username: str = "public_user") -> dict:
         private_gate={
             "reject": False,
             "private_profile_detected": False,
+            "public_profile_proven": True,
             "probe_ms": 12.0,
             "probe_reused": False,
             "private_probe_payload": {
                 "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "single_xml_profile_tabs",
                 "detection_method": "none",
                 "confidence": 0.0,
                 "probe_ms": 12.0,
@@ -85,6 +88,7 @@ def _run_follow(
     *,
     return_review_mocks: bool = False,
     prepare_before_follow_tap=None,
+    dont_follow_private_accounts: bool = False,
 ) -> dict | tuple[dict, MagicMock, MagicMock]:
     with patch(
         "follow_action_engine.follow_action_surface_wait_and_select_element",
@@ -110,7 +114,7 @@ def _run_follow(
             profile_already_open=True,
             source_profile_username="source_user",
             visual_candidate_id="vc-1",
-            dont_follow_private_accounts=False,
+            dont_follow_private_accounts=dont_follow_private_accounts,
             pre_follow_context=_context(username),
             prepare_before_follow_tap=prepare_before_follow_tap,
         )
@@ -197,6 +201,19 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
         mock_snapshot.assert_not_called()
         mock_review_confirm.assert_not_called()
         mock_review_visible.assert_not_called()
+
+    def test_rid_requested_is_not_success_when_private_follows_are_disabled(self) -> None:
+        device = _Device([self._state_info("Requested")])
+        out = _run_follow(device, dont_follow_private_accounts=True)
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_code"], 35)
+        self.assertEqual(out["follow_state_after"], "requested")
+        self.assertTrue(out["private_follow_request_after_tap"])
+        self.assertEqual(
+            out["visual_follow_failure_reason"],
+            "follow_requested_rejected_by_private_policy",
+        )
 
     def test_rid_still_follow_polls_then_falls_back_to_snapshot(self) -> None:
         device = _Device(
