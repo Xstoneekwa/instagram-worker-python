@@ -252,6 +252,29 @@ class InstagramCredentialsRuntimeAccessTest(unittest.TestCase):
         self.assertEqual(parsed.password, "fake-password-for-unit-tests")
         self.assertFalse(parsed.vault_secret_is_json)
 
+    def test_opaque_password_character_sequence_is_preserved(self) -> None:
+        synthetic_passwords = (
+            " password",
+            "password ",
+            " password ",
+            "pa ss word",
+            "mot-de-passe-é§🔐",
+            "!@#$%^&*()_+-=[];':,.<>/?\\|`~",
+        )
+        for password in synthetic_passwords:
+            plain = parse_vault_secret_for_login(password)
+            envelope = parse_vault_secret_for_login(json.dumps({"password": password}))
+            self.assertTrue(plain.ok)
+            self.assertTrue(envelope.ok)
+            self.assertEqual(plain.password, password)
+            self.assertEqual(envelope.password, password)
+
+    def test_non_string_secret_is_not_coerced(self) -> None:
+        parsed = parse_vault_secret_for_login(123456)  # type: ignore[arg-type]
+
+        self.assertFalse(parsed.ok)
+        self.assertEqual(parsed.failure_reason, "vault_secret_password_invalid")
+
     def test_json_vault_secret_via_get_instagram_credentials(self) -> None:
         payload = json.dumps(
             {

@@ -1410,7 +1410,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
         self.assertEqual(login.click_calls, 1)
 
-    def test_post_submit_session_expired_stable_after_settling(self) -> None:
+    def test_silent_logged_out_return_remains_unknown_and_fail_closed(self) -> None:
         device, _username, _password_selector, _login = configured_device()
         device.hierarchies = [LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML]
 
@@ -1426,7 +1426,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.post_submit_outcome, "logged_out")
-        self.assertEqual(result.post_submit_probe_reason, "session_expired_after_settling")
+        self.assertEqual(result.post_submit_probe_reason, "unknown_logged_out_return")
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 4)
         self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 4)
         self.assertEqual(result.safe_metadata["final_terminal_screen"], "logged_out")
@@ -2399,7 +2399,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             sleeper=Mock(),
         )
 
-        self.assertEqual(result.post_submit_probe_reason, "session_expired_after_settling")
+        self.assertEqual(result.post_submit_probe_reason, "unknown_logged_out_return")
         self.assertEqual(login.click_calls, 1)
         self.assertFalse(result.safe_metadata["second_submit_executed"])
 

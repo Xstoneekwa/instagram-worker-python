@@ -1317,7 +1317,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
         self.assertFalse(result.retry_attempted)
 
-    def test_logged_out_after_settling_reason_is_preserved(self) -> None:
+    def test_unknown_logged_out_return_reason_is_preserved(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)
         password_result = type(
             "PasswordResult",
@@ -1325,7 +1325,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             {
                 "failure_reason": None,
                 "post_submit_outcome": "logged_out",
-                "post_submit_probe_reason": "session_expired_after_settling",
+                "post_submit_probe_reason": "unknown_logged_out_return",
                 "executed": True,
                 "submit_tapped": True,
                 "timings": {},
@@ -1349,7 +1349,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             )
 
         self.assertEqual(result.final_outcome, "logged_out")
-        self.assertEqual(result.reason, "session_expired_after_settling")
+        self.assertEqual(result.reason, "unknown_logged_out_return")
         self.assertEqual(result.safe_metadata["password_result"]["post_submit_observation_count"], 4)
 
     def test_unknown_after_settling_does_not_retry_password(self) -> None:
