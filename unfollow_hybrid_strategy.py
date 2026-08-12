@@ -1042,7 +1042,7 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
     total_confirmed_surfaces = 0
     last_specific_search_failure_reason = ""
     for search_attempt in range(1, SEARCH_LOCAL_REFRESH_RETRY_LIMIT + 2):
-        if not type_search(device, expected):
+        if not type_search(device, expected, trusted_search_surface=True):
             search_result = {
                 "ok": False,
                 "status": "retryable",

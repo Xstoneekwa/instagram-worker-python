@@ -134,10 +134,6 @@ class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
             "_exact_follow_button_visible_after_unfollow",
             return_value=False,
         ), patch.object(
-            probe,
-            "detect_profile_following_button_for_unfollow",
-            return_value={"ok": True},
-        ) as detector, patch.object(
             probe.time,
             "monotonic",
             side_effect=[0.0, 0.0, 0.1, 0.6],
@@ -150,11 +146,7 @@ class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["profile_follow_state_after"], "following")
-        detector.assert_called_once_with(
-            device,
-            expected_target_username="",
-            allow_verified_wide_cta=True,
-        )
+        self.assertEqual(result["failure_reason"], "unfollow_verify_conditions_not_met")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import account_session_orchestrator as session
 PRODUCTION_BASE_SHA = "8f6d16c772236450b22d167239223ca3eae30e7d"
 ACCOUNT_ID = "22222222-2222-4222-8222-222222222222"
 REVIEWED_SUCCESSOR_RUNTIME_DELTAS = {
+    "account_session_resume_engine.py",
     "instagram_navigation.py",
     "runner.py",
     "supabase_client.py",

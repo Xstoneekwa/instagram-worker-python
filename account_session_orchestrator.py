@@ -4619,10 +4619,20 @@ def run_account_session(
         follow_to_unfollow_real.get("executed")
         and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
     )
+    no_pending_unfollow = bool(
+        str(follow_to_unfollow_diagnostic.get("handoff_skip_reason") or "")
+        == "no_pending_unfollow"
+        and int(follow_to_unfollow_diagnostic.get("pending_unfollow_count") or 0) == 0
+    )
+    mandatory_unfollow_satisfied = bool(
+        mandatory_unfollow_executed or no_pending_unfollow
+    )
     unfollow_quota_target = (
         follow_to_unfollow_real.get("real_max_actions_effective")
         or follow_to_unfollow_real.get("real_max_actions")
     )
+    if no_pending_unfollow:
+        unfollow_quota_target = 0
     specific_failure_reason = str(
         follow_to_unfollow_real.get("failure_reason") or ""
     ).strip()
@@ -4726,6 +4736,7 @@ def run_account_session(
                 "pending_unfollow_count"
             ),
             "mandatory_unfollow_executed": mandatory_unfollow_executed,
+            "mandatory_unfollow_satisfied": mandatory_unfollow_satisfied,
             "unfollow_quota_target": unfollow_quota_target,
             "unfollow_actions_verified": follow_to_unfollow_real.get(
                 "unfollow_actions_verified"
@@ -4883,6 +4894,7 @@ def run_account_session(
         "suggested_resume_strategy": suggested_resume_strategy or None,
         "welcome_sender_jobs_sent_count": sender_summary.get("jobs_sent_count"),
         "mandatory_unfollow_executed": mandatory_unfollow_executed,
+        "mandatory_unfollow_satisfied": mandatory_unfollow_satisfied,
         "unfollow_quota_target": unfollow_quota_target,
         "root_failure_code": root_failure_code or None,
         "failure_phase": failure_phase or None,
@@ -4937,6 +4949,8 @@ def run_account_session(
         "failure_signature": failure_signature,
         "restart_allowed": auto_restart_restart_allowed,
         "restart_block_reason": auto_restart_restart_block_reason,
+        "mandatory_unfollow_executed": mandatory_unfollow_executed,
+        "mandatory_unfollow_satisfied": mandatory_unfollow_satisfied,
         "unfollow_quota_target": unfollow_quota_target,
         "unfollow_actions_verified": int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
         "unfollow_results_persisted_count": int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0),
@@ -5121,6 +5135,7 @@ def run_account_session(
         follow_to_unfollow_real=follow_to_unfollow_real,
         account_session_outreach_addon=account_session_outreach_addon,
         mandatory_unfollow_executed=mandatory_unfollow_executed,
+        mandatory_unfollow_satisfied=mandatory_unfollow_satisfied,
         unfollow_quota_target=unfollow_quota_target,
         root_failure_code=root_failure_code or None,
         failure_phase=failure_phase or None,

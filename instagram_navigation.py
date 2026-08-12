@@ -82,6 +82,7 @@ _LAST_SEARCH_SURFACE_PKG: str = ""
 _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY: str = ""
 _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT: bool = False
 _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT: float = 0.0
+_UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT: float = 0.0
 # Followers-engine CT open only (Search → tap CT profile). Never set for DM sender.
 _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE: bool = False
 _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS: dict[str, int] | None = None
@@ -235,6 +236,20 @@ def _follow_ct_open_search_strict_verified_recent() -> tuple[bool, float]:
     age_ms = (time.monotonic() - _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT) * 1000.0
     ttl_s = float(getattr(config, "FOLLOW_CT_OPEN_SEARCH_STRICT_RECENT_TTL_S", 45.0) or 45.0)
     return age_ms <= ttl_s * 1000.0, age_ms
+
+
+def _mark_unfollow_direct_search_surface_fresh() -> None:
+    global _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT
+    _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT = time.monotonic()
+
+
+def _consume_unfollow_direct_search_surface_fresh() -> bool:
+    global _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT
+    if _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT <= 0.0:
+        return False
+    age_s = time.monotonic() - _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT
+    _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT = 0.0
+    return age_s <= 4.0
 
 
 def _search_surface_cache_state_label() -> str:
@@ -506,7 +521,12 @@ def apply_search_surface_reuse_metrics(
     return True
 
 
-def return_to_search_from_profile(d: u2.Device, pkg: str | None = None) -> bool:
+def return_to_search_from_profile(
+    d: u2.Device,
+    pkg: str | None = None,
+    *,
+    trusted_global_search_return: bool = False,
+) -> bool:
     """
     One back + poll for lightweight search. Sets search_back_to_search_ms.
     On success applies search surface reuse metrics (skip open_search).
@@ -529,9 +549,28 @@ def return_to_search_from_profile(d: u2.Device, pkg: str | None = None) -> bool:
                 "search_back_to_search_ok",
                 search_back_to_search_ms=round(_perf["search_back_to_search_ms"], 2),
             )
-            return apply_search_surface_reuse_metrics(
+            if trusted_global_search_return:
+                _mark_search_surface_ok(d, pkg)
+                _mark_unfollow_direct_search_surface_fresh()
+                _perf["search_surface_reused"] = True
+                _perf["search_field_ready_ms"] = round(
+                    (time.perf_counter() - t0) * 1000.0, 2
+                )
+                log(
+                    "info",
+                    "unfollow_direct_back_search_transition_proved",
+                    proof="exact_profile_back_plus_package_edittext",
+                    search_back_to_search_ms=round(
+                        float(_perf["search_back_to_search_ms"]), 2
+                    ),
+                )
+                return True
+            reused = apply_search_surface_reuse_metrics(
                 d, pkg, "back_from_profile", source_profile_username=""
             )
+            if reused:
+                _mark_unfollow_direct_search_surface_fresh()
+            return reused
         time.sleep(0.08)
     _perf["search_back_to_search_ms"] = (time.perf_counter() - t0) * 1000
     log(
@@ -2327,6 +2366,24 @@ def open_search(
             caller_context=ctx or None,
             source_profile_username=src_user or None,
         )
+        if (
+            ctx.startswith("unfollow_direct_exact")
+            and _consume_unfollow_direct_search_surface_fresh()
+            and is_lightweight_search_screen(d, pkg)
+        ):
+            _perf["search_surface_reused"] = True
+            _perf["search_click_ms"] = 0.0
+            _perf["search_field_ready_ms"] = round(
+                (time.perf_counter() - t_reuse) * 1000.0, 2
+            )
+            log(
+                "info",
+                "unfollow_direct_search_surface_proof_reused",
+                caller_context=ctx,
+                proof="back_transition_plus_package_activity_edittext",
+                reuse_check_ms=_perf["search_field_ready_ms"],
+            )
+            return True
         if is_followers_list_surface_quick(d, source_profile_username=src_user):
             invalidate_search_surface_cache("followers_list_local_search")
             _log_followers_local_search_rejected(
@@ -3618,6 +3675,7 @@ def type_search(
     follow_ct_surface_confirmed: bool = False,
     outreach_trusted_search: bool = False,
     outreach_trusted_edittext_verified: bool = False,
+    trusted_search_surface: bool = False,
 ) -> bool:
     """Robust clear, then FastIME or set_text; fused row detect when FastIME."""
     global _perf, _TYPE_SEARCH_FAILURE_REASON
@@ -3625,6 +3683,7 @@ def type_search(
     _clear_pending_fused_fast_ime_row()
     follow_ct_typing = bool(follow_ct_surface_confirmed) or is_follow_ct_search_context_active()
     outreach_trusted_typing = bool(outreach_trusted_search) and not follow_ct_typing
+    generic_trusted_typing = bool(trusted_search_surface) and not follow_ct_typing
     reuse_outreach_edittext_precheck = bool(
         outreach_trusted_typing and outreach_trusted_edittext_verified
     )
@@ -3730,6 +3789,18 @@ def type_search(
                 reason=surf_why,
                 precheck_ms=round(precheck_ms, 2),
             )
+    elif generic_trusted_typing:
+        ok_surf, surf_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg_ig)
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
+        _perf["typing_precheck_edittext_reused"] = True
+        log(
+            "info",
+            "trusted_search_surface_type_precheck_used",
+            username=str(username or "")[:80],
+            ok=bool(ok_surf),
+            reason=surf_why,
+            precheck_ms=round(precheck_ms, 2),
+        )
     elif reuse_outreach_edittext_precheck:
         ok_surf = True
         surf_why = "recent_parent_fast_path_edittext_verified"
@@ -3858,7 +3929,7 @@ def type_search(
 
     serial = get_device_serial(d)
     t_cmd_start = time.perf_counter()
-    if outreach_trusted_typing and ok_surf:
+    if (outreach_trusted_typing or generic_trusted_typing) and ok_surf:
         t_set = time.perf_counter()
         direct_ok = False
         direct_reason = ""
@@ -3884,9 +3955,14 @@ def type_search(
             typing_command_ms = (time.perf_counter() - t_cmd_start) * 1000
             _perf["typing_command_ms"] = typing_command_ms
             _perf["typing_confirm_ms"] = 0.0
+            trusted_path = (
+                "unfollow_direct_search"
+                if generic_trusted_typing
+                else "dm_sender_outreach"
+            )
             log(
                 "info",
-                "dm_sender_outreach_trusted_set_text_used",
+                f"{trusted_path}_trusted_set_text_used",
                 username=str(username or "")[:80],
                 previous_username=str(previous_username or "")[:80] or None,
                 set_text_ms=round(direct_ms, 2),
@@ -3901,7 +3977,7 @@ def type_search(
                 typing_method=typing_method,
                 typing_confirm_ms=0.0,
                 ok=True,
-                typing_confirm_method="outreach_trusted_strict_get_text",
+                typing_confirm_method=f"{trusted_path}_strict_get_text",
             )
             log(
                 "info",
@@ -3913,17 +3989,25 @@ def type_search(
                 precheck_ms=round(precheck_ms, 2),
                 typing_command_ms=round(typing_command_ms, 2),
                 typing_confirm_ms=0.0,
-                typing_precheck_edittext_reused=bool(reuse_outreach_edittext_precheck),
+                typing_precheck_edittext_reused=bool(
+                    reuse_outreach_edittext_precheck or generic_trusted_typing
+                ),
                 typing_set_text_ms=round(set_text_ms, 2),
                 typing_get_text_confirm_ms=round(get_text_confirm_ms, 2),
                 follow_ct_typing=False,
-                outreach_trusted_search=True,
+                outreach_trusted_search=bool(outreach_trusted_typing),
+                trusted_search_surface=bool(generic_trusted_typing),
             )
             _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
             return True
+        trusted_path = (
+            "unfollow_direct_search"
+            if generic_trusted_typing
+            else "dm_sender_outreach"
+        )
         log(
             "warning",
-            "dm_sender_outreach_trusted_set_text_fallback",
+            f"{trusted_path}_trusted_set_text_fallback",
             username=str(username or "")[:80],
             previous_username=str(previous_username or "")[:80] or None,
             reason=direct_reason or "unknown",

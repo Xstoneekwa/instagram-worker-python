@@ -201,7 +201,9 @@ def _phase_to_run_unfollow(
         and str(outcome.get("last_safe_checkpoint") or "").strip()
     ):
         return True
-    mandatory_done = _as_bool(summary.get("mandatory_unfollow_executed"))
+    mandatory_done = _as_bool(summary.get("mandatory_unfollow_satisfied"))
+    if mandatory_done is None:
+        mandatory_done = _as_bool(summary.get("mandatory_unfollow_executed"))
     if unfollow_remaining is not None:
         return bool(mandatory_done is False and unfollow_remaining > 0)
     if unfollow_target is not None and unfollow_done is not None:

@@ -930,6 +930,7 @@ def tap_unfollow_in_following_sheet(
     d: u2.Device,
     *,
     target_username: str,
+    sheet_context_signals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Tap the exact Unfollow option. Caller must have already passed real-action guards."""
     opt = detect_unfollow_option_in_following_sheet(d)
@@ -958,11 +959,31 @@ def tap_unfollow_in_following_sheet(
         "tap_y": int(opt.get("tap_y") or 0),
     }
     log("info", "unfollow_sheet_unfollow_option_tap_started", **out)
-    guard_instagram_action_rate_limit(
-        d,
-        phase="unfollow",
-        preceding_action="unfollow_pre_tap",
+    certified_sheet = dict(sheet_context_signals or {})
+    sheet_context_certified = bool(
+        certified_sheet.get("unfollow_visible")
+        and (
+            certified_sheet.get("mute_visible")
+            or certified_sheet.get("restrict_visible")
+        )
     )
+    if not sheet_context_certified:
+        # The rate-limit guard remains mandatory when the caller cannot prove
+        # the Instagram actions sheet.  A certified sheet already proves that
+        # a restriction modal is not the active surface, so avoid a duplicate
+        # full hierarchy dump immediately before the same exact control tap.
+        guard_instagram_action_rate_limit(
+            d,
+            phase="unfollow",
+            preceding_action="unfollow_pre_tap",
+        )
+    else:
+        log(
+            "info",
+            "unfollow_pre_tap_restriction_guard_reused_sheet_proof",
+            target_username=target_username,
+            proof="unfollow_plus_mute_or_restrict_visible",
+        )
     try:
         d.click(int(out["tap_x"]), int(out["tap_y"]))
         time.sleep(0.2)
@@ -971,11 +992,10 @@ def tap_unfollow_in_following_sheet(
         out["failure_reason"] = "unfollow_option_tap_failed"
         out["error"] = str(exc)[:200]
         return out
-    guard_instagram_action_rate_limit(
-        d,
-        phase="unfollow",
-        preceding_action="unfollow",
-    )
+    # Post-tap restriction classification is performed by the verifier from
+    # the first unrecognized fresh hierarchy.  This keeps the guard before any
+    # subsequent business action without forcing an unconditional XML dump on
+    # the successful path.
     log("info", "unfollow_sheet_unfollow_option_tapped", **out)
     return out
 
@@ -1001,6 +1021,22 @@ def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
     if det.get("ok"):
         return "following"
     return "following_absent"
+
+
+def _guard_restriction_if_live_markers(d: u2.Device, *, preceding_action: str) -> None:
+    """Keep the restriction safe-stop without an unconditional hierarchy dump."""
+    for label in ("Try Again Later", "Réessayer plus tard", "Reessayer plus tard"):
+        try:
+            if not d(text=label).exists(timeout=0.04):
+                continue
+            guard_instagram_action_rate_limit(
+                d,
+                phase="unfollow",
+                preceding_action=preceding_action,
+            )
+            return
+        except Exception:
+            continue
 
 
 _PRIVATE_UNFOLLOW_CONTEXT_MARKERS = (
@@ -1204,6 +1240,10 @@ def verify_unfollow_action_success_after_tap(
     private_confirmation_generation = ""
     while time.monotonic() < deadline:
         iterations += 1
+        _guard_restriction_if_live_markers(
+            d,
+            preceding_action="unfollow",
+        )
         phase_start = time.perf_counter()
         signals = _detect_actions_sheet_signals(d)
         sheet_signal_check_ms = _elapsed_ms(phase_start)
@@ -1291,6 +1331,7 @@ def verify_unfollow_action_success_after_tap(
                     d,
                     phase="unfollow",
                     preceding_action="private_unfollow_confirmation_pre_tap",
+                    hierarchy_xml=hierarchy,
                 )
                 try:
                     d.click(
@@ -1314,11 +1355,9 @@ def verify_unfollow_action_success_after_tap(
                     }
                     log("info", "unfollow_action_verify_failed", **out)
                     return out
-                guard_instagram_action_rate_limit(
-                    d,
-                    phase="unfollow",
-                    preceding_action="private_unfollow_confirmation",
-                )
+                # The next verification iteration owns the post-tap
+                # restriction boundary.  Reuse the private-modal hierarchy for
+                # the pre-tap guard and avoid a second unconditional dump.
                 log(
                     "info",
                     "unfollow_private_confirmation_tapped",
@@ -1369,13 +1408,30 @@ def verify_unfollow_action_success_after_tap(
         time.sleep(0.25)
 
     fallback_start = time.perf_counter()
-    det = detect_profile_following_button_for_unfollow(
+    hierarchy, hierarchy_dump_ms = _dump_hierarchy_with_timing(d)
+    # Reuse this one fresh boundary for restriction safety, exact profile
+    # identity and CTA state.  The previous implementation launched a second
+    # multi-poll Following detector after already proving the sheet closed.
+    guard_instagram_action_rate_limit(
         d,
-        expected_target_username="",
-        allow_verified_wide_cta=True,
+        phase="unfollow",
+        preceding_action="unfollow",
+        hierarchy_xml=hierarchy,
+    )
+    actual_raw, identity_method, identity_meta = _extract_profile_username_from_hierarchy(
+        hierarchy
+    )
+    expected = normalize_unfollow_username(target_username)
+    actual = normalize_unfollow_username(actual_raw)
+    profile_identity_exact = bool(expected and actual == expected)
+    following_visible = _following_button_visible_in_hierarchy(hierarchy, d=d)
+    follow_visible = bool(
+        follow_visible or _exact_follow_button_visible_after_unfollow(d)
+    )
+    profile_follow_state_after = (
+        "following" if following_visible else "follow" if follow_visible else "following_absent"
     )
     fallback_ms = _elapsed_ms(fallback_start)
-    profile_follow_state_after = "following" if det.get("ok") else "following_absent"
     following_absent = profile_follow_state_after != "following"
     log(
         "info",
@@ -1388,9 +1444,12 @@ def verify_unfollow_action_success_after_tap(
         sheet_signal_check_ms=0.0,
         follow_exact_check_ms=0.0,
         fallback_following_absent_check_ms=fallback_ms,
+        hierarchy_dump_ms=hierarchy_dump_ms,
         profile_follow_state_after=profile_follow_state_after,
+        profile_identity_exact=profile_identity_exact,
+        profile_identity_method=identity_method,
     )
-    if sheet_closed and following_absent:
+    if sheet_closed and profile_identity_exact and following_absent:
         out = {
             "ok": True,
             "verification_method": "sheet_closed_and_profile_following_absent",
@@ -1403,6 +1462,8 @@ def verify_unfollow_action_success_after_tap(
             "private_confirmation_detected": private_confirmation_detected,
             "private_confirmation_tapped": private_confirmation_tapped,
             "private_confirmation_generation": private_confirmation_generation,
+            "post_action_profile_identity_exact": True,
+            "post_action_profile_identity_meta": identity_meta,
         }
         log("info", "unfollow_action_verified", **out)
         return out
@@ -2355,6 +2416,7 @@ def return_to_following_list_after_unfollow_action(
     *,
     account_username: str,
     max_back_steps: int = 3,
+    profile_departure_certified: bool = False,
 ) -> dict[str, Any]:
     """Return from target profile to owner Following after a real Unfollow tap."""
     log(
@@ -2364,22 +2426,38 @@ def return_to_following_list_after_unfollow_action(
         max_back_steps=max_back_steps,
     )
     last_det: dict[str, Any] = {}
+    back_steps = 0
+    if profile_departure_certified:
+        try:
+            d.press("back")
+            back_steps = 1
+        except Exception:
+            pass
+        time.sleep(0.12)
     for step in range(max(1, int(max_back_steps))):
         det = detect_own_following_list_screen(d, account_username=account_username)
         last_det = det
         if det.get("is_following_list"):
-            out = {"ok": True, "method": "already_on_following", "back_steps": step, "failure_reason": ""}
+            out = {
+                "ok": True,
+                "method": (
+                    "certified_profile_back" if profile_departure_certified else "already_on_following"
+                ),
+                "back_steps": back_steps,
+                "failure_reason": "",
+            }
             log("info", "unfollow_action_return_to_following_list_ok", **out)
             return out
         try:
             d.press("back")
+            back_steps += 1
         except Exception:
             pass
         time.sleep(0.45)
     out = {
         "ok": False,
         "method": "back",
-        "back_steps": max(1, int(max_back_steps)),
+        "back_steps": back_steps,
         "failure_reason": str(last_det.get("failure_reason") or "following_list_not_detected"),
         "last_detection": last_det,
     }

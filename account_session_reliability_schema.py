@@ -246,6 +246,7 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
         badges.append("needs_human_review")
     if (
         snapshot.get("mandatory_unfollow_executed") is False
+        and snapshot.get("mandatory_unfollow_satisfied") is not True
         and snapshot.get("restart_allowed") is not True
         and snapshot.get("failure_category") != "recoverable_python_runtime_failure"
     ):
@@ -411,6 +412,7 @@ def build_admin_reliability_snapshot(
             safe_summary.get("failure_reason"),
         ),
         "mandatory_unfollow_executed": _value(safe_summary.get("mandatory_unfollow_executed")),
+        "mandatory_unfollow_satisfied": _value(safe_summary.get("mandatory_unfollow_satisfied")),
         "phases_to_run": phases_to_run,
         "unsafe_markers": unsafe,
     }
@@ -464,9 +466,13 @@ def _event_type_and_severity(
     if "device_offline" in unsafe:
         return "device_offline", "critical", "device_offline", "Recover device connectivity."
 
-    if snapshot.get("mandatory_unfollow_executed") is False and _mandatory_unfollow_expected(
+    if (
+        snapshot.get("mandatory_unfollow_executed") is False
+        and snapshot.get("mandatory_unfollow_satisfied") is not True
+        and _mandatory_unfollow_expected(
         snapshot,
         resume_plan,
+        )
     ):
         return (
             "mandatory_unfollow_not_executed",

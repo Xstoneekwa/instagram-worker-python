@@ -107,11 +107,16 @@ def _return_after_unfollow_profile(
     *,
     account_username: str,
     direct_exact_search: bool,
+    profile_departure_certified: bool = False,
 ) -> dict[str, Any]:
     """Prefer the shallow Search return for direct fallback candidates."""
 
     if direct_exact_search:
-        if return_to_search_from_profile(d, config.INSTAGRAM_PACKAGE):
+        if return_to_search_from_profile(
+            d,
+            config.INSTAGRAM_PACKAGE,
+            trusted_global_search_return=True,
+        ):
             return {
                 "ok": True,
                 "destination": "search",
@@ -131,6 +136,7 @@ def _return_after_unfollow_profile(
     returned = return_to_following_list_after_unfollow_action(
         d,
         account_username=account_username,
+        profile_departure_certified=profile_departure_certified,
     )
     return {
         **dict(returned or {}),
@@ -3403,7 +3409,11 @@ def _run_real_unfollow_multi_loop(
             }
             return emit_final("failed_unfollow_multi_action", "unfollow_option_missing")
 
-        tap_out = tap_unfollow_in_following_sheet(d, target_username=target_username)
+        tap_out = tap_unfollow_in_following_sheet(
+            d,
+            target_username=target_username,
+            sheet_context_signals=dict(sheet.get("sheet_context_signals") or {}),
+        )
         if tap_out.get("ok"):
             sent += 1
             action_attempted_usernames.add(target_key)
@@ -3752,6 +3762,7 @@ def _run_real_unfollow_multi_loop(
             d,
             account_username=uname,
             direct_exact_search=target_opened_directly,
+            profile_departure_certified=verify_ok,
         )
         return_ok = bool(ret.get("ok"))
         search_session_reused = bool(ret.get("search_session_reused"))
@@ -4686,7 +4697,11 @@ def run_unfollow_session(
         return 0 if status == "success_probe" else 1
 
     # Phase 2C: real Unfollow tap (max 1 per run; visible DB eligibility only).
-    tap_out = tap_unfollow_in_following_sheet(d, target_username=target_username)
+    tap_out = tap_unfollow_in_following_sheet(
+        d,
+        target_username=target_username,
+        sheet_context_signals=dict(sheet.get("sheet_context_signals") or {}),
+    )
     actions_sent = 1 if tap_out.get("ok") else 0
     if not tap_out.get("ok"):
         ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
@@ -4763,7 +4778,11 @@ def run_unfollow_session(
             reason=str(persist_out.get("error") or "persist_failed"),
         )
 
-    ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+    ret = return_to_following_list_after_unfollow_action(
+        d,
+        account_username=uname,
+        profile_departure_certified=verify_ok,
+    )
     return_ok = bool(ret.get("ok"))
 
     if not verify_ok:
