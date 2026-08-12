@@ -748,11 +748,11 @@ def _build_login_provisioner_command(
         raise ValueError("auto_login_app_instance_binding_required")
     expected_username = _load_expected_username(account_id)
     normalized_run_type = str(run_type or "").strip().lower()
-    cli_module = (
-        "historical_auto_login_07ee_adapter"
-        if normalized_run_type == "login_provisioning"
-        else "instagram_login_provisioner_cli"
-    )
+    # Every login path enters the same authoritative engine.  The historical
+    # 07ee tree is retained only as forensic source material; routing a live
+    # request through it would silently drop modern recovery and challenge
+    # contracts added to the canonical implementation.
+    cli_module = "instagram_login_provisioner_cli"
     cmd = [
         sys.executable,
         "-m",
@@ -766,8 +766,6 @@ def _build_login_provisioner_command(
         "--run-id",
         request_id,
     ]
-    if normalized_run_type == "login_provisioning":
-        cmd.extend(["--request-id", str(run_request_id or request_id)])
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
@@ -2179,31 +2177,6 @@ def _finalize_manual_run_after_subprocess(
                 run_id=run_id,
                 request_metadata=request_metadata,
             )
-        return
-
-    if run_type == "login_provisioning":
-        _safe_complete_account_run_request(
-            request_id,
-            cfg.worker_id,
-            "failed",
-            error_code="worker_exit_nonzero",
-            error_message_safe=f"Worker subprocess exited with code {exit_code}.",
-        )
-        _reconcile_linked_run(
-            account_id=account_id,
-            run_id=run_id,
-            terminal_status="failed",
-            request_id=request_id,
-            exit_code=exit_code,
-        )
-        _audit(
-            account_id=account_id,
-            action_type="manual_run_failed",
-            status="failed",
-            message=f"Manual run failed with exit code {exit_code}.",
-            run_id=run_id,
-            payload={"request_id": request_id, "exit_code": exit_code},
-        )
         return
 
     summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)

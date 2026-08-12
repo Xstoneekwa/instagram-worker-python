@@ -1150,9 +1150,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 package_name="com.instagram.androie",
                 app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
             )
-        self.assertIn("historical_auto_login_07ee_adapter", cmd)
-        self.assertNotIn("instagram_login_provisioner_cli", cmd)
-        self.assertEqual(cmd[cmd.index("--request-id") + 1], TEST_REQUEST_ID)
+        self.assertIn("instagram_login_provisioner_cli", cmd)
+        self.assertNotIn("historical_auto_login_07ee_adapter", cmd)
+        self.assertNotIn("--request-id", cmd)
         self.assertNotIn("--resume-email-code-from-action", cmd)
         self.assertIn("--publish", cmd)
         self.assertNotIn("--no-publish", cmd)
@@ -1379,16 +1379,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 account_id=TEST_ACCOUNT_ID,
                 exit_code=1,
             )
-        complete.assert_called_once()
-        self.assertEqual(complete.call_args.args[2], "failed")
-        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
-        reconcile.assert_called_once()
+        complete.assert_not_called()
+        reconcile.assert_not_called()
         audit.assert_called_once()
-        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
-        modern_summary.assert_not_called()
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_verification_paused")
+        modern_summary.assert_called_once_with(TEST_RUN_ID)
         modern_terminalization.assert_not_called()
 
-    def test_historical_login_provisioning_bypasses_modern_orphan_classification(self) -> None:
+    def test_login_provisioning_uses_modern_orphan_classification(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1430,11 +1428,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
             )
         complete.assert_called_once()
-        self.assertEqual(complete.call_args.args[2], "failed")
-        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
+        self.assertEqual(complete.call_args.args[2], "blocked")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "orphan_challenge_provenance_weak")
         reconcile.assert_called_once()
-        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
-        modern_summary.assert_not_called()
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_blocked")
+        modern_summary.assert_called_once_with(TEST_RUN_ID)
 
     def test_finalize_subprocess_real_failure_still_marks_failed(self) -> None:
         cfg = consumer.DispatcherConfig(
@@ -1480,7 +1478,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         reconcile.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
 
-    def test_historical_login_provisioning_does_not_use_modern_failure_summary(self) -> None:
+    def test_login_provisioning_uses_modern_failure_summary(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1507,7 +1505,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "get_account_run_request", return_value=request),
             patch.object(consumer, "complete_account_run_request") as complete,
             patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
-            patch.object(consumer, "_terminalize_auto_login_failure") as modern_terminalization,
+            patch.object(
+                consumer,
+                "_terminalize_auto_login_failure",
+                return_value=({"status": "failed"}, {**summary, "reason_code": "wrong_app_package"}),
+            ) as modern_terminalization,
             patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
             patch.object(consumer, "_audit") as audit,
         ):
@@ -1517,13 +1519,13 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 account_id=TEST_ACCOUNT_ID,
                 exit_code=1,
             )
-        self.assertEqual(complete.call_args.args[2], "failed")
-        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
-        self.assertEqual(audit.call_args.kwargs["payload"], {"request_id": TEST_REQUEST_ID, "exit_code": 1})
-        modern_terminalization.assert_not_called()
-        modern_summary.assert_not_called()
+        complete.assert_not_called()
+        self.assertEqual(audit.call_args.kwargs["payload"]["request_id"], TEST_REQUEST_ID)
+        self.assertEqual(audit.call_args.kwargs["payload"]["login_provisioner_summary"]["reason_code"], "wrong_app_package")
+        modern_terminalization.assert_called_once()
+        modern_summary.assert_called_once_with(TEST_RUN_ID)
 
-    def test_historical_login_provisioning_bypasses_modern_failure_contract_and_incident(self) -> None:
+    def test_login_provisioning_uses_modern_failure_contract_and_incident(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1557,7 +1559,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "get_account_run_request", return_value=request),
             patch.object(consumer, "complete_account_run_request") as complete,
             patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
-            patch.object(consumer, "_terminalize_auto_login_failure") as terminalize,
+            patch.object(
+                consumer,
+                "_terminalize_auto_login_failure",
+                return_value=({"status": "failed"}, {**summary, "reason_code": "wrong_suggested_account_requires_admin_review"}),
+            ) as terminalize,
             patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
             patch.object(consumer, "_publish_run_failure_incident") as publish,
             patch.object(consumer, "_audit"),
@@ -1569,11 +1575,10 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
                 request_snapshot=request,
             )
-        self.assertEqual(complete.call_args.args[2], "failed")
-        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
-        terminalize.assert_not_called()
-        modern_summary.assert_not_called()
-        publish.assert_not_called()
+        complete.assert_not_called()
+        terminalize.assert_called_once()
+        modern_summary.assert_called_once_with(TEST_RUN_ID)
+        publish.assert_called_once()
 
     def test_email_resume_keeps_modern_atomic_terminalization_before_notification(self) -> None:
         cfg = consumer.DispatcherConfig(
