@@ -93,9 +93,14 @@ class SecretValue:
 
 
 def parse_vault_secret_for_login(raw_secret: str) -> VaultPasswordParseResult:
-    """Normalize a Vault secret into a password-only string safe for login injection."""
+    """Extract a password without changing its exact character sequence."""
 
-    text = str(raw_secret or "").strip()
+    if not isinstance(raw_secret, str):
+        return VaultPasswordParseResult(
+            ok=False,
+            failure_reason="vault_secret_password_invalid",
+        )
+    text = raw_secret
     contains_metadata = _contains_vault_metadata_markers(text)
     if not text:
         return VaultPasswordParseResult(
@@ -131,7 +136,7 @@ def parse_vault_secret_for_login(raw_secret: str) -> VaultPasswordParseResult:
                 vault_secret_has_password_key=False,
                 vault_secret_contains_metadata_keys=contains_metadata,
             )
-        if not isinstance(password_value, str) or not password_value.strip():
+        if not isinstance(password_value, str) or password_value == "":
             return VaultPasswordParseResult(
                 ok=False,
                 failure_reason="vault_secret_password_invalid",
@@ -139,7 +144,7 @@ def parse_vault_secret_for_login(raw_secret: str) -> VaultPasswordParseResult:
                 vault_secret_has_password_key=has_password_key,
                 vault_secret_contains_metadata_keys=contains_metadata,
             )
-        extracted = password_value.strip()
+        extracted = password_value
         if revealed_value_blocked_for_injection(extracted):
             return VaultPasswordParseResult(
                 ok=False,

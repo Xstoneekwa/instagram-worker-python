@@ -5076,7 +5076,7 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
         return False
     failure = str(getattr(result, "failure_reason", "") or "")
     probe_reason = str(getattr(result, "post_submit_probe_reason", "") or "")
-    if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling"}:
+    if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling", "unknown_logged_out_return"}:
         return False
     outcome = _password_result_outcome(result)
     if failure in NO_RETRY_FAILURES or outcome in {
@@ -5143,8 +5143,8 @@ def _dashboard_action_for_outcome(
 
 def _final_reason_for_password_outcome(outcome: str, password_result: Any, classification_reason: str) -> str:
     probe_reason = str(getattr(password_result, "post_submit_probe_reason", "") or "")
-    if outcome == "logged_out" and probe_reason == "session_expired_after_settling":
-        return "session_expired_after_settling"
+    if outcome == "logged_out" and probe_reason in {"session_expired_after_settling", "unknown_logged_out_return"}:
+        return probe_reason
     if outcome == "unknown" and probe_reason == "post_submit_unknown_after_settling":
         return "post_submit_unknown_after_settling"
     if outcome == "save_password_prompt_blocking":

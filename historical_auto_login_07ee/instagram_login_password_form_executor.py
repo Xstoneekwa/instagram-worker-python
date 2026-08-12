@@ -2296,10 +2296,10 @@ def _observe_post_submit_settled(
     if outcome == "logged_out":
         last_observed = {
             **last_observed,
-            "reason": "session_expired_after_settling",
+            "reason": "unknown_logged_out_return",
             "terminal": True,
         }
-        warnings.append("post_submit_logged_out_after_settling")
+        warnings.append("post_submit_unknown_logged_out_return")
     elif outcome == "unknown":
         final_loading = bool(
             post_dismiss_final_observation_count
