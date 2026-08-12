@@ -137,6 +137,14 @@ class PhoneFarmRuntimeControlTest(TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "ready")
         self.assertEqual(rest.call_count, 4)
+        selected = {
+            call.kwargs["table"]: call.kwargs["identity_column"]
+            for call in rest.call_args_list
+        }
+        self.assertEqual(selected["account_run_requests"], "id")
+        self.assertEqual(selected["ig_runs"], "id")
+        self.assertEqual(selected["auto_restart_device_locks"], "device_id")
+        self.assertEqual(selected["auto_restart_tick_locks"], "idempotency_key")
 
         with mock.patch.object(
             ctl,

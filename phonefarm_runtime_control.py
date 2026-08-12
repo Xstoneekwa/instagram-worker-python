@@ -97,9 +97,10 @@ def _rest_select_ids(
     base_url: str,
     service_key: str,
     table: str,
+    identity_column: str,
     filters: dict[str, str],
 ) -> list[dict[str, Any]]:
-    query = {"select": "id", "limit": "1", **filters}
+    query = {"select": identity_column, "limit": "1", **filters}
     url = f"{base_url.rstrip('/')}/rest/v1/{table}?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(
         url,
@@ -131,19 +132,20 @@ def deployment_zero_gate(paths: RuntimePaths | None = None) -> dict[str, Any]:
         }
     now_iso = datetime.now(timezone.utc).isoformat()
     specs = {
-        "account_run_requests": {"status": "in.(queued,claimed,starting,running)"},
-        "ig_runs": {"status": "in.(pending,running)"},
-        "auto_restart_device_locks": {"lease_expires_at": f"gt.{now_iso}"},
-        "auto_restart_tick_locks": {"status": "eq.started"},
+        "account_run_requests": ("id", {"status": "in.(queued,claimed,starting,running)"}),
+        "ig_runs": ("id", {"status": "in.(pending,running)"}),
+        "auto_restart_device_locks": ("device_id", {"lease_expires_at": f"gt.{now_iso}"}),
+        "auto_restart_tick_locks": ("idempotency_key", {"status": "eq.started"}),
     }
     counts: dict[str, int] = {}
     try:
-        for table, filters in specs.items():
+        for table, (identity_column, filters) in specs.items():
             counts[table] = len(
                 _rest_select_ids(
                     base_url=base_url,
                     service_key=service_key,
                     table=table,
+                    identity_column=identity_column,
                     filters=filters,
                 )
             )
