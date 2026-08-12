@@ -123,6 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--publish", action="store_true", help="Explicitly allow controlled backend status publish.")
     parser.add_argument("--no-publish", action="store_true", help="Force status publishing disabled.")
     parser.add_argument("--run-id", default="", help="Optional safe run id. Defaults to a generated UUID.")
+    parser.add_argument("--request-id", default="", help="Optional safe request id for trace correlation.")
+    parser.add_argument("--device-id", default="", help="Optional safe canonical device id for trace correlation.")
     parser.add_argument("--log-jsonl", default=DEFAULT_LOG_JSONL, help="Safe JSONL log path.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable safe JSON.")
     parser.add_argument(
@@ -253,8 +255,10 @@ def run_cli_command(
         observe_current_screen_only=bool(args.observe_current_screen_only),
         package_name=_effective_package_name(args),
         run_id=run_id,
+        request_id=str(getattr(args, "request_id", "") or "") or run_id,
         run_type="login_provisioning",
         device_serial=str(getattr(args, "device_serial", "") or ""),
+        device_id=str(getattr(args, "device_id", "") or ""),
         expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or ""),
         post_start_wait_ms=int(args.post_start_wait_ms or DEFAULT_POST_APP_START_WAIT_MS),
         post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
@@ -1104,6 +1108,7 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "connected_detected_after_save_prompt_dismiss": bool(
             password_result.get("connected_detected_after_save_prompt_dismiss")
         ),
+        "auth_forensics": dict(password_result.get("auth_forensics") or {}),
         **_credentials_fields_from_metadata(metadata),
         "retry_count": int(getattr(result, "retry_count", 0) or 0),
         "would_publish": bool(getattr(result, "should_publish_status", False)) and bool(metadata.get("publish_enabled")),

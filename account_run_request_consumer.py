@@ -766,12 +766,18 @@ def _build_login_provisioner_command(
         "--run-id",
         request_id,
     ]
+    original_request_id = str(run_request_id or request_id or "").strip()
+    if original_request_id:
+        cmd.extend(["--request-id", original_request_id])
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
     cmd.extend(["--package-name", package])
     cmd.extend(["--expected-app-instance-id", app_instance])
     meta = dict(metadata_safe or {})
+    device_id = str(meta.get("device_id") or "").strip()
+    if device_id:
+        cmd.extend(["--device-id", device_id])
     if normalized_run_type == "login_email_code_resume":
         cmd.append("--resume-email-code-from-action")
         action_id = str(meta.get("action_id") or meta.get("verification_action_id") or "").strip()
@@ -3054,6 +3060,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             "assignment_id": dispatch_ctx.get("assignment_id"),
             "assignment_updated_at": dispatch_ctx.get("assignment_updated_at"),
             "credentials_version": dispatch_ctx.get("credentials_version"),
+            "device_id": dispatch_ctx.get("device_id"),
         },
     )
     log(

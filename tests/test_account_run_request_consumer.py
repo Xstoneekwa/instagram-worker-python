@@ -1152,7 +1152,10 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             )
         self.assertIn("instagram_login_provisioner_cli", cmd)
         self.assertNotIn("historical_auto_login_07ee_adapter", cmd)
-        self.assertNotIn("--request-id", cmd)
+        self.assertEqual(
+            cmd[cmd.index("--request-id") + 1],
+            "00000000-0000-4000-8000-000000000101",
+        )
         self.assertNotIn("--resume-email-code-from-action", cmd)
         self.assertIn("--publish", cmd)
         self.assertNotIn("--no-publish", cmd)

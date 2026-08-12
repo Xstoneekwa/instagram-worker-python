@@ -35,7 +35,10 @@ class CanonicalAutoLoginRoutingTest(unittest.TestCase):
 
         self.assertEqual(command[command.index("-m") + 1], "instagram_login_provisioner_cli")
         self.assertNotIn("historical_auto_login_07ee_adapter", command)
-        self.assertNotIn("--request-id", command)
+        self.assertEqual(
+            command[command.index("--request-id") + 1],
+            "00000000-0000-4000-8000-000000000101",
+        )
         self.assertEqual(command[command.index("--package-name") + 1], PACKAGE_NAME)
         self.assertEqual(command[command.index("--expected-app-instance-id") + 1], APP_INSTANCE_ID)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
 import config
@@ -28,6 +28,7 @@ from instagram_credentials_runtime_access import (
 )
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
+from auto_login_auth_forensics import AuthForensicsTrace
 
 
 ACTION_LOGIN_FORM_SUBMIT = "login_form_submit"
@@ -261,6 +262,48 @@ def execute_login_form_credentials(
     post_submit_timeout_ms: Optional[int] = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
+    auth_forensics: AuthForensicsTrace | None = None,
+) -> LoginPasswordExecutionResult:
+    active_timer = timer or time.perf_counter
+    trace = auth_forensics or AuthForensicsTrace.from_env()
+    trace.record("AUTH_FLOW_START", attempt=1)
+    result = _execute_login_form_credentials_impl(
+        d,
+        expected_username=expected_username,
+        password=password,
+        prevalidated_signals=prevalidated_signals,
+        post_submit_wait_ms=post_submit_wait_ms,
+        dump_after_submit=dump_after_submit,
+        max_password_required_retry=max_password_required_retry,
+        max_post_submit_observations=max_post_submit_observations,
+        post_submit_observation_interval_ms=post_submit_observation_interval_ms,
+        post_submit_timeout_ms=post_submit_timeout_ms,
+        timer=active_timer,
+        sleeper=sleeper,
+        auth_forensics=trace,
+    )
+    metadata = dict(result.safe_metadata or {})
+    metadata["auth_forensics"] = trace.snapshot(
+        terminal_outcome=str(result.post_submit_outcome or result.failure_reason or result.reason or "")
+    )
+    return replace(result, safe_metadata=metadata)
+
+
+def _execute_login_form_credentials_impl(
+    d: Any,
+    *,
+    expected_username: str,
+    password: SecretValue,
+    prevalidated_signals: dict | None = None,
+    post_submit_wait_ms: int = 1000,
+    dump_after_submit: bool = True,
+    max_password_required_retry: int = MAX_PASSWORD_REQUIRED_RETRY,
+    max_post_submit_observations: int = DEFAULT_POST_SUBMIT_OBSERVATIONS,
+    post_submit_observation_interval_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS,
+    post_submit_timeout_ms: Optional[int] = None,
+    timer: Timer | None = None,
+    sleeper: Sleeper | None = None,
+    auth_forensics: AuthForensicsTrace,
 ) -> LoginPasswordExecutionResult:
     """Fill and submit one prevalidated Instagram login form.
 
@@ -361,6 +404,7 @@ def execute_login_form_credentials(
             timer=timer,
             expected_username=username,
         )
+    auth_forensics.record("FORM_DETECTED", attempt=1, form_mode="password_only" if password_only_mode else "full")
 
     username_entered = False
     password_entered = False
@@ -369,6 +413,7 @@ def execute_login_form_credentials(
     username_input_started = timer()
     try:
         if not password_only_mode:
+            auth_forensics.record("USERNAME_INPUT_START", attempt=1)
             username_result = _focus_clear_set_and_confirm_username(
                 d,
                 targets["username"],
@@ -390,6 +435,7 @@ def execute_login_form_credentials(
                 warnings.append("username_field_fill_sent")
             if not username_entered:
                 raise RuntimeError(username_input_result or "username_input_failed")
+            auth_forensics.record("USERNAME_INPUT_END", attempt=1, confirmed=bool(username_entered))
 
         try:
             revealed_password = password.reveal_for_login_executor()
@@ -402,6 +448,7 @@ def execute_login_form_credentials(
         if revealed_value_blocked_for_injection(revealed_password):
             raise RuntimeError("blocked_secret_payload_shape")
 
+        auth_forensics.record("PASSWORD_INPUT_START", attempt=1)
         start = timer()
         input_result = _input_password_robust(d, targets["password"], revealed_password, warnings)
         password_input_method_used = input_result["input_method_used"]
@@ -419,6 +466,7 @@ def execute_login_form_credentials(
         timings["password_input_ms"] = _elapsed_ms(start, timer())
         if not input_call_reported_success:
             raise RuntimeError("password_input_failed")
+        auth_forensics.record("PASSWORD_INPUT_END", attempt=1, confirmed=bool(input_call_reported_success))
     except Exception as exc:
         failure_reason = str(exc) if str(exc) in {
             "input_failed",
@@ -534,18 +582,28 @@ def execute_login_form_credentials(
             form_events_settled=form_events_settled,
         )
     targets = {**targets, **fresh_submit["targets"]}
+    auth_forensics.record(
+        "FIELDS_VALIDATED",
+        attempt=1,
+        field_content_stable=field_content_stable_before_submit,
+        fresh_form_observation=fresh_xml_before_tap,
+    )
 
     try:
+        auth_forensics.record("LOGIN_SUBMIT_PLANNED", attempt=1)
         start = timer()
         _click_target(targets["login_button"])
+        auth_forensics.mark_submit_tap(attempt=1)
         submit_tapped = True
         warnings.append("login_submit_tap_sent")
         timings["submit_tap_ms"] = _elapsed_ms(start, timer())
+        auth_forensics.record("LOGIN_SUBMIT_ACK", attempt=1, tap_call_succeeded=True)
     except Exception:
         if overlay_recovery_allowed and _safe_overlay_recovery_once(d, targets, warnings):
             try:
                 start = timer()
                 _click_target(targets["login_button"])
+                auth_forensics.mark_submit_tap(attempt=1)
                 submit_tapped = True
                 timings["submit_tap_ms"] += _elapsed_ms(start, timer())
             except Exception:
@@ -631,6 +689,7 @@ def execute_login_form_credentials(
             warnings.append("post_submit_observe_started")
             def _recover_returned_login_form_once() -> dict[str, Any]:
                 nonlocal password_refill_attempted, second_submit_executed
+                auth_forensics.record("FORM_REOBSERVED", attempt=2, classified_state="logged_out_return")
                 recovery = _resolve_fresh_login_submit_target(
                     d,
                     expected_username=username,
@@ -646,6 +705,7 @@ def execute_login_form_credentials(
                 password_state = _password_field_non_empty_state(recovery_targets["password"])
                 if password_state == "false":
                     password_refill_attempted = True
+                    auth_forensics.record("PASSWORD_INPUT_START", attempt=2)
                     refill = _input_password_robust(
                         d,
                         recovery_targets["password"],
@@ -654,6 +714,7 @@ def execute_login_form_credentials(
                     )
                     if not _password_injection_confirmed(refill):
                         return {"failure_reason": "password_input_not_confirmed"}
+                    auth_forensics.record("PASSWORD_INPUT_END", attempt=2, confirmed=True)
                     recovery = _resolve_fresh_login_submit_target(
                         d,
                         expected_username=username,
@@ -666,9 +727,13 @@ def execute_login_form_credentials(
                     if recovery["failure_reason"]:
                         return recovery
                     recovery_targets = dict(recovery["targets"])
+                auth_forensics.record("FIELDS_VALIDATED", attempt=2, field_content_stable=True)
+                auth_forensics.record("LOGIN_SUBMIT_PLANNED", attempt=2)
                 _click_target(recovery_targets["login_button"])
+                auth_forensics.mark_submit_tap(attempt=2)
                 second_submit_executed = True
                 warnings.append("login_submit_returned_form_recovery_tap_sent")
+                auth_forensics.record("LOGIN_SUBMIT_ACK", attempt=2, tap_call_succeeded=True)
                 return {"failure_reason": "", "executed": True}
 
             observed = _observe_post_submit_settled(
@@ -681,6 +746,8 @@ def execute_login_form_credentials(
                 interval_ms=observation_interval_ms,
                 max_observations=observation_limit,
                 returned_login_form_recovery=_recover_returned_login_form_once,
+                auth_forensics=auth_forensics,
+                attempt=1,
             )
             post_submit_observation_count = int(observed.get("observation_count") or 0)
             post_submit_wait_total_ms = int(observed.get("wait_total_ms") or 0)
@@ -2584,6 +2651,8 @@ def _observe_post_submit_settled(
     interval_ms: int,
     max_observations: int,
     returned_login_form_recovery: ReturnedLoginFormRecovery | None = None,
+    auth_forensics: AuthForensicsTrace | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     screens: list[str] = []
     wait_total_ms = 0
@@ -2632,6 +2701,13 @@ def _observe_post_submit_settled(
         hierarchy_xml = _dump_hierarchy_once(d)
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        if auth_forensics is not None:
+            auth_forensics.observe(
+                attempt=attempt,
+                hierarchy_xml=hierarchy_xml,
+                observed=observed,
+                app_current=_forensics_app_current(d, auth_forensics),
+            )
         last_observed = observed
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
@@ -2762,6 +2838,8 @@ def _observe_post_submit_settled(
             sleeper=sleeper,
             interval_ms=POST_DISMISS_FINAL_INTERVAL_MS,
             max_observations=POST_DISMISS_FINAL_OBSERVATIONS,
+            auth_forensics=auth_forensics,
+            attempt=attempt,
         )
         post_dismiss_final_observation_count = int(final_observed.get("observation_count") or 0)
         post_dismiss_final_screens = list(final_observed.get("screens") or [])
@@ -2780,6 +2858,8 @@ def _observe_post_submit_settled(
             timings=timings,
             timer=timer,
             sleeper=sleeper,
+            auth_forensics=auth_forensics,
+            attempt=attempt,
         )
         final_recheck_screens = list(final_recheck.get("screens") or [])
         if final_recheck_screens:
@@ -2805,6 +2885,8 @@ def _observe_post_submit_settled(
                 interval_ms=interval_ms,
                 max_observations=max_observations,
                 returned_login_form_recovery=None,
+                auth_forensics=auth_forensics,
+                attempt=attempt + 1,
             )
             recovered_screens = list(recovered.get("screens") or [])
             return {
@@ -2902,6 +2984,8 @@ def _observe_post_submit_final_recheck(
     timings: dict[str, int],
     timer: Timer,
     sleeper: Sleeper,
+    auth_forensics: AuthForensicsTrace | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     screens: list[str] = []
     wait_total_ms = 0
@@ -2919,6 +3003,13 @@ def _observe_post_submit_final_recheck(
         hierarchy_xml = _dump_hierarchy_once(d)
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        if auth_forensics is not None:
+            auth_forensics.observe(
+                attempt=attempt,
+                hierarchy_xml=hierarchy_xml,
+                observed=observed,
+                app_current=_forensics_app_current(d, auth_forensics),
+            )
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
         if observed.get("terminal") is True:
@@ -2938,6 +3029,8 @@ def _observe_post_dismiss_final_settled(
     sleeper: Sleeper,
     interval_ms: int,
     max_observations: int,
+    auth_forensics: AuthForensicsTrace | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     observations = max(1, min(int(max_observations or 1), MAX_POST_SUBMIT_OBSERVATIONS))
     interval = _clamp_ms(interval_ms, MAX_POST_SUBMIT_INTERVAL_MS)
@@ -2958,6 +3051,13 @@ def _observe_post_dismiss_final_settled(
         hierarchy_xml = _dump_hierarchy_once(d)
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         last_observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        if auth_forensics is not None:
+            auth_forensics.observe(
+                attempt=attempt,
+                hierarchy_xml=hierarchy_xml,
+                observed=last_observed,
+                app_current=_forensics_app_current(d, auth_forensics),
+            )
         label = str(last_observed.get("screen_label") or last_observed.get("screen_type") or "unknown")
         screens.append(label)
         if last_observed.get("password_required_dialog_present") is True or bool(last_observed.get("terminal")):
@@ -2969,6 +3069,18 @@ def _observe_post_dismiss_final_settled(
         "wait_total_ms": wait_total_ms,
         "final_screen_type": screens[-1] if screens else "",
     }
+
+
+def _forensics_app_current(d: Any, trace: AuthForensicsTrace) -> dict[str, Any]:
+    """Best-effort read-only process/activity sample, isolated from decisions."""
+
+    if not trace.enabled:
+        return {}
+    try:
+        current = d.app_current()
+    except Exception:
+        return {}
+    return dict(current) if isinstance(current, dict) else {}
 
 
 def _is_post_submit_dismissible_prompt_label(label: str) -> bool:

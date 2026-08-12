@@ -7,6 +7,7 @@ remain injectable and disabled by default.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -44,6 +45,7 @@ from instagram_login_status_classifier import (
     clean_login_probe_metadata,
     normalize_login_probe_outcome,
 )
+from auto_login_auth_forensics import AuthForensicsTrace
 from instagram_login_ui_probe import detect_login_probe_outcome_from_hierarchy, extract_login_screen_signals_from_hierarchy
 from login_challenge_runtime import (
     consume_verification_code_for_worker,
@@ -269,6 +271,7 @@ def run_login_provisioning_flow(
     operator_smoke_active_account_username: str | None = None,
     operator_smoke_allow_logout_fallback: bool = False,
     run_id: str | None = None,
+    request_id: str | None = None,
     run_type: str | None = "login_provisioning",
     device_serial: str | None = None,
     device_id: str | None = None,
@@ -301,6 +304,7 @@ def run_login_provisioning_flow(
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
     safe_run_id = str(run_id or "").strip() or None
+    safe_request_id = str(request_id or run_id or "").strip() or None
     safe_run_type = str(run_type or "login_provisioning").strip() or "login_provisioning"
     safe_device_id = str(device_id or "").strip() or None
     safe_expected_app_instance_id = str(expected_app_instance_id or "").strip() or None
@@ -312,6 +316,17 @@ def run_login_provisioning_flow(
     safe_operator_smoke_active_username = _normalize_identity_username(operator_smoke_active_account_username)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
     safe_package_name = _safe_package_name(package_name)
+    auth_forensics = AuthForensicsTrace.from_env(
+        context={
+            "request_id": safe_request_id,
+            "run_id": safe_run_id,
+            "account_id": safe_account_id,
+            "app_instance_id": safe_expected_app_instance_id,
+            "device_id": safe_device_id,
+            "worker_sha": os.environ.get("WORKER_GIT_SHA") or os.environ.get("PHONEFARM_ACTIVE_COMMIT") or "",
+            "expected_package": safe_package_name,
+        },
+    )
     bounded_post_start_wait_ms = _clamp_post_start_wait_ms(post_start_wait_ms)
     app_start_attempted = bool(start_app_before_probe) and not bool(observe_current_screen_only)
     screen_preparation_metadata = {
@@ -2430,6 +2445,7 @@ def run_login_provisioning_flow(
         signals=signals,
         post_submit_timeout_ms=post_submit_timeout_ms,
         timer=timer,
+        auth_forensics=auth_forensics,
     )
     actions_taken.append("login_form_submit")
 
@@ -2482,6 +2498,7 @@ def run_login_provisioning_flow(
             signals=signals,
             post_submit_timeout_ms=post_submit_timeout_ms,
             timer=timer,
+            auth_forensics=auth_forensics,
         )
         actions_taken.append("login_form_submit_retry")
 
@@ -4976,6 +4993,7 @@ def _execute_password_form(
     signals: dict[str, Any],
     post_submit_timeout_ms: Optional[int],
     timer: Timer,
+    auth_forensics: AuthForensicsTrace | None = None,
 ) -> Any:
     start = timer()
     result = execute_login_form_credentials(
@@ -4985,6 +5003,7 @@ def _execute_password_form(
         prevalidated_signals=signals,
         post_submit_wait_ms=0,
         post_submit_timeout_ms=post_submit_timeout_ms,
+        auth_forensics=auth_forensics,
     )
     result.timings["orchestrator_password_executor_ms"] = _elapsed_ms(start, timer())
     return result
@@ -5065,6 +5084,7 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "autofill_interference_detected",
             "fresh_form_observation_before_tap",
             "form_events_settled",
+            "auth_forensics",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
