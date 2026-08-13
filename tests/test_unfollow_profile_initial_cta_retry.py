@@ -11,8 +11,32 @@ class _Device:
     def click(self, x, y) -> None:
         self.clicks.append((x, y))
 
+    def app_current(self):
+        return {"package": "com.instagram.androif"}
+
 
 class _WideButtonDevice(_Device):
+    class _Selector:
+        def __init__(self, device):
+            self.device = device
+            self.info = {
+                "text": "Following",
+                "contentDescription": "Following e-baie.be",
+                "resourceName": "com.instagram.androif:id/profile_header_follow_button",
+            }
+
+        def exists(self, timeout=0):
+            del timeout
+            return True
+
+        def click(self):
+            self.device.clicks.append((540, 584))
+
+    def __call__(self, **selector):
+        if selector.get("resourceId") == "com.instagram.androif:id/profile_header_follow_button":
+            return self._Selector(self)
+        raise AssertionError(f"unexpected selector: {selector}")
+
     def window_size(self):
         return 1080, 2400
 

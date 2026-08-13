@@ -1585,6 +1585,56 @@ def _following_button_methods_compatible(method_a: str, method_b: str) -> bool:
     }
 
 
+def _tap_live_profile_header_following_cta(
+    d: u2.Device,
+    *,
+    detection: dict[str, Any],
+) -> tuple[bool, str]:
+    """Tap the native relationship CTA by selector, never by stale XML bounds.
+
+    Profile content can finish expanding after two identical hierarchy dumps.
+    A coordinate captured before that final reflow may then land on a bio link.
+    UiAutomator's selector resolves the current node at click time, which keeps
+    the tap attached to Instagram's native profile-header relationship button.
+    """
+    resource_id = str(detection.get("resource_id") or "").strip()
+    if not _profile_header_following_cta_owned(resource_id):
+        return False, "live_cta_resource_not_profile_header_owned"
+
+    expected_package = resource_id.split(":id/", 1)[0] if ":id/" in resource_id else ""
+    try:
+        current_package = str((d.app_current() or {}).get("package") or "").strip()
+    except Exception:
+        current_package = ""
+    if expected_package and current_package and current_package != expected_package:
+        return False, "live_cta_foreground_package_mismatch"
+
+    try:
+        selector = d(resourceId=resource_id)
+        if not selector.exists(timeout=0):
+            return False, "live_cta_selector_missing"
+        info = dict(selector.info or {})
+    except Exception:
+        return False, "live_cta_selector_probe_failed"
+
+    live_resource_id = str(info.get("resourceName") or resource_id).strip()
+    live_text = str(info.get("text") or "").strip()
+    live_content_desc = str(info.get("contentDescription") or "").strip()
+    label_ok, _ = _following_button_label_match(
+        live_text,
+        live_content_desc,
+        expected_target_username=str(detection.get("expected_target_username") or ""),
+    )
+    if not _profile_header_following_cta_owned(live_resource_id) or not label_ok:
+        return False, "live_cta_semantic_identity_mismatch"
+
+    try:
+        selector.click()
+    except Exception:
+        return False, "live_cta_selector_click_failed"
+    return True, "live_profile_header_selector"
+
+
 def _retry_following_button_after_bounds_shift(
     d: u2.Device,
     *,
@@ -2077,8 +2127,33 @@ def open_unfollow_actions_sheet_from_profile_probe(
     bounds = refreshed_bounds
     tap_x = int(refreshed.get("tap_x") or refreshed.get("center_x") or 0)
     tap_y = int(refreshed.get("tap_y") or refreshed.get("center_y") or 0)
+    selector_tapped, selector_reason = _tap_live_profile_header_following_cta(
+        d,
+        detection={**refreshed, "expected_target_username": expected_target_username},
+    )
+    live_selector_required = ":id/" in str(refreshed.get("resource_id") or "")
+    if not selector_tapped and (
+        selector_reason == "live_cta_foreground_package_mismatch"
+        or live_selector_required
+    ):
+        out = {
+            "ok": False,
+            "failure_reason": selector_reason,
+            "expected_target_username": expected_target_username,
+            "following_detection_method": method,
+            "unfollow_option_visible": False,
+            "sheet_context_signals": {},
+            "bounds": bounds,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+            "profile_exact_confirmed": profile_exact_confirmed,
+            "terminal_reason": "following_cta_surface_not_stable",
+        }
+        log("info", "unfollow_actions_sheet_open_failed", **out)
+        return out
     try:
-        d.click(tap_x, tap_y)
+        if not selector_tapped:
+            d.click(tap_x, tap_y)
     except Exception as exc:
         out = {
             "ok": False,
@@ -2119,6 +2194,8 @@ def open_unfollow_actions_sheet_from_profile_probe(
         center_delta_x=delta_x,
         center_delta_y=delta_y,
         bounds_shift_px=bounds_shift_px,
+        tap_dispatch_method=(selector_reason if selector_tapped else "fresh_xml_bounds_fallback"),
+        live_selector_failure_reason=("" if selector_tapped else selector_reason),
     )
 
     time.sleep(0.85)

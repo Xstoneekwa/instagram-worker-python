@@ -26,12 +26,17 @@ class _MissingElement:
 
 
 class _LiveElement:
-    def __init__(self, info):
+    def __init__(self, info, clicks=None):
         self.info = info
+        self._clicks = clicks
 
     def exists(self, timeout=0):
         del timeout
         return True
+
+    def click(self):
+        if self._clicks is not None:
+            self._clicks.append("selector")
 
 
 class _XmlDevice:
@@ -52,6 +57,9 @@ class _XmlDevice:
 
     def click(self, x, y):
         self.clicks.append((x, y))
+
+    def app_current(self):
+        return {"package": "com.instagram.android"}
 
 
 class _AccessibilityDevice(_XmlDevice):
@@ -87,6 +95,62 @@ class _SuggestedAccessibilityDevice(_XmlDevice):
 
 
 class FollowingCtaContractTests(unittest.TestCase):
+    def test_native_profile_cta_is_clicked_by_live_selector_after_xml_revalidation(self):
+        class _LiveCtaDevice(_XmlDevice):
+            def __call__(self, **selector):
+                if selector.get("resourceId") == "com.instagram.android:id/profile_header_follow_button":
+                    return _LiveElement(
+                        {
+                            "text": "Following",
+                            "contentDescription": "Following target",
+                            "resourceName": "com.instagram.android:id/profile_header_follow_button",
+                            "className": "android.widget.Button",
+                            "clickable": True,
+                        },
+                        self.clicks,
+                    )
+                return _MissingElement()
+
+        device = _LiveCtaDevice(_profile_xml())
+        with patch.object(
+            probe,
+            "_detect_actions_sheet_signals",
+            return_value={"unfollow_visible": True, "unfollow_text": "Unfollow"},
+        ):
+            out = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="target",
+                profile_exact_confirmed=True,
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(device.clicks, ["selector"])
+
+    def test_external_foreground_blocks_cta_tap_without_coordinate_fallback(self):
+        class _ExternalDevice(_XmlDevice):
+            def app_current(self):
+                return {"package": "com.google.android.apps.maps"}
+
+        device = _ExternalDevice(_profile_xml())
+        out = probe.open_unfollow_actions_sheet_from_profile_probe(
+            device,
+            expected_target_username="target",
+            profile_exact_confirmed=True,
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_reason"], "live_cta_foreground_package_mismatch")
+        self.assertEqual(device.clicks, [])
+
+    def test_missing_live_native_selector_fails_closed_without_stale_coordinate_tap(self):
+        device = _XmlDevice(_profile_xml())
+        out = probe.open_unfollow_actions_sheet_from_profile_probe(
+            device,
+            expected_target_username="target",
+            profile_exact_confirmed=True,
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_reason"], "live_cta_selector_missing")
+        self.assertEqual(device.clicks, [])
+
     def test_cta_present_immediately_is_detected_from_xml(self):
         out = probe.detect_profile_following_button_for_unfollow(
             _XmlDevice(_profile_xml()),
