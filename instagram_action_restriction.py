@@ -369,6 +369,21 @@ def guard_instagram_action_rate_limit(
 ) -> RestrictionClassification:
     """Raise after atomically pausing/publishing a confirmed restriction."""
     xml = _dump_hierarchy(d) if hierarchy_xml is None else str(hierarchy_xml or "")
+    # Privacy consent is a global interaction boundary, not an action-rate
+    # restriction.  Check it first so no caller can tap through the overlay or
+    # count a business receipt.  The shared detector deliberately never clicks
+    # the consent CTA.
+    from instagram_ads_data_consent_popup import guard_instagram_ads_data_consent_popup
+
+    guard_instagram_ads_data_consent_popup(
+        d,
+        hierarchy_xml=xml,
+        package_name=_current_package(d),
+        context=_RUNTIME_CONTEXT,
+        phase=phase,
+        preceding_action=preceding_action,
+        visual_text=visual_text,
+    )
     result = classify_instagram_action_rate_limit(
         xml,
         visual_text=visual_text,

@@ -79,3 +79,27 @@ device locks valides ou tick locks `started`. Le contrôle est exécuté avant l
 switch et de nouveau avant tout signal envoyé au dispatcher. Une indisponibilité
 Supabase bloque également l'opération. Cette barrière empêche un déploiement de
 transformer une reprise canonique en arrêt `SIGTERM`/143 au milieu du bootstrap.
+
+## Popup Instagram de consentement publicitaire
+
+La modale Instagram `Choose if we process your data for ads` est une frontière
+globale d'intervention humaine. Le détecteur canonique combine le titre, le CTA
+`Get started`, le corps observé et le package Instagram. Le Worker ne choisit
+jamais le consentement et publie un incident/action opérateur idempotent avec
+compte, device et app-instance.
+
+- En Auto Login, un username propre encore lisible et exactement identique
+  permet le passage de l'Identity Guard puis la persistance `connected`; la
+  demande opérateur reste ouverte.
+- Sans preuve exacte, la session reste authentifiée mais
+  `identity_pending_popup`, sans retour au formulaire ni relecture des
+  credentials. Après traitement manuel, la reprise réobserve le profil propre
+  dans la même lignée.
+- Avant toute action Follow, Unfollow, DM/Welcome, Like ou autre geste métier,
+  la modale produit un arrêt `partial_resumable` sans tap, sans faux reçu et
+  sans incrément de compteur.
+
+Reasons stables :
+
+- `instagram_ads_data_consent_popup_identity_pending`
+- `instagram_ads_data_consent_popup_business_action_paused`

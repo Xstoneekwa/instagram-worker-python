@@ -26180,8 +26180,34 @@ def main() -> int:
     try:
         return _main_impl()
     except Exception as exc:
+        from instagram_ads_data_consent_popup import (
+            EXIT_CODE as ADS_DATA_CONSENT_EXIT_CODE,
+            InstagramAdsDataConsentPopupDetected,
+        )
         from instagram_action_restriction import InstagramActionRestrictionDetected
 
+        if isinstance(exc, InstagramAdsDataConsentPopupDetected):
+            summary = dict(exc.summary)
+            run_id = str(summary.get("run_id") or "")
+            if run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="stopped",
+                    # The popup interrupts before a business gesture.  It is
+                    # neither a success nor an action failure.
+                    totals={"total": 0, "success": 0, "failed": 0},
+                    performance_summary=summary,
+                )
+            log(
+                "warning",
+                "ads_data_consent_session_safely_paused",
+                run_id=run_id or None,
+                request_id=summary.get("request_id"),
+                reason=summary.get("reason"),
+                no_false_action_receipt=True,
+                resume_recommended=True,
+            )
+            return _return_with_cleanup(exc.device, ADS_DATA_CONSENT_EXIT_CODE)
         if not isinstance(exc, InstagramActionRestrictionDetected):
             raise
         summary = dict(exc.summary)

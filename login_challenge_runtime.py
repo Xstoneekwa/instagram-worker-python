@@ -39,6 +39,11 @@ def publish_login_challenge_pending_incident(
     reason: str,
     dashboard_action_type: str | None,
     masked_email_present: bool | None = None,
+    request_id: str | None = None,
+    device_id: str | None = None,
+    app_instance_id: str | None = None,
+    clone: str | None = None,
+    detected_at: str | None = None,
 ) -> dict[str, Any]:
     channel = str(challenge_type or "").strip().lower()
     channel_label = {
@@ -47,12 +52,20 @@ def publish_login_challenge_pending_incident(
         "whatsapp": "WhatsApp",
         "authenticator_app": "Authenticator app",
     }.get(channel, "Unknown")
+    ads_data_consent_popup = str(screen_type or "").strip() == "instagram_ads_data_consent_popup"
     incident_type = (
+        "instagram_ads_data_consent_popup_requires_operator"
+        if ads_data_consent_popup
+        else
         "login_verification_code_required"
         if dashboard_action_type == "enter_email_verification_code"
         else "login_challenge_pending"
     )
-    dedupe_key = f"account:{account_id}:login_challenge:{incident_type}"
+    dedupe_key = (
+        f"account:{account_id}:instagram_ads_data_consent_popup"
+        if ads_data_consent_popup
+        else f"account:{account_id}:login_challenge:{incident_type}"
+    )
     return publish_account_incident(
         incident_type=incident_type,
         dedupe_key=dedupe_key,
@@ -61,15 +74,23 @@ def publish_login_challenge_pending_incident(
         account_id=account_id,
         account_username=expected_username,
         run_id=run_id,
+        device_id=device_id,
         source="login_provisioner",
         reason=reason,
         action_required=dashboard_action_type,
         safe_client_message=(
+            'Instagram affiche « Choose if we process your data for ads ». Une action opérateur est requise.'
+            if ads_data_consent_popup
+            else
             f"Instagram requires a verification code to continue signing in. Channel: {channel_label}."
             if dashboard_action_type == "enter_email_verification_code"
             else "Instagram is showing a verification challenge that requires human review."
         ),
         admin_message=(
+            'Ouvrir la Phone View, traiter manuellement la popup « Choose if we process your data for ads » '
+            'via « Get started », puis reprendre la vérification.'
+            if ads_data_consent_popup
+            else
             f"Verification-code challenge detected after password submit. Channel: {channel_label}."
             if dashboard_action_type == "enter_email_verification_code"
             else "Unsupported post-submit login challenge detected."
@@ -82,6 +103,19 @@ def publish_login_challenge_pending_incident(
             "dashboard_action_type": dashboard_action_type,
             "masked_email_present": masked_email_present,
             "human_review_required": dashboard_action_type == "review_login_challenge",
+            "popup_type": "instagram_ads_data_consent_popup" if ads_data_consent_popup else None,
+            "popup_title": "Choose if we process your data for ads" if ads_data_consent_popup else None,
+            "recommended_action": (
+                "Open Phone View, handle the ads-data choice manually, then resume identity verification."
+                if ads_data_consent_popup
+                else None
+            ),
+            "automatic_cta_click_allowed": False if ads_data_consent_popup else None,
+            "request_id": request_id,
+            "device_id": device_id,
+            "app_instance_id": app_instance_id,
+            "clone": clone,
+            "detected_at": detected_at,
         },
     )
 

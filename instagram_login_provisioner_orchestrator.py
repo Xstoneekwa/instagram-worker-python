@@ -46,6 +46,10 @@ from instagram_login_status_classifier import (
     normalize_login_probe_outcome,
 )
 from auto_login_auth_forensics import AuthForensicsTrace
+from instagram_ads_data_consent_popup import (
+    IDENTITY_PENDING_REASON as ADS_DATA_CONSENT_IDENTITY_PENDING_REASON,
+    POPUP_TYPE as ADS_DATA_CONSENT_POPUP_TYPE,
+)
 from instagram_login_ui_probe import detect_login_probe_outcome_from_hierarchy, extract_login_screen_signals_from_hierarchy
 from login_challenge_runtime import (
     consume_verification_code_for_worker,
@@ -67,6 +71,10 @@ TRANSIENT_RETRY_FAILURES = {
     "input_failed",
     "submit_failed",
 }
+
+
+def _ads_data_consent_identity_pending(reason: str | None) -> bool:
+    return str(reason or "").strip() == ADS_DATA_CONSENT_IDENTITY_PENDING_REASON
 CREDENTIALS_MISSING_REASONS = {
     "credentials_missing",
     "credentials_not_found",
@@ -394,6 +402,7 @@ def run_login_provisioning_flow(
         failure_timings: dict[str, Any] | None = None,
         failure_warnings: list[str] | None = None,
     ) -> tuple[dict[str, Any], LoginProvisioningFlowResult | None]:
+        handoff_metadata = {**screen_preparation_metadata, **dict(extra_metadata or {})}
         identity_metadata, identity_failure_reason = _canonical_post_auth_identity_handoff(
             d,
             verifier=identity_verifier,
@@ -402,7 +411,7 @@ def run_login_provisioning_flow(
             expected_package_name=safe_package_name,
             run_id=safe_run_id,
             run_type=safe_run_type,
-            extra_metadata=extra_metadata,
+            extra_metadata=handoff_metadata,
         )
         merged_metadata = dict(identity_metadata)
         if bool(identity_metadata.get("expected_identity_verified")):
@@ -415,19 +424,24 @@ def run_login_provisioning_flow(
             }, None
 
         exact_mismatch = identity_failure_reason == "active_instagram_account_mismatch"
+        popup_pending = _ads_data_consent_identity_pending(identity_failure_reason)
         failure = _finalize(
             ok=False,
             completed=True,
-            final_outcome="identity_verification_failed",
+            final_outcome="verification_pending" if popup_pending else "identity_verification_failed",
             reason=identity_failure_reason,
             failure_reason=identity_failure_reason,
-            final_login_status="mismatch" if exact_mismatch else "logged_out",
-            final_provisioning_status="blocked" if exact_mismatch else "login_pending",
-            final_onboarding_status="blocked" if exact_mismatch else "credentials_submitted",
+            final_login_status=("mismatch" if exact_mismatch else "verification_pending" if popup_pending else "logged_out"),
+            final_provisioning_status=("blocked" if exact_mismatch else "login_verification_pending" if popup_pending else "login_pending"),
+            final_onboarding_status=("blocked" if exact_mismatch else "verification_pending" if popup_pending else "credentials_submitted"),
             dashboard_action_type=(
-                "review_logged_in_account_mismatch" if exact_mismatch else "retry_provisioning"
+                "review_logged_in_account_mismatch"
+                if exact_mismatch
+                else "review_login_challenge"
+                if popup_pending
+                else "retry_provisioning"
             ),
-            should_publish_status=False,
+            should_publish_status=popup_pending,
             account_id=safe_account_id,
             expected_username=safe_expected_username,
             actions_taken=[*actions_taken, "verify_connected_account_identity"],
@@ -5684,17 +5698,28 @@ def _verify_connected_identity_before_ready(
     expected_package_name: str,
     run_id: str | None,
     run_type: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> Any:
     try:
-        return verifier(
-            d,
-            expected_account_username=expected_username,
-            expected_package_name=expected_package_name,
-            account_id=account_id,
-            run_id=run_id,
-            run_type=run_type,
-            stage="login_provisioning_post_login_identity",
-        )
+        kwargs: dict[str, Any] = {
+            "expected_account_username": expected_username,
+            "expected_package_name": expected_package_name,
+            "account_id": account_id,
+            "run_id": run_id,
+            "run_type": run_type,
+            "stage": "login_provisioning_post_login_identity",
+        }
+        if verifier is _default_connected_identity_verifier:
+            context = dict(extra_metadata or {})
+            kwargs.update(
+                {
+                    "request_id": context.get("request_id"),
+                    "device_id": context.get("device_id"),
+                    "expected_app_instance_id": context.get("expected_app_instance_id"),
+                    "clone": context.get("clone"),
+                }
+            )
+        return verifier(d, **kwargs)
     except Exception as exc:
         return {
             "ok": False,
@@ -5727,6 +5752,7 @@ def _canonical_post_auth_identity_handoff(
         expected_package_name=expected_package_name,
         run_id=run_id,
         run_type=run_type,
+        extra_metadata=extra_metadata,
     )
     identity_metadata = _connected_identity_safe_metadata(identity_result)
     merged_metadata = {
@@ -5779,6 +5805,21 @@ def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
             failure_reason = "expected_instagram_identity_not_verified"
     verification_method = _safe_public_text(raw.get("verification_method"))
     identity_evidence = _safe_public_text(raw.get("identity_evidence"))
+    safe_popup_meta = {
+        key: raw_meta.get(key)
+        for key in (
+            "instagram_ads_data_consent_popup_detected",
+            "popup_type",
+            "operator_action_required",
+            "automatic_cta_click_allowed",
+            "identity_pending_popup",
+            "session_authenticated",
+            "popup_incident_id",
+            "popup_dashboard_action_id",
+            "popup_detected_at",
+        )
+        if raw_meta.get(key) is not None
+    }
     return {
         "expected_identity_verified": verified,
         "identity_verification_status": "verified" if verified else "failed",
@@ -5788,6 +5829,7 @@ def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
         "profile_opened": profile_opened,
         "identity_verification_method": verification_method,
         "identity_evidence": identity_evidence,
+        **safe_popup_meta,
     }
 
 
@@ -5853,6 +5895,15 @@ def _publish_safe_metadata(extra_metadata: dict[str, Any]) -> dict[str, Any]:
         "profile_opened",
         "identity_verification_method",
         "identity_evidence",
+        "instagram_ads_data_consent_popup_detected",
+        "popup_type",
+        "operator_action_required",
+        "automatic_cta_click_allowed",
+        "identity_pending_popup",
+        "session_authenticated",
+        "popup_incident_id",
+        "popup_dashboard_action_id",
+        "popup_detected_at",
     )
     safe: dict[str, Any] = {}
     for key in allowed_keys:
@@ -5922,7 +5973,11 @@ def _sync_login_challenge_side_effects(
             dashboard_action_type=dashboard_action_type,
             run_id=run_id,
             challenge_type=str(challenge_meta.get("challenge_type") or ""),
-            screen_type=str(challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""),
+            screen_type=str(
+                ADS_DATA_CONSENT_POPUP_TYPE
+                if extra_metadata.get("instagram_ads_data_consent_popup_detected")
+                else challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""
+            ),
             masked_email_present=bool(challenge_meta.get("masked_email_present")),
             human_review_required=dashboard_action_type == "review_login_challenge",
             stage="post_submit",
@@ -5932,6 +5987,14 @@ def _sync_login_challenge_side_effects(
                 "assignment_id": extra_metadata.get("assignment_id"),
                 "credentials_version": extra_metadata.get("credentials_version"),
                 "request_id": extra_metadata.get("request_id"),
+                "popup_type": extra_metadata.get("popup_type"),
+                "popup_title": "Choose if we process your data for ads"
+                if extra_metadata.get("instagram_ads_data_consent_popup_detected")
+                else None,
+                "operator_action_required": extra_metadata.get("operator_action_required"),
+                "app_instance_id": extra_metadata.get("expected_app_instance_id"),
+                "device_id": extra_metadata.get("device_id"),
+                "clone": extra_metadata.get("clone"),
             },
         )
     except Exception:
@@ -5944,10 +6007,19 @@ def _sync_login_challenge_side_effects(
             expected_username=expected_username,
             run_id=run_id,
             challenge_type=str(challenge_meta.get("challenge_type") or ""),
-            screen_type=str(challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""),
+            screen_type=str(
+                ADS_DATA_CONSENT_POPUP_TYPE
+                if extra_metadata.get("instagram_ads_data_consent_popup_detected")
+                else challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""
+            ),
             reason=reason or final_outcome,
             dashboard_action_type=dashboard_action_type,
             masked_email_present=bool(challenge_meta.get("masked_email_present")),
+            request_id=str(extra_metadata.get("request_id") or "").strip() or None,
+            device_id=str(extra_metadata.get("device_id") or "").strip() or None,
+            app_instance_id=str(extra_metadata.get("expected_app_instance_id") or "").strip() or None,
+            clone=str(extra_metadata.get("clone") or "").strip() or None,
+            detected_at=str(extra_metadata.get("popup_detected_at") or "").strip() or None,
         )
     except Exception:
         warnings.append("login_challenge_incident_failed_safe")
@@ -6178,7 +6250,11 @@ def _submit_password_after_email_code(
         )
         actions_taken.append("verify_connected_account_identity")
         if identity_failure_reason:
-            outcome = "identity_verification_failed"
+            outcome = (
+                LoginProbeOutcome.VERIFICATION_PENDING.value
+                if _ads_data_consent_identity_pending(identity_failure_reason)
+                else "identity_verification_failed"
+            )
             warnings.append("connected_identity_not_verified_safe")
     classification = classify_login_probe_outcome(
         outcome,
@@ -6193,7 +6269,11 @@ def _submit_password_after_email_code(
         post_submit_screen_type=str(password_meta.get("post_submit_screen_type") or ""),
     )
     if identity_failure_reason:
-        dashboard_action_type = "enter_email_verification_code"
+        dashboard_action_type = (
+            "review_login_challenge"
+            if _ads_data_consent_identity_pending(identity_failure_reason)
+            else "enter_email_verification_code"
+        )
     final_reason = _final_reason_for_password_outcome(outcome, password_result, classification.reason)
     if identity_failure_reason:
         final_reason = identity_failure_reason
@@ -6457,6 +6537,7 @@ def run_email_code_resume_flow(
             expected_package_name=safe_package_name,
             run_id=run_id,
             run_type=safe_run_type,
+            extra_metadata=resume_extra_base,
         )
         identity_metadata = _connected_identity_safe_metadata(identity_result)
         if identity_metadata.get("expected_identity_verified") is not True:
@@ -6481,12 +6562,22 @@ def run_email_code_resume_flow(
             return _finalize(
                 ok=False,
                 completed=True,
-                final_outcome="identity_verification_failed",
+                final_outcome=(
+                    "verification_pending"
+                    if _ads_data_consent_identity_pending(identity_failure_reason)
+                    else "identity_verification_failed"
+                ),
                 reason=identity_failure_reason,
                 failure_reason=identity_failure_reason,
                 final_login_status="verification_pending",
                 final_provisioning_status="login_verification_pending",
                 final_onboarding_status="verification_pending",
+                dashboard_action_type=(
+                    "review_login_challenge"
+                    if _ads_data_consent_identity_pending(identity_failure_reason)
+                    else "enter_email_verification_code"
+                ),
+                should_publish_status=True,
                 account_id=safe_account_id,
                 expected_username=safe_expected_username,
                 actions_taken=[*actions_taken, "verify_connected_account_identity"],
@@ -6502,8 +6593,6 @@ def run_email_code_resume_flow(
                 timer=timer,
                 publisher=publisher,
                 publish_enabled=publish_enabled,
-                dashboard_action_type="enter_email_verification_code",
-                should_publish_status=True,
             )
         action_sync: dict[str, Any] | None = None
         if consume_from_action and action_id:

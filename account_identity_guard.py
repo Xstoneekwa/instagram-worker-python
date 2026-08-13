@@ -25,6 +25,12 @@ from instagram_login_ui_probe import (
     detect_login_probe_outcome_from_hierarchy,
     extract_login_screen_signals_from_hierarchy,
 )
+from instagram_ads_data_consent_popup import (
+    IDENTITY_PENDING_REASON as ADS_DATA_CONSENT_IDENTITY_PENDING_REASON,
+    POPUP_TYPE as ADS_DATA_CONSENT_POPUP_TYPE,
+    classify_instagram_ads_data_consent_popup,
+    publish_ads_data_consent_operator_alert,
+)
 from instagram_post_verification_completion import prepare_post_verification_identity_surface
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav
@@ -770,6 +776,10 @@ def verify_active_instagram_account_matches_expected(
     account_id: str | None = None,
     run_type: str | None = None,
     run_id: str | None = None,
+    request_id: str | None = None,
+    device_id: str | None = None,
+    expected_app_instance_id: str | None = None,
+    clone: str | None = None,
     stage: str = "account_identity_preflight",
 ) -> AccountIdentityCheckResult:
     """Open/inspect own profile and require an exact handle match."""
@@ -805,6 +815,84 @@ def verify_active_instagram_account_matches_expected(
         return result
 
     post_verification_metadata: dict[str, Any] = {}
+
+    def _ads_data_consent_identity_boundary(hierarchy: str) -> AccountIdentityCheckResult | None:
+        classification = classify_instagram_ads_data_consent_popup(
+            hierarchy,
+            package_name=str(
+                expected_package_name
+                or getattr(config, "INSTAGRAM_PACKAGE", "")
+                or ""
+            ),
+        )
+        if not classification.detected:
+            return None
+        actual_raw, method, extraction_meta = _extract_own_profile_username_from_hierarchy(hierarchy)
+        actual = normalize_account_username(actual_raw)
+        exact_profile_proof = bool(
+            actual
+            and actual == expected
+            and method in {
+                "action_bar_title",
+                "profile_header_username",
+                "username_resource_id",
+            }
+        )
+        alert = publish_ads_data_consent_operator_alert(
+            account_id=str(account_id or ""),
+            account_username=expected_raw,
+            run_id=run_id,
+            request_id=request_id,
+            device_id=device_id,
+            app_instance_id=expected_app_instance_id,
+            clone=clone,
+            phase="login_identity_guard",
+            preceding_action="post_auth_handoff",
+            identity_pending=not exact_profile_proof,
+        )
+        popup_meta = {
+            **extraction_meta,
+            **post_verification_metadata,
+            "popup_type": ADS_DATA_CONSENT_POPUP_TYPE,
+            "instagram_ads_data_consent_popup_detected": True,
+            "operator_action_required": True,
+            "automatic_cta_click_allowed": False,
+            "session_authenticated": True,
+            "identity_pending_popup": not exact_profile_proof,
+            "popup_incident_id": alert.get("incident_id"),
+            "popup_dashboard_action_id": alert.get("dashboard_action_id"),
+            "popup_detected_at": alert.get("detected_at"),
+            "popup_classification": classification.to_dict(),
+            "profile_opened": exact_profile_proof,
+        }
+        if exact_profile_proof:
+            log(
+                "info",
+                "ads_data_consent_popup_identity_exact_match",
+                account_id=account_id,
+                run_id=run_id,
+                expected_account_username=expected_raw,
+                verification_method=method,
+            )
+            return AccountIdentityCheckResult(
+                ok=True,
+                expected_account_username=expected_raw,
+                actual_logged_in_username=actual_raw,
+                expected_instagram_user_id=expected_stable_id,
+                identity_evidence="username_exact_match_behind_ads_data_consent_popup",
+                rename_disambiguation_status="not_needed_username_matched",
+                verification_method=f"own_profile_username_exact_behind_popup:{method}",
+                meta=popup_meta,
+            )
+        return _identity_failure_result(
+            expected_raw=expected_raw,
+            expected_stable_id=expected_stable_id,
+            failure_reason=ADS_DATA_CONSENT_IDENTITY_PENDING_REASON,
+            verification_method="ads_data_consent_popup_identity_pending",
+            actual_raw=actual_raw,
+            meta=popup_meta,
+        )
+
     if stage == "login_provisioning_post_login_identity" or str(run_type or "").startswith("login_"):
         completion = prepare_post_verification_identity_surface(
             d,
@@ -821,6 +909,22 @@ def verify_active_instagram_account_matches_expected(
             "post_verification_fingerprint_changed": completion.fingerprint_changed,
             **completion.metadata,
         }
+        popup_hierarchy = str(completion.metadata.get("observed_hierarchy") or "")
+        if popup_hierarchy:
+            # The completion gate has already proved that no gesture was sent.
+            # Reuse its exact observation instead of performing another dump.
+            post_verification_metadata.pop("observed_hierarchy", None)
+            popup_identity = _ads_data_consent_identity_boundary(popup_hierarchy)
+            if popup_identity is not None:
+                if not popup_identity.ok:
+                    _log_identity_failure(
+                        popup_identity,
+                        account_id=account_id,
+                        run_type=run_type,
+                        run_id=run_id,
+                        stage=stage,
+                    )
+                return popup_identity
         if not completion.safe_for_identity_guard:
             result = _identity_failure_result(
                 expected_raw=expected_raw,
@@ -875,6 +979,17 @@ def verify_active_instagram_account_matches_expected(
         return pre_profile
 
     _, _, pre_hierarchy = pre_profile
+    popup_identity = _ads_data_consent_identity_boundary(pre_hierarchy)
+    if popup_identity is not None:
+        if not popup_identity.ok:
+            _log_identity_failure(
+                popup_identity,
+                account_id=account_id,
+                run_type=run_type,
+                run_id=run_id,
+                stage=stage,
+            )
+        return popup_identity
 
     if not open_own_profile_from_bottom_nav(
         d,
@@ -915,6 +1030,17 @@ def verify_active_instagram_account_matches_expected(
         return result
 
     hierarchy = _dump_hierarchy(d)
+    popup_identity = _ads_data_consent_identity_boundary(hierarchy)
+    if popup_identity is not None:
+        if not popup_identity.ok:
+            _log_identity_failure(
+                popup_identity,
+                account_id=account_id,
+                run_type=run_type,
+                run_id=run_id,
+                stage=stage,
+            )
+        return popup_identity
     actual_raw, method, meta = _extract_own_profile_username_from_hierarchy(hierarchy)
     actual = normalize_account_username(actual_raw)
     if actual and actual == expected:

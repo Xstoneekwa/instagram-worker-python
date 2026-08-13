@@ -110,6 +110,20 @@ def upsert_login_challenge_dashboard_action(
         return {"published": False, "reason": "invalid_payload", "action_type": atype or None}
 
     spec = dict(LOGIN_CHALLENGE_ACTIONS[atype])
+    ads_data_consent_popup = str(screen_type or "").strip() == "instagram_ads_data_consent_popup"
+    if atype == "review_login_challenge" and ads_data_consent_popup:
+        spec.update(
+            {
+                "title": "Choix de traitement des données publicitaires Instagram",
+                "safe_client_message": (
+                    'Instagram affiche « Choose if we process your data for ads ». '
+                    "Une action opérateur est requise avant de poursuivre."
+                ),
+                "action_label": "Ouvrir la Phone View",
+                "audience": "admin",
+                "requires_client_action": False,
+            }
+        )
     channel = str(challenge_type or "").strip().lower()
     if not channel and str(screen_type or "").strip() == "email_code_challenge":
         channel = "email"
@@ -148,7 +162,11 @@ def upsert_login_challenge_dashboard_action(
             "ttl_minutes": EMAIL_CODE_ACTION_TTL_MINUTES if action_expires_at else None,
         }
     )
-    dedupe_key = f"account:{aid}:dashboard_action:{atype}"
+    dedupe_key = (
+        f"account:{aid}:dashboard_action:{atype}:instagram_ads_data_consent_popup"
+        if ads_data_consent_popup
+        else f"account:{aid}:dashboard_action:{atype}"
+    )
     deep_link = f"/instagram-dashboard/credentials-actions?account_id={aid}"
 
     try:

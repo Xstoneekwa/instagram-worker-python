@@ -15,6 +15,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from instagram_ads_data_consent_popup import (
+    POPUP_TYPE as ADS_DATA_CONSENT_POPUP_TYPE,
+    classify_instagram_ads_data_consent_popup,
+)
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 from logs import log
 
@@ -67,6 +71,28 @@ def prepare_post_verification_identity_surface(
 
     for _ in range(max(0, int(max_recoveries)) + 1):
         hierarchy = _dump_hierarchy(d)
+        ads_popup = classify_instagram_ads_data_consent_popup(
+            hierarchy,
+            package_name=expected_package_name,
+        )
+        if ads_popup.detected:
+            # This is a privacy choice, not a dismissible onboarding surface.
+            # Return the untouched hierarchy to the identity guard so it can
+            # prove (or refuse to assume) the exact account behind the overlay.
+            return PostVerificationCompletionResult(
+                safe_for_identity_guard=True,
+                screen_type=ADS_DATA_CONSENT_POPUP_TYPE,
+                recovery_count=len(recovered),
+                recovered_screen_types=tuple(recovered),
+                fingerprint_changed=last_changed,
+                metadata={
+                    "ads_data_consent_popup_detected": True,
+                    "automatic_cta_click_allowed": False,
+                    "operator_action_required": True,
+                    "observed_hierarchy": hierarchy,
+                    "popup_classification": ads_popup.to_dict(),
+                },
+            )
         screen_type, signals = classify_post_verification_surface(
             hierarchy,
             expected_package_name=expected_package_name,
