@@ -225,6 +225,30 @@ ROUTING_SCREEN_TYPES = {
 }
 DEFAULT_USE_ANOTHER_PROFILE_INTERVAL_MS = 1000
 
+# Every authenticated-session variant is an entry into the same success
+# handoff.  This registry is an executable architecture contract: variants may
+# have different navigation/recovery before authentication, but they may not
+# define an independent connected terminal.
+CANONICAL_POST_AUTH_SUCCESS_VARIANTS = frozenset(
+    {
+        "direct_login",
+        "already_connected",
+        "continue_as_candidate",
+        "wrong_account_replacement",
+        "use_another_profile",
+        "returned_login_form",
+        "credential_form",
+        "samsung_password_prompt",
+        "save_login_info",
+        "location_services",
+        "setup_new_device",
+        "email",
+        "sms",
+        "whatsapp",
+        "authenticator",
+    }
+)
+
 
 @dataclass(frozen=True)
 class LoginProvisioningFlowResult:
@@ -364,13 +388,13 @@ def run_login_provisioning_flow(
         "would_submit_password": False,
     }
 
-    def _connected_identity_gate(
+    def _canonical_post_auth_success_handoff(
         extra_metadata: dict[str, Any],
         *,
         failure_timings: dict[str, Any] | None = None,
         failure_warnings: list[str] | None = None,
     ) -> tuple[dict[str, Any], LoginProvisioningFlowResult | None]:
-        identity_result = _verify_connected_identity_before_ready(
+        identity_metadata, identity_failure_reason = _canonical_post_auth_identity_handoff(
             d,
             verifier=identity_verifier,
             account_id=safe_account_id,
@@ -378,17 +402,18 @@ def run_login_provisioning_flow(
             expected_package_name=safe_package_name,
             run_id=safe_run_id,
             run_type=safe_run_type,
+            extra_metadata=extra_metadata,
         )
-        identity_metadata = _connected_identity_safe_metadata(identity_result)
-        merged_metadata = {**extra_metadata, **identity_metadata}
+        merged_metadata = dict(identity_metadata)
         if bool(identity_metadata.get("expected_identity_verified")):
             actions_taken.append("verify_connected_account_identity")
-            return merged_metadata, None
+            return {
+                **merged_metadata,
+                "own_profile_opened": True,
+                "connected_only_after_identity": True,
+                "client_finalization_eligible": True,
+            }, None
 
-        identity_failure_reason = str(
-            identity_metadata.get("identity_verification_failure_reason")
-            or "expected_instagram_identity_not_verified"
-        )
         exact_mismatch = identity_failure_reason == "active_instagram_account_mismatch"
         failure = _finalize(
             ok=False,
@@ -450,7 +475,7 @@ def run_login_provisioning_flow(
                 final_outcome="blocked",
                 reason="post_login_location_services_prompt_dismiss_failed",
                 failure_reason="post_login_location_services_prompt_dismiss_failed",
-                final_login_status="connected",
+                final_login_status="logged_out",
                 final_provisioning_status="login_pending",
                 final_onboarding_status="credentials_submitted",
                 should_publish_status=False,
@@ -495,7 +520,7 @@ def run_login_provisioning_flow(
             final_outcome="blocked",
             reason="post_login_location_services_prompt_not_dismissed",
             failure_reason="post_login_location_services_prompt_not_dismissed",
-            final_login_status="connected",
+            final_login_status="logged_out",
             final_provisioning_status="login_pending",
             final_onboarding_status="credentials_submitted",
             should_publish_status=False,
@@ -724,7 +749,7 @@ def run_login_provisioning_flow(
         post_app_start_outcome = _post_action_outcome_from_signals(signals)
         if post_app_start_outcome == LoginProbeOutcome.CONNECTED.value:
             classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
-            identity_metadata, identity_failure = _connected_identity_gate(
+            identity_metadata, identity_failure = _canonical_post_auth_success_handoff(
                 {
                     **screen_preparation_metadata,
                     "selected_route": "already_connected_expected",
@@ -780,7 +805,7 @@ def run_login_provisioning_flow(
             )
     elif _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value:
         classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
-        identity_metadata, identity_failure = _connected_identity_gate(
+        identity_metadata, identity_failure = _canonical_post_auth_success_handoff(
             {
                 **screen_preparation_metadata,
                 "selected_route": "already_connected_expected",
@@ -818,7 +843,7 @@ def run_login_provisioning_flow(
         and bool(screen_preparation_metadata.get("post_login_location_services_prompt_dismissed"))
     ):
         classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
-        identity_metadata, identity_failure = _connected_identity_gate(
+        identity_metadata, identity_failure = _canonical_post_auth_success_handoff(
             {
                 **screen_preparation_metadata,
                 "selected_route": "post_login_location_prompt_connected_identity_gate",
@@ -1017,7 +1042,7 @@ def run_login_provisioning_flow(
             }
             if actual_username and actual_username.strip().lstrip("@").lower() == safe_expected_username.strip().lstrip("@").lower():
                 classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
-                identity_metadata, identity_failure = _connected_identity_gate(
+                identity_metadata, identity_failure = _canonical_post_auth_success_handoff(
                     {
                         **old_logged_in_metadata,
                         "selected_route": "already_connected_expected",
@@ -1790,7 +1815,7 @@ def run_login_provisioning_flow(
                 "would_submit_password": False,
             }
             if post_action_outcome == LoginProbeOutcome.CONNECTED.value:
-                post_action_metadata, identity_failure = _connected_identity_gate(post_action_metadata)
+                post_action_metadata, identity_failure = _canonical_post_auth_success_handoff(post_action_metadata)
                 if identity_failure is not None:
                     return identity_failure
             return _finalize(
@@ -2144,7 +2169,7 @@ def run_login_provisioning_flow(
                 "would_submit_password": False,
             }
             if post_action_outcome == LoginProbeOutcome.CONNECTED.value:
-                post_action_metadata, identity_failure = _connected_identity_gate(post_action_metadata)
+                post_action_metadata, identity_failure = _canonical_post_auth_success_handoff(post_action_metadata)
                 if identity_failure is not None:
                     return identity_failure
             return _finalize(
@@ -2288,6 +2313,14 @@ def run_login_provisioning_flow(
         if not _signals_confirm_login_form(signals):
             if post_username_outcome:
                 classification = classify_login_probe_outcome(post_username_outcome)
+                identity_metadata: dict[str, Any] = {}
+                identity_failure = None
+                if post_username_outcome == LoginProbeOutcome.CONNECTED.value:
+                    identity_metadata, identity_failure = _canonical_post_auth_success_handoff(
+                        {**old_logged_in_metadata, **post_continue_metadata}
+                    )
+                    if identity_failure is not None:
+                        return identity_failure
                 return _finalize(
                     ok=post_username_outcome == LoginProbeOutcome.CONNECTED.value,
                     completed=post_username_outcome in {
@@ -2314,7 +2347,11 @@ def run_login_provisioning_flow(
                     actions_taken=actions_taken,
                     timings=timings,
                     warnings=warnings,
-                    extra_metadata={**old_logged_in_metadata, **post_continue_metadata},
+                    extra_metadata={
+                        **old_logged_in_metadata,
+                        **post_continue_metadata,
+                        **identity_metadata,
+                    },
                     total_start=total_start,
                     timer=timer,
                     publisher=publisher,
@@ -2644,7 +2681,7 @@ def run_login_provisioning_flow(
         **password_result_metadata,
     }
     if outcome == LoginProbeOutcome.CONNECTED.value:
-        final_metadata, identity_failure = _connected_identity_gate(
+        final_metadata, identity_failure = _canonical_post_auth_success_handoff(
             final_metadata,
             failure_timings=_merge_timings(timings, password_result.timings),
             failure_warnings=[*warnings, *password_result.warnings],
@@ -5669,6 +5706,43 @@ def _verify_connected_identity_before_ready(
         }
 
 
+def _canonical_post_auth_identity_handoff(
+    d: Any,
+    *,
+    verifier: ConnectedIdentityVerifier,
+    account_id: str,
+    expected_username: str,
+    expected_package_name: str,
+    run_id: str | None,
+    run_type: str,
+    extra_metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Run the sole post-auth identity gate shared by every login variant."""
+
+    identity_result = _verify_connected_identity_before_ready(
+        d,
+        verifier=verifier,
+        account_id=account_id,
+        expected_username=expected_username,
+        expected_package_name=expected_package_name,
+        run_id=run_id,
+        run_type=run_type,
+    )
+    identity_metadata = _connected_identity_safe_metadata(identity_result)
+    merged_metadata = {
+        **dict(extra_metadata or {}),
+        **identity_metadata,
+        "canonical_post_auth_handoff_reached": True,
+        "post_auth_handoff_stage": "identity_guard",
+    }
+    if bool(identity_metadata.get("expected_identity_verified")):
+        return merged_metadata, ""
+    return merged_metadata, str(
+        identity_metadata.get("identity_verification_failure_reason")
+        or "expected_instagram_identity_not_verified"
+    )
+
+
 def _connected_identity_safe_metadata(result: Any) -> dict[str, Any]:
     if hasattr(result, "to_dict") and callable(result.to_dict):
         raw = result.to_dict()
@@ -6092,7 +6166,7 @@ def _submit_password_after_email_code(
     identity_metadata: dict[str, Any] = {}
     identity_failure_reason = ""
     if outcome == LoginProbeOutcome.CONNECTED.value:
-        identity_result = _verify_connected_identity_before_ready(
+        identity_metadata, identity_failure_reason = _canonical_post_auth_identity_handoff(
             d,
             verifier=connected_identity_verifier,
             account_id=safe_account_id,
@@ -6100,14 +6174,10 @@ def _submit_password_after_email_code(
             expected_package_name=safe_package_name,
             run_id=run_id,
             run_type=run_type,
+            extra_metadata=resume_extra_metadata,
         )
-        identity_metadata = _connected_identity_safe_metadata(identity_result)
         actions_taken.append("verify_connected_account_identity")
-        if identity_metadata.get("expected_identity_verified") is not True:
-            identity_failure_reason = str(
-                identity_metadata.get("identity_verification_failure_reason")
-                or "expected_instagram_identity_not_verified"
-            )
+        if identity_failure_reason:
             outcome = "identity_verification_failed"
             warnings.append("connected_identity_not_verified_safe")
     classification = classify_login_probe_outcome(

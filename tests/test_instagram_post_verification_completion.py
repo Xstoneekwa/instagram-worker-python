@@ -18,6 +18,12 @@ HOME_XML = (
     '<node package="com.instagram.androig" resource-id="com.instagram.androig:id/profile_tab" content-desc="Profile" />'
     "</node></hierarchy>"
 )
+MODERN_HOME_XML = (
+    '<hierarchy><node package="com.instagram.androig" text="Instagram" />'
+    '<node package="com.instagram.androig" text="Your story" />'
+    '<node package="com.instagram.androig" text="Follow" />'
+    "</hierarchy>"
+)
 PROFILE_XML = (
     '<hierarchy><node package="com.instagram.androig" text="bmybusinesses" '
     'resource-id="com.instagram.androig:id/action_bar_title" /></hierarchy>'
@@ -174,6 +180,42 @@ class PostVerificationCompletionTests(unittest.TestCase):
             )
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_reason, "own_profile_open_failed")
+
+    def test_modern_home_without_legacy_tab_ids_enters_identity_handoff(self) -> None:
+        screen, signals = classify_post_verification_surface(
+            MODERN_HOME_XML,
+            expected_package_name=PACKAGE,
+        )
+        self.assertEqual(screen, "active_account_home")
+        self.assertEqual(
+            signals["connected_surface_proof"],
+            "instagram_authenticated_surface_classifier",
+        )
+
+    def test_modern_home_is_not_connected_without_exact_identity_guard(self) -> None:
+        device = FakeDevice([MODERN_HOME_XML, MODERN_HOME_XML])
+        with (
+            patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
+            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=False),
+        ):
+            result = identity_guard.verify_active_instagram_account_matches_expected(
+                device,
+                expected_account_username="bmybusinesses",
+                run_type="login_provisioning",
+                stage="login_provisioning_post_login_identity",
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "own_profile_open_failed")
+
+    def test_modern_home_wrong_package_never_enters_identity_handoff(self) -> None:
+        wrong = MODERN_HOME_XML.replace(PACKAGE, "com.instagram.android")
+        result = prepare_post_verification_identity_surface(
+            FakeDevice([wrong]),
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(result.failure_reason, "post_verification_human_assistance_required")
 
     def test_location_recovery_still_requires_exact_identity_guard(self) -> None:
         device = FakeDevice([LOCATION_XML, HOME_XML, HOME_XML, HOME_XML, PROFILE_XML])

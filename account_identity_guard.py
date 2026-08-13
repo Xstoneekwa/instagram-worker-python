@@ -562,9 +562,14 @@ def _log_identity_failure(
     run_id: str | None,
     stage: str,
 ) -> None:
+    event = (
+        "active_instagram_account_mismatch"
+        if result.failure_reason == ACCOUNT_IDENTITY_MISMATCH_REASON
+        else "account_identity_verification_failed"
+    )
     log(
         "error",
-        "active_instagram_account_mismatch",
+        event,
         account_id=account_id,
         expected_account_username=result.expected_account_username,
         expected_instagram_user_id=result.expected_instagram_user_id,

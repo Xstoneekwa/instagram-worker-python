@@ -73,7 +73,10 @@ def prepare_post_verification_identity_surface(
         )
         fingerprint = _fingerprint(hierarchy)
 
-        if screen_type in {"active_account_home", "active_account_profile"}:
+        if (
+            screen_type in {"active_account_home", "active_account_profile"}
+            and signals.get("connected_surface_proof")
+        ):
             return PostVerificationCompletionResult(
                 safe_for_identity_guard=True,
                 screen_type=screen_type,
@@ -166,10 +169,15 @@ def classify_post_verification_surface(
     screen_type = str(signals.get("screen_type") or "unknown")
     normalized = _normalized_hierarchy_text(hierarchy)
 
-    if _hierarchy_proves_connected_instagram_surface(hierarchy, expected_package_name):
+    connected_surface_proof = _connected_instagram_surface_proof(
+        hierarchy,
+        expected_package_name,
+        signals=signals,
+    )
+    if connected_surface_proof:
         if screen_type not in {"active_account_profile"}:
             screen_type = "active_account_home"
-        return screen_type, {**signals, "connected_surface_proof": "instagram_bottom_navigation"}
+        return screen_type, {**signals, "connected_surface_proof": connected_surface_proof}
 
     if _is_sync_contacts_prompt(normalized):
         return "post_login_sync_contacts_prompt", signals
@@ -183,16 +191,40 @@ def hierarchy_proves_expected_instagram_foreground(hierarchy: str, expected_pack
 
 
 def _hierarchy_proves_connected_instagram_surface(hierarchy: str, expected_package_name: str) -> bool:
+    return bool(_connected_instagram_surface_proof(hierarchy, expected_package_name))
+
+
+def _connected_instagram_surface_proof(
+    hierarchy: str,
+    expected_package_name: str,
+    *,
+    signals: dict[str, Any] | None = None,
+) -> str:
     raw = str(hierarchy or "")
     package = str(expected_package_name or "").strip()
     if package and f'package="{package}"' not in raw:
-        return False
+        return ""
     has_tab_bar = bool(re.search(r'resource-id="[^"]*:id/tab_bar"', raw))
     has_profile_tab = bool(
         re.search(r'resource-id="[^"]*:id/(?:profile_tab|tab_profile|bottom_bar_profile)"', raw)
         or re.search(r'content-desc="(?:Profile|Profil)"', raw, re.IGNORECASE)
     )
-    return has_tab_bar and has_profile_tab
+    if has_tab_bar and has_profile_tab:
+        return "instagram_bottom_navigation"
+
+    # Recent Instagram builds no longer expose the legacy tab_bar/profile_tab
+    # ids on every Home render.  Reuse the same package-bound UI classifier
+    # which already proved the authenticated Home/Profile to the credential
+    # executor.  This is only permission to ENTER the canonical identity
+    # handoff: own-profile navigation and an exact normalized username match
+    # remain mandatory before any connected state can be persisted.
+    observed = signals or extract_login_screen_signals_from_hierarchy(raw)
+    if str(observed.get("screen_type") or "") in {
+        "active_account_home",
+        "active_account_profile",
+    }:
+        return "instagram_authenticated_surface_classifier"
+    return ""
 
 
 def _is_sync_contacts_prompt(text: str) -> bool:
