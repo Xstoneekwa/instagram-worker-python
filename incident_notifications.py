@@ -217,9 +217,20 @@ def build_incident_notification_payload(incident: dict) -> dict:
     assistant_message = _safe_text(incident.get("assistant_message"))
     admin_message = _safe_text(incident.get("admin_message"))
     run_id = str(incident.get("run_id") or "").strip() or None
+    device_id = str(incident.get("device_id") or "").strip() or None
     last_seen_at = str(incident.get("last_seen_at") or "").strip() or None
     occurrence_count = incident.get("occurrence_count") or 1
     metadata = incident.get("metadata") if isinstance(incident.get("metadata"), dict) else {}
+    reason_code = _safe_text(
+        metadata.get("reason_code")
+        or incident.get("reason")
+        or incident.get("failure_reason"),
+        max_len=160,
+    ) or "unclassified"
+    operator_review_instruction = (
+        "Run interrupted — operator action required. Resolve the incident, "
+        "then explicitly set the account to Active to allow the next natural run."
+    )
 
     if str(metadata.get("domain") or "").strip().lower() == "auto_login":
         phase = _safe_text(metadata.get("phase"), max_len=80) or "unknown"
@@ -338,8 +349,12 @@ def build_incident_notification_payload(incident: dict) -> dict:
         message_parts.append(f"Last seen: {last_seen_at}")
     if action_required:
         message_parts.append(f"Action: {action_required}")
+    if status in {"open", "acknowledged", "investigating"}:
+        message_parts.append(f"Required operator action: {operator_review_instruction}")
     if run_id:
         message_parts.append(f"Run: {_short_id(run_id) or run_id}")
+    if device_id:
+        message_parts.append(f"Device: {_short_id(device_id) or device_id}")
     dashboard_url = _incident_dashboard_url(incident)
     payload = {
         "title": title,
@@ -348,10 +363,14 @@ def build_incident_notification_payload(incident: dict) -> dict:
         "incident_type": incident_type,
         "account_username": account_username,
         "account_id_short": _short_id(incident.get("account_id")),
+        "device_id_short": _short_id(device_id),
         "status": status,
         "occurrence_count": occurrence_count,
         "last_seen_at": last_seen_at,
+        "detected_at": last_seen_at,
+        "reason_code": reason_code,
         "action_required": action_required,
+        "required_operator_action": operator_review_instruction if status in {"open", "acknowledged", "investigating"} else None,
         "assistant_message": assistant_message,
         "admin_message": admin_message,
         "run_id": run_id,

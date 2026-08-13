@@ -237,6 +237,19 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertNotIn("service_role token should not leak", text)
         self.assertNotIn("<node", text)
 
+    def test_open_incident_notification_explains_two_step_recovery(self) -> None:
+        incident = {
+            **_incident("incident-1"),
+            "device_id": "a22c6048-9dde-42db-88e1-94f4619361df",
+            "reason": "account_session_phase_not_terminal",
+        }
+        payload = incident_notifications.build_incident_notification_payload(incident)
+        self.assertEqual(payload["reason_code"], "account_session_phase_not_terminal")
+        self.assertEqual(payload["detected_at"], incident["last_seen_at"])
+        self.assertTrue(payload["device_id_short"])
+        self.assertIn("Resolve the incident", payload["required_operator_action"])
+        self.assertIn("explicitly set the account to Active", payload["text"])
+
     def test_package_mismatch_notification_payload_safe_for_dry_run(self) -> None:
         payload = incident_notifications.build_incident_notification_payload(_package_mismatch_incident("incident-1"))
         text = json.dumps(payload, sort_keys=True)
