@@ -62,6 +62,7 @@ import runtime_incidents
 import supabase_client
 import deferred_projection_outbox
 import follow_persistence_receipt_replay
+import orphan_run_reconciliation
 from follow60_ordering_v2_behavioral_canary_v1 import (
     behavioral_runtime_scope_for_account,
 )
@@ -3387,6 +3388,12 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     if not cfg.enabled:
         log("error", "run_control_dispatcher_disabled")
         return 2
+
+    # Recover subprocesses that exceeded the dispatcher's maximum lifetime and
+    # have no live worker heartbeat or device lease. This is deliberately more
+    # conservative than lease expiry alone because account request leases are
+    # not renewed for the full duration of a healthy session.
+    orphan_run_reconciliation.reconcile_orphaned_active_runs(cfg)
 
     # Recover terminal sessions before startup queue preflight so stale active
     # rows cannot permanently prevent a safe dispatcher restart.
