@@ -227,6 +227,40 @@ class PostVerificationCompletionTests(unittest.TestCase):
             self.assertFalse(open_own_profile_from_bottom_nav(device))
         self.assertEqual(device.selector.click.call_count, 0)
 
+    def test_bound_clone_package_is_used_for_foreground_and_profile_resource_lookup(self) -> None:
+        clone_package = "com.instagram.androig"
+        device = FakeDevice([HOME_XML], current_package=clone_package)
+        with (
+            patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", "com.instagram.android"),
+            patch("own_profile_navigation.verify_app_foreground", return_value=True) as foreground,
+            patch("own_profile_navigation.time.sleep"),
+        ):
+            self.assertTrue(
+                open_own_profile_from_bottom_nav(
+                    device,
+                    expected_package_name=clone_package,
+                )
+            )
+        foreground.assert_called_once_with(device, clone_package)
+        self.assertEqual(device.selector.click.call_count, 1)
+
+    def test_bound_clone_package_mismatch_fails_closed(self) -> None:
+        clone_package = "com.instagram.androig"
+        device = FakeDevice([HOME_XML], current_package="com.instagram.android")
+        with (
+            patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", "com.instagram.android"),
+            patch("own_profile_navigation.verify_app_foreground", return_value=False) as foreground,
+            patch("own_profile_navigation.time.sleep"),
+        ):
+            self.assertFalse(
+                open_own_profile_from_bottom_nav(
+                    device,
+                    expected_package_name=clone_package,
+                )
+            )
+        foreground.assert_called_once_with(device, clone_package)
+        self.assertEqual(device.selector.click.call_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

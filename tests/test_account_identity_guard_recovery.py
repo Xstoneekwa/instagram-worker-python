@@ -149,7 +149,7 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
         with (
             patch.object(guard, "prepare_post_verification_identity_surface", return_value=completion) as prepare,
             patch.object(guard, "_dump_hierarchy", side_effect=[HOME_XML, PROFILE_USERNAME_XML]),
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True) as open_profile,
             patch.object(
                 guard,
                 "_extract_own_profile_username_from_hierarchy",
@@ -168,6 +168,10 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         prepare.assert_called_once_with(
+            device,
+            expected_package_name="com.instagram.androig",
+        )
+        open_profile.assert_called_once_with(
             device,
             expected_package_name="com.instagram.androig",
         )

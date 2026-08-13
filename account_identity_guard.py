@@ -871,7 +871,14 @@ def verify_active_instagram_account_matches_expected(
 
     _, _, pre_hierarchy = pre_profile
 
-    if not open_own_profile_from_bottom_nav(d):
+    if not open_own_profile_from_bottom_nav(
+        d,
+        expected_package_name=str(
+            expected_package_name
+            or getattr(config, "INSTAGRAM_PACKAGE", "")
+            or ""
+        ),
+    ):
         hierarchy = _dump_hierarchy(d)
         result = _identity_failure_result(
             expected_raw=expected_raw,

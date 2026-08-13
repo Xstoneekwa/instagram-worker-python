@@ -32,8 +32,14 @@ _PROFILE_TAB_RID_SUFFIXES: tuple[str, ...] = (
 )
 
 
-def _instagram_package_candidates(d: u2.Device) -> list[str]:
+def _instagram_package_candidates(
+    d: u2.Device,
+    expected_package_name: str | None = None,
+) -> list[str]:
     pkgs: list[str] = []
+    expected = str(expected_package_name or "").strip()
+    if expected:
+        pkgs.append(expected)
     try:
         cur = (d.app_current() or {}).get("package")
         if cur:
@@ -48,10 +54,18 @@ def _instagram_package_candidates(d: u2.Device) -> list[str]:
     return pkgs
 
 
-def open_own_profile_from_bottom_nav(d: u2.Device) -> bool:
+def open_own_profile_from_bottom_nav(
+    d: u2.Device,
+    *,
+    expected_package_name: str | None = None,
+) -> bool:
     """Open own profile via bottom navigation profile tab."""
     log("info", "welcome_baseline_own_profile_open_started")
-    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    pkg = str(
+        expected_package_name
+        or getattr(config, "INSTAGRAM_PACKAGE", "")
+        or ""
+    ).strip()
     if not verify_app_foreground(d, pkg):
         actual_package = ""
         try:
@@ -95,7 +109,7 @@ def open_own_profile_from_bottom_nav(d: u2.Device) -> bool:
             continue
 
     if not clicked:
-        for ipkg in _instagram_package_candidates(d):
+        for ipkg in _instagram_package_candidates(d, pkg):
             for suffix in _PROFILE_TAB_RID_SUFFIXES:
                 rid = f"{ipkg}:id/{suffix}"
                 try:
