@@ -65,10 +65,16 @@ class FollowersEntrySearchSurfaceRecoveryTest(unittest.TestCase):
         self.assertEqual(meta["reason"], "profile_already_confirmed")
 
     @patch.object(nav, "verify_profile", return_value=True)
+    @patch.object(
+        nav,
+        "_expected_profile_identity_boundary",
+        return_value=(True, {"identity_method": "exact_observed_username"}),
+    )
     @patch.object(nav, "find_first_row_search_username_hot")
     def test_profile_recovery_confirmed_before_followers_entry(
         self,
         mock_find_row,
+        _mock_identity,
         _mock_verify,
     ) -> None:
         row = MagicMock()

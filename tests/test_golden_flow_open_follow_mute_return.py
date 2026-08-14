@@ -59,6 +59,11 @@ class GoldenOpenFollowersListNominalTest(unittest.TestCase):
 
 class GoldenReturnFollowersListNominalTest(unittest.TestCase):
     @patch.object(nav, "open_followers_list_from_profile", return_value=(True, {}))
+    @patch.object(
+        nav,
+        "_expected_profile_identity_boundary",
+        return_value=(True, {"identity_method": "exact_observed_username"}),
+    )
     @patch.object(nav, "verify_profile", return_value=True)
     @patch.object(nav, "detect_followers_list_screen", return_value={"is_followers_list": False})
     @patch.object(nav, "_followers_entry_maybe_recover_ct_profile_from_search_surface")

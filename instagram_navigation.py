@@ -4439,6 +4439,111 @@ def _profile_signal_b_username_top_band(d: u2.Device, username: str) -> str | No
     return None
 
 
+def _expected_profile_identity_boundary(
+    d: u2.Device,
+    expected_username: str,
+    expected_package: str,
+    *,
+    observed_username: str = "",
+    allow_stage_scoped_transition: bool = False,
+    stage_scoped_transition_proven: bool = False,
+    stage_binding_id: str = "",
+) -> tuple[bool, dict[str, Any]]:
+    """Fail-closed identity boundary for critical follower/profile transitions.
+
+    Generic profile chrome (Message, Follow, profile tabs, header containers) is
+    deliberately *not* sufficient here: those signals are also present on DM
+    modals and on the wrong account profile.  A transition is accepted only on
+    the expected Instagram package, on a profile-capable activity, and with
+    either the exact username or a fresh caller-owned visual transition proof.
+
+    The stage-scoped exception exists solely for visual follower rows whose
+    pre/post fingerprints already proved a transition tied to the exact
+    candidate.  Source/CT recovery must never enable it.
+    """
+    expected_norm = _normalize_handle(expected_username or "")
+    observed_norm = _normalize_handle(observed_username or "")
+    meta: dict[str, Any] = {
+        "expected_username": expected_username,
+        "observed_username": observed_username or None,
+        "expected_package": expected_package,
+        "current_package": None,
+        "current_activity": None,
+        "identity_method": None,
+        "reason": None,
+        "stage_binding_id": stage_binding_id or None,
+    }
+
+    if not expected_norm:
+        meta["reason"] = "profile_identity_expected_username_missing"
+        return False, meta
+
+    try:
+        cur = d.app_current() or {}
+    except Exception as exc:
+        meta["reason"] = "profile_identity_app_current_unavailable"
+        meta["app_current_error"] = str(exc)[:160]
+        return False, meta
+
+    current_package = str(cur.get("package") or "")
+    current_activity = str(cur.get("activity") or "")
+    meta["current_package"] = current_package or None
+    meta["current_activity"] = current_activity or None
+
+    if expected_package and current_package != expected_package:
+        meta["reason"] = "profile_identity_package_mismatch"
+        return False, meta
+
+    activity_norm = current_activity.lower()
+    dangerous_activity_tokens = (
+        "modalactivity",
+        "direct",
+        "inbox",
+        "thread",
+        "messaging",
+        "story",
+        "reel",
+        "browser",
+        "webview",
+    )
+    if any(token in activity_norm for token in dangerous_activity_tokens):
+        meta["reason"] = "profile_identity_dangerous_activity"
+        return False, meta
+    if not (
+        "instagrammainactivity" in activity_norm
+        or activity_norm.endswith(".mainactivity")
+        or "profileactivity" in activity_norm
+    ):
+        meta["reason"] = "profile_identity_activity_unproven"
+        return False, meta
+
+    if observed_norm:
+        if observed_norm != expected_norm:
+            meta["reason"] = "profile_identity_username_mismatch"
+            return False, meta
+        meta["identity_method"] = "exact_observed_username"
+        meta["reason"] = "profile_identity_confirmed"
+        return True, meta
+
+    top_band_method = _profile_signal_b_username_top_band(d, expected_username)
+    if top_band_method:
+        meta["identity_method"] = top_band_method
+        meta["reason"] = "profile_identity_confirmed"
+        return True, meta
+
+    if (
+        allow_stage_scoped_transition
+        and stage_scoped_transition_proven
+        and bool(stage_binding_id)
+    ):
+        meta["identity_method"] = "stage_scoped_visual_transition"
+        meta["reason"] = "profile_identity_confirmed"
+        return True, meta
+
+    meta["reason"] = "profile_identity_username_unproven"
+    return False, meta
+
+
 def _profile_signal_c_chrome(d: u2.Device, package: str) -> str | None:
     """Instagram foreground + any common profile chrome control."""
     try:
@@ -43290,12 +43395,39 @@ def _followers_entry_recover_source_profile_from_search_surface(
         return False, "exact_search_row_tap_failed"
 
     if verify_profile(d, source_profile_username):
+        observed_username = ""
+        try:
+            observed_username = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip()
+        except Exception:
+            observed_username = ""
+        identity_ok, identity_meta = _expected_profile_identity_boundary(
+            d,
+            source_profile_username,
+            pkg,
+            observed_username=observed_username,
+        )
+        if not identity_ok:
+            log(
+                "warning",
+                "followers_entry_profile_recovery_failed",
+                source_profile_username=source_profile_username,
+                package=pkg,
+                phase=phase,
+                reason=str(identity_meta.get("reason") or "profile_identity_unconfirmed"),
+                identity_meta=identity_meta,
+            )
+            return False, str(
+                identity_meta.get("reason") or "profile_identity_unconfirmed"
+            )
         log(
             "info",
             "followers_entry_profile_recovery_confirmed",
             source_profile_username=source_profile_username,
             package=pkg,
             phase=phase,
+            identity_meta=identity_meta,
         )
         return True, "profile_recovery_confirmed"
 
@@ -44848,7 +44980,11 @@ def open_follower_profile_from_list(
         except (KeyError, TypeError, ValueError):
             return False
 
-    def _finalize_success(ab_open: str) -> bool:
+    def _finalize_success(
+        ab_open: str,
+        *,
+        stage_scoped_transition_proven: bool = False,
+    ) -> bool:
         if _is_source_action_bar(ab_open):
             log(
                 "error",
@@ -44879,6 +45015,27 @@ def open_follower_profile_from_list(
                 reason="candidate_selection_skipped_stale_profile_context",
             )
             return False
+        identity_ok, identity_meta = _expected_profile_identity_boundary(
+            d,
+            un,
+            pkg,
+            observed_username=ab_open,
+            allow_stage_scoped_transition=bool(is_visual),
+            stage_scoped_transition_proven=bool(stage_scoped_transition_proven),
+            stage_binding_id=vcid if is_visual else "",
+        )
+        if not identity_ok:
+            log(
+                "error",
+                "follower_profile_open_failed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open or None,
+                visual_candidate_id=vcid or None,
+                reason=str(identity_meta.get("reason") or "profile_identity_unconfirmed"),
+                identity_meta=identity_meta,
+            )
+            return False
         log(
             "info",
             "follower_profile_open_success",
@@ -44886,6 +45043,7 @@ def open_follower_profile_from_list(
             source_profile_username=source_profile_username,
             action_bar_title=ab_open or None,
             visual_candidate_id=vcid or None,
+            profile_identity_method=identity_meta.get("identity_method"),
         )
         return True
 
@@ -45211,7 +45369,10 @@ def open_follower_profile_from_list(
             continue
 
         ab_verify = _action_bar_title()
-        if not _finalize_success(ab_verify):
+        if not _finalize_success(
+            ab_verify,
+            stage_scoped_transition_proven=True,
+        ):
             last_fail_reason = "verify_then_source_action_bar"
             if si + 1 < len(strategies):
                 log(
@@ -59869,18 +60030,43 @@ def return_to_followers_list(
         source_profile_username=source_profile_username,
     )
     if verify_profile(d, source_profile_username):
-        followers_session_clear_list_committed_open(source_profile_username)
-        ok_reopen, _reopen_meta = open_followers_list_from_profile(
-            d, source_profile_username, pkg, profile_verified=True
+        observed_username = ""
+        try:
+            observed_username = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip()
+        except Exception:
+            observed_username = ""
+        source_identity_ok, source_identity_meta = _expected_profile_identity_boundary(
+            d,
+            source_profile_username,
+            pkg,
+            observed_username=observed_username,
         )
-        if ok_reopen:
+        if not source_identity_ok:
             log(
-                "info",
-                "followers_list_recovered",
+                "warning",
+                "followers_list_reopen_source_identity_rejected",
                 source_profile_username=source_profile_username,
-                method="reopen_from_source_profile",
+                reason=str(
+                    source_identity_meta.get("reason")
+                    or "profile_identity_unconfirmed"
+                ),
+                identity_meta=source_identity_meta,
             )
-            return True, "reopen_from_source_profile"
+        else:
+            followers_session_clear_list_committed_open(source_profile_username)
+            ok_reopen, _reopen_meta = open_followers_list_from_profile(
+                d, source_profile_username, pkg, profile_verified=True
+            )
+            if ok_reopen:
+                log(
+                    "info",
+                    "followers_list_recovered",
+                    source_profile_username=source_profile_username,
+                    method="reopen_from_source_profile",
+                )
+                return True, "reopen_from_source_profile"
     search_rec_ok = False
     search_rec_reason = "search_recovery_not_attempted"
     if _followers_entry_search_surface_recovery_fallback_enabled():
