@@ -5,11 +5,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from worker_runtime_identity import (
     RUNTIME_IDENTITY_ENV,
     WorkerRuntimeIdentity,
     WorkerRuntimeIdentityError,
+    _git,
     bind_worker_runtime_identity,
     resolve_worker_runtime_identity,
     validate_worker_runtime_identity_binding,
@@ -55,6 +57,42 @@ class WorkerRuntimeIdentityTest(unittest.TestCase):
         nested.mkdir()
         with self.assertRaisesRegex(WorkerRuntimeIdentityError, "root_mismatch"):
             resolve_worker_runtime_identity(nested, environ={})
+
+    @mock.patch("worker_runtime_identity.time.sleep")
+    @mock.patch("worker_runtime_identity.subprocess.run")
+    def test_transient_git_timeout_is_retried_without_weakening_identity(
+        self,
+        run_mock: mock.Mock,
+        sleep_mock: mock.Mock,
+    ) -> None:
+        command = ["git", "-C", str(self.root), "rev-parse", "HEAD"]
+        run_mock.side_effect = [
+            subprocess.TimeoutExpired(command, 5.0),
+            subprocess.CompletedProcess(command, 0, stdout=f"{self.head}\n", stderr=""),
+        ]
+
+        self.assertEqual(_git(self.root, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(run_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(0.2)
+
+    @mock.patch("worker_runtime_identity.time.sleep")
+    @mock.patch("worker_runtime_identity.subprocess.run")
+    def test_persistent_git_timeout_still_fails_closed(
+        self,
+        run_mock: mock.Mock,
+        sleep_mock: mock.Mock,
+    ) -> None:
+        command = ["git", "-C", str(self.root), "rev-parse", "HEAD"]
+        run_mock.side_effect = subprocess.TimeoutExpired(command, 5.0)
+
+        with self.assertRaises(WorkerRuntimeIdentityError) as caught:
+            _git(self.root, "rev-parse", "HEAD")
+
+        self.assertEqual(caught.exception.reason, "worker_runtime_git_identity_unavailable")
+        self.assertEqual(caught.exception.stage, "git_identity_timeout")
+        self.assertEqual(caught.exception.diagnostics["attempts"], 3)
+        self.assertEqual(run_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
 
     def test_transport_round_trip_preserves_canonical_binding(self) -> None:
         original = resolve_worker_runtime_identity(

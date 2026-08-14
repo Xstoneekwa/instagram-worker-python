@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import json
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,9 @@ from typing import Any, Mapping
 
 RUNTIME_IDENTITY_ENV = "WORKER_RUNTIME_IDENTITY_V2"
 _FULL_SHA_LENGTH = 40
+_GIT_TIMEOUT_SECONDS = 5.0
+_GIT_TIMEOUT_ATTEMPTS = 3
+_GIT_RETRY_DELAY_SECONDS = 0.2
 
 
 class WorkerRuntimeIdentityError(RuntimeError):
@@ -92,16 +96,32 @@ def _transport_payload(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _git(root: Path, *args: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise WorkerRuntimeIdentityError("worker_runtime_git_identity_unavailable") from exc
+    completed: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, _GIT_TIMEOUT_ATTEMPTS + 1):
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            if attempt >= _GIT_TIMEOUT_ATTEMPTS:
+                raise WorkerRuntimeIdentityError(
+                    "worker_runtime_git_identity_unavailable",
+                    stage="git_identity_timeout",
+                    diagnostics={
+                        "attempts": attempt,
+                        "timeout_seconds": _GIT_TIMEOUT_SECONDS,
+                    },
+                ) from exc
+            time.sleep(_GIT_RETRY_DELAY_SECONDS)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkerRuntimeIdentityError("worker_runtime_git_identity_unavailable") from exc
+    if completed is None:
+        raise WorkerRuntimeIdentityError("worker_runtime_git_identity_unavailable")
     value = completed.stdout.strip()
     if not value:
         raise WorkerRuntimeIdentityError("worker_runtime_git_identity_empty")
