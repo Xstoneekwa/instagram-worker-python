@@ -4,6 +4,12 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 python3 "$ROOT/scripts/verify-follow60-mainline-lock-v3.py"
 
+LOCK_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lock_state"])' "$ROOT/docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json" 2>/dev/null || true)"
+if test "$LOCK_STATE" = "UNLOCKED"; then
+  printf '%s\n' "PACKAGE_WHILE_UNLOCKED=FAIL" >&2
+  exit 4
+fi
+
 SHARED_TOKEN="/Users/admin/phonefarm-runtime/run/run-control-dispatcher/auto-restart-skip-startup-tick.once"
 RELEASE="/Users/admin/phonefarm-worker-releases/FOLLOW60_V2_MAINLINE_V1"
 

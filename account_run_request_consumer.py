@@ -84,6 +84,7 @@ from runtime_incident_matrix import (
     classify_recoverable_python_retry,
     classify_terminal_run_failure,
 )
+from follow60_mainline_integrity_v3 import verify_runtime_integrity
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
@@ -3600,6 +3601,21 @@ def main(argv: list[str] | None = None) -> int:
             identity_source=runtime_identity.source,
             runtime_root_ok=True,
         )
+    integrity = verify_runtime_integrity(
+        Path(__file__).resolve().parent,
+        runtime_mode="mainline",
+        binding_kind="mainline",
+        engine="FOLLOW60_V2_MAINLINE_V1",
+    )
+    if not integrity.get("ok"):
+        log(
+            "error",
+            "follow60_dispatcher_startup_integrity_failed",
+            reason="FOLLOW60_MAINLINE_INTEGRITY_MISMATCH",
+            integrity_reason=str(integrity.get("reason") or "unknown"),
+            device_actions_started=False,
+        )
+        return 5
     if args and args[0] in {"--preflight", "preflight"}:
         cfg = load_dispatcher_config()
         if "--json" in args:

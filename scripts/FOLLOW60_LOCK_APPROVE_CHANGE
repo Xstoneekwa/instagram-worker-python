@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Liam-only detached signing command; the private key stays outside repo/CI."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import subprocess
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--request")
+    group.add_argument("--manifest")
+    parser.add_argument("--private-key", required=True)
+    parser.add_argument("--signature-output", required=True)
+    args = parser.parse_args()
+    payload = Path(args.request or args.manifest).resolve()
+    private_key = Path(args.private_key).expanduser().resolve()
+    output = Path(args.signature_output).resolve()
+    if not payload.is_file():
+        raise SystemExit("payload_missing")
+    if not private_key.is_file():
+        raise SystemExit("private_key_missing")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.check_call([
+        "openssl", "pkeyutl", "-sign", "-inkey", str(private_key),
+        "-rawin", "-in", str(payload), "-out", str(output),
+    ])
+    print(f"SIGNED={payload} SIGNATURE={output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

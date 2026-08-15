@@ -12,7 +12,11 @@
 /post_follow_stage_outbox.py @Xstoneekwa
 /target_followers_* @Xstoneekwa
 /scripts/*follow60* @Xstoneekwa
+/scripts/FOLLOW60_LOCK_APPROVE_CHANGE @Xstoneekwa
+/scripts/FOLLOW60_LOCK_REQUEST_CHANGE @Xstoneekwa
 /tests/*follow60* @Xstoneekwa
 /tests/test_instagram_list_continuation_contract.py @Xstoneekwa
 /tests/test_target_followers_progressive_resume_v2.py @Xstoneekwa
 /docs/governance/FOLLOW60_MAINLINE_LOCK_V3* @Xstoneekwa
+/.githooks/pre-commit @Xstoneekwa
+/.githooks/pre-push @Xstoneekwa

@@ -25,3 +25,17 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Historical Follow60 promotion matrix
         run: python -m unittest -q tests.test_follow60_v2_mainline_v1 tests.test_follow60_mainline_business_session_binding_v1 tests.test_instagram_list_continuation_contract tests.test_target_followers_progressive_resume_v2 tests.test_follow60_surface_driven_return_ct_v1 tests.test_post_viewer_story_highlight_identity_guard
+  follow60-runtime-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Runtime and dispatcher fail-closed self-tests
+        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3
+  follow60-performance-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CT Resume performance gate
+        run: python3 scripts/benchmark-follow60-ct-resume-reacquisition.py

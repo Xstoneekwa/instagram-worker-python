@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Create an unsigned, exact-diff Follow60 change request."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from follow60_lock_v3 import sha256_bytes  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-revision", required=True)
+    parser.add_argument("--requested-scope", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--expiry-minutes", type=int, default=60)
+    parser.add_argument("--change-id", default="")
+    parser.add_argument("--base-manifest", default=str(ROOT / "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json"))
+    args = parser.parse_args()
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", args.base_revision]
+    ).decode().strip()
+    head_sha = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"]
+    ).decode().strip()
+    diff = subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--binary", f"{base_sha}..{head_sha}"]
+    )
+    files = subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--name-only", f"{base_sha}..{head_sha}"]
+    ).decode().splitlines()
+    now = datetime.now(timezone.utc)
+    request = {
+        "schema": "FOLLOW60_LOCK_CHANGE_REQUEST_V1",
+        "change_id": args.change_id or str(uuid.uuid4()),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "base_manifest_sha256": sha256_bytes(Path(args.base_manifest).read_bytes()),
+        "files_requested": sorted(set(files)),
+        "diff_sha256": sha256_bytes(diff),
+        "requested_scope": str(args.requested_scope),
+        "requested_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=max(1, args.expiry_minutes))).isoformat(),
+        "approval_status": "REQUESTED_NOT_APPROVED",
+    }
+    Path(args.output).write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(request, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,313 @@
+"""Canonical Follow60 V3/V3.1 lock verification primitives.
+
+V3.1 manifests are detached-signature authenticated and bind exact Git blobs,
+raw bytes, file modes, the local Python import graph and a consumed one-shot
+change approval.  This module is read-only: it never generates or approves a
+change and never rewrites a manifest.
+"""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+from typing import Any, Iterable
+
+
+SCHEMA_V3 = "FOLLOW60_MAINLINE_LOCK_V3"
+SCHEMA_V3_1 = "FOLLOW60_MAINLINE_LOCK_V3_1"
+APPROVAL_SCHEMA_V3 = "FOLLOW60_MAINLINE_LOCK_V3_EXTERNAL_APPROVAL"
+LOCKED = "LOCKED"
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def git(root: Path, *args: str) -> bytes:
+    return subprocess.check_output(["git", "-C", str(root), *args])
+
+
+def git_file_entry(root: Path, relative: str, *, revision: str = "HEAD") -> dict[str, Any]:
+    line = git(root, "ls-tree", revision, "--", relative).decode("utf-8").strip()
+    if not line:
+        raise ValueError(f"protected_file_missing:{relative}")
+    metadata, listed_path = line.split("\t", 1)
+    mode, object_type, oid = metadata.split(" ", 2)
+    if listed_path != relative or object_type != "blob":
+        raise ValueError(f"protected_path_not_blob:{relative}")
+    payload = git(root, "show", f"{revision}:{relative}")
+    return {
+        "path": relative,
+        "git_blob_oid": oid,
+        "sha256": sha256_bytes(payload),
+        "size": len(payload),
+        "mode": mode,
+    }
+
+
+def _resolve_local_import(root: Path, owner: str, module: str, level: int) -> str | None:
+    owner_path = Path(owner)
+    if level:
+        base_parts = list(owner_path.parent.parts)
+        remove = max(0, level - 1)
+        if remove:
+            base_parts = base_parts[:-remove]
+        parts = base_parts + ([part for part in module.split(".") if part] if module else [])
+    else:
+        parts = [part for part in module.split(".") if part]
+    if not parts:
+        return None
+    candidates = [
+        Path(*parts).with_suffix(".py"),
+        Path(*parts) / "__init__.py",
+    ]
+    for candidate in candidates:
+        if (root / candidate).is_file():
+            return candidate.as_posix()
+    return None
+
+
+def direct_local_imports(root: Path, relative: str, payload: bytes | None = None) -> set[str]:
+    if not relative.endswith(".py"):
+        return set()
+    source = payload if payload is not None else (root / relative).read_bytes()
+    try:
+        tree = ast.parse(source.decode("utf-8"), filename=relative)
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                resolved = _resolve_local_import(root, relative, alias.name, 0)
+                if resolved:
+                    imports.add(resolved)
+        elif isinstance(node, ast.ImportFrom):
+            resolved = _resolve_local_import(root, relative, node.module or "", int(node.level or 0))
+            if resolved:
+                imports.add(resolved)
+            elif node.module:
+                for alias in node.names:
+                    nested = f"{node.module}.{alias.name}"
+                    resolved = _resolve_local_import(root, relative, nested, int(node.level or 0))
+                    if resolved:
+                        imports.add(resolved)
+    return imports
+
+
+def transitive_import_graph(root: Path, roots: Iterable[str]) -> dict[str, list[str]]:
+    pending = list(sorted(set(str(path) for path in roots if str(path).endswith(".py"))))
+    visited: set[str] = set()
+    graph: dict[str, list[str]] = {}
+    while pending:
+        relative = pending.pop(0)
+        if relative in visited or not (root / relative).is_file():
+            continue
+        visited.add(relative)
+        imports = sorted(direct_local_imports(root, relative))
+        graph[relative] = imports
+        for imported in imports:
+            if imported not in visited:
+                pending.append(imported)
+    return dict(sorted(graph.items()))
+
+
+def verify_detached_signature(payload: Path, signature: Path, public_key: Path) -> tuple[bool, str]:
+    if not payload.is_file():
+        return False, "signed_payload_missing"
+    if not signature.is_file():
+        return False, "detached_signature_missing"
+    if not public_key.is_file():
+        return False, "public_key_missing"
+    completed = subprocess.run(
+        [
+            "openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key),
+            "-rawin", "-in", str(payload), "-sigfile", str(signature),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return (completed.returncode == 0), (
+        "signature_valid" if completed.returncode == 0 else "signature_invalid"
+    )
+
+
+def _verify_v3_legacy(root: Path, manifest_path: Path, approval_path: Path, revision: str) -> dict[str, Any]:
+    manifest_raw = manifest_path.read_bytes()
+    manifest = json.loads(manifest_raw)
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    if approval.get("schema") != APPROVAL_SCHEMA_V3:
+        return {"ok": False, "reason": "approval_schema_mismatch"}
+    if approval.get("status") != "consumed_once":
+        return {"ok": False, "reason": "approval_not_consumed_once"}
+    manifest_approval = manifest.get("approval") or {}
+    if manifest_approval.get("status") != "approved_once":
+        return {"ok": False, "reason": "manifest_not_approved"}
+    if approval.get("approval_id") != manifest_approval.get("approval_id"):
+        return {"ok": False, "reason": "approval_id_mismatch"}
+    if approval.get("approved_scope_sha256") != manifest.get("protected_scope_sha256"):
+        return {"ok": False, "reason": "approval_scope_hash_mismatch"}
+    if approval.get("manifest_sha256") != sha256_bytes(manifest_raw):
+        return {"ok": False, "reason": "approval_manifest_hash_mismatch"}
+    protected = manifest.get("protected_files") or {}
+    mismatches: dict[str, Any] = {}
+    for relative, expected in protected.items():
+        try:
+            actual = sha256_bytes(git(root, "show", f"{revision}:{relative}"))
+        except subprocess.CalledProcessError:
+            actual = None
+        if actual != expected:
+            mismatches[relative] = {"expected": expected, "actual": actual}
+    if mismatches:
+        return {"ok": False, "reason": "head_protected_blob_mismatch", "mismatches": mismatches}
+    scope_hash = sha256_bytes(canonical_json(protected))
+    if scope_hash != manifest.get("protected_scope_sha256"):
+        return {"ok": False, "reason": "protected_scope_hash_mismatch"}
+    return {
+        "ok": True,
+        "status": "FOLLOW60_MAINLINE_LOCK_V3_OK",
+        "revision": git(root, "rev-parse", revision).decode().strip(),
+        "approval_id": approval.get("approval_id"),
+        "protected_file_count": len(protected),
+        "protected_scope_sha256": scope_hash,
+    }
+
+
+def verify_repository(
+    root: Path,
+    manifest_path: Path,
+    *,
+    revision: str = "HEAD",
+    approval_path: Path | None = None,
+    signature_path: Path | None = None,
+    public_key_path: Path | None = None,
+) -> dict[str, Any]:
+    root = Path(root).resolve()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "reason": "manifest_unreadable", "error_type": type(exc).__name__}
+    if manifest.get("schema") == SCHEMA_V3:
+        if approval_path is None:
+            return {"ok": False, "reason": "approval_missing"}
+        return _verify_v3_legacy(root, manifest_path, approval_path, revision)
+    if manifest.get("schema") != SCHEMA_V3_1:
+        return {"ok": False, "reason": "manifest_schema_mismatch"}
+    if manifest.get("lock_state") != LOCKED:
+        return {"ok": False, "reason": "lock_state_not_locked"}
+    if (manifest.get("approval") or {}).get("token_status") != "consumed_once":
+        return {"ok": False, "reason": "approval_token_not_consumed"}
+    if signature_path is None or public_key_path is None:
+        return {"ok": False, "reason": "signature_configuration_missing"}
+    signed, signature_reason = verify_detached_signature(
+        manifest_path, signature_path, public_key_path
+    )
+    if not signed:
+        return {"ok": False, "reason": signature_reason}
+    entries = manifest.get("protected_entries") or {}
+    if not isinstance(entries, dict) or not entries:
+        return {"ok": False, "reason": "protected_scope_empty"}
+    mismatches: dict[str, Any] = {}
+    for relative, expected in entries.items():
+        try:
+            actual = git_file_entry(root, relative, revision=revision)
+        except (subprocess.CalledProcessError, ValueError):
+            actual = None
+        comparable = dict(actual or {})
+        if comparable:
+            comparable["role"] = expected.get("role")
+            comparable["lock_version"] = expected.get("lock_version")
+        if comparable != expected:
+            mismatches[relative] = {"expected": expected, "actual": actual}
+    if mismatches:
+        return {"ok": False, "reason": "protected_entry_mismatch", "mismatches": mismatches}
+    scope_hash = sha256_bytes(canonical_json(entries))
+    if scope_hash != manifest.get("protected_scope_sha256"):
+        return {"ok": False, "reason": "protected_scope_hash_mismatch"}
+    graph = transitive_import_graph(root, entries.keys())
+    missing_dependencies = sorted(
+        {dependency for imports in graph.values() for dependency in imports} - set(entries)
+    )
+    if missing_dependencies:
+        return {
+            "ok": False,
+            "reason": "unprotected_transitive_dependency",
+            "missing_dependencies": missing_dependencies,
+        }
+    graph_hash = sha256_bytes(canonical_json(graph))
+    if graph_hash != manifest.get("import_graph_sha256"):
+        return {"ok": False, "reason": "import_graph_mismatch", "actual": graph_hash}
+    contract = manifest.get("runtime_contract") or {}
+    if contract != {
+        "runtime_mode": "mainline",
+        "binding_kind": "mainline",
+        "engine": "FOLLOW60_V2_MAINLINE_V1",
+        "entrypoint": "runner.py",
+    }:
+        return {"ok": False, "reason": "runtime_contract_mismatch"}
+    return {
+        "ok": True,
+        "status": "FOLLOW60_MAINLINE_LOCK_V3_1_OK",
+        "lock_version": manifest.get("lock_version"),
+        "revision": git(root, "rev-parse", revision).decode().strip(),
+        "protected_file_count": len(entries),
+        "protected_scope_sha256": scope_hash,
+        "import_graph_sha256": graph_hash,
+        "manifest_signature": "PASS",
+        "approval_token_consumed": True,
+    }
+
+
+def verify_runtime(
+    root: Path,
+    *,
+    runtime_mode: str,
+    binding_kind: str,
+    engine: str,
+    manifest_path: Path,
+    signature_path: Path | None = None,
+    public_key_path: Path | None = None,
+) -> dict[str, Any]:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "reason": "follow60_integrity_manifest_unreadable", "error_type": type(exc).__name__}
+    contract = manifest.get("runtime_contract") or {}
+    if contract.get("runtime_mode") != runtime_mode:
+        return {"ok": False, "reason": "follow60_integrity_runtime_mode_mismatch"}
+    if contract.get("binding_kind") != binding_kind:
+        return {"ok": False, "reason": "follow60_integrity_binding_mismatch"}
+    if contract.get("engine") != engine:
+        return {"ok": False, "reason": "follow60_integrity_engine_mismatch"}
+    if manifest.get("schema") == SCHEMA_V3:
+        if (manifest.get("approval") or {}).get("status") != "approved_once":
+            return {"ok": False, "reason": "follow60_integrity_approval_missing"}
+        protected = manifest.get("protected_files") or {}
+        if not isinstance(protected, dict) or not protected:
+            return {"ok": False, "reason": "follow60_integrity_empty_scope"}
+        for relative, expected in protected.items():
+            candidate = root / str(relative)
+            actual = sha256_bytes(candidate.read_bytes()) if candidate.is_file() else None
+            if actual != expected:
+                return {"ok": False, "reason": "FOLLOW60_MAINLINE_INTEGRITY_MISMATCH"}
+        if sha256_bytes(canonical_json(protected)) != manifest.get("protected_scope_sha256"):
+            return {"ok": False, "reason": "follow60_integrity_scope_hash_mismatch"}
+        return {"ok": True, "status": "FOLLOW60_MAINLINE_LOCK_V3_RUNTIME_OK"}
+    verified = verify_repository(
+        root,
+        manifest_path,
+        revision="HEAD",
+        signature_path=signature_path,
+        public_key_path=public_key_path,
+    )
+    if not verified.get("ok"):
+        verified["reason"] = "FOLLOW60_MAINLINE_INTEGRITY_MISMATCH"
+    return verified
