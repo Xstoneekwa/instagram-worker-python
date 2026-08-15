@@ -13,7 +13,7 @@
   "restored_from_broken_sha": "724699d8ce85aa66e01e3ef60b5885ff9a539a34",
   "protected_files": {
     ".github/CODEOWNERS": "0501c5b8dd7e06faada49913cfb4143d1b8196a647e703566aeb49f98091d4c3",
-    ".github/workflows/follow60-mainline-lock.yml": "e7f866f50c302b588807915b47af45aae19c65e2fa699193e86212d965b7ca01",
+    ".github/workflows/follow60-mainline-lock.yml": "a414b6466dfd072007e53c6f9f4f8382c2c14ce764147af29ef8eee2e826d740",
     "account_run_request_consumer.py": "4d56313f07246a40c7908033aa71073b3f9b93bdc4630fda26f38e47ee5b086d",
     "account_session_orchestrator.py": "0fb249284f801eba7137a125704249d720c333dbfbfef1a3edee2832d0c899db",
     "follow60_business_session_binding_v1.py": "485fc52b22bc1c70506ecafbc89342fa608454f6b56f30abb4eaaa280b386cd7",
@@ -52,7 +52,7 @@
     "tests/test_post_viewer_story_highlight_identity_guard.py": "433f9fbba5829d45bf82abb905953e5aaef985ade2b930c44c830e2af5e2d8a9",
     "tests/test_target_followers_progressive_resume_v2.py": "95d5e3fb48d2b7227693bfe68f70ada2c064a2b60f6bdb1e591d372a0992ba6c"
   },
-  "protected_scope_sha256": "f8c1c3f25403c3a3b32ee6cdcb7d6e6b0d0ffd4b2a62194adcef4a82d3b79908",
+  "protected_scope_sha256": "e324d2055069629688b8d3e511cf8ab7d767e9558d18f3f8f7eb80d8ef0e49f8",
   "protected_functions": [
     "runner._run_followers_list_engine_session",
     "runner._followers_pre_scroll_contract_decision",

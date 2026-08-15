@@ -67,6 +67,8 @@ field certification.
 - Diff check: PASS
 - Secret scan: PASS (only environment reads, examples, and synthetic tests)
 - Performance gate: PASS
+- GitHub clean-runner dependency bootstrap: Python 3.9 + `requirements.txt`
+  before the remote promotion matrix (no Worker runtime behavior change)
 
 ## Lock V3
 

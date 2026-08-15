@@ -5,8 +5,8 @@
   "approved_at": "2026-08-15",
   "status": "consumed_once",
   "approval_source": "/Users/admin/.codex/attachments/11ce406a-e070-44b4-9d74-dd1835ed6dbc/pasted-text.txt",
-  "approved_scope_sha256": "f8c1c3f25403c3a3b32ee6cdcb7d6e6b0d0ffd4b2a62194adcef4a82d3b79908",
-  "manifest_sha256": "a8f76030c80a87ca4ac38c90271839d2559ba08dc89eaa9e4130368296c0273d",
+  "approved_scope_sha256": "e324d2055069629688b8d3e511cf8ab7d767e9558d18f3f8f7eb80d8ef0e49f8",
+  "manifest_sha256": "33d56fe46200e3b879dcf363ba1bfa83dc342e3138ae08a9bb7643486e2ee976",
   "approved_change_scope": [
     "restore_locked_follow60_scope",
     "forward_port_see_more_before_scroll",
