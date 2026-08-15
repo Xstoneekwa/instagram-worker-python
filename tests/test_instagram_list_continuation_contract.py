@@ -910,7 +910,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(diag["forward_attempt_count"], 3)
         self.assertEqual(len(device.swipes), 3)
 
-    def test_32_safe_partial_scroll_failure_rotates_to_next_ct(self) -> None:
+    def test_32_scroll_failure_preserves_first_reason_without_ct_rotation(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {
                 "follows_completed_count": 17,
@@ -936,9 +936,14 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             warm_session_used=False, force_stop_used=False,
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
-        self.assertEqual(len(engine.calls), 2)
-        self.assertEqual(result["global_follows_completed"], 40)
-        self.assertEqual(len(result["partial_resumable_targets"]), 1)
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["global_follows_completed"], 17)
+        self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
+        self.assertEqual(
+            result["summary"]["follow_stop_reason"],
+            "visible_window_exhausted_scroll_failed",
+        )
+        self.assertTrue(result["summary"]["secondary_stop_reason_suppressed"])
 
     def test_33_duplicate_accessibility_labels_do_not_shorten_geometry(self) -> None:
         xml = _surface(
@@ -1052,14 +1057,14 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
         self.assertEqual(len(engine.calls), 1)
-        self.assertEqual(len(result["partial_resumable_targets"]), 1)
-        self.assertEqual(result["summary"]["phase_status"], "partial_not_resumable")
+        self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
         self.assertEqual(
             result["summary"]["follow_stop_reason"],
-            "partial_ct_rotation_revalidation_failed",
+            "visible_window_exhausted_scroll_failed",
         )
+        self.assertFalse(result["summary"]["target_rotation_allowed"])
 
-    def test_38_safe_partial_rotation_stops_after_two_failed_cts(self) -> None:
+    def test_38_first_scroll_failure_stops_without_second_ct_attempt(self) -> None:
         safe_failure = {
             "follows_completed_count": 1,
             "follows_goal_effective": 40,
@@ -1077,11 +1082,10 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             warm_session_used=False, force_stop_used=False,
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
-        self.assertEqual(len(engine.calls), 2)
-        self.assertEqual(len(result["partial_resumable_targets"]), 2)
+        self.assertEqual(len(engine.calls), 1)
         self.assertEqual(
             result["summary"]["follow_stop_reason"],
-            "safe_partial_ct_failure_limit_reached",
+            "visible_window_exhausted_scroll_failed",
         )
 
     def test_39_processed_valid_viewport_expands_see_more_before_scroll(self) -> None:
@@ -1115,6 +1119,10 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             pre_scroll_contract,
         )
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
+        self.assertIn("followers_pre_scroll_boundary_committed", pre_scroll_contract)
+        self.assertIn('action="stop_before_scroll"', pre_scroll_contract)
+        self.assertIn("detect_followers_list_screen_visual_fallback", pre_scroll_contract)
+        self.assertIn("pre_scroll_continuation_ambiguous", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
 
     def test_39b_failed_scroll_gets_one_fresh_see_more_probe_before_rotation(self) -> None:
@@ -1182,7 +1190,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(out["state"], State.AMBIGUOUS_SURFACE.value)
 
-    def test_40_mythyl_partial_revalidates_and_rotates_without_consuming_wrong_ct(self) -> None:
+    def test_40_scroll_failure_does_not_call_fast_rotation(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {
                 "follows_completed_count": 18,
@@ -1215,13 +1223,11 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
             fast_rotate_to_next_target_from_followers=rotate,
         )
-        self.assertEqual(len(rotations), 1)
-        self.assertEqual(rotations[0]["to_source_target"], "source-2")
-        self.assertEqual(len(engine.calls), 2)
-        self.assertTrue(engine.calls[1]["start_from_current_followers_list"])
-        self.assertEqual(result["global_follows_completed"], 40)
-        self.assertEqual(result["summary"]["phase_status"], "completed")
-        self.assertEqual(result["summary"]["safe_next_step"], "end_follow_phase")
+        self.assertEqual(rotations, [])
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["global_follows_completed"], 18)
+        self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
+        self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
 
     def test_41_failed_revalidation_does_not_consume_next_ct(self) -> None:
         engine = _FakeFollowersEngine([(0, {
@@ -1247,8 +1253,12 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(engine.calls), 1)
-        self.assertEqual(result["summary"]["phase_status"], "partial_not_resumable")
-        self.assertEqual(result["summary"]["safe_next_step"], "end_session")
+        self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
+        self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
+        self.assertEqual(
+            result["summary"]["follow_stop_reason"],
+            "visible_window_exhausted_scroll_failed",
+        )
 
     def test_42_partial_follow_contract_blocks_unfollow_handoff(self) -> None:
         ok, reason = session._follow_exit_handoff_gate(

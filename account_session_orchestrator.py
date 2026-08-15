@@ -147,8 +147,17 @@ def _resolve_target_availability_tenant_once(
     return resolution.tenant_id, None
 FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
     {
-        "visible_window_exhausted_scroll_failed",
         "see_more_click_exhausted_after_bounded_recovery",
+    }
+)
+FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS = frozenset(
+    {
+        # A failed physical scroll is a safe resume boundary for the current CT,
+        # not proof that another CT may be opened inside the same attempt.  Keep
+        # the first reason authoritative and leave continuation to the next
+        # canonical run/checkpoint.
+        "visible_window_exhausted_scroll_failed",
+        "pre_scroll_continuation_ambiguous",
     }
 )
 SEE_MORE_ROTATION_BLOCKING_STATUSES = frozenset(
@@ -1508,6 +1517,41 @@ def _run_follow_target_rotation(
             )
             break
         if not exhausted:
+            if summary_reason in FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS:
+                final_reason = summary_reason
+                final_summary.update(
+                    {
+                        "follow_session_outcome": "partial_resumable",
+                        "follow_stop_reason": summary_reason,
+                        "original_follow_stop_reason": summary_reason,
+                        "target_rotation_allowed": False,
+                        "secondary_stop_reason_suppressed": True,
+                    }
+                )
+                merge_follow_outcome(
+                    final_summary,
+                    stable_reason=summary_reason,
+                    verified_actions=global_follows_completed,
+                    target_actions=global_follow_goal,
+                    current_target_id=target_id or source_profile,
+                    # Do not advertise an intra-run CT rotation after an
+                    # unproved scroll boundary.  The full remaining plan stays
+                    # in the session summary/checkpoint for the next run.
+                    remaining_target_ids=[],
+                    safe_boundary=False,
+                )
+                log(
+                    "info",
+                    "follow_target_secondary_stop_suppressed",
+                    account_id=account_id,
+                    run_id=run_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    reason=summary_reason,
+                    target_rotation_allowed=False,
+                    preserved_outcome="partial_resumable",
+                )
+                break
             local_partial_rotation = summary_reason in FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS
             if local_partial_rotation:
                 partial_resumable_targets.append(
@@ -1861,6 +1905,11 @@ def _run_follow_target_rotation(
         or final_summary.get("all_targets_exhausted") is True
     )
     if not globally_completed:
+        contract_remaining_target_ids = (
+            []
+            if final_reason in FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS
+            else remaining_target_ids
+        )
         merge_follow_outcome(
             final_summary,
             stable_reason=final_reason,
@@ -1870,7 +1919,7 @@ def _run_follow_target_rotation(
                 _as_target_id((final_target or {}).get("target_id"))
                 or _as_source_profile((final_target or {}).get("source_profile"))
             ),
-            remaining_target_ids=remaining_target_ids,
+            remaining_target_ids=contract_remaining_target_ids,
             deadline_insufficient=final_reason in {"deadline_insufficient", "insufficient_time"},
             safe_boundary=bool(final_contract.get("safe_boundary")),
             extra_diagnostics=final_summary,

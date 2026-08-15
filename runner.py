@@ -17416,7 +17416,30 @@ def _run_followers_list_engine_session(
                             continuation_probe_count=1,
                         )
                     )
-                    if str(_visible_window_continuation.get("state") or "") == (
+                    _pre_scroll_continuation_state = str(
+                        _visible_window_continuation.get("state") or ""
+                    )
+                    log(
+                        "info",
+                        "followers_pre_scroll_boundary_check",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        source_profile_username=source_profile_username,
+                        state=_pre_scroll_continuation_state,
+                        see_more_visible=bool(
+                            _visible_window_continuation.get("see_more_visible")
+                        ),
+                        suggestions_visible=bool(
+                            _visible_window_continuation.get("suggestions_visible")
+                        ),
+                        visible_primary_row_count=int(
+                            _visible_window_continuation.get("primary_row_count") or 0
+                        ),
+                        decision_source="fresh_xml",
+                    )
+                    if _pre_scroll_continuation_state == (
                         "EXPAND_PRIMARY_LIST_AVAILABLE"
                     ):
                         see_more_status = "see_more_clicking"
@@ -17444,6 +17467,82 @@ def _run_followers_list_engine_session(
                             or "see_more_no_progress"
                         )
                         break
+                    if bool(_visible_window_continuation.get("is_boundary")):
+                        # The final primary row has already been consumed and the
+                        # rendered viewport is now Suggestions.  This is a proved
+                        # CT boundary, not permission for one more physical swipe.
+                        see_more_status = (
+                            "see_more_expansion_confirmed_but_no_more_followers"
+                            if see_more_status == "see_more_expanded"
+                            else "see_more_absent"
+                        )
+                        _followers_loop_finally_status = "suggestions_boundary"
+                        _followers_loop_finally_stop = "followers_suggestions_boundary"
+                        log(
+                            "info",
+                            "followers_pre_scroll_boundary_committed",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            source_profile_username=source_profile_username,
+                            state=_pre_scroll_continuation_state,
+                            action="stop_before_scroll",
+                            reason="suggestions_boundary_fresh_xml",
+                        )
+                        break
+                    if _pre_scroll_continuation_state == "AMBIGUOUS_SURFACE":
+                        # XML is the fast signal.  Only an ambiguous result pays
+                        # for one screenshot-based list probe.  A strong visual
+                        # primary-row surface may continue to the canonical
+                        # scroll; otherwise fail closed without a blind swipe.
+                        _pre_scroll_visual = detect_followers_list_screen_visual_fallback(
+                            d,
+                            source_profile_username=source_profile_username,
+                        )
+                        _pre_scroll_visual_match = bool(
+                            _pre_scroll_visual.get("visual_match")
+                            and int(
+                                _pre_scroll_visual.get("visual_user_rows_detected")
+                                or 0
+                            )
+                            >= 2
+                        )
+                        log(
+                            "info",
+                            "followers_pre_scroll_boundary_visual_fallback",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            source_profile_username=source_profile_username,
+                            visual_match=_pre_scroll_visual_match,
+                            visual_confidence=float(
+                                _pre_scroll_visual.get("visual_confidence") or 0.0
+                            ),
+                            visual_user_rows_detected=int(
+                                _pre_scroll_visual.get("visual_user_rows_detected")
+                                or 0
+                            ),
+                            action=(
+                                "continue_primary_rows"
+                                if _pre_scroll_visual_match
+                                else "stop_before_scroll"
+                            ),
+                            reason=(
+                                "ambiguous_xml_visual_primary_rows_confirmed"
+                                if _pre_scroll_visual_match
+                                else "ambiguous_xml_visual_continuation_unproved"
+                            ),
+                        )
+                        if not _pre_scroll_visual_match:
+                            _followers_loop_finally_status = (
+                                "pre_scroll_continuation_ambiguous"
+                            )
+                            _followers_loop_finally_stop = (
+                                "pre_scroll_continuation_ambiguous"
+                            )
+                            break
                 _visible_window_scroll_strategy: dict[str, Any] = {}
                 if _visible_window_scroll_required:
                     _visible_window_scroll_strategy = _followers_visible_window_scroll_strategy(

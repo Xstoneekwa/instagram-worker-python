@@ -224,6 +224,41 @@ def _without_reviewed_follow60_evaluation_barrier(node: ast.FunctionDef) -> ast.
     )
 
 
+def _without_reviewed_follow_scroll_stop_authority(node: ast.FunctionDef) -> ast.FunctionDef:
+    """Remove only the reviewed no-rotation scroll-stop authority delta."""
+    normalized = copy.deepcopy(node)
+
+    class RemoveReviewedScrollStopAuthority(ast.NodeTransformer):
+        def visit_Assign(self, item):
+            if any(
+                isinstance(target, ast.Name)
+                and target.id == "contract_remaining_target_ids"
+                for target in item.targets
+            ):
+                return None
+            return self.generic_visit(item)
+
+        def visit_If(self, item):
+            if any(
+                isinstance(child, ast.Name)
+                and child.id == "FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS"
+                for child in ast.walk(item.test)
+            ):
+                return None
+            return self.generic_visit(item)
+
+        def visit_Name(self, item):
+            if item.id == "contract_remaining_target_ids":
+                return ast.copy_location(
+                    ast.Name(id="remaining_target_ids", ctx=item.ctx), item
+                )
+            return item
+
+    return ast.fix_missing_locations(
+        RemoveReviewedScrollStopAuthority().visit(normalized)
+    )
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -238,11 +273,13 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_follow60_evaluation_barrier(
-            _without_reviewed_follow60_binding(
-                _without_reviewed_resume_quota_bound(
-                    _without_availability_or_provenance_hooks(
-                        _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_follow_scroll_stop_authority(
+            _without_reviewed_follow60_evaluation_barrier(
+                _without_reviewed_follow60_binding(
+                    _without_reviewed_resume_quota_bound(
+                        _without_availability_or_provenance_hooks(
+                            _function(current_source, "_run_follow_target_rotation")
+                        )
                     )
                 )
             )
