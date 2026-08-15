@@ -18,5 +18,6 @@
 /tests/test_instagram_list_continuation_contract.py @Xstoneekwa
 /tests/test_target_followers_progressive_resume_v2.py @Xstoneekwa
 /docs/governance/FOLLOW60_MAINLINE_LOCK_V3* @Xstoneekwa
+/docs/governance/FOLLOW60_MAINLINE_LOCK_V3_1_PUBLIC_KEY.pem @Xstoneekwa
 /.githooks/pre-commit @Xstoneekwa
 /.githooks/pre-push @Xstoneekwa

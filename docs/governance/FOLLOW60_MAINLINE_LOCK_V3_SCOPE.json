@@ -5,6 +5,8 @@
   ".githooks/pre-push",
   "account_run_request_consumer.py",
   "account_session_orchestrator.py",
+  "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_SCOPE.json",
+  "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_1_PUBLIC_KEY.pem",
   "follow60_business_session_binding_v1.py",
   "follow60_lock_v3.py",
   "follow60_mainline_integrity_v3.py",
