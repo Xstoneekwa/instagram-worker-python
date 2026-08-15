@@ -1,0 +1,21 @@
+{
+  "base_sha": "528bce2ecd280ea1829245b4a734bacf5d160f23",
+  "change_id": "follow60-physical-write-lock-v3-1-20260816",
+  "diff_sha256": "841b1ad75c1e328f9f032c6571dc1365e21eb7d08ffdab19ce6e22eaa67476d8",
+  "expires_at": "2026-08-16T03:22:29.795789+00:00",
+  "files_requested": [
+    ".gitattributes",
+    ".githooks/pre-commit",
+    ".githooks/pre-push",
+    "follow60_write_lock_v3_1.py",
+    "scripts/guard-follow60-protected-index-v3-1.py",
+    "scripts/install-follow60-physical-write-lock-v3-1.py",
+    "scripts/promote-follow60-v2-mainline.sh",
+    "scripts/request-follow60-protected-index-commit-v3-1.py",
+    "scripts/verify-follow60-physical-write-lock-v3-1.py",
+    "tests/test_follow60_physical_write_lock_v3_1.py"
+  ],
+  "requested_at": "2026-08-15T23:22:29.795789+00:00",
+  "requested_scope": "physical root-owned immutable write lock, signed staged-commit gate, package and activation enforcement",
+  "schema": "FOLLOW60_SIGNED_COMMIT_AUTHORIZATION_V3_1"
+}
