@@ -121,7 +121,7 @@ class FollowProfileIdentityBoundaryV1Test(unittest.TestCase):
                 device, "baocanteenlille", PKG, max_retries=0
             )
         self.assertFalse(ok)
-        self.assertEqual(reason, "failed")
+        self.assertEqual(reason, "followers_surface_reacquisition_unproved")
         reopen.assert_not_called()
 
 
