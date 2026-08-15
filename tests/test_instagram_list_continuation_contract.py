@@ -267,7 +267,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             "is_followers_list": True,
             "open_detection_method": "own_unified_follow_list",
         }
-        with patch.object(nav, "detect_followers_list_screen", return_value=detection), patch.object(
+        with patch.object(nav, "detect_followers_list_screen_fresh", return_value=(detection, "<fresh/>")), patch.object(
             nav.time, "sleep", return_value=None
         ):
             ok, how = nav.return_to_followers_list(device, "source")
@@ -282,7 +282,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
     def test_05j_unverified_return_does_not_rearm_committed_surface(self) -> None:
         nav.followers_session_reset_list_committed_open()
         device = _FakeDevice(_surface(rows=[]))
-        with patch.object(nav, "detect_followers_list_screen", return_value={"is_followers_list": False}), patch.object(
+        with patch.object(nav, "detect_followers_list_screen_fresh", return_value=({"is_followers_list": False}, "<fresh/>")), patch.object(
             nav, "verify_profile", return_value=False
         ), patch.object(nav.time, "sleep", return_value=None):
             ok, how = nav.return_to_followers_list(
@@ -291,8 +291,40 @@ class InstagramListContinuationContractTests(unittest.TestCase):
                 max_retries=0,
             )
         self.assertFalse(ok)
-        self.assertEqual(how, "failed")
+        self.assertEqual(how, "followers_surface_reacquisition_unproved")
         self.assertFalse(nav.followers_session_list_committed_open_for("source"))
+
+    def test_05k_return_invalidates_stale_followers_xml_before_back_certification(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        stale = _surface(rows=[("stale_row", "Follow")])
+        nav._followers_store_detect_hierarchy_xml(stale)
+        device = _FakeDevice("<hierarchy/>")
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav, "verify_profile", return_value=False
+        ):
+            ok, how = nav.return_to_followers_list(device, "source", max_retries=0)
+        self.assertFalse(ok)
+        self.assertEqual(how, "followers_surface_reacquisition_unproved")
+        self.assertFalse(nav.followers_session_list_committed_open_for("source"))
+
+    def test_05l_return_true_fresh_followers_surface_rearms_session(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        fresh = _surface(rows=[("fresh_row", "Follow")])
+        device = _FakeDevice(fresh)
+        fresh_det = {
+            "is_followers_list": True,
+            "open_detection_method": "own_unified_follow_list",
+            "followers_detect_hierarchy_source": "fresh_dump",
+        }
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav,
+            "detect_followers_list_screen_fresh",
+            return_value=(fresh_det, fresh),
+        ):
+            ok, how = nav.return_to_followers_list(device, "source", max_retries=0)
+        self.assertTrue(ok)
+        self.assertEqual(how, "back")
+        self.assertTrue(nav.followers_session_list_committed_open_for("source"))
 
     def test_05h_visual_fallback_uses_a_bounded_coarse_signature(self) -> None:
         before = "0" * 256

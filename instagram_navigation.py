@@ -60031,12 +60031,19 @@ def return_to_followers_list(
     if retries is None:
         retries = int(getattr(config, "FOLLOWERS_LIST_RETURN_MAX_RETRIES", 2))
     for attempt in range(max(0, retries) + 1):
+        # A Back is a surface-changing intent.  Any hierarchy captured on the
+        # candidate profile (or on an earlier Followers viewport) is invalid
+        # at this boundary and must never certify the destination surface.
+        followers_clear_detect_hierarchy_cache()
         try:
             d.press("back")
         except Exception:
             pass
         time.sleep(0.38)
-        det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
+        det, _fresh_hierarchy_xml = detect_followers_list_screen_fresh(
+            d,
+            source_profile_username=source_profile_username,
+        )
         if det.get("is_followers_list"):
             # The same positive detector that authorises the caller to resume
             # list processing also restores the committed-surface invariant.
@@ -60053,6 +60060,10 @@ def return_to_followers_list(
                 source_profile_username=source_profile_username,
                 attempt=attempt,
                 method="back",
+                proof_source=str(
+                    det.get("followers_detect_hierarchy_source") or ""
+                ),
+                fresh_proof_required=True,
             )
             log(
                 "info",
@@ -60061,6 +60072,10 @@ def return_to_followers_list(
                 method="back",
                 committed_source="verified_return_to_followers_list",
                 open_detection_method=str(det.get("open_detection_method") or ""),
+                proof_source=str(
+                    det.get("followers_detect_hierarchy_source") or ""
+                ),
+                fresh_proof_required=True,
             )
             return True, "back"
     log(
@@ -60095,6 +60110,7 @@ def return_to_followers_list(
             )
         else:
             followers_session_clear_list_committed_open(source_profile_username)
+            followers_clear_detect_hierarchy_cache()
             ok_reopen, _reopen_meta = open_followers_list_from_profile(
                 d, source_profile_username, pkg, profile_verified=True
             )
@@ -60117,6 +60133,7 @@ def return_to_followers_list(
         )
         if search_rec_ok:
             followers_session_clear_list_committed_open(source_profile_username)
+            followers_clear_detect_hierarchy_cache()
             ok_reopen, _reopen_meta = open_followers_list_from_profile(
                 d, source_profile_username, pkg, profile_verified=True
             )
@@ -60136,8 +60153,13 @@ def return_to_followers_list(
                 recovery_reason=search_rec_reason,
             )
             return False, "search_profile_recovery_failed"
-    log("error", "followers_list_return_failed", source_profile_username=source_profile_username)
-    return False, "failed"
+    log(
+        "error",
+        "followers_list_return_failed",
+        source_profile_username=source_profile_username,
+        reason="followers_surface_reacquisition_unproved",
+    )
+    return False, "followers_surface_reacquisition_unproved"
 
 
 def visual_flow_final_return_to_ct_followers_list(
