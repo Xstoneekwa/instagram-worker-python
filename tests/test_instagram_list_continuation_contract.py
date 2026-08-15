@@ -1212,6 +1212,37 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             "allow_canonical_scroll",
         )
 
+    def test_39c1_exhausted_viewport_positive_rows_scroll_instead_of_reprocessing(self) -> None:
+        continuation = {
+            "state": State.PRIMARY_ROWS_AVAILABLE.value,
+            "primary_row_count": 2,
+            "see_more_visible": False,
+            "is_boundary": False,
+        }
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                continuation,
+                followers_list_proved=True,
+                visual_evidence={"visual_match": False},
+            ),
+            "allow_canonical_scroll",
+        )
+
+    def test_39c2_positive_rows_without_followers_surface_proof_fail_closed(self) -> None:
+        continuation = {
+            "state": State.PRIMARY_ROWS_AVAILABLE.value,
+            "primary_row_count": 2,
+            "see_more_visible": False,
+            "is_boundary": False,
+        }
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                continuation,
+                followers_list_proved=False,
+            ),
+            "stop_ambiguous_surface",
+        )
+
     def test_39d_pre_scroll_hard_boundaries_and_unknown_surface_fail_closed(self) -> None:
         see_more = nav.followers_list_continuation_from_hierarchy_xml(
             _surface(rows=[("row_a", "Following")], see_more=True, suggestions=True),

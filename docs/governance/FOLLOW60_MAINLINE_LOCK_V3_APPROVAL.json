@@ -1,19 +1,20 @@
 {
   "schema": "FOLLOW60_MAINLINE_LOCK_V3_EXTERNAL_APPROVAL",
-  "approval_id": "11ce406a-e070-44b4-9d74-dd1835ed6dbc-follow60-mainline-lock-v3",
+  "approval_id": "019fb309-ct-resume-scroll-freeze-lock-v3-20260815",
   "approved_by": "Liam",
   "approved_at": "2026-08-15",
   "status": "consumed_once",
-  "approval_source": "/Users/admin/.codex/attachments/11ce406a-e070-44b4-9d74-dd1835ed6dbc/pasted-text.txt",
-  "approved_scope_sha256": "e324d2055069629688b8d3e511cf8ab7d767e9558d18f3f8f7eb80d8ef0e49f8",
-  "manifest_sha256": "33d56fe46200e3b879dcf363ba1bfa83dc342e3138ae08a9bb7643486e2ee976",
+  "approval_source": "codex_task:019fb309-6664-7a00-a54c-03ba0f0821ce:user_message_p0_ct_resume_scroll_freeze",
+  "approved_scope_sha256": "6049e8cdb8091c021c742cef62c9ab10a79878940cb12c5b09394f884978f006",
+  "manifest_sha256": "641f8727822f2c05e27ff09f6b2ce7588c133359b0be82a42f05f41184b5e6b4",
   "approved_change_scope": [
     "restore_locked_follow60_scope",
     "forward_port_see_more_before_scroll",
     "fix_pre_scroll_decision",
     "preserve_first_safe_stop_reason",
     "optimize_ct_resume_reacquisition",
-    "install_follow60_mainline_lock_v3"
+    "install_follow60_mainline_lock_v3",
+    "restore_exhausted_viewport_scroll_transition"
   ],
   "approved_files_and_hunks": {
     "account_session_orchestrator.py": [
@@ -25,6 +26,7 @@
     ],
     "runner.py": [
       "followers_pre_scroll_contract_decision",
+      "restore_exhausted_viewport_scroll_transition",
       "see_more_check_before_scroll",
       "ct_resume_cached_snapshot_reacquisition",
       "runtime_integrity_gate_before_device_actions"

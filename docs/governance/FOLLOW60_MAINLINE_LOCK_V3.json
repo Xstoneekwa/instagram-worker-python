@@ -1,6 +1,6 @@
 {
   "schema": "FOLLOW60_MAINLINE_LOCK_V3",
-  "lock_version": "3.0.0",
+  "lock_version": "3.0.1",
   "status": "SOURCE_CERTIFIED_FIELD_CERTIFICATION_PENDING",
   "golden_baseline": {
     "locked_tag_commit": "32a83949f84713a4dbd1e3b4491a1ebc88745b16",
@@ -33,7 +33,7 @@
     "instagram_list_continuation.py": "f264c335dcb1722202e197e024a4a55dd57ad9aae580b7ce6cdde9f57ada8e3f",
     "instagram_navigation.py": "45ca95345ee2bf948144661d9335cb30573f2a48a39119effedcfd20b78b80a2",
     "post_follow_stage_outbox.py": "c6f51ff560d99fe52d3fb70c86bf121a4de94d1f343f762901f8b6f955b3444d",
-    "runner.py": "ba3a9818a5ccb28de448d9620ab44b257c81c47abeb0218ba27117a0eec74042",
+    "runner.py": "b9adbe35bbf01339bb6d6028015656f968ce998324b4da9440b8bba4429df6f6",
     "runtime_caps.py": "b4c3340b1b028d104e263e574c19a6390d3c8cdb7e56afefe8903b7d789f7974",
     "scripts/benchmark-follow60-ct-resume-reacquisition.py": "632f96c08aada14f6d2b5bcc2cc378452de4493d2c5fa74afc0bcfe160f916bf",
     "scripts/generate-follow60-mainline-lock-v3-candidate.py": "635cd7b1a4f6fb24262f0119c56a60baa4cd313728c44c0d44d779ad19682dca",
@@ -47,12 +47,12 @@
     "tests/test_follow60_p0_source_contract.py": "f7b9d8963766900cf13ad483ae595afcf438d6483b8302c26b9d6a38a0f6344a",
     "tests/test_follow60_surface_driven_return_ct_v1.py": "0b29e720b08c3baca16ebe40a704e78c262a57b054e3ef69a02f8512b911a449",
     "tests/test_follow60_v2_mainline_v1.py": "5c481c714375a8f0acb1fe217574e4379e2b8f6e372ce4d1d281b00dad08eccc",
-    "tests/test_instagram_list_continuation_contract.py": "3bcf723619b8a870300fcf9f7247fa1cbe235644034407f104424e2ec1dcedd5",
+    "tests/test_instagram_list_continuation_contract.py": "fa1501e055ad62023a6ba84ac86a41cad4e6348dc71c5cfb829bc4f0aa141f32",
     "tests/test_post_follow_like_samsung_fast.py": "9a4c492a6001cd359b7bf51cdd698458304e2463011f561c137c4a4712dfb107",
     "tests/test_post_viewer_story_highlight_identity_guard.py": "433f9fbba5829d45bf82abb905953e5aaef985ade2b930c44c830e2af5e2d8a9",
     "tests/test_target_followers_progressive_resume_v2.py": "95d5e3fb48d2b7227693bfe68f70ada2c064a2b60f6bdb1e591d372a0992ba6c"
   },
-  "protected_scope_sha256": "e324d2055069629688b8d3e511cf8ab7d767e9558d18f3f8f7eb80d8ef0e49f8",
+  "protected_scope_sha256": "6049e8cdb8091c021c742cef62c9ab10a79878940cb12c5b09394f884978f006",
   "protected_functions": [
     "runner._run_followers_list_engine_session",
     "runner._followers_pre_scroll_contract_decision",
@@ -94,7 +94,7 @@
     "field_certification": "PENDING_NEXT_NATURAL_RUNS"
   },
   "approval": {
-    "approval_id": "11ce406a-e070-44b4-9d74-dd1835ed6dbc-follow60-mainline-lock-v3",
+    "approval_id": "019fb309-ct-resume-scroll-freeze-lock-v3-20260815",
     "approved_by": "Liam",
     "approved_at": "2026-08-15",
     "status": "approved_once",
@@ -104,7 +104,8 @@
       "fix_pre_scroll_decision",
       "preserve_first_safe_stop_reason",
       "optimize_ct_resume_reacquisition",
-      "install_follow60_mainline_lock_v3"
+      "install_follow60_mainline_lock_v3",
+      "restore_exhausted_viewport_scroll_transition"
     ],
     "field_certification_required_for_new_golden": true
   }

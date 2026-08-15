@@ -2152,7 +2152,7 @@ def _followers_pre_scroll_contract_decision(
     followers_list_proved: bool,
     visual_evidence: dict[str, Any] | None = None,
 ) -> str:
-    """Return the no-gesture decision for the fresh pre-scroll observation."""
+    """Return the no-gesture decision after the visible viewport is exhausted."""
     state = str(continuation.get("state") or "")
     visual = visual_evidence if isinstance(visual_evidence, dict) else {}
     visual_hard_boundary = bool(
@@ -2160,12 +2160,18 @@ def _followers_pre_scroll_contract_decision(
         or visual.get("suggestions_boundary_proved")
         or visual.get("suggestions_only_proved")
     )
-    if state == "PRIMARY_ROWS_AVAILABLE":
-        return "process_rows"
     if state == "EXPAND_PRIMARY_LIST_AVAILABLE":
         return "expand_primary_list"
     if bool(continuation.get("is_boundary")) or visual_hard_boundary:
         return "stop_hard_boundary"
+    # This helper is called only after every candidate in the current visible
+    # viewport has already been processed or safely rejected. Seeing those
+    # same primary rows again proves the followers surface; it must not send
+    # the engine back around the same viewport without a scroll.
+    if state == "PRIMARY_ROWS_AVAILABLE":
+        if followers_list_proved and int(continuation.get("primary_row_count") or 0) > 0:
+            return "allow_canonical_scroll"
+        return "stop_ambiguous_surface"
     if (
         followers_list_proved
         and int(continuation.get("primary_row_count") or 0) > 0
