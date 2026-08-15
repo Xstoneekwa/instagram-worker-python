@@ -1,0 +1,27 @@
+{
+  "approval_status": "REQUESTED_NOT_APPROVED",
+  "base_manifest_sha256": "b8ac37a3278cc4a586bc4454763b352d90c66358fcfb9dfbed4c903f96d7dc92",
+  "base_sha": "528bce2ecd280ea1829245b4a734bacf5d160f23",
+  "change_id": "follow60-physical-write-lock-v3-1-20260816",
+  "diff_sha256": "fd2c2e54bb5a196b36a8abd7cda74d8ffb02689194426901027c2add4139b36f",
+  "expires_at": "2026-08-16T03:29:22.284185+00:00",
+  "files_requested": [
+    ".gitattributes",
+    ".githooks/pre-commit",
+    ".githooks/pre-push",
+    "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
+    "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
+    "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_SCOPE.json",
+    "follow60_write_lock_v3_1.py",
+    "scripts/guard-follow60-protected-index-v3-1.py",
+    "scripts/install-follow60-physical-write-lock-v3-1.py",
+    "scripts/promote-follow60-v2-mainline.sh",
+    "scripts/request-follow60-protected-index-commit-v3-1.py",
+    "scripts/verify-follow60-physical-write-lock-v3-1.py",
+    "tests/test_follow60_physical_write_lock_v3_1.py"
+  ],
+  "head_sha": "4271faddab33e032a3d5b04b9894149630378845",
+  "requested_at": "2026-08-15T23:29:22.284185+00:00",
+  "requested_scope": "root-owned immutable physical Follow60 V3.1 write lock, self-protected governance scope, and signed commit/package/activation gates",
+  "schema": "FOLLOW60_LOCK_CHANGE_REQUEST_V1"
+}
