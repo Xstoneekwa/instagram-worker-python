@@ -799,11 +799,26 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             rows=[("row_7", "Following")]
             + [(f"row_{idx}", "Follow") for idx in range(8, 15)]
         )
+        after = after.replace(
+            "<hierarchy>",
+            "<hierarchy>"
+            + _node(rid="com.instagram.android:id/unified_follow_list_tab_layout")
+            + _node(
+                text="22 followers",
+                rid="com.instagram.android:id/title",
+                selected=True,
+            )
+            + _node(klass="androidx.recyclerview.widget.RecyclerView"),
+            1,
+        )
+        def refresh_after(*_args, **_kwargs):
+            nav._followers_store_detect_hierarchy_xml(after)
+            return after
         nav._followers_store_detect_hierarchy_xml(before)
         device = _FakeScrollDevice()
         diag: dict = {}
         with (
-            patch.object(nav, "followers_refresh_detect_hierarchy_cache", return_value=after),
+            patch.object(nav, "followers_refresh_detect_hierarchy_cache", side_effect=refresh_after),
             patch.object(nav, "_followers_log_scroll_or_swipe_about_to_run"),
             patch.object(nav.time, "sleep", return_value=None),
         ):
@@ -823,6 +838,39 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(diag["fully_visible_count"], 8)
         self.assertEqual(diag["partial_row_count"], 0)
         self.assertNotEqual(diag["scroll_distance_ratio"], 0.24)
+        self.assertTrue(diag["reacquisition_fast_path_ready"])
+        self.assertEqual(diag["reacquisition_xml_dump_count"], 0)
+        self.assertEqual(diag["reacquisition_poll_count"], 0)
+        self.assertEqual(diag["reacquisition_screenshot_count"], 0)
+        self.assertEqual(diag["reacquisition_vision_call_count"], 0)
+        self.assertGreater(
+            diag["post_scroll_detection_snapshot"]["candidate_username_count"],
+            0,
+        )
+
+    def test_29aa_ambiguous_post_scroll_snapshot_preserves_historical_fallback(self) -> None:
+        before = _surface(rows=[(f"row_{idx}", "Following") for idx in range(8)])
+        after = _surface(
+            rows=[("row_7", "Following")]
+            + [(f"row_{idx}", "Follow") for idx in range(8, 15)]
+        )
+        nav._followers_store_detect_hierarchy_xml(before)
+        diag: dict = {}
+        with (
+            patch.object(nav, "followers_refresh_detect_hierarchy_cache", return_value=after),
+            patch.object(nav, "_followers_log_scroll_or_swipe_about_to_run"),
+            patch.object(nav.time, "sleep", return_value=None),
+        ):
+            ok = nav._followers_scroll_list_forward(
+                _FakeScrollDevice(),
+                scroll_profile="canonical_adaptive",
+                bypass_post_tap_capture_gate=True,
+                bypass_scroll_xml_guards=True,
+                scroll_diag_out=diag,
+            )
+        self.assertTrue(ok)
+        self.assertFalse(diag["reacquisition_fast_path_ready"])
+        self.assertNotIn("post_scroll_detection_snapshot", diag)
 
     def test_29a_stolm_shape_emits_primary_state_with_two_overlap_and_seven_new(self) -> None:
         before = _surface(rows=[(f"stolm_row_{idx}", "Following") for idx in range(9)])
@@ -910,7 +958,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(diag["forward_attempt_count"], 3)
         self.assertEqual(len(device.swipes), 3)
 
-    def test_32_scroll_failure_preserves_first_reason_without_ct_rotation(self) -> None:
+    def test_32_scroll_failure_preserves_first_stop_without_ct_rotation(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {
                 "follows_completed_count": 17,
@@ -938,12 +986,13 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(result["global_follows_completed"], 17)
+        self.assertEqual(len(result["partial_resumable_targets"]), 0)
         self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
+        self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
         self.assertEqual(
             result["summary"]["follow_stop_reason"],
             "visible_window_exhausted_scroll_failed",
         )
-        self.assertTrue(result["summary"]["secondary_stop_reason_suppressed"])
 
     def test_33_duplicate_accessibility_labels_do_not_shorten_geometry(self) -> None:
         xml = _surface(
@@ -1039,7 +1088,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             "previous_zero_overlap_not_reusable",
         )
 
-    def test_37_ambiguous_scroll_failure_stops_global_rotation(self) -> None:
+    def test_37_ambiguous_scroll_failure_preserves_first_stop(self) -> None:
         engine = _FakeFollowersEngine([(0, {
             "follows_completed_count": 17,
             "follows_goal_effective": 40,
@@ -1057,14 +1106,15 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
         self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(len(result["partial_resumable_targets"]), 0)
         self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
         self.assertEqual(
             result["summary"]["follow_stop_reason"],
             "visible_window_exhausted_scroll_failed",
         )
-        self.assertFalse(result["summary"]["target_rotation_allowed"])
+        self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
 
-    def test_38_first_scroll_failure_stops_without_second_ct_attempt(self) -> None:
+    def test_38_scroll_failure_never_consumes_secondary_ct(self) -> None:
         safe_failure = {
             "follows_completed_count": 1,
             "follows_goal_effective": 40,
@@ -1083,10 +1133,12 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
         self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(len(result["partial_resumable_targets"]), 0)
         self.assertEqual(
             result["summary"]["follow_stop_reason"],
             "visible_window_exhausted_scroll_failed",
         )
+        self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
 
     def test_39_processed_valid_viewport_expands_see_more_before_scroll(self) -> None:
         nav._followers_store_detect_hierarchy_xml(
@@ -1119,10 +1171,6 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             pre_scroll_contract,
         )
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
-        self.assertIn("followers_pre_scroll_boundary_committed", pre_scroll_contract)
-        self.assertIn('action="stop_before_scroll"', pre_scroll_contract)
-        self.assertIn("detect_followers_list_screen_visual_fallback", pre_scroll_contract)
-        self.assertIn("pre_scroll_continuation_ambiguous", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
 
     def test_39b_failed_scroll_gets_one_fresh_see_more_probe_before_rotation(self) -> None:
@@ -1147,6 +1195,60 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertIn("continue", final_probe)
 
+    def test_39c_positive_22_rows_are_not_vetoed_by_visual_false(self) -> None:
+        xml = _surface(rows=[(f"row_{idx}", "Following") for idx in range(22)])
+        continuation = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            processed_primary_row_ids={f"row_{idx}" for idx in range(22)},
+            previously_valid_followers_rows=True,
+        )
+        self.assertEqual(continuation["state"], State.AMBIGUOUS_SURFACE.value)
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                continuation,
+                followers_list_proved=True,
+                visual_evidence={"visual_match": False},
+            ),
+            "allow_canonical_scroll",
+        )
+
+    def test_39d_pre_scroll_hard_boundaries_and_unknown_surface_fail_closed(self) -> None:
+        see_more = nav.followers_list_continuation_from_hierarchy_xml(
+            _surface(rows=[("row_a", "Following")], see_more=True, suggestions=True),
+            processed_primary_row_ids={"row_a"},
+            previously_valid_followers_rows=True,
+        )
+        suggestions_only = nav.followers_list_continuation_from_hierarchy_xml(
+            _surface(rows=[], suggestions=True),
+            previously_valid_followers_rows=True,
+        )
+        unknown = nav.followers_list_continuation_from_hierarchy_xml("<hierarchy />")
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                see_more, followers_list_proved=True
+            ),
+            "expand_primary_list",
+        )
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                suggestions_only, followers_list_proved=True
+            ),
+            "stop_hard_boundary",
+        )
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                unknown, followers_list_proved=False
+            ),
+            "stop_ambiguous_surface",
+        )
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                {"state": State.AMBIGUOUS_SURFACE.value, "primary_row_count": 2},
+                followers_list_proved=True,
+                visual_evidence={"hard_boundary_proved": True},
+            ),
+            "stop_hard_boundary",
+        )
     def test_44_real_grouped_count_without_selected_flag_uses_committed_surface(self) -> None:
         run_rows = [
             ("myriam_flh_", "Following"),
@@ -1190,7 +1292,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(out["state"], State.AMBIGUOUS_SURFACE.value)
 
-    def test_40_scroll_failure_does_not_call_fast_rotation(self) -> None:
+    def test_40_partial_scroll_failure_does_not_rotate_even_when_callback_available(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {
                 "follows_completed_count": 18,
@@ -1223,13 +1325,13 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
             fast_rotate_to_next_target_from_followers=rotate,
         )
-        self.assertEqual(rotations, [])
+        self.assertEqual(len(rotations), 0)
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(result["global_follows_completed"], 18)
         self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
         self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
 
-    def test_41_failed_revalidation_does_not_consume_next_ct(self) -> None:
+    def test_41_scroll_failure_never_invokes_revalidation_callback(self) -> None:
         engine = _FakeFollowersEngine([(0, {
             "follows_completed_count": 18,
             "follows_goal_effective": 40,
@@ -1255,10 +1357,6 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(result["summary"]["phase_status"], "partial_resumable")
         self.assertEqual(result["summary"]["safe_next_step"], "schedule_resume")
-        self.assertEqual(
-            result["summary"]["follow_stop_reason"],
-            "visible_window_exhausted_scroll_failed",
-        )
 
     def test_42_partial_follow_contract_blocks_unfollow_handoff(self) -> None:
         ok, reason = session._follow_exit_handoff_gate(

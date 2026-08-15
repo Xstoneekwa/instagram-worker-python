@@ -224,11 +224,13 @@ def _without_reviewed_follow60_evaluation_barrier(node: ast.FunctionDef) -> ast.
     )
 
 
-def _without_reviewed_follow_scroll_stop_authority(node: ast.FunctionDef) -> ast.FunctionDef:
-    """Remove only the reviewed no-rotation scroll-stop authority delta."""
+def _without_reviewed_follow60_first_stop_preservation(
+    node: ast.FunctionDef,
+) -> ast.FunctionDef:
+    """Remove the reviewed Follow60 no-rotation guard for legacy parity checks."""
     normalized = copy.deepcopy(node)
 
-    class RemoveReviewedScrollStopAuthority(ast.NodeTransformer):
+    class RemoveFirstStopPreservation(ast.NodeTransformer):
         def visit_Assign(self, item):
             if any(
                 isinstance(target, ast.Name)
@@ -238,25 +240,32 @@ def _without_reviewed_follow_scroll_stop_authority(node: ast.FunctionDef) -> ast
                 return None
             return self.generic_visit(item)
 
-        def visit_If(self, item):
-            if any(
-                isinstance(child, ast.Name)
-                and child.id == "FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS"
-                for child in ast.walk(item.test)
+        def visit_keyword(self, item):
+            updated = self.generic_visit(item)
+            if (
+                updated.arg == "remaining_target_ids"
+                and isinstance(updated.value, ast.Name)
+                and updated.value.id == "contract_remaining_target_ids"
             ):
-                return None
-            return self.generic_visit(item)
+                updated.value = ast.Name(id="remaining_target_ids", ctx=ast.Load())
+            return updated
 
-        def visit_Name(self, item):
-            if item.id == "contract_remaining_target_ids":
-                return ast.copy_location(
-                    ast.Name(id="remaining_target_ids", ctx=item.ctx), item
+        def visit_If(self, item):
+            self.generic_visit(item)
+            if (
+                isinstance(item.test, ast.Compare)
+                and isinstance(item.test.left, ast.Name)
+                and item.test.left.id == "summary_reason"
+                and any(
+                    isinstance(comparator, ast.Name)
+                    and comparator.id == "FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS"
+                    for comparator in item.test.comparators
                 )
+            ):
+                return []
             return item
 
-    return ast.fix_missing_locations(
-        RemoveReviewedScrollStopAuthority().visit(normalized)
-    )
+    return ast.fix_missing_locations(RemoveFirstStopPreservation().visit(normalized))
 
 
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
@@ -273,7 +282,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_follow_scroll_stop_authority(
+        actual = _without_reviewed_follow60_first_stop_preservation(
             _without_reviewed_follow60_evaluation_barrier(
                 _without_reviewed_follow60_binding(
                     _without_reviewed_resume_quota_bound(

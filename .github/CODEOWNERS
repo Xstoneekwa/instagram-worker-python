@@ -1,0 +1,18 @@
+# Follow60 Mainline protected scope: explicit Liam approval is additionally
+# enforced by FOLLOW60_MAINLINE_LOCK_V3 and its external approval record.
+/runner.py @Xstoneekwa
+/account_session_orchestrator.py @Xstoneekwa
+/account_run_request_consumer.py @Xstoneekwa
+/instagram_navigation.py @Xstoneekwa
+/instagram_list_continuation.py @Xstoneekwa
+/follow60_* @Xstoneekwa
+/follow_60s_* @Xstoneekwa
+/follow_* @Xstoneekwa
+/followers_* @Xstoneekwa
+/post_follow_stage_outbox.py @Xstoneekwa
+/target_followers_* @Xstoneekwa
+/scripts/*follow60* @Xstoneekwa
+/tests/*follow60* @Xstoneekwa
+/tests/test_instagram_list_continuation_contract.py @Xstoneekwa
+/tests/test_target_followers_progressive_resume_v2.py @Xstoneekwa
+/docs/governance/FOLLOW60_MAINLINE_LOCK_V3* @Xstoneekwa

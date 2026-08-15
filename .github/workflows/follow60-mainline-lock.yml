@@ -1,8 +1,21 @@
 name: Follow60 Mainline Lock
 on: [push, pull_request]
 jobs:
-  verify:
+  follow60-lock-v3:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/verify-follow60-mainline-lock.py
+        with:
+          fetch-depth: 0
+      - name: Exact HEAD protected-scope verification
+        run: python3 scripts/verify-follow60-mainline-lock-v3.py
+      - name: Lock self-tests
+        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3
+  follow60-promotion-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Historical Follow60 promotion matrix
+        run: python3 -m unittest -q tests.test_follow60_v2_mainline_v1 tests.test_follow60_mainline_business_session_binding_v1 tests.test_instagram_list_continuation_contract tests.test_target_followers_progressive_resume_v2 tests.test_follow60_surface_driven_return_ct_v1 tests.test_post_viewer_story_highlight_identity_guard

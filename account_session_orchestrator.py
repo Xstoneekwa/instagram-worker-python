@@ -152,10 +152,6 @@ FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
 )
 FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS = frozenset(
     {
-        # A failed physical scroll is a safe resume boundary for the current CT,
-        # not proof that another CT may be opened inside the same attempt.  Keep
-        # the first reason authoritative and leave continuation to the next
-        # canonical run/checkpoint.
         "visible_window_exhausted_scroll_failed",
         "pre_scroll_continuation_ambiguous",
     }
@@ -1534,9 +1530,6 @@ def _run_follow_target_rotation(
                     verified_actions=global_follows_completed,
                     target_actions=global_follow_goal,
                     current_target_id=target_id or source_profile,
-                    # Do not advertise an intra-run CT rotation after an
-                    # unproved scroll boundary.  The full remaining plan stays
-                    # in the session summary/checkpoint for the next run.
                     remaining_target_ids=[],
                     safe_boundary=False,
                 )
@@ -1550,6 +1543,7 @@ def _run_follow_target_rotation(
                     reason=summary_reason,
                     target_rotation_allowed=False,
                     preserved_outcome="partial_resumable",
+                    safe_next_step="schedule_resume",
                 )
                 break
             local_partial_rotation = summary_reason in FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS

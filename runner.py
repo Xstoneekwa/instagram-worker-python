@@ -48,6 +48,7 @@ import follow_persistence_receipt_replay
 import deferred_projection_outbox
 import device_action_latch
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
+from follow60_mainline_integrity_v3 import verify_runtime_integrity
 from worker_runtime_identity import (
     WorkerRuntimeIdentity,
     bind_worker_runtime_identity,
@@ -2143,6 +2144,36 @@ def _followers_visible_window_scroll_strategy(*, scroll_used: int) -> dict[str, 
         "reason": "visible_window_exhausted_after_two_soft_scrolls",
         "scroll_attempt_index": attempt_index,
     }
+
+
+def _followers_pre_scroll_contract_decision(
+    continuation: dict[str, Any],
+    *,
+    followers_list_proved: bool,
+    visual_evidence: dict[str, Any] | None = None,
+) -> str:
+    """Return the no-gesture decision for the fresh pre-scroll observation."""
+    state = str(continuation.get("state") or "")
+    visual = visual_evidence if isinstance(visual_evidence, dict) else {}
+    visual_hard_boundary = bool(
+        visual.get("hard_boundary_proved")
+        or visual.get("suggestions_boundary_proved")
+        or visual.get("suggestions_only_proved")
+    )
+    if state == "PRIMARY_ROWS_AVAILABLE":
+        return "process_rows"
+    if state == "EXPAND_PRIMARY_LIST_AVAILABLE":
+        return "expand_primary_list"
+    if bool(continuation.get("is_boundary")) or visual_hard_boundary:
+        return "stop_hard_boundary"
+    if (
+        followers_list_proved
+        and int(continuation.get("primary_row_count") or 0) > 0
+        and not bool(continuation.get("see_more_visible"))
+        and not bool(continuation.get("is_boundary"))
+    ):
+        return "allow_canonical_scroll"
+    return "stop_ambiguous_surface"
 
 
 def _new_candidate_follow_decision(
@@ -15465,6 +15496,19 @@ def _run_followers_list_engine_session(
                             target_scan_tracker.get("scrolls_attempted") or 0
                         ) + 1
                     if _ff_ok and str(_ff_verdict.reason) == "legacy_scroll_proof_staged":
+                        _ff_post_scroll_snapshot = _ff_diag.get(
+                            "post_scroll_detection_snapshot"
+                        )
+                        if isinstance(_ff_post_scroll_snapshot, dict) and bool(
+                            _ff_post_scroll_snapshot.get("is_followers_list")
+                        ):
+                            _ff_post_scroll_snapshot = dict(_ff_post_scroll_snapshot)
+                            _ff_post_scroll_snapshot["post_scroll_scroll_index"] = int(
+                                _ff_scroll_index
+                            )
+                            open_list_meta["post_scroll_detection_snapshot"] = dict(
+                                _ff_post_scroll_snapshot
+                            )
                         log(
                             "info", "ct_resume_v4_enforce_scroll_applied",
                             account_id=account_id, run_id=run_id,
@@ -15492,6 +15536,25 @@ def _run_followers_list_engine_session(
                             scroll_under_progressed=False,
                             correction_scroll_count=int(
                                 _ff_diag.get("correction_scroll_count") or 0
+                            ),
+                            reacquisition_fast_path_ready=bool(
+                                isinstance(_ff_post_scroll_snapshot, dict)
+                                and _ff_post_scroll_snapshot.get("is_followers_list")
+                            ),
+                            reacquisition_snapshot_build_ms=float(
+                                _ff_diag.get("reacquisition_snapshot_build_ms") or 0.0
+                            ),
+                            xml_dump_count=int(
+                                _ff_diag.get("reacquisition_xml_dump_count") or 0
+                            ),
+                            poll_count=int(
+                                _ff_diag.get("reacquisition_poll_count") or 0
+                            ),
+                            screenshot_count=int(
+                                _ff_diag.get("reacquisition_screenshot_count") or 0
+                            ),
+                            vision_call_count=int(
+                                _ff_diag.get("reacquisition_vision_call_count") or 0
                             ),
                         )
                         continue
@@ -17419,6 +17482,32 @@ def _run_followers_list_engine_session(
                     _pre_scroll_continuation_state = str(
                         _visible_window_continuation.get("state") or ""
                     )
+                    _pre_scroll_primary_row_count = int(
+                        _visible_window_continuation.get("primary_row_count") or 0
+                    )
+                    _pre_scroll_followers_list_proved = bool(
+                        _visible_window_continuation.get("selected_followers_tab")
+                        or str(
+                            _visible_window_continuation.get(
+                                "surface_verification_source"
+                            )
+                            or ""
+                        )
+                        in {
+                            "selected_followers_tab",
+                            "committed_rows_and_visible_followers_title",
+                        }
+                    )
+                    _pre_scroll_visual_evidence = (
+                        visual_loop_state.get("session_vf_detail")
+                        if isinstance(visual_loop_state.get("session_vf_detail"), dict)
+                        else {}
+                    )
+                    _pre_scroll_action = _followers_pre_scroll_contract_decision(
+                        _visible_window_continuation,
+                        followers_list_proved=_pre_scroll_followers_list_proved,
+                        visual_evidence=_pre_scroll_visual_evidence,
+                    )
                     log(
                         "info",
                         "followers_pre_scroll_boundary_check",
@@ -17428,20 +17517,22 @@ def _run_followers_list_engine_session(
                         run_id=str(run_id or ""),
                         source_profile_username=source_profile_username,
                         state=_pre_scroll_continuation_state,
+                        followers_list_proved=_pre_scroll_followers_list_proved,
                         see_more_visible=bool(
                             _visible_window_continuation.get("see_more_visible")
                         ),
                         suggestions_visible=bool(
                             _visible_window_continuation.get("suggestions_visible")
                         ),
-                        visible_primary_row_count=int(
-                            _visible_window_continuation.get("primary_row_count") or 0
-                        ),
+                        visible_primary_row_count=_pre_scroll_primary_row_count,
                         decision_source="fresh_xml",
+                        decision=_pre_scroll_action,
+                        screenshot_count=0,
+                        vision_call_count=0,
                     )
-                    if _pre_scroll_continuation_state == (
-                        "EXPAND_PRIMARY_LIST_AVAILABLE"
-                    ):
+                    if _pre_scroll_action == "process_rows":
+                        continue
+                    if _pre_scroll_action == "expand_primary_list":
                         see_more_status = "see_more_clicking"
                         _visible_window_expansion = followers_try_expand_primary_list(
                             d,
@@ -17467,15 +17558,8 @@ def _run_followers_list_engine_session(
                             or "see_more_no_progress"
                         )
                         break
-                    if bool(_visible_window_continuation.get("is_boundary")):
-                        # The final primary row has already been consumed and the
-                        # rendered viewport is now Suggestions.  This is a proved
-                        # CT boundary, not permission for one more physical swipe.
-                        see_more_status = (
-                            "see_more_expansion_confirmed_but_no_more_followers"
-                            if see_more_status == "see_more_expanded"
-                            else "see_more_absent"
-                        )
+                    if _pre_scroll_action == "stop_hard_boundary":
+                        see_more_status = "see_more_absent"
                         _followers_loop_finally_status = "suggestions_boundary"
                         _followers_loop_finally_stop = "followers_suggestions_boundary"
                         log(
@@ -17491,58 +17575,41 @@ def _run_followers_list_engine_session(
                             reason="suggestions_boundary_fresh_xml",
                         )
                         break
-                    if _pre_scroll_continuation_state == "AMBIGUOUS_SURFACE":
-                        # XML is the fast signal.  Only an ambiguous result pays
-                        # for one screenshot-based list probe.  A strong visual
-                        # primary-row surface may continue to the canonical
-                        # scroll; otherwise fail closed without a blind swipe.
-                        _pre_scroll_visual = detect_followers_list_screen_visual_fallback(
-                            d,
-                            source_profile_username=source_profile_username,
-                        )
-                        _pre_scroll_visual_match = bool(
-                            _pre_scroll_visual.get("visual_match")
-                            and int(
-                                _pre_scroll_visual.get("visual_user_rows_detected")
-                                or 0
-                            )
-                            >= 2
-                        )
+                    if _pre_scroll_action == "allow_canonical_scroll":
                         log(
                             "info",
-                            "followers_pre_scroll_boundary_visual_fallback",
+                            "followers_pre_scroll_positive_rows_continue",
                             flow="follow",
                             account_id=str(account_id or ""),
                             target_id=str(target_id or ""),
                             run_id=str(run_id or ""),
                             source_profile_username=source_profile_username,
-                            visual_match=_pre_scroll_visual_match,
-                            visual_confidence=float(
-                                _pre_scroll_visual.get("visual_confidence") or 0.0
-                            ),
-                            visual_user_rows_detected=int(
-                                _pre_scroll_visual.get("visual_user_rows_detected")
-                                or 0
-                            ),
-                            action=(
-                                "continue_primary_rows"
-                                if _pre_scroll_visual_match
-                                else "stop_before_scroll"
-                            ),
-                            reason=(
-                                "ambiguous_xml_visual_primary_rows_confirmed"
-                                if _pre_scroll_visual_match
-                                else "ambiguous_xml_visual_continuation_unproved"
-                            ),
+                            visible_primary_row_count=_pre_scroll_primary_row_count,
+                            action="allow_canonical_scroll",
+                            visual_veto_consulted=False,
+                            reason="positive_primary_rows_valid_followers_no_hard_boundary",
                         )
-                        if not _pre_scroll_visual_match:
-                            _followers_loop_finally_status = (
-                                "pre_scroll_continuation_ambiguous"
-                            )
-                            _followers_loop_finally_stop = (
-                                "pre_scroll_continuation_ambiguous"
-                            )
-                            break
+                    elif _pre_scroll_action == "stop_ambiguous_surface":
+                        _followers_loop_finally_status = (
+                            "pre_scroll_continuation_ambiguous"
+                        )
+                        _followers_loop_finally_stop = (
+                            "pre_scroll_continuation_ambiguous"
+                        )
+                        log(
+                            "warning",
+                            "followers_pre_scroll_continuation_unproved",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            source_profile_username=source_profile_username,
+                            followers_list_proved=_pre_scroll_followers_list_proved,
+                            visible_primary_row_count=_pre_scroll_primary_row_count,
+                            action="stop_before_scroll",
+                            reason="unknown_or_unproved_surface",
+                        )
+                        break
                 _visible_window_scroll_strategy: dict[str, Any] = {}
                 if _visible_window_scroll_required:
                     _visible_window_scroll_strategy = _followers_visible_window_scroll_strategy(
@@ -23864,6 +23931,25 @@ def _main_impl() -> int:
                 return 96
 
         if supabase_mode and run_request_id and not _follow60_canary_active:
+            _integrity = verify_runtime_integrity(
+                Path(__file__).resolve().parent,
+                runtime_mode="mainline",
+                binding_kind="mainline",
+                engine=DEFAULT_FOLLOW_ENGINE,
+            )
+            if not bool(_integrity.get("ok")):
+                log(
+                    "error",
+                    "FOLLOW60_MAINLINE_INTEGRITY_MISMATCH",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    request_id=run_request_id or None,
+                    reason=str(_integrity.get("reason") or "integrity_mismatch"),
+                    mismatched_files=sorted((_integrity.get("mismatches") or {}).keys()),
+                    device_actions_started=False,
+                    operator_review_required=True,
+                )
+                return 96
             _follow60_engine_active = bool(_configure_follow60_mainline(
                 account_id=account_id,
                 account_username=account_username,

@@ -1,0 +1,111 @@
+{
+  "schema": "FOLLOW60_MAINLINE_LOCK_V3",
+  "lock_version": "3.0.0",
+  "status": "SOURCE_CERTIFIED_FIELD_CERTIFICATION_PENDING",
+  "golden_baseline": {
+    "locked_tag_commit": "32a83949f84713a4dbd1e3b4491a1ebc88745b16",
+    "approved_source_sha": "55a039ae14a2111c6c48261094e08f3fe00def01",
+    "field_certified_worker_sha": "6701b2dfc661ae98d97de9b2da2ff03dfc93ecce",
+    "tag": "follow60-v2-mainline-production-2026-08-09",
+    "immutable_release": "/Users/admin/phonefarm-worker-releases/32a8394-follow60-v2-mainline-v1",
+    "reference_run_id": "cb7dcc07-b3bb-46cf-ac54-ae37cdfde8d7"
+  },
+  "restored_from_broken_sha": "724699d8ce85aa66e01e3ef60b5885ff9a539a34",
+  "protected_files": {
+    ".github/CODEOWNERS": "0501c5b8dd7e06faada49913cfb4143d1b8196a647e703566aeb49f98091d4c3",
+    ".github/workflows/follow60-mainline-lock.yml": "e7f866f50c302b588807915b47af45aae19c65e2fa699193e86212d965b7ca01",
+    "account_run_request_consumer.py": "4d56313f07246a40c7908033aa71073b3f9b93bdc4630fda26f38e47ee5b086d",
+    "account_session_orchestrator.py": "0fb249284f801eba7137a125704249d720c333dbfbfef1a3edee2832d0c899db",
+    "follow60_business_session_binding_v1.py": "485fc52b22bc1c70506ecafbc89342fa608454f6b56f30abb4eaaa280b386cd7",
+    "follow60_mainline_integrity_v3.py": "6c18d41d41181f1fa17e7519c787507c568295b9a5f8236f6d2a44905c9c9f3f",
+    "follow60_mainline_v2.py": "572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652",
+    "follow_60s_canary.py": "0cf818cf152562ce2307364b054752cfb671ca3edcdfe6081e39d106418c8a5d",
+    "follow_60s_canary_binding_v2.py": "3169ad5128561eeac87b7c9874db4d51c6669f416687b77ef700e55c26305fa7",
+    "follow_action_engine.py": "5405d19e665911be4068a1d2c22d235881e550f77f4a45a0f1d106154794b540",
+    "follow_outcome_contract.py": "ce1959d49c3cfa47755e54752fe78a71a91985fc87d2549e3bef941b90b0a720",
+    "follow_persistence_intent.py": "6a758647576f5ad7e17800ab2adf45a6c5bda5ffa20c7dd18af2bdf4d8e0f88d",
+    "follow_persistence_receipt_replay.py": "ea21cd8b5ee0c5836fa92b7c177e8a41e3ab87ae6ac0ddd7029500f27b8abf12",
+    "follow_persistence_rpc.py": "d36c0c09e3be6b1fbf17e37b4814bd21b6906669f876bf5f98dd3df0c65aecef",
+    "follow_state_contract.py": "c53c61ddc05dbcca5be7a35dd36e87135b519fcd68431f3b6a7eb6c1e9c30ce9",
+    "followers_exploration.py": "130b357587735249a995435779eafea4d4f759f64857910f1ae6286b034f52c6",
+    "followers_injection_evidence.py": "ff3509a756a9ae2064af8acf0f874fe1a32b53161503d8a1f43e21ceb8760df3",
+    "followers_inter_candidate_perf.py": "4276bf64f73c8c6a274cd5025ea01328c0312f131820f838ab29943d55ee8923",
+    "instagram_list_continuation.py": "f264c335dcb1722202e197e024a4a55dd57ad9aae580b7ce6cdde9f57ada8e3f",
+    "instagram_navigation.py": "45ca95345ee2bf948144661d9335cb30573f2a48a39119effedcfd20b78b80a2",
+    "post_follow_stage_outbox.py": "c6f51ff560d99fe52d3fb70c86bf121a4de94d1f343f762901f8b6f955b3444d",
+    "runner.py": "ba3a9818a5ccb28de448d9620ab44b257c81c47abeb0218ba27117a0eec74042",
+    "runtime_caps.py": "b4c3340b1b028d104e263e574c19a6390d3c8cdb7e56afefe8903b7d789f7974",
+    "scripts/benchmark-follow60-ct-resume-reacquisition.py": "632f96c08aada14f6d2b5bcc2cc378452de4493d2c5fa74afc0bcfe160f916bf",
+    "scripts/generate-follow60-mainline-lock-v3-candidate.py": "635cd7b1a4f6fb24262f0119c56a60baa4cd313728c44c0d44d779ad19682dca",
+    "scripts/promote-follow60-v2-mainline.sh": "add106f5ec249b95bdff549db002aa1ae060458dc7247eb4dcfaec4384dceb41",
+    "scripts/verify-follow60-mainline-lock-v3.py": "ea025e75ecaeda450cc378c3cb983b0955c63c3d42c58be9589002b192314f3e",
+    "supabase_client.py": "867d888ba52b08eb7c8e1ac94ede6ce8764eca493bd583b13333d271ca50f131",
+    "target_followers_progressive_resume_v2.py": "2312e359dc46f105b3697176a406f4cbc73769465174b7ce36307f0c162c0890",
+    "target_followers_resume_replay.py": "585e559dfd956e3c5e5fa978e0ce215d835a193196a525a77f6dc5d5c90082ad",
+    "tests/test_follow60_mainline_business_session_binding_v1.py": "2ae0883b2af3a40aade5a3a7bc96e9d3f4e8e8108601dd1e2eec6f1d75d9c530",
+    "tests/test_follow60_mainline_lock_v3.py": "578ec4b560fc5c0c55b43e6b20b80eca3ed7cf86683da5ded73907b0f49eedf7",
+    "tests/test_follow60_p0_source_contract.py": "f7b9d8963766900cf13ad483ae595afcf438d6483b8302c26b9d6a38a0f6344a",
+    "tests/test_follow60_surface_driven_return_ct_v1.py": "0b29e720b08c3baca16ebe40a704e78c262a57b054e3ef69a02f8512b911a449",
+    "tests/test_follow60_v2_mainline_v1.py": "5c481c714375a8f0acb1fe217574e4379e2b8f6e372ce4d1d281b00dad08eccc",
+    "tests/test_instagram_list_continuation_contract.py": "3bcf723619b8a870300fcf9f7247fa1cbe235644034407f104424e2ec1dcedd5",
+    "tests/test_post_follow_like_samsung_fast.py": "9a4c492a6001cd359b7bf51cdd698458304e2463011f561c137c4a4712dfb107",
+    "tests/test_post_viewer_story_highlight_identity_guard.py": "433f9fbba5829d45bf82abb905953e5aaef985ade2b930c44c830e2af5e2d8a9",
+    "tests/test_target_followers_progressive_resume_v2.py": "95d5e3fb48d2b7227693bfe68f70ada2c064a2b60f6bdb1e591d372a0992ba6c"
+  },
+  "protected_scope_sha256": "f8c1c3f25403c3a3b32ee6cdcb7d6e6b0d0ffd4b2a62194adcef4a82d3b79908",
+  "protected_functions": [
+    "runner._run_followers_list_engine_session",
+    "runner._followers_pre_scroll_contract_decision",
+    "account_session_orchestrator._run_follow_target_rotation",
+    "instagram_navigation.followers_list_continuation_from_hierarchy_xml",
+    "instagram_navigation.followers_detection_snapshot_from_fresh_hierarchy",
+    "instagram_navigation._followers_scroll_list_forward",
+    "target_followers_progressive_resume_v2.TargetFollowersResumeController"
+  ],
+  "runtime_entrypoints": [
+    "account_run_request_consumer.py",
+    "runner.py:main",
+    "runner.py:_run_followers_list_engine_session"
+  ],
+  "runtime_contract": {
+    "runtime_mode": "mainline",
+    "binding_kind": "mainline",
+    "engine": "FOLLOW60_V2_MAINLINE_V1",
+    "fail_closed_reason": "FOLLOW60_MAINLINE_INTEGRITY_MISMATCH",
+    "device_actions_before_gate": 0
+  },
+  "required_invariants": [
+    "positive_primary_rows_valid_followers_no_hard_boundary_allows_scroll",
+    "see_more_before_scroll",
+    "suggestions_only_never_scrolls",
+    "unknown_surface_fails_closed",
+    "story_highlight_v5_mandatory",
+    "first_safe_stop_reason_wins",
+    "no_ct_rotation_after_safe_stop",
+    "one_canonical_terminalization",
+    "ct_resume_cached_xml_reuse_has_zero_extra_ui_actions"
+  ],
+  "performance_budget": {
+    "ct_resume_reacquisition_p50_improvement_min_percent": 30.0,
+    "ct_resume_reacquisition_p95_no_regression": true,
+    "extra_ui_actions": 0,
+    "extra_screenshots_happy_path": 0,
+    "extra_vision_calls_happy_path": 0,
+    "field_certification": "PENDING_NEXT_NATURAL_RUNS"
+  },
+  "approval": {
+    "approval_id": "11ce406a-e070-44b4-9d74-dd1835ed6dbc-follow60-mainline-lock-v3",
+    "approved_by": "Liam",
+    "approved_at": "2026-08-15",
+    "status": "approved_once",
+    "approved_change_scope": [
+      "restore_locked_follow60_scope",
+      "forward_port_see_more_before_scroll",
+      "fix_pre_scroll_decision",
+      "preserve_first_safe_stop_reason",
+      "optimize_ct_resume_reacquisition",
+      "install_follow60_mainline_lock_v3"
+    ],
+    "field_certification_required_for_new_golden": true
+  }
+}

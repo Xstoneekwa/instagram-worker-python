@@ -39225,6 +39225,45 @@ def _followers_scroll_list_forward(
         except Exception:
             pass
     _sd("scroll_helper_succeeded", bool(scroll_ok))
+    if scroll_ok and (canonical_controlled or canonical_adaptive):
+        # The canonical scroll already paid for a fresh hierarchy to prove
+        # overlap. Convert that exact immutable observation into the existing
+        # picker snapshot format; never dump XML, poll, screenshot or invoke
+        # Vision a second time merely to reacquire the same viewport.
+        _reacquisition_started = time.perf_counter()
+        _reacquisition_xml = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "")
+        _sd("reacquisition_xml_dump_count", 0)
+        _sd("reacquisition_poll_count", 0)
+        _sd("reacquisition_screenshot_count", 0)
+        _sd("reacquisition_vision_call_count", 0)
+        _reacquisition_snapshot: dict[str, Any] = {}
+        if _reacquisition_xml:
+            try:
+                _reacquisition_snapshot = (
+                    followers_detection_snapshot_from_fresh_hierarchy(
+                        _reacquisition_xml,
+                        source_profile_username=str(source_profile_username or ""),
+                        scroll_index=0,
+                    )
+                )
+            except Exception:
+                _reacquisition_snapshot = {}
+        if bool(_reacquisition_snapshot.get("is_followers_list")):
+            _sd("post_scroll_detection_snapshot", _reacquisition_snapshot)
+            _sd("reacquisition_fast_path_ready", True)
+            _sd("reacquisition_list_container_seen_ms", 0.0)
+            _sd(
+                "reacquisition_primary_rows_seen_ms",
+                0.0
+                if int(_reacquisition_snapshot.get("candidate_username_count") or 0) > 0
+                else None,
+            )
+        else:
+            _sd("reacquisition_fast_path_ready", False)
+        _sd(
+            "reacquisition_snapshot_build_ms",
+            round((time.perf_counter() - _reacquisition_started) * 1000.0, 3),
+        )
     if scroll_diag_out is not None and not scroll_ok:
         scroll_diag_out.setdefault(
             "failure_reason",

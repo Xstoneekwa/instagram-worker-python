@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+python3 "$ROOT/scripts/verify-follow60-mainline-lock-v3.py"
+
 SHARED_TOKEN="/Users/admin/phonefarm-runtime/run/run-control-dispatcher/auto-restart-skip-startup-tick.once"
 RELEASE="/Users/admin/phonefarm-worker-releases/FOLLOW60_V2_MAINLINE_V1"
 

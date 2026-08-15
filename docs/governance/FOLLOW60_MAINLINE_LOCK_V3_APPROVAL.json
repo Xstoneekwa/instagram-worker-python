@@ -1,0 +1,65 @@
+{
+  "schema": "FOLLOW60_MAINLINE_LOCK_V3_EXTERNAL_APPROVAL",
+  "approval_id": "11ce406a-e070-44b4-9d74-dd1835ed6dbc-follow60-mainline-lock-v3",
+  "approved_by": "Liam",
+  "approved_at": "2026-08-15",
+  "status": "consumed_once",
+  "approval_source": "/Users/admin/.codex/attachments/11ce406a-e070-44b4-9d74-dd1835ed6dbc/pasted-text.txt",
+  "approved_scope_sha256": "f8c1c3f25403c3a3b32ee6cdcb7d6e6b0d0ffd4b2a62194adcef4a82d3b79908",
+  "manifest_sha256": "a8f76030c80a87ca4ac38c90271839d2559ba08dc89eaa9e4130368296c0273d",
+  "approved_change_scope": [
+    "restore_locked_follow60_scope",
+    "forward_port_see_more_before_scroll",
+    "fix_pre_scroll_decision",
+    "preserve_first_safe_stop_reason",
+    "optimize_ct_resume_reacquisition",
+    "install_follow60_mainline_lock_v3"
+  ],
+  "approved_files_and_hunks": {
+    "account_session_orchestrator.py": [
+      "preserve_first_safe_stop_reason",
+      "block_ct_rotation_after_safe_stop"
+    ],
+    "instagram_navigation.py": [
+      "reuse_fresh_post_scroll_xml_snapshot_for_ct_resume"
+    ],
+    "runner.py": [
+      "followers_pre_scroll_contract_decision",
+      "see_more_check_before_scroll",
+      "ct_resume_cached_snapshot_reacquisition",
+      "runtime_integrity_gate_before_device_actions"
+    ],
+    "follow60_mainline_integrity_v3.py": [
+      "exact_runtime_disk_hash_and_contract_verification"
+    ],
+    ".github/workflows/follow60-mainline-lock.yml": [
+      "required_exact_hash_and_promotion_matrix_jobs"
+    ],
+    ".github/CODEOWNERS": [
+      "follow60_protected_scope_owner"
+    ],
+    "scripts/generate-follow60-mainline-lock-v3-candidate.py": [
+      "candidate_generation_without_approval"
+    ],
+    "scripts/verify-follow60-mainline-lock-v3.py": [
+      "exact_head_blob_and_external_approval_verification"
+    ],
+    "scripts/promote-follow60-v2-mainline.sh": [
+      "lock_v3_promotion_gate"
+    ],
+    "scripts/benchmark-follow60-ct-resume-reacquisition.py": [
+      "ct_resume_reacquisition_performance_gate"
+    ],
+    "tests/test_instagram_list_continuation_contract.py": [
+      "pre_scroll_ct_resume_and_first_reason_regressions"
+    ],
+    "tests/test_target_availability_disabled_parity.py": [
+      "reviewed_follow60_delta_parity_normalization"
+    ],
+    "tests/test_follow60_mainline_lock_v3.py": [
+      "lock_runtime_and_candidate_separation_self_tests"
+    ]
+  },
+  "field_certification": "PENDING_NEXT_NATURAL_RUNS",
+  "new_golden_promotion_authorized": false
+}
