@@ -20,6 +20,7 @@ import uiautomator2 as u2
 
 import config
 import account_protection_lists
+import followers_surface_proof as followers_proof
 from instagram_action_restriction import guard_instagram_action_rate_limit
 from device import (
     force_stop,
@@ -2986,7 +2987,7 @@ def followers_dump_fresh_hierarchy(
         return ""
     text = str(text or "").strip()
     if store_in_cache and text:
-        _followers_store_detect_hierarchy_xml(text)
+        _followers_store_detect_hierarchy_xml(text, d=d, source="fresh_dump")
     return text
 
 
@@ -3010,13 +3011,17 @@ def detect_followers_list_screen_fresh(
         source_profile_username=str(source_profile_username or "").strip(),
         hierarchy_xml=fresh_xml or None,
     )
+    if fresh_xml:
+        _followers_store_detect_hierarchy_xml(
+            fresh_xml,
+            d=d,
+            source_profile_username=source_profile_username,
+            source="certify_after_navigation_fresh_dump",
+        )
     det["followers_detect_hierarchy_source"] = (
         "fresh_dump" if fresh_xml else "live_only_no_dump"
     )
-    if str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "").strip():
-        det["followers_detect_stale_cache_present"] = True
-    else:
-        det["followers_detect_stale_cache_present"] = False
+    det["followers_detect_stale_cache_present"] = False
     return det, fresh_xml
 
 
@@ -7077,7 +7082,6 @@ def scroll_followers_list_to_find_row(
             bypass_scroll_xml_guards=True,
         ):
             break
-        followers_clear_detect_hierarchy_cache()
         if settle_s > 0:
             time.sleep(min(settle_s, 1.5))
         rows, _meta = harvest_visible_followers_rows(
@@ -11198,10 +11202,6 @@ _FOLLOWERS_POST_TAP_IMMEDIATE_CAPTURE_DONE: bool = False
 # Count of detect_followers_list_screen calls after followers stat tap (reset per open attempt).
 _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT: int = 0
 
-# Latest followers-list hierarchy capture (post-tap debug XML); used when live U2 probes are empty.
-_LAST_FOLLOWERS_DETECT_HIERARCHY_XML: str = ""
-_LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH: str = ""
-
 # While True: block programmatic scroll/swipe (see _followers_abort_scroll_if_post_tap_lock).
 POST_TAP_FOLLOWERS_DETECTION_IN_PROGRESS: bool = False
 
@@ -14369,18 +14369,106 @@ _OWN_UNIFIED_FOLLOWERS_TAB_TITLE_FR_RE = re.compile(
 )
 
 
-def _followers_store_detect_hierarchy_xml(hierarchy_xml: str, *, xml_path: str = "") -> None:
-    global _LAST_FOLLOWERS_DETECT_HIERARCHY_XML, _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH
-    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML = str(hierarchy_xml or "")
-    if xml_path:
-        _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = str(xml_path)
+def _followers_surface_scope(
+    d: u2.Device | None = None,
+    *,
+    source_profile_username: str = "",
+) -> followers_proof.FollowersSurfaceScope:
+    runtime: dict[str, Any] = {}
+    try:
+        from follow_60s_canary import runtime_context
+
+        runtime = dict(runtime_context() or {})
+    except Exception:
+        runtime = {}
+    serial = ""
+    if d is not None:
+        try:
+            serial = str(get_device_serial(d) or "").strip()
+        except Exception:
+            serial = ""
+    return followers_proof.FollowersSurfaceScope(
+        device_serial=serial or str(runtime.get("device_serial") or "unbound"),
+        app_instance_id=str(
+            runtime.get("app_instance_id")
+            or os.environ.get("PHONEFARM_APP_INSTANCE_ID")
+            or "unbound"
+        ),
+        account_id=str(runtime.get("account_id") or "unbound"),
+        target_id=str(
+            _normalize_handle(str(source_profile_username or ""))
+            or runtime.get("target_id")
+            or "unbound"
+        ),
+        surface_id="instagram_followers_list",
+    )
+
+
+def _followers_store_detect_hierarchy_xml(
+    hierarchy_xml: str,
+    *,
+    xml_path: str = "",
+    d: u2.Device | None = None,
+    source_profile_username: str = "",
+    source: str = "fresh_xml",
+) -> None:
+    followers_proof.capture(
+        _followers_surface_scope(
+            d,
+            source_profile_username=source_profile_username,
+        ),
+        str(hierarchy_xml or ""),
+        xml_path=str(xml_path or ""),
+        source=str(source or "fresh_xml"),
+    )
+
+
+def _followers_cached_hierarchy_xml(
+    d: u2.Device | None = None,
+    *,
+    source_profile_username: str = "",
+) -> str:
+    if d is None and not source_profile_username:
+        proof, _reason = followers_proof.get_current(mode="same_surface_read")
+    else:
+        proof, _reason = followers_proof.get(
+            _followers_surface_scope(
+                d,
+                source_profile_username=source_profile_username,
+            ),
+            mode="same_surface_read",
+        )
+    return str(proof.hierarchy_xml if proof is not None else "")
 
 
 def followers_clear_detect_hierarchy_cache() -> None:
-    """Drop cached followers-list hierarchy (pre-scroll XML must not be reused)."""
-    global _LAST_FOLLOWERS_DETECT_HIERARCHY_XML, _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH
-    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML = ""
-    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = ""
+    """Drop current scoped Followers proof (pre-transition XML is invalid)."""
+    followers_proof.clear_current()
+
+
+def followers_invalidate_surface_for_navigation(
+    d: u2.Device,
+    source_profile_username: str,
+    *,
+    reason: str,
+) -> None:
+    scope = _followers_surface_scope(
+        d,
+        source_profile_username=source_profile_username,
+    )
+    generations = followers_proof.invalidate(
+        scope,
+        reason=str(reason or "navigation_intent"),
+        navigation_changed=True,
+    )
+    log(
+        "info",
+        "followers_surface_proof_invalidated",
+        reason=str(reason or "navigation_intent"),
+        navigation_generation=generations.navigation_generation,
+        scroll_generation=generations.scroll_generation,
+        source_profile_username=str(source_profile_username or "")[:120],
+    )
 
 
 _INSTAGRAM_LIST_SUGGESTIONS_LABELS = {
@@ -14696,7 +14784,7 @@ def followers_suggestions_boundary_from_cached_hierarchy(
 ) -> dict[str, Any]:
     """Classify the cached post-scroll hierarchy via the canonical contract."""
     return followers_list_continuation_from_hierarchy_xml(
-        str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
+        _followers_cached_hierarchy_xml(),
         flow="follow",
         processed_primary_row_ids=processed_primary_row_ids,
         previously_valid_followers_rows=previously_valid_followers_rows,
@@ -14758,7 +14846,7 @@ def followers_try_expand_primary_list(
             "before": {},
         }
     before = followers_list_continuation_from_hierarchy_xml(
-        str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
+        _followers_cached_hierarchy_xml(),
         flow="follow",
         processed_primary_row_ids=processed_primary_row_ids,
         previously_valid_followers_rows=True,
@@ -14954,7 +15042,10 @@ def followers_try_expand_primary_list(
         stable_new_rows_fingerprint = ""
         for settle_probe in range(1, max_polls + 1):
             time.sleep(poll_interval_s)
-            after_xml = followers_refresh_detect_hierarchy_cache(d)
+            after_xml = followers_refresh_detect_hierarchy_cache(
+                d,
+                source_profile_username=expected_source_profile,
+            )
             after = followers_list_continuation_from_hierarchy_xml(
                 after_xml,
                 flow="follow",
@@ -15183,6 +15274,7 @@ def followers_refresh_detect_hierarchy_cache(
     d: u2.Device,
     *,
     screen_index: int = 0,
+    source_profile_username: str = "",
 ) -> str:
     """
     Single fresh dump_hierarchy for post-scroll baseline harvest (stores cache for XML-first path).
@@ -15210,7 +15302,13 @@ def followers_refresh_detect_hierarchy_cache(
             _bump_xml_fetch()
         except Exception:
             pass
-    _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
+    _followers_store_detect_hierarchy_xml(
+        hier_text,
+        xml_path=str(xml_path),
+        d=d,
+        source_profile_username=source_profile_username,
+        source="post_scroll_fresh_dump",
+    )
     return hier_text.strip()
 
 
@@ -15286,18 +15384,20 @@ def _followers_resolve_detect_hierarchy_xml(
     hierarchy_xml: str | None = None,
     *,
     live_incomplete: bool = False,
+    source_profile_username: str = "",
 ) -> str:
     hier = str(hierarchy_xml or "").strip()
     if hier:
         return hier
-    if str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "").strip():
-        return str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML).strip()
-    path = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH or "").strip()
-    if path:
-        try:
-            return Path(path).read_text(encoding="utf-8")
-        except Exception:
-            pass
+    proof, _proof_reason = followers_proof.get(
+        _followers_surface_scope(
+            d,
+            source_profile_username=source_profile_username,
+        ),
+        mode="same_surface_read",
+    )
+    if proof is not None and str(proof.hierarchy_xml or "").strip():
+        return str(proof.hierarchy_xml).strip()
     if live_incomplete:
         try:
             try:
@@ -15512,11 +15612,19 @@ def _apply_own_unified_followers_list_to_det(
         out["visible_header_texts"] = list(dict.fromkeys([tab] + list(out.get("visible_header_texts") or [])))[:20]
 
 
-def _harvest_own_unified_xml_first_eligible(d: u2.Device) -> bool:
+def _harvest_own_unified_xml_first_eligible(
+    d: u2.Device,
+    source_profile_username: str = "",
+) -> bool:
     """True when own-unified followers list should harvest from cached hierarchy XML first."""
     if str(_FOLLOWERS_LAST_OPEN_DETECTION_METHOD or "").strip() == "own_unified_follow_list":
         return True
-    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    hier = _followers_resolve_detect_hierarchy_xml(
+        d,
+        None,
+        live_incomplete=False,
+        source_profile_username=source_profile_username,
+    )
     return bool(hier.strip()) and "follow_list_username" in hier
 
 
@@ -15788,7 +15896,12 @@ def harvest_follow_list_row_cta_for_follow_flow(
     """
     from visual_row_mapping import is_row_cta_xml_reject_class
 
-    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    hier = _followers_resolve_detect_hierarchy_xml(
+        d,
+        None,
+        live_incomplete=False,
+        source_profile_username=source_profile_username,
+    )
     hierarchy_source = "cached"
     if not hier or "follow_list_row_large_follow_button" not in hier:
         try:
@@ -16175,6 +16288,7 @@ def detect_followers_list_screen(
             d,
             hierarchy_xml,
             live_incomplete=live_incomplete,
+            source_profile_username=source_profile_username,
         )
         own_meta: dict[str, Any] = {"detected": False}
         if hier_for_own:
@@ -37866,7 +37980,13 @@ def _followers_after_tap_immediate_capture_and_detect(
             hier = d.dump_hierarchy()
         hier_text = hier if isinstance(hier, str) else str(hier or "")
         xml_path.write_text(hier_text, encoding="utf-8")
-        _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
+        _followers_store_detect_hierarchy_xml(
+            hier_text,
+            xml_path=str(xml_path),
+            d=d,
+            source_profile_username=source_profile_username,
+            source="post_tap_immediate_fresh_dump",
+        )
         _bump_xml_fetch()
     except Exception as e:
         paths["xml_error"] = str(e)
@@ -38548,6 +38668,18 @@ def _followers_scroll_list_forward(
         _sd("bypass_scroll_xml_guards", True)
     log("info", "followers_list_scroll", direction="forward")
     _sd("whether_physical_swipe_attempted", True)
+    _pre_scroll_xml = _followers_cached_hierarchy_xml()
+    _scroll_scope = _followers_surface_scope(
+        d,
+        source_profile_username=source_profile_username,
+    )
+    _scroll_generations = followers_proof.invalidate(
+        _scroll_scope,
+        reason="followers_list_physical_scroll",
+        scroll_changed=True,
+    )
+    _sd("followers_surface_navigation_generation", _scroll_generations.navigation_generation)
+    _sd("followers_surface_scroll_generation", _scroll_generations.scroll_generation)
     scroll_ok = False
     fallback_fixed_micro_used = False
     if canonical_controlled or canonical_adaptive:
@@ -38556,7 +38688,7 @@ def _followers_scroll_list_forward(
             w, h = d.window_size()
         except Exception:
             w, h = 1080, 2400
-        current_xml = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "")
+        current_xml = _pre_scroll_xml
         short_geometry = canonical_follow_scroll_geometry(w, h)
         max_forward_attempts = (
             bounded_canonical_attempt_limit
@@ -38642,7 +38774,14 @@ def _followers_scroll_list_forward(
                 gesture_ok = True
             except Exception:
                 gesture_ok = False
-            after_xml = followers_refresh_detect_hierarchy_cache(d) if gesture_ok else ""
+            after_xml = (
+                followers_refresh_detect_hierarchy_cache(
+                    d,
+                    source_profile_username=source_profile_username,
+                )
+                if gesture_ok
+                else ""
+            )
             after_surface = followers_list_continuation_from_hierarchy_xml(
                 after_xml,
                 flow="follow",
@@ -38751,7 +38890,10 @@ def _followers_scroll_list_forward(
                     correction_end = min(int(h * 0.62), correction_start + correction_distance)
                     d.swipe(int(geometry["x"]), correction_start, int(geometry["x"]), correction_end, 0.34)
                     time.sleep(0.45)
-                    corrected_xml = followers_refresh_detect_hierarchy_cache(d)
+                    corrected_xml = followers_refresh_detect_hierarchy_cache(
+                        d,
+                        source_profile_username=source_profile_username,
+                    )
                     corrected_surface = followers_list_continuation_from_hierarchy_xml(
                         corrected_xml,
                         flow="follow",
@@ -38789,7 +38931,10 @@ def _followers_scroll_list_forward(
                 # A transient empty/ambiguous dump must not consume depth. One
                 # fresh XML-only reprobe may prove that the original anchor is
                 # still intact, in which case the short fallback remains safe.
-                reprobe_xml = followers_refresh_detect_hierarchy_cache(d)
+                reprobe_xml = followers_refresh_detect_hierarchy_cache(
+                    d,
+                    source_profile_username=source_profile_username,
+                )
                 reprobe_surface = followers_list_continuation_from_hierarchy_xml(
                     reprobe_xml,
                     flow="follow",
@@ -39231,7 +39376,7 @@ def _followers_scroll_list_forward(
         # picker snapshot format; never dump XML, poll, screenshot or invoke
         # Vision a second time merely to reacquire the same viewport.
         _reacquisition_started = time.perf_counter()
-        _reacquisition_xml = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "")
+        _reacquisition_xml = _followers_cached_hierarchy_xml()
         _sd("reacquisition_xml_dump_count", 0)
         _sd("reacquisition_poll_count", 0)
         _sd("reacquisition_screenshot_count", 0)
@@ -39585,10 +39730,19 @@ def harvest_visible_followers_rows(
     hier = ""
 
     if force_fresh_hierarchy:
-        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=int(screen_index))
+        hier = followers_refresh_detect_hierarchy_cache(
+            d,
+            screen_index=int(screen_index),
+            source_profile_username=source_profile_username,
+        )
         hierarchy_source = "fresh_dump"
-    elif _harvest_own_unified_xml_first_eligible(d):
-        hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    elif _harvest_own_unified_xml_first_eligible(d, source_profile_username):
+        hier = _followers_resolve_detect_hierarchy_xml(
+            d,
+            None,
+            live_incomplete=False,
+            source_profile_username=source_profile_username,
+        )
         hierarchy_source = "cached"
 
     if hier and "follow_list_username" in hier:
@@ -39609,7 +39763,11 @@ def harvest_visible_followers_rows(
             )
 
     if not rows and not force_fresh_hierarchy:
-        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=int(screen_index))
+        hier = followers_refresh_detect_hierarchy_cache(
+            d,
+            screen_index=int(screen_index),
+            source_profile_username=source_profile_username,
+        )
         hierarchy_source = "fresh_dump_retry"
         if hier and "follow_list_username" in hier:
             rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
@@ -39687,9 +39845,18 @@ def _collect_own_unified_followers_rows_from_hierarchy(
     hierarchy_source: str,
 ) -> list[dict[str, Any]]:
     """Harvest follow_list_username rows from cached or fresh hierarchy XML (Welcome-aligned)."""
-    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    hier = _followers_resolve_detect_hierarchy_xml(
+        d,
+        None,
+        live_incomplete=False,
+        source_profile_username=source_profile_username,
+    )
     if hierarchy_source == "fresh_dump":
-        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        hier = followers_refresh_detect_hierarchy_cache(
+            d,
+            screen_index=0,
+            source_profile_username=source_profile_username,
+        )
     if not hier or "follow_list_username" not in hier:
         return []
     return _extract_own_unified_followers_usernames_from_hierarchy_xml(
@@ -39792,7 +39959,7 @@ def iter_followers_candidates(
     )
 
     rows: list[dict[str, Any]] = []
-    if _harvest_own_unified_xml_first_eligible(d):
+    if _harvest_own_unified_xml_first_eligible(d, source_profile_username):
         rows = _collect_own_unified_followers_rows_from_hierarchy(
             d,
             source_profile_username=source_profile_username,
@@ -42693,7 +42860,13 @@ def _followers_entry_v2_second_pass_fresh_capture_and_detect(
             hier = d.dump_hierarchy()
         hier_text = hier if isinstance(hier, str) else str(hier or "")
         xml_path.write_text(hier_text, encoding="utf-8")
-        _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
+        _followers_store_detect_hierarchy_xml(
+            hier_text,
+            xml_path=str(xml_path),
+            d=d,
+            source_profile_username=source_profile_username,
+            source="post_tap_second_pass_fresh_dump",
+        )
         _bump_xml_fetch()
     except Exception as e:
         paths["xml_error"] = str(e)
@@ -42863,6 +43036,9 @@ def _followers_entry_post_tap_xml_fast_poll(
             _followers_store_detect_hierarchy_xml(
                 hier_text,
                 xml_path="followers_entry_post_tap_xml_fast_poll",
+                d=d,
+                source_profile_username=source_profile_username,
+                source="post_tap_fast_poll_fresh_dump",
             )
             tap_diag["followers_entry_post_tap_xml_fast_confirmed"] = True
             log(
@@ -44649,6 +44825,12 @@ def open_followers_list_from_profile(
                 recovery_reason=search_rec_reason,
             )
 
+    followers_invalidate_surface_for_navigation(
+        d,
+        source_profile_username,
+        reason="open_followers_list_from_profile",
+    )
+
     if (
         bool(getattr(config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", False))
         and not followers_session_list_committed_open_for(source_profile_username)
@@ -45087,6 +45269,11 @@ def open_follower_profile_from_list(
         return True
 
     if not is_visual:
+        followers_invalidate_surface_for_navigation(
+            d,
+            source_profile_username,
+            reason="open_follower_profile_from_list",
+        )
         rc = candidate.get("row_center") or [0, 0]
         try:
             d.click(int(rc[0]), int(rc[1]))
@@ -45116,6 +45303,11 @@ def open_follower_profile_from_list(
         return _finish_open_profile(ok)
 
     # Visual candidate: multi-tap strategies, transition wait, strict anti–source-profile guard.
+    followers_invalidate_surface_for_navigation(
+        d,
+        source_profile_username,
+        reason="open_visual_follower_profile_from_list",
+    )
     work = dict(candidate)
     row_o = dict(work.get("approx_row_bounds") or {})
     av_o = dict(work.get("approx_avatar_bounds") or {})
@@ -60034,7 +60226,11 @@ def return_to_followers_list(
         # A Back is a surface-changing intent.  Any hierarchy captured on the
         # candidate profile (or on an earlier Followers viewport) is invalid
         # at this boundary and must never certify the destination surface.
-        followers_clear_detect_hierarchy_cache()
+        followers_invalidate_surface_for_navigation(
+            d,
+            source_profile_username,
+            reason="return_to_followers_list_back",
+        )
         try:
             d.press("back")
         except Exception:
