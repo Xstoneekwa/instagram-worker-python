@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Iterable
@@ -31,7 +32,23 @@ def canonical_json(value: Any) -> bytes:
 
 
 def git(root: Path, *args: str) -> bytes:
-    return subprocess.check_output(["git", "-C", str(root), *args])
+    exact_root = Path(root).expanduser().resolve(strict=True)
+    environment = os.environ.copy()
+    for key in tuple(environment):
+        if key == "GIT_CONFIG_COUNT" or key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            environment.pop(key, None)
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    return subprocess.check_output(
+        [
+            "git",
+            "-c", "safe.directory=",
+            "-c", f"safe.directory={exact_root}",
+            "-C", str(exact_root),
+            *args,
+        ],
+        env=environment,
+    )
 
 
 def git_file_entry(root: Path, relative: str, *, revision: str = "HEAD") -> dict[str, Any]:

@@ -1,14 +1,17 @@
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
 from follow60_lock_v3 import (
     canonical_json,
+    git,
     git_file_entry,
     sha256_bytes,
     transitive_import_graph,
@@ -65,6 +68,38 @@ def _write_contract(root: Path, protected: dict[str, str], *, approval_id: str =
 class Follow60MainlineLockV3Tests(unittest.TestCase):
     def setUp(self):
         self.verifier = _load_verifier()
+
+    def test_git_read_trust_is_exact_process_scoped_and_sanitized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch("follow60_lock_v3.subprocess.check_output", return_value=b"ok") as checked:
+                with patch.dict(
+                    "follow60_lock_v3.os.environ",
+                    {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "safe.directory",
+                        "GIT_CONFIG_VALUE_0": "*",
+                    },
+                ):
+                    self.assertEqual(b"ok", git(root, "rev-parse", "HEAD"))
+            command = checked.call_args.args[0]
+            environment = checked.call_args.kwargs["env"]
+            exact_root = str(root.resolve())
+            self.assertEqual(
+                [
+                    "git",
+                    "-c", "safe.directory=",
+                    "-c", f"safe.directory={exact_root}",
+                    "-C", exact_root,
+                    "rev-parse", "HEAD",
+                ],
+                command,
+            )
+            self.assertEqual("1", environment["GIT_CONFIG_NOSYSTEM"])
+            self.assertEqual(os.devnull, environment["GIT_CONFIG_GLOBAL"])
+            self.assertNotIn("GIT_CONFIG_COUNT", environment)
+            self.assertNotIn("GIT_CONFIG_KEY_0", environment)
+            self.assertNotIn("GIT_CONFIG_VALUE_0", environment)
 
     def _repo(self):
         temporary = tempfile.TemporaryDirectory()
