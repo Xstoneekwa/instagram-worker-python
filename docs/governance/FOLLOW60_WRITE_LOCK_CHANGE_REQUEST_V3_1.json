@@ -1,21 +1,18 @@
 {
   "approval_status": "REQUESTED_NOT_APPROVED",
-  "base_manifest_sha256": "9ccf055272ee75b9fd3a765d00f827b5e15fc2ea8bbd29144cd9aa20c783bd33",
-  "base_sha": "68efd372245304c637b1353f40d2d1c3865d677b",
-  "change_id": "follow60-final-git-read-trust-v3-1-20260816",
-  "diff_sha256": "7e20c25c0b1cce7622d5b4f7ce5efdfab44d213b46be9aff0f60e282f6d3010f",
-  "expires_at": "2026-08-16T04:40:57.186420+00:00",
+  "base_manifest_sha256": "fa3feaaaa8ae65881331bd4f0b1630a592bcad229170a173b1fac6143c266d4d",
+  "base_sha": "fcdb5afeb086bec6c6f842011f38d9a133c11398",
+  "change_id": "follow60-runtime-ed25519-verifier-v3-1-20260816",
+  "diff_sha256": "f07b125c047e83cabb73f3abbc59aff94e48fe97ff077941466faa26185e2f8b",
+  "expires_at": "2026-08-16T11:45:47.629156+00:00",
   "files_requested": [
     "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
     "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
     "follow60_lock_v3.py",
-    "scripts/run_control_dispatcher_service.sh",
-    "tests/test_dispatcher_lifecycle.py",
-    "tests/test_follow60_mainline_lock_v3.py",
-    "tests/test_worker_runtime_identity.py"
+    "tests/test_follow60_mainline_lock_v3.py"
   ],
-  "head_sha": "8e4490b0253307d12602b6390e9dfd1120c2340f",
-  "requested_at": "2026-08-16T02:40:57.186420+00:00",
-  "requested_scope": "final exact process-scoped Git read trust for root-owned immutable Follow60 releases, including dispatcher propagation; no wildcard/global/system trust",
+  "head_sha": "1b393cc49569d465c2b01e36eec2ea039c2d8942",
+  "requested_at": "2026-08-16T09:45:47.629156+00:00",
+  "requested_scope": "deterministic in-process Ed25519 runtime verification independent of launchd PATH; no Follow60 behavior change",
   "schema": "FOLLOW60_LOCK_CHANGE_REQUEST_V1"
 }

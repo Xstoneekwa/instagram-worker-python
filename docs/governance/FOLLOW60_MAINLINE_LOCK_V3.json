@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "68efd372245304c637b1353f40d2d1c3865d677b",
-    "change_id": "follow60-final-git-read-trust-v3-1-20260816",
-    "diff_sha256": "7e20c25c0b1cce7622d5b4f7ce5efdfab44d213b46be9aff0f60e282f6d3010f",
-    "expires_at": "2026-08-16T04:40:57.186420+00:00",
-    "head_sha": "8e4490b0253307d12602b6390e9dfd1120c2340f",
-    "request_sha256": "2f2ec7510a8f72bf3bf35105c224051766d4e4c54ac8d615d95b5e58c48a8e31",
+    "base_sha": "fcdb5afeb086bec6c6f842011f38d9a133c11398",
+    "change_id": "follow60-runtime-ed25519-verifier-v3-1-20260816",
+    "diff_sha256": "f07b125c047e83cabb73f3abbc59aff94e48fe97ff077941466faa26185e2f8b",
+    "expires_at": "2026-08-16T11:45:47.629156+00:00",
+    "head_sha": "1b393cc49569d465c2b01e36eec2ea039c2d8942",
+    "request_sha256": "3ac69da43f769a1571deefebfb7e530e2a2b4d65e250d7aa59e7cb6249174b0f",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -103,6 +103,23 @@
       ],
       "head_sha": "8e4490b0253307d12602b6390e9dfd1120c2340f",
       "requested_scope": "final exact process-scoped Git read trust for root-owned immutable Follow60 releases, including dispatcher propagation; no wildcard/global/system trust",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "fcdb5afeb086bec6c6f842011f38d9a133c11398",
+      "change_id": "follow60-runtime-ed25519-verifier-v3-1-20260816",
+      "consumed_at": "2026-08-16T09:53:35.694796+00:00",
+      "diff_sha256": "f07b125c047e83cabb73f3abbc59aff94e48fe97ff077941466faa26185e2f8b",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
+        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
+        "follow60_lock_v3.py",
+        "tests/test_follow60_mainline_lock_v3.py"
+      ],
+      "head_sha": "1b393cc49569d465c2b01e36eec2ea039c2d8942",
+      "requested_scope": "deterministic in-process Ed25519 runtime verification independent of launchd PATH; no Follow60 behavior change",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1020,13 +1037,13 @@
       "size": 5040
     },
     "follow60_lock_v3.py": {
-      "git_blob_oid": "6ba7fd2d55790bce202ad79a4f01efc834682df2",
+      "git_blob_oid": "e4cd74fa8a30b6cfb5152ddacd072dc60b476671",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "follow60_lock_v3.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "9b2bf3275bdeb463ff58919a4eb1e3b23f3c95a81223f5bbdbd2c5d89cab4401",
-      "size": 13685
+      "sha256": "7bd9f4a0313ca4008843978242abc9d81d1fff8375b8124931eb28b530010442",
+      "size": 13891
     },
     "follow60_mainline_integrity_v3.py": {
       "git_blob_oid": "bb30b0068444f0a436792e9e7b560285e994d9ea",
@@ -1659,13 +1676,13 @@
       "size": 8667
     },
     "tests/test_follow60_mainline_lock_v3.py": {
-      "git_blob_oid": "61211e99796670ed68889c13d8d3fbd5c16031e3",
+      "git_blob_oid": "a0494e5eb4c6b8553383eb939ed8a37653b96b3d",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "tests/test_follow60_mainline_lock_v3.py",
       "role": "regression_contract",
-      "sha256": "bf41b960b91bada02db89564ee0398085e87b9b13f980eb3ae4822af0b5cf29e",
-      "size": 15451
+      "sha256": "d65895f3a8c4df64def3be81745538fc276806e7a209a58668326db268d72a5a",
+      "size": 15936
     },
     "tests/test_follow60_p0_source_contract.py": {
       "git_blob_oid": "bb8fc9ec31af8ba57155556b5bf33800f05c5c20",
@@ -1929,7 +1946,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "3b4302dab4fb544ad84043dba0c3ed5b40bd4ba62864ae662e6bde1c06629805",
+  "protected_scope_sha256": "d5945def53782fd7fbc4ee810c7d6bca90de5b7f1d9028f50bfaf5d5a1e7eecc",
   "protected_transitive_dependency_count": 106,
   "runtime_contract": {
     "binding_kind": "mainline",
