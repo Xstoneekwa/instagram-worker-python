@@ -47,6 +47,26 @@ Principes alignés avec le moteur :
 
 **Ne jamais agir sur un écran non confirmé** pour une action critique (follow, ouverture DM, navigation profil→followers, retour CT post-follow, etc.) : au minimum **état nav cohérent** + **signaux corroborants** (détection écran, fingerprint, ou vision selon le flow documenté).
 
+## Récupération Followers après une ouverture profil non confirmée
+
+Une intention d'ouverture ne constitue jamais une preuve de profondeur. Après
+`candidate_profile_open_not_confirmed`, la navigation classe d'abord la surface
+réellement visible parmi `FOLLOWERS_LIST`, `SOURCE_CT_PROFILE`,
+`CANDIDATE_PROFILE`, `POST_SURFACE`, `EXPLORE_SEARCH` et `UNKNOWN`.
+
+- `FOLLOWERS_LIST` : continuer depuis une preuve fraîche, sans Back.
+- `SOURCE_CT_PROFILE` : rouvrir Followers directement depuis le CT, sans Back.
+- `CANDIDATE_PROFILE` ou `POST_SURFACE` : invalider l'ancienne preuve, envoyer
+  au plus un Back, puis observer de nouveau avant toute autre navigation.
+- `EXPLORE_SEARCH` : récupération exacte du CT, puis réouverture canonique.
+- `UNKNOWN` : réévaluation read-only bornée, puis arrêt fail-closed
+  `followers_recovery_surface_unproved`.
+
+Le Follow reste interdit tant que l'identité exacte du candidat n'est pas
+prouvée. Toute navigation invalide le XML, les bounds et la génération de
+surface précédents. La chaîne maximale de Back sans observation fraîche vaut
+donc strictement un.
+
 ## Contrat Follow 7+1 — 2026-07-25
 
 La continuation legacy de la liste Followers calcule la cadence à partir des

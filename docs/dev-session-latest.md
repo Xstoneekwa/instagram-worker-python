@@ -582,6 +582,22 @@ remain historical evidence.
 
 - Détails navigation / vision / follow / post-follow / recovery : voir les autres fichiers sous `docs/` et la carte dans `AGENTS.md`.
 
+## Changement autorisé en cours — wrong-depth Followers recovery
+
+- Change ID : `follow60-wrong-depth-profile-recovery-v1-20260816`.
+- Base verrouillée : `f4d00e2158dc6f6bf61ea5b82dce3328628873f0`.
+- Approval 1 externe validée; aucun commit, push, package ou runtime avant le
+  gel final et Approval 2.
+- Le correctif générique classe la surface réellement présente après une
+  ouverture candidat non confirmée. Source CT et Followers n'envoient aucun
+  Back; candidat/post autorisent un seul Back avant réobservation; inconnu
+  échoue fermé.
+- L'Identity Guard, FollowersSurfaceProof V3.1, network transient recovery,
+  storage safety et Follow60 Lock V3.1 restent obligatoires.
+- Certification terrain : à effectuer uniquement au prochain run naturel après
+  activation et résolution opérateur de l'incident Mythyl; aucun run/tick/ADB
+  n'est créé par ce chantier.
+
 ## Checkpoint préparé — 2026-07-23
 
 - Follow warmup : journées actives SAST basées sur `follow_verified`, pas âge

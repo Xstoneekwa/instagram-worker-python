@@ -12,6 +12,7 @@ import random
 import re
 import time
 import unicodedata
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 import xml.etree.ElementTree as ET
@@ -45233,6 +45234,15 @@ def open_follower_profile_from_list(
                 action_bar_title=ab_open,
                 visual_candidate_id=vcid or None,
             )
+            log(
+                "warning",
+                "candidate_profile_open_not_confirmed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open,
+                proved_surface=FollowersRecoverySurface.SOURCE_CT_PROFILE.value,
+                reason="exact_identity_still_source_ct",
+            )
             return False
         if _is_ambiguous_stale_candidate_action_bar(ab_open):
             log(
@@ -45273,6 +45283,15 @@ def open_follower_profile_from_list(
                 visual_candidate_id=vcid or None,
                 reason=str(identity_meta.get("reason") or "profile_identity_unconfirmed"),
                 identity_meta=identity_meta,
+            )
+            log(
+                "warning",
+                "candidate_profile_open_not_confirmed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open or None,
+                proved_surface=FollowersRecoverySurface.UNKNOWN.value,
+                reason=str(identity_meta.get("reason") or "profile_identity_unconfirmed"),
             )
             return False
         log(
@@ -45317,6 +45336,14 @@ def open_follower_profile_from_list(
                 follower_username=un,
                 source_profile_username=source_profile_username,
                 reason="verify_profile_failed",
+            )
+            log(
+                "warning",
+                "candidate_profile_open_not_confirmed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                proved_surface=FollowersRecoverySurface.UNKNOWN.value,
+                reason="generic_profile_detector_not_confirmed",
             )
         return _finish_open_profile(ok)
 
@@ -60228,6 +60255,315 @@ def run_visual_candidate_post_follow_phase(
     return _out
 
 
+class FollowersRecoverySurface(str, Enum):
+    """Freshly proved start surface for Followers recovery.
+
+    Recovery decisions must be derived from this observation, never from the
+    navigation action that the caller previously attempted.
+    """
+
+    FOLLOWERS_LIST = "FOLLOWERS_LIST"
+    SOURCE_CT_PROFILE = "SOURCE_CT_PROFILE"
+    CANDIDATE_PROFILE = "CANDIDATE_PROFILE"
+    POST_SURFACE = "POST_SURFACE"
+    EXPLORE_SEARCH = "EXPLORE_SEARCH"
+    UNKNOWN = "UNKNOWN"
+
+
+def classify_followers_recovery_surface(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str | None = None,
+    *,
+    candidate_username: str = "",
+) -> tuple[FollowersRecoverySurface, dict[str, Any]]:
+    """Classify the live recovery surface from fresh, positive evidence."""
+
+    pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+    det: dict[str, Any] = {}
+    hierarchy_xml = ""
+    try:
+        det, hierarchy_xml = detect_followers_list_screen_fresh(
+            d,
+            source_profile_username=source_profile_username,
+        )
+        det = dict(det or {})
+    except Exception as exc:
+        det = {"fresh_detection_error": type(exc).__name__}
+
+    meta: dict[str, Any] = {
+        "surface": FollowersRecoverySurface.UNKNOWN.value,
+        "source_profile_username": str(source_profile_username or ""),
+        "candidate_username": str(candidate_username or ""),
+        "is_followers_list": bool(det.get("is_followers_list")),
+        "current_screen_guess": str(det.get("current_screen_guess") or ""),
+        "fresh_hierarchy_present": bool(hierarchy_xml),
+        "proof_source": str(det.get("followers_detect_hierarchy_source") or ""),
+        "action_bar_title": str(det.get("action_bar_title") or "").strip(),
+    }
+    if bool(det.get("is_followers_list")):
+        meta["surface"] = FollowersRecoverySurface.FOLLOWERS_LIST.value
+        meta["reason"] = "fresh_followers_surface_proved"
+        return FollowersRecoverySurface.FOLLOWERS_LIST, meta
+
+    action_bar_title = str(meta.get("action_bar_title") or "").strip()
+    if not action_bar_title:
+        try:
+            action_bar_title = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip()
+        except Exception:
+            action_bar_title = ""
+        meta["action_bar_title"] = action_bar_title
+
+    source_ok, source_identity = _expected_profile_identity_boundary(
+        d,
+        source_profile_username,
+        pkg,
+        observed_username=action_bar_title,
+    )
+    meta["source_identity_reason"] = str(source_identity.get("reason") or "")
+    if source_ok:
+        meta["surface"] = FollowersRecoverySurface.SOURCE_CT_PROFILE.value
+        meta["reason"] = "exact_source_ct_profile_proved"
+        return FollowersRecoverySurface.SOURCE_CT_PROFILE, meta
+
+    posts_action_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(
+        action_bar_title
+    )
+    expected_candidate = str(candidate_username or "").strip()
+    if expected_candidate:
+        candidate_ok, candidate_identity = _expected_profile_identity_boundary(
+            d,
+            expected_candidate,
+            pkg,
+            observed_username=action_bar_title,
+        )
+        meta["candidate_identity_reason"] = str(
+            candidate_identity.get("reason") or ""
+        )
+        if candidate_ok:
+            meta["surface"] = FollowersRecoverySurface.CANDIDATE_PROFILE.value
+            meta["reason"] = "exact_candidate_profile_proved"
+            return FollowersRecoverySurface.CANDIDATE_PROFILE, meta
+    elif action_bar_title and not posts_action_bar:
+        observed_profile_ok, observed_profile_identity = (
+            _expected_profile_identity_boundary(
+                d,
+                action_bar_title,
+                pkg,
+                observed_username=action_bar_title,
+            )
+        )
+        meta["observed_profile_identity_reason"] = str(
+            observed_profile_identity.get("reason") or ""
+        )
+        if observed_profile_ok:
+            meta["surface"] = FollowersRecoverySurface.CANDIDATE_PROFILE.value
+            meta["reason"] = "exact_non_source_profile_proved"
+            return FollowersRecoverySurface.CANDIDATE_PROFILE, meta
+
+    like_surface_ok = False
+    like_surface_method = ""
+    if posts_action_bar:
+        try:
+            (
+                like_surface_ok,
+                like_surface_method,
+                _like_signals,
+                _like_stats,
+            ) = _ui_post_viewer_open_like_unlike_fast(d)
+        except Exception:
+            like_surface_ok = False
+    meta["posts_action_bar"] = bool(posts_action_bar)
+    meta["like_surface_ok"] = bool(like_surface_ok)
+    meta["like_surface_method"] = str(like_surface_method or "")
+    if posts_action_bar and like_surface_ok:
+        meta["surface"] = FollowersRecoverySurface.POST_SURFACE.value
+        meta["reason"] = "trusted_post_surface_proved"
+        return FollowersRecoverySurface.POST_SURFACE, meta
+
+    try:
+        search_ok = is_lightweight_search_screen(d, pkg)
+    except Exception:
+        search_ok = False
+    meta["search_surface_proved"] = bool(search_ok)
+    if search_ok:
+        meta["surface"] = FollowersRecoverySurface.EXPLORE_SEARCH.value
+        meta["reason"] = "instagram_search_surface_proved"
+        return FollowersRecoverySurface.EXPLORE_SEARCH, meta
+
+    meta["reason"] = "current_surface_unproved"
+    return FollowersRecoverySurface.UNKNOWN, meta
+
+
+def recover_followers_after_candidate_profile_open_not_confirmed(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str | None = None,
+    *,
+    candidate_username: str = "",
+    max_navigation_actions: int = 3,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Recover Followers from the current proved surface, one action at a time."""
+
+    pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+    max_actions = max(0, min(int(max_navigation_actions), 4))
+    actions_used = 0
+    observations: list[dict[str, Any]] = []
+    unknown_observations = 0
+
+    while True:
+        surface, observation = classify_followers_recovery_surface(
+            d,
+            source_profile_username,
+            pkg,
+            candidate_username=candidate_username,
+        )
+        observation = dict(observation)
+        observation["observation_index"] = len(observations) + 1
+        observation["navigation_actions_used"] = actions_used
+        observations.append(observation)
+        log(
+            "info",
+            "followers_wrong_depth_recovery_surface_observed",
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username or None,
+            surface=surface.value,
+            observation_index=len(observations),
+            navigation_actions_used=actions_used,
+            observation=observation,
+        )
+
+        if surface == FollowersRecoverySurface.FOLLOWERS_LIST:
+            followers_session_mark_list_committed_open(
+                source_profile_username,
+                committed_source="wrong_depth_fresh_followers_proof",
+            )
+            return True, "followers_already_present", {
+                "surface": surface.value,
+                "navigation_actions_used": actions_used,
+                "observations": observations,
+            }
+
+        if surface == FollowersRecoverySurface.SOURCE_CT_PROFILE:
+            followers_session_clear_list_committed_open(source_profile_username)
+            followers_clear_detect_hierarchy_cache()
+            ok_reopen, reopen_meta = open_followers_list_from_profile(
+                d,
+                source_profile_username,
+                pkg,
+                profile_verified=True,
+            )
+            if ok_reopen:
+                return True, "reopen_from_proved_source_ct_profile", {
+                    "surface": surface.value,
+                    "navigation_actions_used": actions_used,
+                    "observations": observations,
+                    "reopen_meta": dict(reopen_meta or {}),
+                }
+            return False, "followers_recovery_surface_unproved", {
+                "surface": surface.value,
+                "navigation_actions_used": actions_used,
+                "observations": observations,
+                "reopen_failure": "source_ct_followers_reopen_failed",
+                "reopen_meta": dict(reopen_meta or {}),
+            }
+
+        if surface == FollowersRecoverySurface.EXPLORE_SEARCH:
+            recovered_profile, search_reason = (
+                _followers_entry_maybe_recover_ct_profile_from_search_surface(
+                    d,
+                    source_profile_username,
+                    pkg,
+                    phase="wrong_depth_candidate_open_recovery",
+                )
+            )
+            if not recovered_profile:
+                return False, "followers_recovery_surface_unproved", {
+                    "surface": surface.value,
+                    "navigation_actions_used": actions_used,
+                    "observations": observations,
+                    "search_recovery_reason": str(search_reason or ""),
+                }
+            followers_session_clear_list_committed_open(source_profile_username)
+            followers_clear_detect_hierarchy_cache()
+            ok_reopen, reopen_meta = open_followers_list_from_profile(
+                d,
+                source_profile_username,
+                pkg,
+                profile_verified=True,
+            )
+            if ok_reopen:
+                return True, "reopen_after_proved_search_recovery", {
+                    "surface": surface.value,
+                    "navigation_actions_used": actions_used,
+                    "observations": observations,
+                    "search_recovery_reason": str(search_reason or ""),
+                    "reopen_meta": dict(reopen_meta or {}),
+                }
+            return False, "followers_recovery_surface_unproved", {
+                "surface": surface.value,
+                "navigation_actions_used": actions_used,
+                "observations": observations,
+                "search_recovery_reason": str(search_reason or ""),
+                "reopen_failure": "search_recovered_source_followers_reopen_failed",
+                "reopen_meta": dict(reopen_meta or {}),
+            }
+
+        if surface in {
+            FollowersRecoverySurface.CANDIDATE_PROFILE,
+            FollowersRecoverySurface.POST_SURFACE,
+        }:
+            if actions_used >= max_actions:
+                break
+            followers_invalidate_surface_for_navigation(
+                d,
+                source_profile_username,
+                reason=f"wrong_depth_recovery_back_from_{surface.value.lower()}",
+            )
+            try:
+                d.press("back")
+            except Exception as exc:
+                return False, "followers_recovery_surface_unproved", {
+                    "surface": surface.value,
+                    "navigation_actions_used": actions_used,
+                    "observations": observations,
+                    "navigation_error": type(exc).__name__,
+                }
+            actions_used += 1
+            # The next loop begins with a fresh observation.  No second Back
+            # can be dispatched from an inferred depth.
+            continue
+
+        unknown_observations += 1
+        if unknown_observations >= 4:
+            break
+        log(
+            "info",
+            "followers_wrong_depth_recovery_read_only_recheck",
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username or None,
+            observation_index=len(observations),
+            ui_actions_sent=0,
+        )
+
+    log(
+        "error",
+        "followers_wrong_depth_recovery_failed",
+        source_profile_username=source_profile_username,
+        candidate_username=candidate_username or None,
+        reason="followers_recovery_surface_unproved",
+        navigation_actions_used=actions_used,
+        observations=observations,
+    )
+    return False, "followers_recovery_surface_unproved", {
+        "surface": FollowersRecoverySurface.UNKNOWN.value,
+        "navigation_actions_used": actions_used,
+        "observations": observations,
+    }
+
+
 def return_to_followers_list(
     d: u2.Device,
     source_profile_username: str,
@@ -60235,186 +60571,91 @@ def return_to_followers_list(
     *,
     max_retries: int | None = None,
 ) -> tuple[bool, str]:
-    """Back from follower profile to followers list; optional reopen from source profile."""
-    pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+    """Depth-aware return to Followers, based only on fresh surface proof."""
     retries = max_retries
     if retries is None:
         retries = int(getattr(config, "FOLLOWERS_LIST_RETURN_MAX_RETRIES", 2))
-    for attempt in range(max(0, retries) + 1):
-        # A Back is a surface-changing intent.  Any hierarchy captured on the
-        # candidate profile (or on an earlier Followers viewport) is invalid
-        # at this boundary and must never certify the destination surface.
-        followers_invalidate_surface_for_navigation(
-            d,
-            source_profile_username,
-            reason="return_to_followers_list_back",
-        )
-        try:
-            d.press("back")
-        except Exception:
-            pass
-        time.sleep(0.38)
-        det, _fresh_hierarchy_xml = detect_followers_list_screen_fresh(
-            d,
-            source_profile_username=source_profile_username,
-        )
-        if det.get("is_followers_list"):
-            # The same positive detector that authorises the caller to resume
-            # list processing also restores the committed-surface invariant.
-            # Without this central promotion, private/filter/duplicate return
-            # paths could truthfully recover the CT list yet leave See More
-            # fail-closed as ``see_more_surface_not_committed``.
+    ok, reason, detail = recover_followers_after_candidate_profile_open_not_confirmed(
+        d,
+        source_profile_username,
+        pkg,
+        max_navigation_actions=max(1, int(retries) + 1),
+    )
+    if ok:
+        if str(reason or "") == "followers_already_present":
+            # Preserve the historical public return contract and committed
+            # source used by continuation/See More consumers.  This label is
+            # API compatibility only: the typed detail proves that no Back was
+            # dispatched when Followers was already present.
             followers_session_mark_list_committed_open(
                 source_profile_username,
                 committed_source="verified_return_to_followers_list",
             )
+        public_reason = {
+            "followers_already_present": "back",
+            "reopen_from_proved_source_ct_profile": "reopen_from_source_profile",
+            "reopen_after_proved_search_recovery": "reopen_after_search_profile_recovery",
+        }.get(str(reason or ""), str(reason or "depth_aware_recovery"))
+        log(
+            "info",
+            "followers_list_recovered",
+            source_profile_username=source_profile_username,
+            method=public_reason,
+            detail=detail,
+            fresh_proof_required=True,
+        )
+        return True, public_reason
+
+    # Historical callers do not always provide enough metadata for the first
+    # classifier to prove Search.  The canonical helper is itself fail-closed:
+    # it performs no recovery unless it freshly proves the Search surface.
+    # Keep this compatibility branch out of the candidate-open failure path,
+    # which calls the typed recovery directly.
+    recovered_profile, search_reason = (
+        _followers_entry_maybe_recover_ct_profile_from_search_surface(
+            d,
+            source_profile_username,
+            pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "",
+            phase="return_to_followers_list_compat",
+        )
+    )
+    if recovered_profile:
+        followers_session_clear_list_committed_open(source_profile_username)
+        followers_clear_detect_hierarchy_cache()
+        ok_reopen, reopen_meta = open_followers_list_from_profile(
+            d,
+            source_profile_username,
+            pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "",
+            profile_verified=True,
+        )
+        if ok_reopen:
             log(
                 "info",
                 "followers_list_recovered",
                 source_profile_username=source_profile_username,
-                attempt=attempt,
-                method="back",
-                proof_source=str(
-                    det.get("followers_detect_hierarchy_source") or ""
-                ),
+                method="reopen_after_search_profile_recovery",
+                detail={
+                    "typed_recovery": detail,
+                    "search_recovery_reason": str(search_reason or ""),
+                    "reopen_meta": dict(reopen_meta or {}),
+                },
                 fresh_proof_required=True,
             )
-            log(
-                "info",
-                "followers_session_rearmed_after_verified_return",
-                source_profile_username=source_profile_username,
-                method="back",
-                committed_source="verified_return_to_followers_list",
-                open_detection_method=str(det.get("open_detection_method") or ""),
-                proof_source=str(
-                    det.get("followers_detect_hierarchy_source") or ""
-                ),
-                fresh_proof_required=True,
-            )
-            return True, "back"
-    log(
-        "warning",
-        "followers_list_reopen_fallback",
-        source_profile_username=source_profile_username,
-    )
-    if verify_profile(d, source_profile_username):
-        observed_username = ""
-        try:
-            observed_username = str(
-                read_current_profile_username_for_follow_gate(d) or ""
-            ).strip()
-        except Exception:
-            observed_username = ""
-        source_identity_ok, source_identity_meta = _expected_profile_identity_boundary(
-            d,
-            source_profile_username,
-            pkg,
-            observed_username=observed_username,
-        )
-        # A freshly reopened CT profile can have its static chrome available
-        # before the network-backed username header is rendered.  Re-observe
-        # that exact identity signal for a short, bounded window.  This never
-        # taps, navigates, or relaxes the identity boundary: a missing or
-        # mismatched username still fails closed.
-        source_identity_rechecks = 0
-        while (
-            not source_identity_ok
-            and str(source_identity_meta.get("reason") or "")
-            == "profile_identity_username_unproven"
-            and source_identity_rechecks < 3
-        ):
-            source_identity_rechecks += 1
-            time.sleep(1.5)
-            try:
-                observed_username = str(
-                    read_current_profile_username_for_follow_gate(d) or ""
-                ).strip()
-            except Exception:
-                observed_username = ""
-            source_identity_ok, source_identity_meta = _expected_profile_identity_boundary(
-                d,
-                source_profile_username,
-                pkg,
-                observed_username=observed_username,
-            )
-            log(
-                "info",
-                "followers_list_reopen_source_identity_transient_recheck",
-                source_profile_username=source_profile_username,
-                attempt=source_identity_rechecks,
-                max_attempts=3,
-                identity_confirmed=bool(source_identity_ok),
-                reason=str(
-                    source_identity_meta.get("reason")
-                    or "profile_identity_unconfirmed"
-                ),
-                observed_username_present=bool(observed_username),
-                ui_actions_sent=0,
-            )
-        if not source_identity_ok:
-            log(
-                "warning",
-                "followers_list_reopen_source_identity_rejected",
-                source_profile_username=source_profile_username,
-                reason=str(
-                    source_identity_meta.get("reason")
-                    or "profile_identity_unconfirmed"
-                ),
-                identity_meta=source_identity_meta,
-                transient_rechecks=source_identity_rechecks,
-            )
-        else:
-            followers_session_clear_list_committed_open(source_profile_username)
-            followers_clear_detect_hierarchy_cache()
-            ok_reopen, _reopen_meta = open_followers_list_from_profile(
-                d, source_profile_username, pkg, profile_verified=True
-            )
-            if ok_reopen:
-                log(
-                    "info",
-                    "followers_list_recovered",
-                    source_profile_username=source_profile_username,
-                    method="reopen_from_source_profile",
-                )
-                return True, "reopen_from_source_profile"
-    search_rec_ok = False
-    search_rec_reason = "search_recovery_not_attempted"
-    if _followers_entry_search_surface_recovery_fallback_enabled():
-        search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
-            d,
-            source_profile_username,
-            pkg,
-            phase="return_to_followers_list_fallback",
-        )
-        if search_rec_ok:
-            followers_session_clear_list_committed_open(source_profile_username)
-            followers_clear_detect_hierarchy_cache()
-            ok_reopen, _reopen_meta = open_followers_list_from_profile(
-                d, source_profile_username, pkg, profile_verified=True
-            )
-            if ok_reopen:
-                log(
-                    "info",
-                    "followers_list_recovered",
-                    source_profile_username=source_profile_username,
-                    method="reopen_after_search_profile_recovery",
-                )
-                return True, "reopen_after_search_profile_recovery"
-        elif search_rec_reason in _FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS:
-            log(
-                "error",
-                "followers_list_return_failed",
-                source_profile_username=source_profile_username,
-                recovery_reason=search_rec_reason,
-            )
-            return False, "search_profile_recovery_failed"
+            return True, "reopen_after_search_profile_recovery"
     log(
         "error",
         "followers_list_return_failed",
         source_profile_username=source_profile_username,
-        reason="followers_surface_reacquisition_unproved",
+        reason=str(reason or "followers_recovery_surface_unproved"),
+        detail=detail,
     )
-    return False, "followers_surface_reacquisition_unproved"
+    public_failure_reason = {
+        "followers_recovery_surface_unproved": "followers_surface_reacquisition_unproved",
+    }.get(
+        str(reason or ""),
+        str(reason or "followers_surface_reacquisition_unproved"),
+    )
+    return False, public_failure_reason
 
 
 def visual_flow_final_return_to_ct_followers_list(

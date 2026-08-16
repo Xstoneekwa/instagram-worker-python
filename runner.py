@@ -155,6 +155,7 @@ from instagram_navigation import (
     get_followers_engine_stop_reason,
     iter_followers_candidates,
     open_follower_profile_from_list,
+    recover_followers_after_candidate_profile_open_not_confirmed,
     return_to_followers_list,
     run_post_follow_post_likes_phase,
     run_visual_candidate_post_follow_phase,
@@ -11978,6 +11979,35 @@ def _follow60_ordering_v2_prepare_candidate(
     return result
 
 
+def _followers_wrong_depth_recovery_failure_summary(
+    *,
+    processed: int,
+    follows_completed_count: int,
+    follows_goal_effective: int | None,
+    global_follows_goal_effective: int | None,
+    target_follow_budget_effective: int | None,
+    source_profile_username: str,
+    recovery_reason: str,
+) -> dict[str, Any]:
+    """Canonical resumable terminal projection for an unproved recovery surface."""
+
+    stable_reason = str(recovery_reason or "followers_recovery_surface_unproved")
+    return {
+        "exit_code": 42,
+        "follow_processed_count": int(processed),
+        "follows_completed_count": int(follows_completed_count),
+        "follows_goal_effective": int(follows_goal_effective or 0),
+        "global_follows_goal_effective": int(global_follows_goal_effective or 0),
+        "target_follow_budget_effective": target_follow_budget_effective,
+        "follow_session_outcome": "partial_resumable",
+        "follow_stop_reason": stable_reason,
+        "current_target": str(source_profile_username or ""),
+        "target_completed": False,
+        "target_exhausted": False,
+        "safe_to_resume": True,
+    }
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -18286,9 +18316,54 @@ def _run_followers_list_engine_session(
                         "username_pending_profile_read": pending_username,
                     },
                 )
-                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                ok_r, recovery_reason, recovery_detail = (
+                    recover_followers_after_candidate_profile_open_not_confirmed(
+                        d,
+                        source_profile_username,
+                        pkg,
+                        candidate_username=str(
+                            pick.get("username")
+                            or pick.get("resolved_username_hint")
+                            or ""
+                        ),
+                    )
+                )
                 if not ok_r:
+                    stable_recovery_reason = str(
+                        recovery_reason or "followers_recovery_surface_unproved"
+                    )
+                    _followers_loop_finally_status = "recovery_surface_unproved"
+                    _followers_loop_finally_stop = stable_recovery_reason
+                    recovery_summary = _followers_wrong_depth_recovery_failure_summary(
+                        processed=processed,
+                        follows_completed_count=follows_completed_count,
+                        follows_goal_effective=max_iter,
+                        global_follows_goal_effective=global_follow_goal_effective,
+                        target_follow_budget_effective=target_follow_budget_effective,
+                        source_profile_username=source_profile_username,
+                        recovery_reason=stable_recovery_reason,
+                    )
+                    _publish_followers_session_summary(**recovery_summary)
+                    log(
+                        "error",
+                        "followers_candidate_open_recovery_safe_stop",
+                        source_profile_username=source_profile_username,
+                        follower_username=str(pick.get("username") or ""),
+                        reason=stable_recovery_reason,
+                        follow_session_outcome="partial_resumable",
+                        target_completed=False,
+                        target_exhausted=False,
+                        recovery_detail=recovery_detail,
+                    )
                     return 42
+                log(
+                    "info",
+                    "followers_candidate_open_recovery_completed",
+                    source_profile_username=source_profile_username,
+                    follower_username=str(pick.get("username") or ""),
+                    recovery_reason=str(recovery_reason or ""),
+                    recovery_detail=recovery_detail,
+                )
                 continue
 
             _profile_open_ms = round((time.perf_counter() - _candidate_open_t0) * 1000.0, 2)

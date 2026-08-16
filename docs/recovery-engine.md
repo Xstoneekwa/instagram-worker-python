@@ -41,6 +41,26 @@ Pendant recovery **critique** (surtout post-follow) :
 - interdits : **swipe** exploratoire, **reopen** profil/liste par taps complexes si la config désactive ce chemin ;
 - autorisé avec prudence : **back** contrôlé, **observe_instagram_state**, **détection** followers / profil.
 
+## Wrong-depth recovery : état courant autoritaire
+
+Une recovery ne déduit jamais la profondeur courante de l'action qui vient
+d'échouer. Elle choisit l'action suivante uniquement depuis une classification
+fraîche de la surface réelle. Le cas critique est un détecteur générique
+positif alors que l'Identity Guard prouve encore le profil CT : la branche
+correcte est une réouverture directe de Followers depuis ce CT, et non une
+suite de Back.
+
+Chaque geste de navigation suit le contrat : invalider la preuve précédente,
+envoyer une seule action, observer à nouveau, classifier, puis décider. Un
+second Back sans observation intermédiaire est interdit. Si aucune surface ne
+peut être prouvée dans le budget borné, la session s'arrête en
+`partial_resumable` avec `target_completed=false`; aucun checkpoint incertain,
+reçu Follow/Mute/Like ou épuisement de cible n'est publié.
+
+La première raison causale (`followers_recovery_surface_unproved` ou raison de
+réacquisition canonique) doit rester dans le résumé et les diagnostics même si
+une enveloppe de session ajoute ensuite une raison terminale plus générale.
+
 ## Logs obligatoires
 
 - Nom d’événement **stable** (`post_follow_return_ct_*`, `visual_follow_*`, etc.).

@@ -51,3 +51,15 @@ freeze, invalid signature or unexpected state returns to `LOCKED_READ_ONLY`.
 Rollback selects only a previously immutable, signature-valid release and does
 not reuse either approval. The audit ledger records every state transition,
 hash, verifier result and activation identity without secrets.
+
+## Protected navigation recovery invariant
+
+Any Follow60 change affecting candidate-open or Followers recovery must prove
+that recovery is driven by the freshly classified current surface, never by
+the depth expected after the attempted action. The certified matrix must cover
+Followers already present, source CT, exact candidate profile, post surface,
+Explore/Search and unknown. It must also prove `MAX_UNOBSERVED_BACK_CHAIN=1`,
+strict candidate identity before Follow, fail-closed unknown handling,
+`target_completed=false` on recovery failure, and preservation of the first
+causal reason. These checks are part of the frozen Approval 2 candidate and
+cannot be weakened during relock or promotion.

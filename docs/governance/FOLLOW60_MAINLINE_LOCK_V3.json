@@ -1,13 +1,13 @@
 {
   "approval": {
-    "base_sha": "6a2e094687b1379a5f3738fdf6935bf6a3e53716",
-    "candidate_tree_sha": "8364da67e8c94ef7ae0b4df31394da04c6c34eb8",
-    "change_id": "follow60-network-transient-recovery-v1-20260816",
-    "expires_at": "2026-08-16T16:58:18.245753+00:00",
-    "final_diff_hash": "f05385bad799c17e4bb29425fd7f9e2b3d6c140ae1872cb2d4f882c76111c3e1",
-    "final_manifest_hash": "7e70e7751ebb32656a0f9c9beeb779b4ff9476418793334f3de6e2ef525785bb",
-    "final_protected_scope_hash": "2b261ddb99acd704bac256a6028148eb9966f4dbd5e0f255d5b8c0f2f426b1ee",
-    "request_sha256": "d16743280514dae013dc902882999bcf401d767ea05ce388d2feb6d348fdfa8b",
+    "base_sha": "f4d00e2158dc6f6bf61ea5b82dce3328628873f0",
+    "candidate_tree_sha": "48ac75c3306da059e450a18d02e49bcc4829fda9",
+    "change_id": "follow60-wrong-depth-profile-recovery-v1-20260816",
+    "expires_at": "2026-08-17T05:24:40Z",
+    "final_diff_hash": "2920aeae9909af905074e6d5c02677ad9315933a3652fb0b7de1380deb211b36",
+    "final_manifest_hash": "2571de11b0ace8437fb20a282dfc1b46692ee95c6f6ff9d80f2f212715fc3194",
+    "final_protected_scope_hash": "b242586bd3b4d4a1ab7bf1d27c46befcdd130838e69571dcfc78d06572766aad",
+    "request_sha256": "9b548c357dcb4eb1024652af34b6bbbe2a13789c58be69da15aa66367e7bde5f",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -189,9 +189,35 @@
       ],
       "requested_scope": "Follow60 Return CT source-profile identity boundary and runner outcome propagation, Unfollow Following surface detector and account-session restart classification",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "f4d00e2158dc6f6bf61ea5b82dce3328628873f0",
+      "candidate_tree_sha": "48ac75c3306da059e450a18d02e49bcc4829fda9",
+      "change_id": "follow60-wrong-depth-profile-recovery-v1-20260816",
+      "consumed_at": "2026-08-16T19:23:47.987555+00:00",
+      "field_status": "PENDING_NEXT_NATURAL_RUN_AFTER_LIAM_RESOLVE",
+      "files": [
+        "docs/dev-session-latest.md",
+        "docs/governance/FOLLOW60_MAINLINE_CHANGE_AND_ACTIVATION_PROTOCOL_V1.md",
+        "docs/navigation-engine.md",
+        "docs/recovery-engine.md",
+        "docs/runbooks/WRONG_DEPTH_RECOVERY.md",
+        "instagram_navigation.py",
+        "runner.py",
+        "tests/test_followers_wrong_depth_recovery.py"
+      ],
+      "requested_scope": [
+        "Follow60 candidate profile-open identity boundary",
+        "Follow60 followers-list depth-aware recovery",
+        "Follow60 first-stop and terminal-reason projection",
+        "Follow60 wrong-depth deterministic regression tests",
+        "Follow60 canonical navigation, recovery, governance, runbook, and session documentation"
+      ],
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
-  "field_certification": "PENDING_NEXT_NATURAL_RUNS",
+  "field_certification": "PENDING_NEXT_NATURAL_RUN_AFTER_LIAM_RESOLVE",
   "import_graph": {
     "account_commercial_policy.py": [
       "assignment_dispatch_resolver.py",
@@ -680,6 +706,10 @@
     "tests/test_followers_surface_proof.py": [
       "followers_surface_proof.py"
     ],
+    "tests/test_followers_wrong_depth_recovery.py": [
+      "instagram_navigation.py",
+      "runner.py"
+    ],
     "tests/test_instagram_list_continuation_contract.py": [
       "account_session_orchestrator.py",
       "instagram_list_continuation.py",
@@ -811,7 +841,7 @@
     ],
     "worker_runtime_identity.py": []
   },
-  "import_graph_sha256": "8de3306ff3ff20bc943ad0757f0a8087985dd6027e4cab993657317483744e20",
+  "import_graph_sha256": "7fbf8e576376dc959fc4cd7121bf2394da62be74dad95be2927783075496731b",
   "lock_state": "LOCKED",
   "lock_version": "3.1.0",
   "manifest_signature": "DETACHED_ED25519_REQUIRED",
@@ -1375,13 +1405,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "ef23396f75999c4f70a7fd5bdfb1c355470b601f",
+      "git_blob_oid": "bc45134d326e5c0211d55735a7dc77b94245c6a1",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "0919fa5c809ce0beec9642ac9b9c9fe3e33826082ae5c7fcc834a1b1a189c51e",
-      "size": 2416998
+      "sha256": "f32770904bb4be324ff69ffc77f7e545f013bddce1b3f4b68a4e3011d25d0ff5",
+      "size": 2426389
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -1492,13 +1522,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "31148f6fb070474d68b2379732d7d10c84768636",
+      "git_blob_oid": "b625c70e5f6da72ec32b75ec23b79a01ead409e0",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "9b051e5b130f96ad6792abaca7c0eb213926d2d87b85b09e90a0be3b4a46ec75",
-      "size": 1213372
+      "sha256": "37b823e3538cc71bad6fb71ea35369259c90e657df06083d441e7e8ea2b844d8",
+      "size": 1216952
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -1824,6 +1854,15 @@
       "sha256": "05b0ae628dee9cc8dc9b4a49306bf01d1e31ac359b344b53011b0289b3a668d6",
       "size": 4783
     },
+    "tests/test_followers_wrong_depth_recovery.py": {
+      "git_blob_oid": "b08571398ec695be56e846164bd3db69569b4f27",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "tests/test_followers_wrong_depth_recovery.py",
+      "role": "regression_contract",
+      "sha256": "93469827e16ef5c1e5e7e4f99f58cd586392936fb76c189d086248a87cdc22df",
+      "size": 9659
+    },
     "tests/test_instagram_list_continuation_contract.py": {
       "git_blob_oid": "0bcc9b0ce5ddddb33119f10512c8b6a92b9e9af0",
       "lock_version": "3.1.0",
@@ -2041,8 +2080,8 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "2b261ddb99acd704bac256a6028148eb9966f4dbd5e0f255d5b8c0f2f426b1ee",
-  "protected_transitive_dependency_count": 136,
+  "protected_scope_sha256": "b242586bd3b4d4a1ab7bf1d27c46befcdd130838e69571dcfc78d06572766aad",
+  "protected_transitive_dependency_count": 108,
   "runtime_contract": {
     "binding_kind": "mainline",
     "engine": "FOLLOW60_V2_MAINLINE_V1",
