@@ -63,6 +63,7 @@ import supabase_client
 import deferred_projection_outbox
 import follow_persistence_receipt_replay
 import orphan_run_reconciliation
+import storage_health
 from follow60_ordering_v2_behavioral_canary_v1 import (
     behavioral_runtime_scope_for_account,
 )
@@ -99,6 +100,74 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
 _last_integration_noop_proof: dict[str, Any] | None = None
 _CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
+_LAST_STORAGE_INCIDENT_AT = 0.0
+_LAST_STORAGE_WARNING_AT = 0.0
+_STORAGE_BLOCK_ACTIVE = False
+
+
+def _dispatcher_storage_gate(
+    cfg: "DispatcherConfig",
+    *,
+    boundary: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Return a cheap host-wide dispatch decision without claiming work."""
+
+    global _LAST_STORAGE_INCIDENT_AT, _LAST_STORAGE_WARNING_AT, _STORAGE_BLOCK_ACTIVE
+    if storage_health.storage_pressure_state().get("active"):
+        storage_health.reset_storage_pressure_after_health_restore()
+    snapshot = storage_health.inspect_storage_health(force=True)
+    payload = snapshot.to_dict()
+    if snapshot.status != storage_health.CRITICAL:
+        now = time.monotonic()
+        if (
+            snapshot.status == storage_health.WARNING
+            and (_LAST_STORAGE_WARNING_AT <= 0.0 or now - _LAST_STORAGE_WARNING_AT >= 60.0)
+        ):
+            log(
+                "warning",
+                "host_storage_warning",
+                worker_id=cfg.worker_id,
+                boundary=boundary,
+                **payload,
+            )
+            _LAST_STORAGE_WARNING_AT = now
+        if _STORAGE_BLOCK_ACTIVE:
+            log(
+                "info",
+                "host_storage_dispatch_resumed",
+                worker_id=cfg.worker_id,
+                boundary=boundary,
+                **payload,
+            )
+        _STORAGE_BLOCK_ACTIVE = False
+        return True, payload
+
+    _STORAGE_BLOCK_ACTIVE = True
+    now = time.monotonic()
+    if _LAST_STORAGE_INCIDENT_AT <= 0.0 or now - _LAST_STORAGE_INCIDENT_AT >= 60.0:
+        log(
+            "critical",
+            "host_storage_dispatch_blocked",
+            worker_id=cfg.worker_id,
+            boundary=boundary,
+            new_dispatch_allowed=False,
+            **payload,
+        )
+        incident = runtime_incidents.build_host_storage_critical_incident(
+            host=socket.gethostname(),
+            storage_snapshot=payload,
+        )
+        runtime_incidents.publish_account_incident(**incident)
+        _LAST_STORAGE_INCIDENT_AT = now
+    try:
+        _heartbeat(
+            cfg,
+            status="unhealthy:host_storage_critical",
+            metadata={"storage_gate": payload, "new_dispatch_allowed": False},
+        )
+    except Exception:
+        pass
+    return False, payload
 
 
 def _runner_runtime_identity_env(request_id: str) -> dict[str, str]:
@@ -3231,6 +3300,18 @@ def _claim_next_dispatch_request(
     if not cfg.enabled:
         return None, {"ok": False, "reason": "disabled"}
 
+    storage_ok, storage_snapshot = _dispatcher_storage_gate(
+        cfg,
+        boundary="before_claim",
+    )
+    if not storage_ok:
+        return None, {
+            "ok": True,
+            "mode": "storage_critical",
+            "reason": storage_health.HOST_STORAGE_CRITICAL,
+            "storage": storage_snapshot,
+        }
+
     _heartbeat(cfg, status=heartbeat_status)
     reclaimed = reclaim_stale_account_run_requests(cfg.worker_id)
     try:
@@ -3303,6 +3384,17 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
 
 
 def evaluate_launch_mode_startup_preflight_with_retries(cfg: DispatcherConfig) -> dict[str, Any]:
+    storage_ok, storage_snapshot = _dispatcher_storage_gate(
+        cfg,
+        boundary="dispatcher_startup_preflight",
+    )
+    if not storage_ok:
+        return {
+            "ok": False,
+            "reason": storage_health.HOST_STORAGE_CRITICAL,
+            "storage": storage_snapshot,
+            "active_count": 0,
+        }
     max_attempts = max(1, _env_int("RUN_CONTROL_DISPATCHER_PREFLIGHT_RETRIES", 3))
     backoff_s = max(0.0, _env_float("RUN_CONTROL_DISPATCHER_PREFLIGHT_RETRY_SECONDS", 2.0))
     last: dict[str, Any] = {"ok": False, "reason": "active_queue_read_failed"}
@@ -3390,6 +3482,27 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         log("error", "run_control_dispatcher_disabled")
         return 2
 
+    storage_wait_logged = False
+    while True:
+        storage_ok, storage_snapshot = _dispatcher_storage_gate(
+            cfg,
+            boundary="dispatcher_startup",
+        )
+        if storage_ok:
+            break
+        if not storage_wait_logged:
+            log(
+                "error",
+                "run_control_dispatcher_storage_preflight_blocked",
+                worker_id=cfg.worker_id,
+                reason=storage_health.HOST_STORAGE_CRITICAL,
+                storage=storage_snapshot,
+                new_dispatch_allowed=False,
+                process_exit=False,
+            )
+            storage_wait_logged = True
+        time.sleep(min(cfg.poll_seconds, 5.0))
+
     # Recover subprocesses that exceeded the dispatcher's maximum lifetime and
     # have no live worker heartbeat or device lease. This is deliberately more
     # conservative than lease expiry alone because account request leases are
@@ -3399,7 +3512,11 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     # Recover terminal sessions before startup queue preflight so stale active
     # rows cannot permanently prevent a safe dispatcher restart.
     reconcile_requests_with_terminal_runs(cfg)
-    preflight = evaluate_launch_mode_startup_preflight_with_retries(cfg)
+    while True:
+        preflight = evaluate_launch_mode_startup_preflight_with_retries(cfg)
+        if str(preflight.get("reason") or "") != storage_health.HOST_STORAGE_CRITICAL:
+            break
+        time.sleep(min(cfg.poll_seconds, 5.0))
     if not preflight.get("ok"):
         reason = str(preflight.get("reason") or "blocked")
         log(
@@ -3485,6 +3602,15 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
             try:
                 _collect_completed_dispatch_tasks(active_tasks)
 
+                storage_ok, _storage_snapshot = _dispatcher_storage_gate(
+                    cfg,
+                    boundary="dispatcher_loop",
+                )
+                if not storage_ok:
+                    consecutive_loop_errors = 0
+                    time.sleep(min(cfg.poll_seconds, 5.0))
+                    continue
+
                 reconcile_requests_with_terminal_runs(cfg)
 
                 # Reconcile secondary projections independently from business
@@ -3531,6 +3657,18 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                 last_loop_error_key = ""
                 consecutive_loop_errors = 0
             except Exception as exc:
+                if storage_health.is_storage_io_error(exc):
+                    storage_health.mark_storage_pressure(
+                        exc,
+                        source="dispatcher_loop",
+                    )
+                    _dispatcher_storage_gate(
+                        cfg,
+                        boundary="dispatcher_loop_storage_io_error",
+                    )
+                    consecutive_loop_errors = 0
+                    time.sleep(min(cfg.poll_seconds, 5.0))
+                    continue
                 consecutive_loop_errors += 1
                 err = str(exc)[:500]
                 now = time.monotonic()

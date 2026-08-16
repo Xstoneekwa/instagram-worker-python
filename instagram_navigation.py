@@ -21,6 +21,7 @@ import uiautomator2 as u2
 import config
 import account_protection_lists
 import followers_surface_proof as followers_proof
+import storage_health
 from instagram_action_restriction import guard_instagram_action_rate_limit
 from device import (
     force_stop,
@@ -43,6 +44,14 @@ from instagram_list_continuation import (
     viewport_fingerprint,
 )
 from screen_fingerprint import build_screen_fingerprint, compare_screen_fingerprints
+
+
+def _require_irreversible_social_action_storage(action: str) -> None:
+    """Fail closed before a social tap when durable state cannot be trusted."""
+
+    storage_health.require_irreversible_action_allowed(
+        boundary=f"instagram_{str(action or 'social_action')}",
+    )
 
 # Set by runner after open_accounts_tab: "accounts_tab" | "mixed_results"
 _search_ui_mode = "accounts_tab"
@@ -10517,6 +10526,7 @@ def perform_follow_safe(
         )
 
     try:
+        _require_irreversible_social_action_storage("follow_pre_tap")
         if tap_exact and tap_coords_ready:
             d.click(tap_cx, tap_cy)
         else:
@@ -10527,6 +10537,8 @@ def perform_follow_safe(
             _invalidate_follow_60s_proofs("planned_follow_tap")
         except Exception:
             pass
+    except storage_health.HostStorageCriticalError:
+        raise
     except Exception as e:
         _record(
             "follow_verify_failed",
@@ -34077,6 +34089,7 @@ def visual_like_open_post(
         )
         try:
             _t_tap_dispatch0 = time.perf_counter()
+            _require_irreversible_social_action_storage("like_pre_tap")
             d.click(tap_x, tap_y)
             post_tap_verification_context["tap_ack"] = True
             post_tap_verification_context["tap_ack_monotonic"] = time.monotonic()
@@ -34086,6 +34099,8 @@ def visual_like_open_post(
                 )
                 _lkperf["like_tap_sent"] = True
                 _lkperf["already_liked"] = False
+        except storage_health.HostStorageCriticalError:
+            raise
         except Exception as e:
             log(
                 "error",
@@ -36455,7 +36470,10 @@ def _visual_tap_toggle_row_for_label(
         b = el.info.get("bounds") or {}
         cy = (int(b["top"]) + int(b["bottom"])) // 2
         tap_x = min(ww - 6, max(int(ww * 0.88), int(b.get("right", 0)) + 72))
+        _require_irreversible_social_action_storage("mute_toggle_pre_tap")
         d.click(int(tap_x), int(cy))
+    except storage_health.HostStorageCriticalError:
+        raise
     except Exception as e:
         return False, False, f"tap_failed:{e}", el
     return True, False, "", el

@@ -47,6 +47,7 @@ import follow_persistence_intent
 import follow_persistence_receipt_replay
 import deferred_projection_outbox
 import device_action_latch
+import storage_health
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
 from worker_runtime_identity import (
@@ -4752,6 +4753,9 @@ _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
 _RUNNER_SESSION_CLEANUP_COMPLETE = False
 _PENDING_TERMINAL_RUN_STATUS: dict[str, Any] | None = None
 _CURRENT_RUN_REQUEST_ID: str | None = None
+_CURRENT_RUN_ID: str | None = None
+_CURRENT_ACCOUNT_ID: str | None = None
+_CURRENT_DEVICE: Any | None = None
 _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING: dict[str, str] | None = None
 
 
@@ -14168,6 +14172,9 @@ def _run_followers_list_engine_session(
                 )
                 target_followers_resume_controller = None
         while processed < max_iter:
+            storage_health.require_irreversible_action_allowed(
+                boundary="follow60_candidate_cycle_start",
+            )
             _log_target_budget_check("before_candidate_selection")
             if _runtime_follow_cap_exceeded(_follow_max_per_run):
                 _mark_global_follow_cap_reached(phase="before_candidate_selection")
@@ -22921,6 +22928,8 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
 def _main_impl() -> int:
     global _CERTIFIED_RUNTIME_IDENTITY
     global _CURRENT_RUN_REQUEST_ID
+    global _CURRENT_RUN_ID, _CURRENT_ACCOUNT_ID
+    global _CURRENT_DEVICE
     global _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
@@ -22928,6 +22937,9 @@ def _main_impl() -> int:
     _RUNNER_SESSION_CLEANUP_COMPLETE = False
     _PENDING_TERMINAL_RUN_STATUS = None
     _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING = None
+    _CURRENT_RUN_ID = None
+    _CURRENT_ACCOUNT_ID = None
+    _CURRENT_DEVICE = None
 
     parser = argparse.ArgumentParser(description="Instagram safe navigation worker")
     parser.add_argument(
@@ -22982,6 +22994,26 @@ def _main_impl() -> int:
         runtime_root_ok=True,
         device_actions_started=False,
     )
+    try:
+        storage_health.reset_storage_pressure_after_health_restore()
+        storage_snapshot = storage_health.require_new_run_allowed(boundary="runner_pre_run")
+        if storage_snapshot.status == storage_health.WARNING:
+            log(
+                "warning",
+                "host_storage_warning",
+                boundary="runner_pre_run",
+                **storage_snapshot.to_dict(),
+            )
+    except storage_health.HostStorageCriticalError as exc:
+        log(
+            "error",
+            "run_aborted",
+            reason=storage_health.HOST_STORAGE_CRITICAL,
+            storage=exc.snapshot.to_dict(),
+            device_actions_started=False,
+            new_run_allowed=False,
+        )
+        return 78
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
     welcome_scan_run = _is_welcome_scan_run(args)
@@ -23026,6 +23058,7 @@ def _main_impl() -> int:
             log("error", "run_aborted", reason="supabase_account_not_found")
             return 10
         account_id = str(account.get("id") or "").strip()
+        _CURRENT_ACCOUNT_ID = account_id or None
         if not account_id:
             log("error", "run_aborted", reason="supabase_account_missing_id")
             return 10
@@ -23092,6 +23125,7 @@ def _main_impl() -> int:
         _t_run_control = time.perf_counter()
         run = _safe_supabase_call("create_run", account_id=account_id) or {}
         run_id = str(run.get("id") or "").strip()
+        _CURRENT_RUN_ID = run_id or None
         linked: dict[str, Any] | None = None
         if run_request_id and run_id:
             try:
@@ -24289,6 +24323,7 @@ def _main_impl() -> int:
 
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
+    _CURRENT_DEVICE = d
     device_action_latch.configure(
         enabled=bool(_follow60_canary_active),
         account_id=account_id or "",
@@ -25203,6 +25238,9 @@ def _main_impl() -> int:
             phase_handoff_only=True,
             external_outreach_queue_only=True,
         )
+        storage_health.require_irreversible_action_allowed(
+            boundary="unfollow_phase_start",
+        )
         unf_code = dispatch_unfollow_session(
             d,
             account_id=account_id,
@@ -25717,6 +25755,9 @@ def _main_impl() -> int:
             unfollow_enabled=bool(dispatch_settings.enabled),
             unfollow_sort_mode=str(dispatch_settings.sort_mode or ""),
             unfollow_actions_sent=0,
+        )
+        storage_health.require_irreversible_action_allowed(
+            boundary="unfollow_session_start",
         )
         unf_code = dispatch_unfollow_session(
             d,
@@ -26432,6 +26473,36 @@ def main() -> int:
     try:
         return _main_impl()
     except Exception as exc:
+        if isinstance(exc, storage_health.HostStorageCriticalError):
+            summary = {
+                "reason": storage_health.HOST_STORAGE_CRITICAL,
+                "first_failure_reason": storage_health.HOST_STORAGE_CRITICAL,
+                "storage": exc.snapshot.to_dict(),
+                "safe_to_continue_ui": False,
+                "no_false_action_receipt": True,
+                "session_counters": dict(_SESSION_COUNTERS),
+            }
+            run_id = str(_CURRENT_RUN_ID or "")
+            if run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="failed",
+                    totals={
+                        "total": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "success": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "failed": 0,
+                    },
+                    performance_summary=summary,
+                )
+            log(
+                "error",
+                "host_storage_critical_safe_stop",
+                account_id=_CURRENT_ACCOUNT_ID,
+                run_id=run_id or None,
+                request_id=_CURRENT_RUN_REQUEST_ID,
+                **summary,
+            )
+            return _return_with_cleanup(_CURRENT_DEVICE, 78)
         from instagram_ads_data_consent_popup import (
             EXIT_CODE as ADS_DATA_CONSENT_EXIT_CODE,
             InstagramAdsDataConsentPopupDetected,

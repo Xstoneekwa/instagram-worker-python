@@ -142,6 +142,42 @@ fi
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
+_rotate_dispatcher_log_if_needed() {
+  local log_file max_bytes retain_count retain_days current_bytes stamp
+  local -a rotated_logs sorted_logs
+  log_file="$LOG_DIR/dispatcher.log"
+  max_bytes="${PHONEFARM_DISPATCHER_LOG_ROTATE_BYTES:-268435456}"
+  retain_count="${PHONEFARM_DISPATCHER_LOG_RETAIN_COUNT:-8}"
+  retain_days="${PHONEFARM_DISPATCHER_LOG_RETAIN_DAYS:-14}"
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=268435456
+  [[ "$retain_count" =~ ^[0-9]+$ ]] || retain_count=8
+  [[ "$retain_days" =~ ^[0-9]+$ ]] || retain_days=14
+  if [[ -f "$log_file" ]]; then
+    current_bytes="$(stat -f '%z' "$log_file" 2>/dev/null || wc -c < "$log_file")"
+    if [[ "$current_bytes" =~ ^[0-9]+$ ]] && (( current_bytes >= max_bytes )); then
+      stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+      mv "$log_file" "$LOG_DIR/dispatcher.log.${stamp}.$$"
+    fi
+  fi
+  if (( retain_days > 0 )); then
+    find "$LOG_DIR" -type f -name 'dispatcher.log.*' -mtime "+$retain_days" -delete
+  fi
+  if (( retain_count > 0 )); then
+    shopt -s nullglob
+    rotated_logs=("$LOG_DIR"/dispatcher.log.*)
+    shopt -u nullglob
+    if (( ${#rotated_logs[@]} > 0 )); then
+      while IFS= read -r item; do
+        [[ -n "$item" ]] && sorted_logs+=("$item")
+      done < <(ls -1t "${rotated_logs[@]}")
+      rotated_logs=("${sorted_logs[@]}")
+    fi
+    if (( ${#rotated_logs[@]} > retain_count )); then
+      printf '%s\0' "${rotated_logs[@]:retain_count}" | xargs -0 rm -f --
+    fi
+  fi
+}
+
 _pid_alive() {
   local pid="${1:-}"
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
@@ -606,6 +642,7 @@ _start_foreground() {
   trap '_handle_start_signal TERM' TERM
   trap '_handle_start_signal INT' INT
   _record_pid "$$"
+  _rotate_dispatcher_log_if_needed
   "$PYTHON_BIN" account_run_request_consumer.py >>"$LOG_DIR/dispatcher.log" 2>&1 &
   consumer_pid="$!"
   _record_pid "$consumer_pid"

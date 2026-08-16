@@ -13,6 +13,44 @@ VALID_SEVERITIES = {"info", "warning", "error", "critical"}
 VALID_STATUSES = {"open", "acknowledged", "resolved", "ignored"}
 
 
+def build_host_storage_critical_incident(
+    *,
+    account_id: str | None = None,
+    run_id: str | None = None,
+    device_id: str | None = None,
+    host: str | None = None,
+    storage_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the generic infrastructure incident for unsafe persistence."""
+
+    host_key = str(host or "unknown-host").strip().lower()
+    snapshot = dict(storage_snapshot or {})
+    return {
+        "incident_type": "HOST_STORAGE_CRITICAL",
+        "dedupe_key": f"host:{host_key}:storage:critical",
+        "severity": "critical",
+        "status": "open",
+        "account_id": str(account_id or "").strip() or None,
+        "run_id": str(run_id or "").strip() or None,
+        "device_id": str(device_id or "").strip() or None,
+        "source": "worker_storage_health",
+        "reason": "host_storage_critical",
+        "failure_reason": "host_storage_critical",
+        "action_required": "Restore safe host storage capacity, then allow the next natural tick.",
+        "safe_client_message": "Automation paused because runtime state cannot be persisted safely.",
+        "assistant_message": "Host storage is critical; new Worker actions are paused.",
+        "admin_message": "Worker paused because host storage cannot safely persist runtime state.",
+        "metadata": {
+            "host": host_key,
+            "filesystem_path": snapshot.get("filesystem_path"),
+            "total_bytes": snapshot.get("total_bytes"),
+            "free_bytes": snapshot.get("free_bytes"),
+            "free_percent": snapshot.get("free_percent"),
+            "new_run_allowed": False,
+        },
+    }
+
+
 def _incidents_enabled() -> bool:
     return bool(getattr(config, "RUNTIME_INCIDENTS_ENABLED", False))
 
