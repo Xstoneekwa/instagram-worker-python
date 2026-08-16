@@ -5866,6 +5866,12 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
 
     def test_candidate_open_blocks_stale_action_bar_outside_confirmed_ct_list(self) -> None:
         device = mock.MagicMock()
+        device.app_current.return_value = {
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+        }
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        device.window_size.return_value = (1080, 2340)
         logs: list[tuple[str, dict[str, object]]] = []
         candidate = {"username": "marc_gnv_", "row_center": [320, 420]}
 
@@ -5886,16 +5892,19 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             )
 
         self.assertFalse(ok)
-        device.click.assert_called_once_with(320, 420)
+        device.click.assert_not_called()
         events = [event for event, _kw in logs]
-        self.assertIn("candidate_open_blocked_ambiguous_stale_action_bar", events)
-        self.assertIn("follower_profile_open_failed", events)
+        self.assertIn("follower_profile_open_blocked_stale_or_missing_row_proof", events)
         blocked = [
             kw
             for event, kw in logs
-            if event == "candidate_open_blocked_ambiguous_stale_action_bar"
+            if event == "follower_profile_open_blocked_stale_or_missing_row_proof"
         ][-1]
-        self.assertEqual(blocked.get("reason"), "candidate_selection_skipped_stale_profile_context")
+        self.assertFalse(blocked.get("physical_tap_attempted"))
+        self.assertEqual(
+            (blocked.get("row_proof_meta") or {}).get("reason"),
+            "expected_row_missing",
+        )
 
     def test_return_ct_post_back_det_rejects_and_falls_back_to_final_confirm(self) -> None:
         cases: list[tuple[str, dict[str, object] | None, list[float] | None]] = [

@@ -83,3 +83,10 @@ recouvrement reste excessif et interdit toute réutilisation comme ancre. Les
 chemins de sécurité 6+2, 5+3 et le fallback déterministe de 0,24 hauteur restent
 disponibles. Détails et preuve runtime historique :
 [checkpoint T-10 / Follow / V2](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).
+# Followers viewport evidence (V1)
+
+Followers list navigation uses `FollowersViewportProof`, `FollowersRowProof` and a single-use
+`RowActionToken`. Candidate selection carries identity intent; row geometry is resolved again
+from fresh XML immediately before a tap. Every navigation/scroll generation change makes old
+evidence comparison-only. See
+`docs/runbooks/STALE_VIEWPORT_OR_ROW_EVIDENCE.md` for the operational contract.

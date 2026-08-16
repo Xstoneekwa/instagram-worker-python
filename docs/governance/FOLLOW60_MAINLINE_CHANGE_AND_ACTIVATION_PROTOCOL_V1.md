@@ -63,3 +63,9 @@ strict candidate identity before Follow, fail-closed unknown handling,
 `target_completed=false` on recovery failure, and preservation of the first
 causal reason. These checks are part of the frozen Approval 2 candidate and
 cannot be weakened during relock or promotion.
+# Stale viewport evidence invariant
+
+The protected Follow60 scope must not dispatch a candidate-row tap from selection-time
+coordinates. Actionability requires a current-generation, exact-identity `RowActionToken`.
+All UI mutations revoke outstanding row tokens atomically. Changes to this invariant remain
+subject to the two-signature Follow60 Lock V3.1 protocol.

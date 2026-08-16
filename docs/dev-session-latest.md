@@ -628,3 +628,21 @@ remain historical evidence.
 - Rollback : armer un nouveau token one-shot, repointer atomiquement le symlink
   vers la release précédente, redémarrer une seule fois et vérifier token
   consommé, PID unique, root correct et zéro request/run/lock créé.
+# FOLLOW60_STALE_VIEWPORT_EVIDENCE_ELIMINATION_V1
+
+- Base: `d40eb84d2c4fcd02c9df7236978bbb4475042176`.
+- Root cause: candidate geometry survived a CT Resume physical mutation when continuity was
+  rejected; the stale row could later be tapped on a different viewport.
+- Fix: generation-scoped viewport/row proofs, single-use exact-row action token, just-in-time
+  fresh username resolution, mutation-time invalidation, and forced candidate reacquisition
+  after every dispatched CT Resume gesture.
+- Tap dispatch prefers the exact live username selector when its geometry still matches the
+  proof; otherwise it uses only the same fresh proof bounds. A changed live geometry sends no
+  tap and forces reacquisition.
+- Validation: targeted matrix `413/413`; full Worker `3172/3172` with 10 intentional skips;
+  `py_compile` and `git diff --check` pass.
+- Synthetic 1,000-iteration proof fixture: bounded-cache JIT p50 `0.0459 ms`, p95
+  `0.0607 ms`; fresh-XML parsing fixture p50 `0.1358 ms`, p95 `0.2760 ms`. No screenshot,
+  Vision or fixed sleep was added to the healthy path.
+- Account-specific logic: none.
+- Runtime activation: forbidden until Liam Approval 2 and final relock.

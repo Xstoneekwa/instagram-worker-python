@@ -15000,6 +15000,11 @@ def followers_try_expand_primary_list(
                             candidate_id=candidate_id,
                             see_more_status="see_more_clicking",
                         )
+                        followers_invalidate_surface_for_navigation(
+                            d,
+                            expected_source_profile,
+                            reason="followers_see_more_expansion",
+                        )
                         selector.click()
                         clicked = True
                         break
@@ -38723,6 +38728,18 @@ def _followers_scroll_list_forward(
         unsafe_anchor_loss = False
 
         for forward_attempt in range(1, max_forward_attempts + 1):
+            if forward_attempt > 1:
+                # A fresh hierarchy may have been captured after the previous
+                # attempt.  Invalidate it before every subsequent mutation.
+                _scroll_generations = followers_proof.invalidate(
+                    _scroll_scope,
+                    reason="followers_list_physical_scroll_retry",
+                    scroll_changed=True,
+                )
+                _sd(
+                    "followers_surface_scroll_generation",
+                    _scroll_generations.scroll_generation,
+                )
             before_surface = followers_list_continuation_from_hierarchy_xml(
                 current_xml,
                 flow="follow",
@@ -38904,6 +38921,15 @@ def _followers_scroll_list_forward(
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 )
                 try:
+                    _scroll_generations = followers_proof.invalidate(
+                        _scroll_scope,
+                        reason="followers_list_corrective_backstep",
+                        scroll_changed=True,
+                    )
+                    _sd(
+                        "followers_surface_scroll_generation",
+                        _scroll_generations.scroll_generation,
+                    )
                     correction_distance = min(int(h * 0.18), int(geometry["distance_px"]))
                     correction_start = int(h * 0.38)
                     correction_end = min(int(h * 0.62), correction_start + correction_distance)
@@ -45135,6 +45161,120 @@ def open_followers_list_from_profile(
     return False, fmeta
 
 
+def _followers_prepare_exact_row_action_token(
+    d: u2.Device,
+    *,
+    expected_username: str,
+    source_profile_username: str,
+    pkg: str,
+) -> tuple[followers_proof.RowActionToken | None, dict[str, Any]]:
+    """Resolve exact row geometry from a fresh, current-generation hierarchy."""
+
+    scope = _followers_surface_scope(d, source_profile_username=source_profile_username)
+    started = time.perf_counter()
+    cached_surface, cached_reason = followers_proof.get(
+        scope,
+        mode="same_surface_read",
+        max_age_ms=750.0,
+    )
+    if cached_surface is not None:
+        hierarchy_xml = str(cached_surface.hierarchy_xml or "")
+        proof_source = "jit_current_generation_bounded_cache"
+        xml_dump_count = 0
+    else:
+        hierarchy_xml = followers_refresh_detect_hierarchy_cache(
+            d, source_profile_username=source_profile_username
+        )
+        proof_source = "jit_pre_profile_open_fresh_xml"
+        xml_dump_count = 1 if hierarchy_xml else 0
+    pkg_meta = _followers_current_pkg_activity(d) or {}
+    current_package = str(pkg_meta.get("current_package") or "")
+    current_activity = str(pkg_meta.get("current_activity") or "")
+    if not hierarchy_xml:
+        return None, {"reason": "fresh_hierarchy_missing"}
+    if pkg and current_package != pkg:
+        return None, {
+            "reason": "package_mismatch",
+            "current_package": current_package,
+            "current_activity": current_activity,
+        }
+    if current_activity and "MainActivity" not in current_activity:
+        return None, {
+            "reason": "activity_mismatch",
+            "current_package": current_package,
+            "current_activity": current_activity,
+        }
+    rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+        hierarchy_xml, source_profile_username=source_profile_username
+    )
+    viewport = followers_proof.capture_viewport(
+        scope,
+        hierarchy_xml,
+        rows,
+        package_name=current_package,
+        activity_name=current_activity,
+        source=proof_source,
+    )
+    token, reason = followers_proof.issue_row_action_token(
+        scope, expected_username, max_age_ms=1500.0
+    )
+    return token, {
+        "reason": reason,
+        "viewport_proof_id": viewport.proof_id if viewport is not None else None,
+        "hierarchy_fingerprint": (
+            viewport.hierarchy_fingerprint if viewport is not None else None
+        ),
+        "navigation_generation": (
+            viewport.generations.navigation_generation if viewport is not None else None
+        ),
+        "scroll_generation": (
+            viewport.generations.scroll_generation if viewport is not None else None
+        ),
+        "row_count": len(rows),
+        "proof_source": proof_source,
+        "cached_surface_reason": cached_reason,
+        "xml_dump_count": xml_dump_count,
+        "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        "current_package": current_package,
+        "current_activity": current_activity,
+    }
+
+
+def _followers_live_selector_for_row_action_token(
+    d: u2.Device,
+    token: followers_proof.RowActionToken,
+) -> tuple[Any | None, str]:
+    """Prefer an exact live selector, while preserving proof-bound geometry."""
+
+    resource_id = str(token.resource_identity or "").strip()
+    row_username = str(token.row_username or "").strip()
+    if not resource_id or not row_username:
+        return None, "live_selector_identity_unavailable"
+    try:
+        selector = d(resourceId=resource_id, text=row_username)
+        exists = getattr(selector, "exists", False)
+        if callable(exists):
+            exists = exists()
+        if not bool(exists):
+            return None, "live_selector_unavailable"
+        info = getattr(selector, "info", {}) or {}
+        bounds = info.get("bounds") if isinstance(info, dict) else None
+        if isinstance(bounds, dict):
+            live_bounds = (
+                int(bounds["left"]),
+                int(bounds["top"]),
+                int(bounds["right"]),
+                int(bounds["bottom"]),
+            )
+            if live_bounds != token.row_bounds:
+                return None, "live_selector_geometry_changed"
+        return selector, "live_exact_selector"
+    except (KeyError, TypeError, ValueError):
+        return None, "live_selector_geometry_unavailable"
+    except Exception:
+        return None, "live_selector_unavailable"
+
+
 def open_follower_profile_from_list(
     d: u2.Device,
     candidate: dict[str, Any],
@@ -45306,14 +45446,79 @@ def open_follower_profile_from_list(
         return True
 
     if not is_visual:
+        row_token, row_proof_meta = _followers_prepare_exact_row_action_token(
+            d,
+            expected_username=un,
+            source_profile_username=source_profile_username,
+            pkg=pkg,
+        )
+        if row_token is None:
+            log(
+                "warning",
+                "follower_profile_open_blocked_stale_or_missing_row_proof",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                row_proof_meta=row_proof_meta,
+                physical_tap_attempted=False,
+            )
+            return _finish_open_profile(False)
+        live_selector, live_selector_reason = _followers_live_selector_for_row_action_token(
+            d, row_token
+        )
+        if live_selector_reason == "live_selector_geometry_changed":
+            followers_invalidate_surface_for_navigation(
+                d,
+                source_profile_username,
+                reason="row_action_live_selector_geometry_changed",
+            )
+            log(
+                "warning",
+                "follower_profile_open_blocked_row_reflow_before_tap",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                reason=live_selector_reason,
+                physical_tap_attempted=False,
+            )
+            return _finish_open_profile(False)
+        token_ok, token_reason = followers_proof.consume_row_action_token(row_token)
+        if not token_ok:
+            log(
+                "warning",
+                "follower_profile_open_blocked_row_action_token",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                reason=token_reason,
+                row_proof_meta=row_proof_meta,
+                physical_tap_attempted=False,
+            )
+            return _finish_open_profile(False)
         followers_invalidate_surface_for_navigation(
             d,
             source_profile_username,
             reason="open_follower_profile_from_list",
         )
-        rc = candidate.get("row_center") or [0, 0]
+        rc = row_token.row_center
+        log(
+            "info",
+            "follower_profile_open_row_action_token_committed",
+            follower_username=un,
+            source_profile_username=source_profile_username,
+            viewport_proof_id=row_token.viewport_proof_id,
+            row_fingerprint=row_token.row_fingerprint,
+            navigation_generation=row_token.generations.navigation_generation,
+            scroll_generation=row_token.generations.scroll_generation,
+            row_center=list(rc),
+            proof_source=str(row_proof_meta.get("proof_source") or ""),
+            tap_method=(
+                "live_exact_selector" if live_selector is not None else "fresh_proof_bounds"
+            ),
+            live_selector_reason=live_selector_reason,
+        )
         try:
-            d.click(int(rc[0]), int(rc[1]))
+            if live_selector is not None:
+                live_selector.click()
+            else:
+                d.click(int(rc[0]), int(rc[1]))
         except Exception as e:
             log(
                 "error",
@@ -45347,11 +45552,80 @@ def open_follower_profile_from_list(
             )
         return _finish_open_profile(ok)
 
-    # Visual candidate: multi-tap strategies, transition wait, strict anti–source-profile guard.
+    # Visual candidates must converge to the same exact live row proof before
+    # any physical action.  Screenshot geometry is comparison evidence only.
+    row_token, row_proof_meta = _followers_prepare_exact_row_action_token(
+        d,
+        expected_username=un,
+        source_profile_username=source_profile_username,
+        pkg=pkg,
+    )
+    if row_token is None:
+        log(
+            "warning",
+            "visual_candidate_open_blocked_without_exact_live_row_proof",
+            follower_username=un,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            row_proof_meta=row_proof_meta,
+            physical_tap_attempted=False,
+        )
+        return _finish_open_profile(False)
+    live_selector, live_selector_reason = _followers_live_selector_for_row_action_token(
+        d, row_token
+    )
+    if live_selector_reason == "live_selector_geometry_changed":
+        followers_invalidate_surface_for_navigation(
+            d,
+            source_profile_username,
+            reason="visual_row_action_live_selector_geometry_changed",
+        )
+        log(
+            "warning",
+            "visual_candidate_open_blocked_row_reflow_before_tap",
+            follower_username=un,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            reason=live_selector_reason,
+            physical_tap_attempted=False,
+        )
+        return _finish_open_profile(False)
+    token_ok, token_reason = followers_proof.consume_row_action_token(row_token)
+    if not token_ok:
+        log(
+            "warning",
+            "visual_candidate_open_blocked_row_action_token",
+            follower_username=un,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            reason=token_reason,
+            physical_tap_attempted=False,
+        )
+        return _finish_open_profile(False)
+
+    # Visual candidate: one current-generation exact-row tap, transition wait,
+    # strict anti-source-profile guard.  There is no stale multi-tap retry.
     followers_invalidate_surface_for_navigation(
         d,
         source_profile_username,
         reason="open_visual_follower_profile_from_list",
+    )
+    log(
+        "info",
+        "follower_profile_open_row_action_token_committed",
+        follower_username=un,
+        source_profile_username=source_profile_username,
+        visual_candidate_id=vcid,
+        viewport_proof_id=row_token.viewport_proof_id,
+        row_fingerprint=row_token.row_fingerprint,
+        navigation_generation=row_token.generations.navigation_generation,
+        scroll_generation=row_token.generations.scroll_generation,
+        row_center=list(row_token.row_center),
+        proof_source=str(row_proof_meta.get("proof_source") or ""),
+        tap_method=(
+            "live_exact_selector" if live_selector is not None else "fresh_proof_bounds"
+        ),
+        live_selector_reason=live_selector_reason,
     )
     work = dict(candidate)
     row_o = dict(work.get("approx_row_bounds") or {})
@@ -45361,7 +45635,17 @@ def open_follower_profile_from_list(
     if row_o and av_o and tz_o and fb_o:
         work.update(_compute_visual_candidate_tap_points_from_bounds(row_o, av_o, tz_o, fb_o))
 
-    strategies = _visual_open_strategy_taps_from_candidate(work)
+    strategies = [
+        (
+            (
+                "jit_live_exact_row_selector"
+                if live_selector is not None
+                else "jit_exact_row_action_token"
+            ),
+            int(row_token.row_center[0]),
+            int(row_token.row_center[1]),
+        )
+    ]
     if not strategies:
         log(
             "error",
@@ -45444,7 +45728,10 @@ def open_follower_profile_from_list(
     for si, (tap_strategy, raw_x, raw_y) in enumerate(strategies):
         tx = max(2, min(int(wwin) - 3, int(raw_x)))
         ty = max(2, min(int(hwin) - 3, int(raw_y)))
-        if _tap_inside_follow_bounds(tx, ty, fb_o):
+        if tap_strategy not in {
+            "jit_exact_row_action_token",
+            "jit_live_exact_row_selector",
+        } and _tap_inside_follow_bounds(tx, ty, fb_o):
             last_fail_reason = "tap_coordinates_inside_follow_button_bounds"
             log(
                 "warning",
@@ -45484,7 +45771,10 @@ def open_follower_profile_from_list(
         )
 
         try:
-            d.click(tx, ty)
+            if tap_strategy == "jit_live_exact_row_selector" and live_selector is not None:
+                live_selector.click()
+            else:
+                d.click(tx, ty)
         except Exception as e:
             last_fail_reason = f"click_failed:{e}"
             log(

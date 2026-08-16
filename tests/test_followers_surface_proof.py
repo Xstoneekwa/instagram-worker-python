@@ -139,6 +139,91 @@ class FollowersSurfaceProofTests(unittest.TestCase):
         self.assertIsNotNone(observed)
         self.assertEqual("valid_same_surface_proof", reason)
 
+    def _capture_viewport(self, scope: proof.FollowersSurfaceScope, *, now: float = 10.0):
+        return proof.capture_viewport(
+            scope,
+            "<hierarchy generation='1'/>",
+            [
+                {
+                    "username": "faelhpp09",
+                    "bounds": {"left": 100, "top": 700, "right": 500, "bottom": 820},
+                    "row_center": [300, 760],
+                    "resource_id": "follow_list_username",
+                }
+            ],
+            package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
+            captured_at_monotonic=now,
+        )
+
+    def test_exact_row_token_is_single_use(self) -> None:
+        scope = _scope()
+        viewport = self._capture_viewport(scope)
+        token, reason = proof.issue_row_action_token(
+            scope, "@FAELHPP09", now_monotonic=10.1
+        )
+        self.assertIsNotNone(viewport)
+        self.assertEqual("row_action_token_issued", reason)
+        self.assertEqual((300, 760), token.row_center if token else None)
+        self.assertEqual((True, "row_action_token_consumed"), proof.consume_row_action_token(token))
+        self.assertEqual(
+            (False, "row_action_token_missing_or_consumed"),
+            proof.consume_row_action_token(token),
+        )
+
+    def test_scroll_invalidation_revokes_row_token_and_geometry(self) -> None:
+        scope = _scope()
+        self._capture_viewport(scope)
+        token, _ = proof.issue_row_action_token(scope, "faelhpp09", now_monotonic=10.1)
+        proof.invalidate(scope, reason="physical_scroll", scroll_changed=True)
+        self.assertEqual(
+            (False, "row_action_token_missing_or_consumed"),
+            proof.consume_row_action_token(token),
+        )
+        new_token, reason = proof.issue_row_action_token(
+            scope, "faelhpp09", now_monotonic=10.2
+        )
+        self.assertIsNone(new_token)
+        self.assertEqual("viewport_proof_missing", reason)
+
+    def test_navigation_invalidation_revokes_row_token(self) -> None:
+        scope = _scope()
+        self._capture_viewport(scope)
+        token, _ = proof.issue_row_action_token(scope, "faelhpp09", now_monotonic=10.1)
+        proof.invalidate(scope, reason="back", navigation_changed=True)
+        self.assertFalse(proof.consume_row_action_token(token)[0])
+
+    def test_missing_wrong_or_ambiguous_expected_identity_fails_closed(self) -> None:
+        scope = _scope()
+        proof.capture_viewport(
+            scope,
+            "<hierarchy/>",
+            [
+                {"username": "one", "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
+                {"username": "one", "bounds": {"left": 3, "top": 3, "right": 4, "bottom": 4}},
+            ],
+            captured_at_monotonic=10.0,
+        )
+        missing, missing_reason = proof.issue_row_action_token(
+            scope, "two", now_monotonic=10.1
+        )
+        ambiguous, ambiguous_reason = proof.issue_row_action_token(
+            scope, "one", now_monotonic=10.1
+        )
+        self.assertIsNone(missing)
+        self.assertEqual("expected_row_missing", missing_reason)
+        self.assertIsNone(ambiguous)
+        self.assertEqual("expected_row_ambiguous", ambiguous_reason)
+
+    def test_stale_viewport_cannot_issue_action_token(self) -> None:
+        scope = _scope()
+        self._capture_viewport(scope, now=10.0)
+        token, reason = proof.issue_row_action_token(
+            scope, "faelhpp09", max_age_ms=1250.0, now_monotonic=11.251
+        )
+        self.assertIsNone(token)
+        self.assertEqual("viewport_proof_stale", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

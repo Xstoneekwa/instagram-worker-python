@@ -9444,6 +9444,17 @@ def _candidate_selection_snapshot_reuse_candidate(
     return None, "snapshot_absent"
 
 
+def _ct_resume_requires_fresh_candidate_reacquisition(
+    scroll_diag: dict[str, Any] | None,
+) -> bool:
+    """A dispatched gesture makes every pre-gesture candidate row non-actionable."""
+
+    return bool(
+        isinstance(scroll_diag, dict)
+        and scroll_diag.get("whether_physical_swipe_attempted") is True
+    )
+
+
 def _ct_checkpoint_same_immutable_viewport_proved(
     checkpoint: dict[str, Any],
     open_list_meta: dict[str, Any] | None,
@@ -15681,10 +15692,23 @@ def _run_followers_list_engine_session(
                             _ff_diag.get("correction_scroll_count") or 0
                         ),
                     )
-                    # If the UI moved, never consume the pre-scroll candidate
-                    # snapshot even when continuity proof was rejected.  A
-                    # fresh collection is mandatory before legacy evaluation.
-                    if _ff_ok:
+                    # Any dispatched physical gesture invalidates the old
+                    # candidate geometry, including continuity-unproven and
+                    # corrective-backstep outcomes.  Re-collect before any
+                    # candidate selection; `_ff_ok` alone is insufficient.
+                    if _ct_resume_requires_fresh_candidate_reacquisition(_ff_diag):
+                        candidates = []
+                        log(
+                            "info",
+                            "ct_resume_candidate_geometry_invalidated_after_physical_gesture",
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            target_id_hash=target_followers_resume_v2.stable_id_hash(target_id),
+                            continuity_reason=str(_ff_verdict.reason or ""),
+                            scroll_ok=bool(_ff_ok),
+                            physical_swipe_attempted=True,
+                            next_action="fresh_viewport_reacquisition",
+                        )
                         continue
                 else:
                     _ff_handles = [

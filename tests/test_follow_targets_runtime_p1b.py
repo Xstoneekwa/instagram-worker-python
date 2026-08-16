@@ -1024,6 +1024,20 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(det["open_detection_method"], "own_unified_follow_list")
         self.assertEqual(det["candidate_username_count"], 8)
 
+    def test_ct_resume_any_dispatched_swipe_requires_fresh_candidates(self) -> None:
+        self.assertTrue(
+            runner._ct_resume_requires_fresh_candidate_reacquisition(
+                {
+                    "whether_physical_swipe_attempted": True,
+                    "failure_reason": "anchor_not_recovered_after_excessive_scroll",
+                }
+            )
+        )
+        self.assertFalse(
+            runner._ct_resume_requires_fresh_candidate_reacquisition(
+                {"whether_physical_swipe_attempted": False}
+            )
+        )
     def test_candidate_selection_snapshot_reuse_falls_back_when_absent_or_stale(self) -> None:
         det_absent, reason_absent = runner._candidate_selection_snapshot_reuse_candidate(
             {},

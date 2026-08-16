@@ -123,3 +123,9 @@ Reasons stables :
 
 - `instagram_ads_data_consent_popup_identity_pending`
 - `instagram_ads_data_consent_popup_business_action_paused`
+# Followers recovery generation boundary
+
+Recovery actions invalidate all actionable Followers viewport and row evidence before the UI
+mutation. A successful recovery must reacquire and recertify the list before candidate
+selection. A CT Resume gesture with unproved continuity also discards pre-gesture candidates;
+it cannot fall through to legacy evaluation with old row coordinates.

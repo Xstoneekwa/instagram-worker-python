@@ -17,9 +17,10 @@ class _MissingSelector:
 
 
 class _Device:
-    def __init__(self, *, package: str = PKG, activity: str = MAIN) -> None:
+    def __init__(self, *, package: str = PKG, activity: str = MAIN, hierarchy: str = "") -> None:
         self.package = package
         self.activity = activity
+        self.hierarchy = hierarchy
         self.clicks: list[tuple[int, int]] = []
 
     def app_current(self) -> dict[str, str]:
@@ -31,6 +32,10 @@ class _Device:
     def click(self, x: int, y: int) -> None:
         self.clicks.append((x, y))
 
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        del compressed
+        return self.hierarchy
+
     def press(self, _key: str) -> None:
         return None
 
@@ -38,7 +43,34 @@ class _Device:
         return _MissingSelector()
 
 
+class _LiveSelector:
+    def __init__(self, device: "_SelectorDevice", bounds: dict[str, int]) -> None:
+        self.device = device
+        self.exists = True
+        self.info = {"bounds": bounds}
+
+    def click(self) -> None:
+        self.device.selector_clicks += 1
+
+
+class _SelectorDevice(_Device):
+    def __init__(self, *, hierarchy: str, live_bounds: dict[str, int]) -> None:
+        super().__init__(hierarchy=hierarchy)
+        self.live_bounds = live_bounds
+        self.selector_clicks = 0
+
+    def __call__(self, **kwargs: object) -> _LiveSelector | _MissingSelector:
+        if kwargs.get("text") == "candidate_exact" and "follow_list_username" in str(
+            kwargs.get("resourceId") or ""
+        ):
+            return _LiveSelector(self, self.live_bounds)
+        return _MissingSelector()
+
+
 class FollowProfileIdentityBoundaryV1Test(unittest.TestCase):
+    def setUp(self) -> None:
+        nav.followers_proof.reset_for_tests()
+
     def test_exact_username_on_main_activity_is_confirmed(self) -> None:
         ok, meta = nav._expected_profile_identity_boundary(
             _Device(), "candidate_exact", PKG, observed_username="candidate_exact"
@@ -92,8 +124,22 @@ class FollowProfileIdentityBoundaryV1Test(unittest.TestCase):
 
     def test_non_visual_open_rejects_nab_dm_false_positive(self) -> None:
         device = _Device(activity=MODAL)
+        row_token = mock.Mock(
+            row_center=(320, 420),
+            viewport_proof_id="vp-1",
+            row_fingerprint="row-1",
+            generations=mock.Mock(navigation_generation=0, scroll_generation=0),
+        )
         with mock.patch.object(nav, "verify_profile", return_value=True), mock.patch.object(
             nav, "read_current_profile_username_for_follow_gate", return_value=""
+        ), mock.patch.object(
+            nav,
+            "_followers_prepare_exact_row_action_token",
+            return_value=(row_token, {"reason": "fixture"}),
+        ), mock.patch.object(
+            nav.followers_proof,
+            "consume_row_action_token",
+            return_value=(True, "row_action_token_consumed"),
         ), mock.patch.object(nav.time, "sleep", return_value=None):
             ok = nav.open_follower_profile_from_list(
                 device,
@@ -103,6 +149,70 @@ class FollowProfileIdentityBoundaryV1Test(unittest.TestCase):
             )
         self.assertFalse(ok)
         self.assertEqual(device.clicks, [(320, 420)])
+
+    def test_non_visual_open_uses_fresh_exact_row_not_stale_selected_geometry(self) -> None:
+        hierarchy = """<hierarchy><node resource-id="follow_list_container" bounds="[400,850][900,1050]"><node resource-id="follow_list_username" text="candidate_exact" bounds="[500,900][800,1000]"/></node></hierarchy>"""
+        device = _Device(hierarchy=hierarchy)
+        with mock.patch.object(nav, "verify_profile", return_value=True), mock.patch.object(
+            nav,
+            "read_current_profile_username_for_follow_gate",
+            return_value="candidate_exact",
+        ), mock.patch.object(nav.time, "sleep", return_value=None):
+            ok = nav.open_follower_profile_from_list(
+                device,
+                {"username": "candidate_exact", "row_center": [10, 10]},
+                source_profile_username="source_ct",
+                pkg=PKG,
+            )
+        self.assertTrue(ok)
+        self.assertEqual([(650, 950)], device.clicks)
+
+    def test_non_visual_open_prefers_exact_live_selector(self) -> None:
+        hierarchy = """<hierarchy><node resource-id="follow_list_container" bounds="[400,850][900,1050]"><node resource-id="follow_list_username" text="candidate_exact" bounds="[500,900][800,1000]"/></node></hierarchy>"""
+        device = _SelectorDevice(
+            hierarchy=hierarchy,
+            live_bounds={"left": 500, "top": 900, "right": 800, "bottom": 1000},
+        )
+        with mock.patch.object(nav, "verify_profile", return_value=True), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="candidate_exact"
+        ), mock.patch.object(nav.time, "sleep", return_value=None):
+            ok = nav.open_follower_profile_from_list(
+                device,
+                {"username": "candidate_exact", "row_center": [10, 10]},
+                source_profile_username="source_ct",
+                pkg=PKG,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(1, device.selector_clicks)
+        self.assertEqual([], device.clicks)
+
+    def test_non_visual_open_reflowed_live_selector_sends_no_tap(self) -> None:
+        hierarchy = """<hierarchy><node resource-id="follow_list_container" bounds="[400,850][900,1050]"><node resource-id="follow_list_username" text="candidate_exact" bounds="[500,900][800,1000]"/></node></hierarchy>"""
+        device = _SelectorDevice(
+            hierarchy=hierarchy,
+            live_bounds={"left": 500, "top": 1100, "right": 800, "bottom": 1200},
+        )
+        ok = nav.open_follower_profile_from_list(
+            device,
+            {"username": "candidate_exact", "row_center": [10, 10]},
+            source_profile_username="source_ct",
+            pkg=PKG,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(0, device.selector_clicks)
+        self.assertEqual([], device.clicks)
+
+    def test_non_visual_open_missing_expected_live_row_sends_no_tap(self) -> None:
+        hierarchy = """<hierarchy><node resource-id="follow_list_container" bounds="[400,850][900,1050]"><node resource-id="follow_list_username" text="other_candidate" bounds="[500,900][800,1000]"/></node></hierarchy>"""
+        device = _Device(hierarchy=hierarchy)
+        ok = nav.open_follower_profile_from_list(
+            device,
+            {"username": "candidate_exact", "row_center": [10, 10]},
+            source_profile_username="source_ct",
+            pkg=PKG,
+        )
+        self.assertFalse(ok)
+        self.assertEqual([], device.clicks)
 
     def test_return_ct_rejects_rex_wrong_profile_before_reopen(self) -> None:
         device = _Device()

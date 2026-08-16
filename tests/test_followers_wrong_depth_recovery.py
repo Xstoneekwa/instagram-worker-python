@@ -49,6 +49,12 @@ class FollowersWrongDepthRecoveryTests(unittest.TestCase):
         device = _Device()
         source = "aleksborys"
         candidate = "nikodembialet"
+        row_token = mock.Mock(
+            row_center=(320, 420),
+            viewport_proof_id="vp-1",
+            row_fingerprint="row-1",
+            generations=mock.Mock(navigation_generation=0, scroll_generation=0),
+        )
         with mock.patch.object(nav, "verify_profile", return_value=True), mock.patch.object(
             nav,
             "read_current_profile_username_for_follow_gate",
@@ -61,7 +67,15 @@ class FollowersWrongDepthRecoveryTests(unittest.TestCase):
             nav,
             "open_followers_list_from_profile",
             return_value=(True, {"is_followers_list": True}),
-        ) as reopen, mock.patch.object(nav.time, "sleep", return_value=None):
+        ) as reopen, mock.patch.object(
+            nav,
+            "_followers_prepare_exact_row_action_token",
+            return_value=(row_token, {"reason": "fixture"}),
+        ), mock.patch.object(
+            nav.followers_proof,
+            "consume_row_action_token",
+            return_value=(True, "row_action_token_consumed"),
+        ), mock.patch.object(nav.time, "sleep", return_value=None):
             opened = nav.open_follower_profile_from_list(
                 device,
                 {"username": candidate, "row_center": [320, 420]},
