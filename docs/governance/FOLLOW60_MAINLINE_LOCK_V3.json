@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "528bce2ecd280ea1829245b4a734bacf5d160f23",
-    "change_id": "follow60-physical-write-lock-v3-1-20260816",
-    "diff_sha256": "fd2c2e54bb5a196b36a8abd7cda74d8ffb02689194426901027c2add4139b36f",
-    "expires_at": "2026-08-16T03:29:22.284185+00:00",
-    "head_sha": "4271faddab33e032a3d5b04b9894149630378845",
-    "request_sha256": "12b46d4872f8b8b263c3fc23a0cd6cbd36fdf5e4c15a341b3ac157630069109f",
+    "base_sha": "72637277c55348e05a1f7a3c871b1b28dc399f3b",
+    "change_id": "follow60-runtime-identity-read-trust-v3-1-20260816",
+    "diff_sha256": "5fd49ae9ae81b02a02a1fcce8eaefd5831f809da2417510262be78b659ccd7e2",
+    "expires_at": "2026-08-16T04:55:39.088368+00:00",
+    "head_sha": "8490ec44d7e9341a7d0a3a8a5243158d65f08ef6",
+    "request_sha256": "471b040f5a93ec74b43799b43b3f00f02a5795a3ce1895ccad264bcbe00021a6",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -66,6 +66,23 @@
       ],
       "head_sha": "4271faddab33e032a3d5b04b9894149630378845",
       "requested_scope": "root-owned immutable physical Follow60 V3.1 write lock, self-protected governance scope, and signed commit/package/activation gates",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "72637277c55348e05a1f7a3c871b1b28dc399f3b",
+      "change_id": "follow60-runtime-identity-read-trust-v3-1-20260816",
+      "consumed_at": "2026-08-16T00:57:17.445835+00:00",
+      "diff_sha256": "5fd49ae9ae81b02a02a1fcce8eaefd5831f809da2417510262be78b659ccd7e2",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
+        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
+        "tests/test_worker_runtime_identity.py",
+        "worker_runtime_identity.py"
+      ],
+      "head_sha": "8490ec44d7e9341a7d0a3a8a5243158d65f08ef6",
+      "requested_scope": "process-scoped exact safe.directory for immutable runtime identity reads only",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1883,16 +1900,16 @@
       "size": 11389
     },
     "worker_runtime_identity.py": {
-      "git_blob_oid": "31b892f8b0b778e599f2916f74046e7b2ff3f1c9",
+      "git_blob_oid": "7f663471c1ad9ba69d6843c83b067f25897f5b8e",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "worker_runtime_identity.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "163236bfbda72b4ad96839a47d3918218b24a60ebc9fd495bd3652dce168362f",
-      "size": 14218
+      "sha256": "c59f57db9d8114fc90c243ffe4fe0a47b89c1d26519aca5f086c4873b01da307",
+      "size": 14534
     }
   },
-  "protected_scope_sha256": "83c346f946080e4ea25f54b8e1d907023a619cc6c707fcc9ff1c2c7710553ab1",
+  "protected_scope_sha256": "37fd07646e7d643e26e4439dff85f7b837de891b966a2274ab566f4b04364bf2",
   "protected_transitive_dependency_count": 106,
   "runtime_contract": {
     "binding_kind": "mainline",
