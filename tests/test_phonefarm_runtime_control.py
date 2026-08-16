@@ -51,6 +51,48 @@ class PhoneFarmRuntimeControlTest(TestCase):
                 self.assertEqual(root.commit, "abc1234")
                 self.assertEqual(Path(root.resolved_root), release.resolve())
 
+    def test_git_commit_uses_process_scoped_exact_canonical_safe_directory(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            release = Path(raw) / "releases" / "locked"
+            release.mkdir(parents=True)
+            alias = Path(raw) / "release-alias"
+            alias.symlink_to(release)
+            completed = mock.Mock(returncode=0, stdout="746dea5\n")
+            with mock.patch.object(ctl.subprocess, "run", return_value=completed) as run:
+                commit = ctl._git_commit(alias)
+
+        self.assertEqual(commit, "746dea5")
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command,
+            [
+                "git",
+                "-c",
+                f"safe.directory={release.resolve()}",
+                "-C",
+                str(release.resolve()),
+                "rev-parse",
+                "--short",
+                "HEAD",
+            ],
+        )
+        self.assertNotIn("--global", command)
+        self.assertNotIn("*", " ".join(command))
+        self.assertNotIn("env", run.call_args.kwargs)
+
+    def test_git_commit_missing_root_fails_closed_without_invoking_git(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            missing = Path(raw) / "missing-release"
+            with mock.patch.object(ctl.subprocess, "run") as run:
+                commit = ctl._git_commit(missing)
+
+        self.assertEqual(commit, "")
+        run.assert_not_called()
+
     def test_resolve_active_root_rejects_missing_and_legacy(self) -> None:
         import tempfile
 
@@ -68,9 +110,11 @@ class PhoneFarmRuntimeControlTest(TestCase):
 
             current.symlink_to(legacy)
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
-                rejected = ctl.resolve_runtime_root()
+                with mock.patch.object(ctl, "_git_commit") as git_commit:
+                    rejected = ctl.resolve_runtime_root()
             self.assertFalse(rejected.ok)
             self.assertEqual(rejected.reason, "active_root_not_in_releases_dir")
+            git_commit.assert_not_called()
 
     def test_switch_release_atomically_updates_current_link(self) -> None:
         import tempfile

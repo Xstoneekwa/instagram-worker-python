@@ -171,9 +171,26 @@ def _safe_resolve(path: Path) -> Path:
 
 
 def _git_commit(root: Path) -> str:
+    """Read HEAD from one already-validated release root.
+
+    Physical Follow60 releases are deliberately root-owned.  Git therefore
+    requires an explicit safe.directory exception even for read-only commands.
+    Keep that exception process-scoped and bind it to the canonical root only;
+    callers must validate release-directory containment before calling here.
+    """
     try:
+        exact_root = Path(root).expanduser().resolve(strict=True)
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={exact_root}",
+                "-C",
+                str(exact_root),
+                "rev-parse",
+                "--short",
+                "HEAD",
+            ],
             check=False,
             text=True,
             capture_output=True,
@@ -559,7 +576,6 @@ def switch_release(target: str) -> dict[str, Any]:
     target_path = Path(target)
     if not target_path.is_absolute():
         target_path = paths.releases_dir / target
-    candidate = RuntimeRoot(True, "valid", str(paths.current_link), str(_safe_resolve(target_path)), _git_commit(target_path))
     validation = resolve_runtime_root(RuntimePaths(target_path, paths.releases_dir, paths.runtime_home, paths.legacy_root))
     if not validation.ok:
         return _runtime_root_payload(validation, command="switch-release")
