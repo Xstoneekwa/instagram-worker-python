@@ -38,6 +38,7 @@ from own_profile_navigation import open_own_profile_from_bottom_nav
 ACCOUNT_IDENTITY_MISMATCH_REASON = "active_instagram_account_mismatch"
 POSSIBLE_USERNAME_RENAME_REASON = "possible_username_rename_detected"
 DEVICE_LOCKED_REASON = "device_locked"
+DEVICE_UNLOCK_FAILED_REASON = "device_unlock_failed"
 DEVICE_LOCKED_REQUIRES_OPERATOR_REASON = "device_locked_requires_operator"
 PREFLIGHT_KEYGUARD_STAGE = "pre_profile_keyguard_check"
 KEYGUARD_SCREEN_TYPE = "device_keyguard"
@@ -521,7 +522,7 @@ def ensure_preflight_device_unlocked(
             return None
 
     result = _preflight_keyguard_failure_result(
-        failure_reason=DEVICE_LOCKED_REASON,
+        failure_reason=DEVICE_UNLOCK_FAILED_REASON,
         unlock_attempted=bool(state.get("swipe_only_unlock_available")),
         unlock_result="failed",
         d=d,

@@ -18,6 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from follow60_change_protocol_v1 import verify_staged_final_approval  # noqa: E402
 from follow60_lock_v3 import sha256_bytes, verify_detached_signature  # noqa: E402
 
 MANIFEST = ROOT / "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json"
@@ -51,6 +52,17 @@ def main() -> int:
     staged = staged_paths()
     protected_changed = sorted(protected.intersection(staged))
     if not protected_changed:
+        return 0
+    manifest_approval = manifest.get("approval") or {}
+    if manifest_approval.get("final_diff_hash"):
+        result = verify_staged_final_approval(ROOT, MANIFEST, ROOT / "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.sig", PUBLIC_KEY)
+        if not result.get("ok"):
+            print(
+                f"CAN_COMMIT_CHANGED_FOLLOW60=NO reason={result.get('reason')}",
+                file=sys.stderr,
+            )
+            return 3
+        print("FOLLOW60_SIGNED_FINAL_MANIFEST_COMMIT_AUTHORIZATION=PASS")
         return 0
     try:
         authorization = json.loads(AUTH.read_text(encoding="utf-8"))

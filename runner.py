@@ -823,6 +823,57 @@ def _current_package_safe(d: Any) -> str:
         return ""
 
 
+def _prepare_device_for_account_identity_preflight(
+    d: Any,
+    *,
+    expected_package: str,
+    expected_account_username: str,
+    account_id: str | None,
+    run_id: str | None,
+) -> Any | None:
+    """Wake/unlock, then restore and prove the exact clone before identity."""
+    from account_identity_guard import (
+        AccountIdentityCheckResult,
+        ensure_preflight_device_unlocked,
+    )
+
+    keyguard_block = ensure_preflight_device_unlocked(
+        d,
+        account_id=account_id,
+        run_id=run_id,
+    )
+    if keyguard_block is not None:
+        return keyguard_block
+
+    package = str(expected_package or "").strip()
+    if not package:
+        return AccountIdentityCheckResult(
+            ok=False,
+            expected_account_username=expected_account_username,
+            failure_reason="expected_instagram_package_missing",
+            verification_method="preflight_exact_package_restore",
+        )
+
+    if _current_package_safe(d) != package:
+        app_start(d, package)
+        deadline = time.monotonic() + max(
+            0.1,
+            float(getattr(config, "APP_START_WAIT_S", 2.0)),
+        )
+        while _current_package_safe(d) != package and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    if _current_package_safe(d) != package or not verify_app_foreground(d, package):
+        return AccountIdentityCheckResult(
+            ok=False,
+            expected_account_username=expected_account_username,
+            failure_reason="expected_instagram_package_not_foreground_after_unlock",
+            verification_method="preflight_exact_package_restore",
+            meta={"expected_package": package, "actual_package": _current_package_safe(d)},
+        )
+    return None
+
+
 def _log_phase_budget(phase: str, elapsed_ms: float, expected_budget_ms: float) -> None:
     if elapsed_ms > expected_budget_ms:
         log(
@@ -24603,7 +24654,6 @@ def _main_impl() -> int:
         and account_username
     ):
         from account_identity_guard import (
-            ACCOUNT_IDENTITY_MISMATCH_REASON,
             verify_active_instagram_account_matches_expected,
         )
 
@@ -24612,19 +24662,30 @@ def _main_impl() -> int:
             if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False))
             else "supabase_account_run"
         )
-        identity = verify_active_instagram_account_matches_expected(
+        identity = _prepare_device_for_account_identity_preflight(
             d,
+            expected_package=config.INSTAGRAM_PACKAGE,
             expected_account_username=account_username,
             account_id=account_id,
-            run_type=effective_run_type,
             run_id=run_id or None,
-            stage="runner_account_identity_preflight",
         )
+        if identity is None:
+            identity = verify_active_instagram_account_matches_expected(
+                d,
+                expected_account_username=account_username,
+                account_id=account_id,
+                run_type=effective_run_type,
+                run_id=run_id or None,
+                stage="runner_account_identity_preflight",
+            )
         if not identity.ok:
+            exact_failure_reason = str(
+                identity.failure_reason or "active_instagram_account_mismatch"
+            )
             log(
                 "error",
                 "run_aborted",
-                reason=ACCOUNT_IDENTITY_MISMATCH_REASON,
+                reason=exact_failure_reason,
                 account_id=account_id,
                 expected_account_username=account_username,
                 actual_logged_in_username=identity.actual_logged_in_username,
@@ -24638,7 +24699,7 @@ def _main_impl() -> int:
                     status="failed",
                     totals={"total": 1, "success": 0, "failed": 1},
                     performance_summary={
-                        "reason": ACCOUNT_IDENTITY_MISMATCH_REASON,
+                        "reason": exact_failure_reason,
                         "run_type": effective_run_type,
                         "expected_account_username": account_username,
                         "actual_logged_in_username": identity.actual_logged_in_username,

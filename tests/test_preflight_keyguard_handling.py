@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import account_identity_guard as guard
+import runner
 import scheduled_session_preflight_runner as preflight_runner
 
 KEYGUARD_SWIPE_XML = (
@@ -99,7 +100,7 @@ class PreflightKeyguardHandlingTests(unittest.TestCase):
         self.assertEqual(result.meta["unlock_result"], "secure_lock_required")
         swipe.assert_not_called()
 
-    def test_persistent_keyguard_after_swipe_returns_device_locked(self) -> None:
+    def test_persistent_keyguard_after_swipe_returns_device_unlock_failed(self) -> None:
         device = Mock()
         device.app_current.return_value = {"package": "com.android.systemui"}
 
@@ -121,9 +122,85 @@ class PreflightKeyguardHandlingTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result)
-        self.assertEqual(result.failure_reason, guard.DEVICE_LOCKED_REASON)
+        self.assertEqual(result.failure_reason, guard.DEVICE_UNLOCK_FAILED_REASON)
         self.assertTrue(result.meta["unlock_attempted"])
         self.assertEqual(result.meta["unlock_result"], "failed")
+
+    def test_main_runner_unlocks_and_restores_exact_clone_before_identity(self) -> None:
+        device = Mock()
+        device.app_current.side_effect = [
+            {"package": "com.android.systemui"},
+            {"package": "com.android.systemui"},
+            {"package": "com.instagram.clone.exact"},
+            {"package": "com.instagram.clone.exact"},
+        ]
+        with (
+            patch.object(runner, "app_start") as start,
+            patch.object(runner, "verify_app_foreground", return_value=True) as foreground,
+            patch.object(guard, "ensure_preflight_device_unlocked", return_value=None),
+            patch("runner.time.sleep"),
+        ):
+            result = runner._prepare_device_for_account_identity_preflight(
+                device,
+                expected_package="com.instagram.clone.exact",
+                expected_account_username="generic_account",
+                account_id="account-1",
+                run_id="run-1",
+            )
+        self.assertIsNone(result)
+        start.assert_called_once_with(device, "com.instagram.clone.exact")
+        foreground.assert_called_once_with(device, "com.instagram.clone.exact")
+
+    def test_main_runner_blocks_before_package_restore_when_unlock_fails(self) -> None:
+        device = Mock()
+        keyguard_block = guard.AccountIdentityCheckResult(
+            ok=False,
+            expected_account_username="",
+            failure_reason=guard.DEVICE_UNLOCK_FAILED_REASON,
+            verification_method="preflight_keyguard_check",
+        )
+        with (
+            patch.object(runner, "app_start") as start,
+            patch.object(runner, "verify_app_foreground") as foreground,
+            patch.object(guard, "ensure_preflight_device_unlocked", return_value=keyguard_block),
+        ):
+            result = runner._prepare_device_for_account_identity_preflight(
+                device,
+                expected_package="com.instagram.clone.exact",
+                expected_account_username="generic_account",
+                account_id="account-1",
+                run_id="run-1",
+            )
+        self.assertIs(result, keyguard_block)
+        start.assert_not_called()
+        foreground.assert_not_called()
+
+    def test_main_runner_never_accepts_wrong_clone_after_unlock(self) -> None:
+        device = Mock()
+        device.app_current.side_effect = [
+            {"package": "com.instagram.other"},
+            {"package": "com.instagram.clone.exact"},
+            {"package": "com.instagram.other"},
+            {"package": "com.instagram.other"},
+        ]
+        with (
+            patch.object(runner, "app_start"),
+            patch.object(runner, "verify_app_foreground") as foreground,
+            patch.object(guard, "ensure_preflight_device_unlocked", return_value=None),
+            patch("runner.time.monotonic", return_value=10.0),
+        ):
+            result = runner._prepare_device_for_account_identity_preflight(
+                device,
+                expected_package="com.instagram.clone.exact",
+                expected_account_username="generic_account",
+                account_id="account-1",
+                run_id="run-1",
+            )
+        self.assertEqual(
+            result.failure_reason,
+            "expected_instagram_package_not_foreground_after_unlock",
+        )
+        foreground.assert_not_called()
 
     def test_preflight_runner_blocks_on_keyguard_before_identity_guard(self) -> None:
         keyguard_block = guard.AccountIdentityCheckResult(
