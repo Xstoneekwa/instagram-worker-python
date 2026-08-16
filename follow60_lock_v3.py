@@ -16,6 +16,10 @@ from pathlib import Path
 import subprocess
 from typing import Any, Iterable
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
 
 SCHEMA_V3 = "FOLLOW60_MAINLINE_LOCK_V3"
 SCHEMA_V3_1 = "FOLLOW60_MAINLINE_LOCK_V3_1"
@@ -143,18 +147,16 @@ def verify_detached_signature(payload: Path, signature: Path, public_key: Path) 
         return False, "detached_signature_missing"
     if not public_key.is_file():
         return False, "public_key_missing"
-    completed = subprocess.run(
-        [
-            "openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key),
-            "-rawin", "-in", str(payload), "-sigfile", str(signature),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return (completed.returncode == 0), (
-        "signature_valid" if completed.returncode == 0 else "signature_invalid"
-    )
+    try:
+        key = load_pem_public_key(public_key.read_bytes())
+        if not isinstance(key, Ed25519PublicKey):
+            return False, "public_key_not_ed25519"
+        key.verify(signature.read_bytes(), payload.read_bytes())
+    except InvalidSignature:
+        return False, "signature_invalid"
+    except (OSError, TypeError, ValueError):
+        return False, "signature_invalid"
+    return True, "signature_valid"
 
 
 def _verify_v3_legacy(root: Path, manifest_path: Path, approval_path: Path, revision: str) -> dict[str, Any]:

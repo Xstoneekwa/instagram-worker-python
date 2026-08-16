@@ -1,15 +1,13 @@
 {
-  "base_sha": "8e4490b0253307d12602b6390e9dfd1120c2340f",
-  "change_id": "follow60-final-git-read-trust-relock-v3-1-20260816",
-  "diff_sha256": "ba3c7137af7b7d2b24a2023eaa9df262beb8cf7dcdc3eda1d6d184e2a9f98646",
-  "expires_at": "2026-08-16T06:43:08.588233+00:00",
+  "base_sha": "fcdb5afeb086bec6c6f842011f38d9a133c11398",
+  "change_id": "follow60-runtime-ed25519-verifier-v3-1-20260816",
+  "diff_sha256": "5ed2aa24b66f74375d0e8ff2bc3951af34bd5894d30480b5623a6bb56c0d46b5",
+  "expires_at": "2026-08-16T13:39:26.132277+00:00",
   "files_requested": [
-    "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json",
-    "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.sig",
-    "docs/governance/FOLLOW60_WRITE_LOCK_CHANGE_REQUEST_V3_1.json",
-    "docs/governance/FOLLOW60_WRITE_LOCK_CHANGE_REQUEST_V3_1.sig"
+    "follow60_lock_v3.py",
+    "tests/test_follow60_mainline_lock_v3.py"
   ],
-  "requested_at": "2026-08-16T02:43:08.588233+00:00",
-  "requested_scope": "relock signed Follow60 V3.1 manifest for exact process-scoped Git read trust",
+  "requested_at": "2026-08-16T09:39:26.132277+00:00",
+  "requested_scope": "replace PATH-dependent OpenSSL verification with deterministic Python Ed25519 verification; no Follow60 behavior change",
   "schema": "FOLLOW60_SIGNED_COMMIT_AUTHORIZATION_V3_1"
 }

@@ -15,6 +15,7 @@ from follow60_lock_v3 import (
     git_file_entry,
     sha256_bytes,
     transitive_import_graph,
+    verify_detached_signature,
     verify_repository,
     verify_runtime,
 )
@@ -228,6 +229,14 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
             root, manifest, signature_path=signature, public_key_path=public_key
         )
         self.assertTrue(result["ok"], result)
+
+    def test_v31_signature_verification_does_not_depend_on_openssl_path(self):
+        temporary, _root, manifest, signature, public_key = self._signed_v31_repo()
+        self.addCleanup(temporary.cleanup)
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False):
+            valid, reason = verify_detached_signature(manifest, signature, public_key)
+        self.assertTrue(valid)
+        self.assertEqual("signature_valid", reason)
 
     def test_v31_space_comment_and_punctuation_mutations_fail(self):
         mutations = ["VALUE = 1 \n", "VALUE = 1  # comment\n", "VALUE = (1,)\n"]
