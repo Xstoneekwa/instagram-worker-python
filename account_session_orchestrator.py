@@ -2253,6 +2253,20 @@ def _session_termination_class(
     real_failure_reason = str(
         follow_to_unfollow_real.get("failure_reason") or ""
     ).strip()
+    unfollow_remaining = int(
+        follow_to_unfollow_real.get("last_run_remaining_eligible") or 0
+    )
+    unfollow_failed_before_action = bool(
+        session_status == "failed"
+        and follow_to_unfollow_real.get("executed")
+        and real_status in {"failed_open_following", "failed_surface"}
+        and unfollow_remaining > 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) == 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0) == 0
+        and int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0) == 0
+    )
+    if unfollow_failed_before_action:
+        return "partial_resumable"
     if (
         session_status == "failed"
         and bool(follow_to_unfollow_real.get("executed"))
@@ -2275,6 +2289,8 @@ def _session_termination_class(
         "follow60_evaluation_barrier_reached",
     }:
         return "completed_waiting_operator_evaluation"
+    if str(follow_session_outcome or "").strip() == "partial_resumable":
+        return "partial_resumable"
     if follow_exit_code == 0:
         if follow_quota_remaining is not None and follow_quota_remaining > 0:
             return "partial_resumable"
@@ -2307,6 +2323,19 @@ def _restart_eligibility(
     )
     if blocked:
         return "blocked", blocked
+    real_status = str(follow_to_unfollow_real.get("status") or "").strip()
+    unfollow_remaining = int(
+        follow_to_unfollow_real.get("last_run_remaining_eligible") or 0
+    )
+    if (
+        session_termination_class == "partial_resumable"
+        and real_status in {"failed_open_following", "failed_surface"}
+        and unfollow_remaining > 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) == 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0) == 0
+        and int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0) == 0
+    ):
+        return "eligible", "unfollow_surface_transient_backlog_remaining"
     unfollow_outcome = (
         dict(follow_to_unfollow_real.get("unfollow_outcome") or {})
         if isinstance(follow_to_unfollow_real.get("unfollow_outcome"), dict)

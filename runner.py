@@ -20268,6 +20268,17 @@ def _run_followers_list_engine_session(
                         follow_tap_blocked=True,
                     )
                     if not ok_v2_abort_ct:
+                        if (
+                            str(_v2_abort_method or "")
+                            == "followers_surface_reacquisition_unproved"
+                        ):
+                            _publish_followers_session_summary(
+                                exit_code=42,
+                                follow_session_outcome="partial_resumable",
+                                follow_stop_reason=(
+                                    "followers_surface_reacquisition_transient"
+                                ),
+                            )
                         return 42
                     continue
 

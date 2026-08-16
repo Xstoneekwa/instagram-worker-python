@@ -902,6 +902,34 @@ def open_own_following_list_from_own_profile(
         time.sleep(min(wait_s, 8.0))
 
     det = detect_own_following_list_screen(d, account_username=account_username)
+    # Instagram can expose the selected Following tab and its list chrome before
+    # network-backed rows arrive.  Treat that exact state as transient and
+    # re-observe it without another tap or any exploratory navigation.
+    transient_rechecks = 0
+    transient_recheck_limit = 3
+    while (
+        str(det.get("failure_reason") or "") == "following_usernames_missing"
+        and bool(det.get("following_tab_active"))
+        and bool(
+            det.get("follow_list_container_present")
+            or det.get("recycler_present")
+            or det.get("listview_present")
+        )
+        and not bool(det.get("following_list_end_detected"))
+        and transient_rechecks < transient_recheck_limit
+    ):
+        transient_rechecks += 1
+        log(
+            "info",
+            "unfollow_following_rows_transient_recheck",
+            account_username=account_username,
+            attempt=transient_rechecks,
+            max_attempts=transient_recheck_limit,
+            failure_reason="following_usernames_missing",
+        )
+        time.sleep(1.5)
+        det = detect_own_following_list_screen(d, account_username=account_username)
+    det["transient_empty_rechecks"] = transient_rechecks
     if not bool(det.get("is_following_list")):
         log(
             "info",
@@ -917,5 +945,6 @@ def open_own_following_list_from_own_profile(
         account_username=account_username,
         active_tab_text=str(det.get("active_tab_text") or ""),
         usernames_visible_count=int(det.get("usernames_visible_count") or 0),
+        transient_empty_rechecks=transient_rechecks,
     )
     return True, {"open_method": "profile_following_stat_tap", "tap_diag": tap_diag, "det": det}

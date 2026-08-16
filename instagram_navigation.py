@@ -60311,6 +60311,46 @@ def return_to_followers_list(
             pkg,
             observed_username=observed_username,
         )
+        # A freshly reopened CT profile can have its static chrome available
+        # before the network-backed username header is rendered.  Re-observe
+        # that exact identity signal for a short, bounded window.  This never
+        # taps, navigates, or relaxes the identity boundary: a missing or
+        # mismatched username still fails closed.
+        source_identity_rechecks = 0
+        while (
+            not source_identity_ok
+            and str(source_identity_meta.get("reason") or "")
+            == "profile_identity_username_unproven"
+            and source_identity_rechecks < 3
+        ):
+            source_identity_rechecks += 1
+            time.sleep(1.5)
+            try:
+                observed_username = str(
+                    read_current_profile_username_for_follow_gate(d) or ""
+                ).strip()
+            except Exception:
+                observed_username = ""
+            source_identity_ok, source_identity_meta = _expected_profile_identity_boundary(
+                d,
+                source_profile_username,
+                pkg,
+                observed_username=observed_username,
+            )
+            log(
+                "info",
+                "followers_list_reopen_source_identity_transient_recheck",
+                source_profile_username=source_profile_username,
+                attempt=source_identity_rechecks,
+                max_attempts=3,
+                identity_confirmed=bool(source_identity_ok),
+                reason=str(
+                    source_identity_meta.get("reason")
+                    or "profile_identity_unconfirmed"
+                ),
+                observed_username_present=bool(observed_username),
+                ui_actions_sent=0,
+            )
         if not source_identity_ok:
             log(
                 "warning",
@@ -60321,6 +60361,7 @@ def return_to_followers_list(
                     or "profile_identity_unconfirmed"
                 ),
                 identity_meta=source_identity_meta,
+                transient_rechecks=source_identity_rechecks,
             )
         else:
             followers_session_clear_list_committed_open(source_profile_username)
