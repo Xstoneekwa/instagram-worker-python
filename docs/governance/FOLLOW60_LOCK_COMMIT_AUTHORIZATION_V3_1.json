@@ -1,12 +1,13 @@
 {
-  "base_sha": "d3b1ffeeaf905f288ab706e867f614e0dca81ebc",
+  "base_sha": "72637277c55348e05a1f7a3c871b1b28dc399f3b",
   "change_id": "follow60-physical-write-lock-v3-1-20260816",
-  "diff_sha256": "3717b90d0f2848b05268f06011a97fae3c5a7df48d608d601d3e8d2d406181b4",
-  "expires_at": "2026-08-16T03:27:23.202480+00:00",
+  "diff_sha256": "463c8e187f561da9f25dfd723e5b19da250c0bdf894ad99468126e56f3079adc",
+  "expires_at": "2026-08-16T04:53:08.330950+00:00",
   "files_requested": [
-    "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_SCOPE.json"
+    "tests/test_worker_runtime_identity.py",
+    "worker_runtime_identity.py"
   ],
-  "requested_at": "2026-08-15T23:27:23.202480+00:00",
+  "requested_at": "2026-08-16T00:53:08.330950+00:00",
   "requested_scope": "physical root-owned immutable write lock, signed staged-commit gate, package and activation enforcement",
   "schema": "FOLLOW60_SIGNED_COMMIT_AUTHORIZATION_V3_1"
 }

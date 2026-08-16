@@ -96,11 +96,23 @@ def _transport_payload(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _git(root: Path, *args: str) -> str:
+    try:
+        exact_root = Path(root).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise WorkerRuntimeIdentityError("worker_runtime_git_identity_unavailable") from exc
+    command = [
+        "git",
+        "-c",
+        f"safe.directory={exact_root}",
+        "-C",
+        str(exact_root),
+        *args,
+    ]
     completed: subprocess.CompletedProcess[str] | None = None
     for attempt in range(1, _GIT_TIMEOUT_ATTEMPTS + 1):
         try:
             completed = subprocess.run(
-                ["git", "-C", str(root), *args],
+                command,
                 check=True,
                 capture_output=True,
                 text=True,

@@ -58,6 +58,44 @@ class WorkerRuntimeIdentityTest(unittest.TestCase):
         with self.assertRaisesRegex(WorkerRuntimeIdentityError, "root_mismatch"):
             resolve_worker_runtime_identity(nested, environ={})
 
+    @mock.patch("worker_runtime_identity.subprocess.run")
+    def test_git_uses_process_scoped_exact_canonical_safe_directory(
+        self,
+        run_mock: mock.Mock,
+    ) -> None:
+        alias = self.root.parent / "runtime-alias"
+        alias.symlink_to(self.root)
+        command = [
+            "git",
+            "-c",
+            f"safe.directory={self.root.resolve()}",
+            "-C",
+            str(self.root.resolve()),
+            "rev-parse",
+            "HEAD",
+        ]
+        run_mock.return_value = subprocess.CompletedProcess(
+            command, 0, stdout=f"{self.head}\n", stderr=""
+        )
+
+        self.assertEqual(_git(alias, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(run_mock.call_args.args[0], command)
+        self.assertNotIn("--global", command)
+        self.assertNotIn("*", " ".join(command))
+        self.assertNotIn("env", run_mock.call_args.kwargs)
+
+    @mock.patch("worker_runtime_identity.subprocess.run")
+    def test_git_missing_root_fails_closed_without_invoking_git(
+        self,
+        run_mock: mock.Mock,
+    ) -> None:
+        with self.assertRaisesRegex(
+            WorkerRuntimeIdentityError,
+            "worker_runtime_git_identity_unavailable",
+        ):
+            _git(self.root / "missing", "rev-parse", "HEAD")
+        run_mock.assert_not_called()
+
     @mock.patch("worker_runtime_identity.time.sleep")
     @mock.patch("worker_runtime_identity.subprocess.run")
     def test_transient_git_timeout_is_retried_without_weakening_identity(
