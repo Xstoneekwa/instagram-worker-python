@@ -1,18 +1,21 @@
 {
   "approval_status": "REQUESTED_NOT_APPROVED",
-  "base_manifest_sha256": "dcdfe2779513856b27d85a56db2ce9aefe59bf400d506ad68a7a21b6fb7ed3b6",
-  "base_sha": "72637277c55348e05a1f7a3c871b1b28dc399f3b",
-  "change_id": "follow60-runtime-identity-read-trust-v3-1-20260816",
-  "diff_sha256": "5fd49ae9ae81b02a02a1fcce8eaefd5831f809da2417510262be78b659ccd7e2",
-  "expires_at": "2026-08-16T04:55:39.088368+00:00",
+  "base_manifest_sha256": "9ccf055272ee75b9fd3a765d00f827b5e15fc2ea8bbd29144cd9aa20c783bd33",
+  "base_sha": "68efd372245304c637b1353f40d2d1c3865d677b",
+  "change_id": "follow60-final-git-read-trust-v3-1-20260816",
+  "diff_sha256": "7e20c25c0b1cce7622d5b4f7ce5efdfab44d213b46be9aff0f60e282f6d3010f",
+  "expires_at": "2026-08-16T04:40:57.186420+00:00",
   "files_requested": [
     "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
     "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
-    "tests/test_worker_runtime_identity.py",
-    "worker_runtime_identity.py"
+    "follow60_lock_v3.py",
+    "scripts/run_control_dispatcher_service.sh",
+    "tests/test_dispatcher_lifecycle.py",
+    "tests/test_follow60_mainline_lock_v3.py",
+    "tests/test_worker_runtime_identity.py"
   ],
-  "head_sha": "8490ec44d7e9341a7d0a3a8a5243158d65f08ef6",
-  "requested_at": "2026-08-16T00:55:39.088368+00:00",
-  "requested_scope": "process-scoped exact safe.directory for immutable runtime identity reads only",
+  "head_sha": "8e4490b0253307d12602b6390e9dfd1120c2340f",
+  "requested_at": "2026-08-16T02:40:57.186420+00:00",
+  "requested_scope": "final exact process-scoped Git read trust for root-owned immutable Follow60 releases, including dispatcher propagation; no wildcard/global/system trust",
   "schema": "FOLLOW60_LOCK_CHANGE_REQUEST_V1"
 }
