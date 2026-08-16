@@ -63,6 +63,13 @@ export WORKER_GIT_SHA_SOURCE="runtime_release_head"
 export WORKER_RELEASE_HEAD="$RUNTIME_GIT_SHA"
 export WORKER_RUNTIME_WRAPPER_PID="$$"
 export WORKER_RUNTIME_ROOT_OK="true"
+# The immutable release is root-owned by the physical write lock. Propagate
+# one exact, process-scoped Git trust entry to every dispatcher child so the
+# signed Follow60 verifier can read protected blobs without global or wildcard
+# safe.directory configuration.
+export GIT_CONFIG_COUNT="1"
+export GIT_CONFIG_KEY_0="safe.directory"
+export GIT_CONFIG_VALUE_0="$ROOT_DIR"
 
 _resolve_adb_path() {
   if [[ -n "${ADB_PATH:-}" && -x "${ADB_PATH}" ]]; then

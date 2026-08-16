@@ -17,6 +17,9 @@ def test_wrapper_git_identity_uses_exact_process_scoped_safe_directory() -> None
 
     assert 'git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse --show-toplevel' in source
     assert 'git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse HEAD' in source
+    assert 'export GIT_CONFIG_COUNT="1"' in source
+    assert 'export GIT_CONFIG_KEY_0="safe.directory"' in source
+    assert 'export GIT_CONFIG_VALUE_0="$ROOT_DIR"' in source
     assert "safe.directory=*" not in source
     assert "git config --global" not in source
 
