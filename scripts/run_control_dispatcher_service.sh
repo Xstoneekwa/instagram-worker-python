@@ -27,8 +27,8 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-RUNTIME_GIT_ROOT="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-RUNTIME_GIT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+RUNTIME_GIT_ROOT="$(git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+RUNTIME_GIT_SHA="$(git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
 if [[ -z "$RUNTIME_GIT_ROOT" || "$(cd "$RUNTIME_GIT_ROOT" && pwd -P)" != "$(cd "$ROOT_DIR" && pwd -P)" ]]; then
   echo "FAIL worker_runtime_root_mismatch root=$ROOT_DIR git_root=${RUNTIME_GIT_ROOT:-missing}" >&2
   exit 2

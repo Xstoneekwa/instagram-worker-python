@@ -63,7 +63,7 @@ class WorkerRuntimeIdentityTest(unittest.TestCase):
         self,
         run_mock: mock.Mock,
     ) -> None:
-        alias = self.root.parent / "runtime-alias"
+        alias = self.root / "runtime-alias"
         alias.symlink_to(self.root)
         command = [
             "git",

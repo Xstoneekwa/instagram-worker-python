@@ -12,6 +12,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_SOURCE = REPO_ROOT / "scripts" / "run_control_dispatcher_service.sh"
 
 
+def test_wrapper_git_identity_uses_exact_process_scoped_safe_directory() -> None:
+    source = WRAPPER_SOURCE.read_text(encoding="utf-8")
+
+    assert 'git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse --show-toplevel' in source
+    assert 'git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse HEAD' in source
+    assert "safe.directory=*" not in source
+    assert "git config --global" not in source
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
