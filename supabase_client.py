@@ -3625,6 +3625,53 @@ def get_follow_persistence_event(action_id: str) -> dict[str, Any] | None:
     return rows[0] if isinstance(rows, list) and rows else None
 
 
+def get_unfollow_persistence_event(action_id: str) -> dict[str, Any] | None:
+    return get_follow_persistence_event(action_id)
+
+
+def persist_verified_unfollow_success_rpc(
+    *,
+    action_id: str,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    candidate_username: str,
+    interaction_row_id: str,
+    attempted_at: str,
+    business_date: str,
+    unfollow_mode: str,
+    verification_method: str,
+    metadata_safe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = _request_json(
+        "POST",
+        "rpc/persist_verified_unfollow_success_v1",
+        body={
+            "p_action_id": str(action_id),
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_candidate_username": str(candidate_username),
+            "p_interaction_row_id": str(interaction_row_id),
+            "p_attempted_at": str(attempted_at),
+            "p_business_date": str(business_date),
+            "p_unfollow_mode": str(unfollow_mode),
+            "p_verification_method": str(verification_method),
+            "p_metadata_safe": dict(metadata_safe or {}),
+        },
+        prefer_representation=True,
+    )
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, dict):
+        raise SupabaseRestError(
+            "supabase_rpc_response_invalid",
+            method="POST",
+            path="rpc/persist_verified_unfollow_success_v1",
+        )
+    return value
+
+
 def get_follow_persistence_canonical_evidence(
     *, action_id: str, account_id: str, username: str
 ) -> dict[str, Any]:

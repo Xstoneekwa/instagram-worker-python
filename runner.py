@@ -45,6 +45,7 @@ import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
 import follow_persistence_receipt_replay
+from ambiguous_mutation_reconciliation import decide_reconciliation
 import deferred_projection_outbox
 import device_action_latch
 import storage_health
@@ -3576,7 +3577,7 @@ def _persist_verified_follow_intents_for_manual_stop(
     for intent in intents:
         stage = str(intent.get("stage") or "")
         action_id = str(intent.get("action_id") or "")
-        if stage != "follow_physically_verified":
+        if stage not in {"follow_physically_verified", "verified"}:
             log(
                 "warning",
                 "manual_stop_follow_intent_not_replayed",
@@ -4547,7 +4548,7 @@ def _persist_verified_follow_from_durable_intent(
     likes = dict(pf.get("likes") or {})
     phase_trace = {
         "follow_physically_verified": str(ctx.get("stage") or "")
-        == "follow_physically_verified",
+        in {"follow_physically_verified", "verified"},
         "mute_verified": bool(
             mute.get("ok")
             and mute.get("posts_verified")
@@ -4606,6 +4607,7 @@ def _recover_verified_follow_persistence_intents(
     account_id: str,
     run_id: str,
     supabase_mode: bool,
+    business_session_id: str | None = None,
 ) -> bool:
     if not (
         supabase_mode
@@ -4613,8 +4615,10 @@ def _recover_verified_follow_persistence_intents(
     ):
         return True
     try:
-        intents = follow_persistence_intent.load_nonterminal_intents(
-            account_id=account_id, run_id=run_id
+        intents = follow_persistence_intent.load_scoped_nonterminal_intents(
+            account_id=account_id,
+            current_run_id=run_id,
+            business_session_id=business_session_id,
         )
     except Exception as exc:
         log(
@@ -4627,12 +4631,13 @@ def _recover_verified_follow_persistence_intents(
         return False
     for intent in intents:
         action_id = str(intent.get("action_id") or "")
+        intent_run_id = str(intent.get("run_id") or "")
         prior_stage = str(intent.get("stage") or "")
         username = str(intent.get("candidate_username") or "")
-        if prior_stage == "prepared_before_follow_tap":
+        if prior_stage in {"prepared", "prepared_before_follow_tap"}:
             try:
                 follow_persistence_intent.update_intent_stage(
-                    run_id=run_id,
+                    run_id=intent_run_id,
                     action_id=action_id,
                     stage="abandoned_before_verified_follow",
                 )
@@ -4655,7 +4660,12 @@ def _recover_verified_follow_persistence_intents(
                 decision="abandoned_without_persistence",
             )
             continue
-        if prior_stage != "follow_physically_verified":
+        if prior_stage not in {
+            "physical_attempt_started",
+            "ambiguous",
+            "follow_physically_verified",
+            "verified",
+        }:
             log(
                 "error",
                 "follow_persistence_intent_recovery_failed",
@@ -4666,21 +4676,79 @@ def _recover_verified_follow_persistence_intents(
             )
             return False
 
+        # Receipt-first: a committed canonical receipt is authoritative and
+        # must terminalize the local intent without another UI read or tap.
+        try:
+            canonical_receipt = supabase_client.get_follow_persistence_event(action_id)
+        except Exception as exc:
+            log(
+                "error",
+                "follow_persistence_intent_receipt_lookup_failed",
+                action_id_hash=action_id_hash(action_id),
+                reason=type(exc).__name__,
+                safe_to_continue_ui=False,
+            )
+            return False
+        if canonical_receipt is not None:
+            receipt_exact = (
+                str(canonical_receipt.get("id") or "") == action_id
+                and str(canonical_receipt.get("account_id") or "") == str(account_id)
+                and str(canonical_receipt.get("run_id") or "") == intent_run_id
+                and str(canonical_receipt.get("username") or "").strip().lstrip("@").lower()
+                == username.strip().lstrip("@").lower()
+                and str(canonical_receipt.get("interaction_type") or "").lower() == "follow"
+            )
+            if not receipt_exact:
+                log(
+                    "error",
+                    "follow_persistence_intent_receipt_binding_mismatch",
+                    action_id_hash=action_id_hash(action_id),
+                    safe_to_continue_ui=False,
+                )
+                return False
+            follow_persistence_intent.update_intent_stage(
+                run_id=intent_run_id,
+                action_id=action_id,
+                stage="persisted",
+                metadata_safe={"reconciled_from_canonical_receipt": True},
+            )
+            log(
+                "info",
+                "follow_persistence_intent_recovered",
+                action_id_hash=action_id_hash(action_id),
+                prior_stage=prior_stage,
+                fresh_follow_state="not_read_receipt_first",
+                decision="canonical_receipt_terminalized",
+                device_actions_started=False,
+            )
+            continue
+
         fresh_profile = bool(username and verify_profile(d, username))
         try:
-            fresh_follow_state = (
-                str(_follow_ui_state_snapshot(d) or "unknown").lower()
+            fresh_follow_states = (
+                [
+                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
+                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
+                ]
                 if fresh_profile
-                else "profile_not_verified"
+                else ["profile_not_verified"]
             )
         except Exception:
-            fresh_follow_state = "unknown"
-        if not fresh_profile or fresh_follow_state != "following":
+            fresh_follow_states = ["unknown"]
+        decision = decide_reconciliation(
+            action_type="follow",
+            canonical_receipt_exists=False,
+            exact_identity=fresh_profile,
+            fresh_states=fresh_follow_states,
+            physical_retry_count=int(intent.get("physical_retry_count") or 0),
+        )
+        fresh_follow_state = fresh_follow_states[-1]
+        if decision.decision != "reconciled":
             try:
                 follow_persistence_intent.update_intent_stage(
-                    run_id=run_id,
+                    run_id=intent_run_id,
                     action_id=action_id,
-                    stage="review_required",
+                    stage="unresolved",
                 )
             except Exception:
                 pass
@@ -4691,6 +4759,8 @@ def _recover_verified_follow_persistence_intents(
                 prior_stage=prior_stage,
                 fresh_follow_state=fresh_follow_state,
                 decision="safe_stop_review_required",
+                reconciliation_reason=decision.reason,
+                retry_was_not_dispatched=True,
                 safe_to_continue_ui=False,
             )
             return False
@@ -4700,7 +4770,7 @@ def _recover_verified_follow_persistence_intents(
             account_id=account_id,
             follower_un=username,
             source_profile_username=str(intent.get("source_ct_username") or ""),
-            run_id=run_id,
+            run_id=intent_run_id,
             follow_out={"skipped_tap": False},
             fs_af="following",
             f_st="following",
@@ -4710,7 +4780,11 @@ def _recover_verified_follow_persistence_intents(
             request_id=str(intent.get("request_id") or "") or None,
             action_id=action_id,
             settings_revision_expected=str(intent.get("settings_revision") or "") or None,
-            followed_at=str(intent.get("followed_at") or "") or None,
+            followed_at=(
+                str(intent.get("followed_at") or "")
+                or str(intent.get("physical_attempt_started_at") or "")
+                or None
+            ),
         )
         log(
             "info" if persisted else "error",
@@ -12310,6 +12384,7 @@ def _run_followers_list_engine_session(
         d,
         account_id=account_id,
         run_id=run_id,
+        business_session_id=business_session_id,
         supabase_mode=supabase_mode,
     ):
         _publish_followers_session_summary(
@@ -20692,21 +20767,36 @@ def _run_followers_list_engine_session(
                         ):
                             raise RuntimeError("follow_persistence_exact_bounds_missing")
                         _action_id = deterministic_action_id(account_id, run_id, follower_un)
-                        intent = follow_persistence_intent.create_prepared_intent(
+                        intent = follow_persistence_intent.create_mutation_intent(
                             action_id=_action_id,
+                            action_type="follow",
                             account_id=account_id,
                             run_id=run_id,
                             request_id=_persistence_request_id,
+                            business_session_id=business_session_id,
+                            attempt_id=str(follow60_attempt_id or 1),
                             candidate_username=follower_un,
                             source_target_id=target_id,
                             source_ct_username=source_profile_username,
+                            business_date=supabase_client.sast_business_day_window()[0],
                             settings_revision=_settings_revision,
+                            worker_sha=(
+                                _CERTIFIED_RUNTIME_IDENTITY.full_sha
+                                if _CERTIFIED_RUNTIME_IDENTITY is not None
+                                else None
+                            ),
                         )
                         intent = _validate_follow_persistence_intent_context(
                             intent,
                             account_id=account_id,
                             run_id=run_id,
                             candidate_username=follower_un,
+                        )
+                        intent = follow_persistence_intent.update_intent_stage(
+                            run_id=run_id,
+                            action_id=_action_id,
+                            stage="physical_attempt_started",
+                            metadata_safe={"tap_dispatch_boundary_reached": True},
                         )
                     except Exception as exc:
                         log(
@@ -20790,7 +20880,7 @@ def _run_followers_list_engine_session(
                             _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
                                 run_id=run_id,
                                 action_id=str(_follow_persistence_ctx["action_id"]),
-                                stage="follow_physically_verified",
+                                stage="verified",
                                 followed_at=_intent_followed_at,
                                 metadata_safe={
                                     "physical_follow_state": "following",
@@ -20799,11 +20889,22 @@ def _run_followers_list_engine_session(
                                     "source_profile": str(source_profile_username or ""),
                                 },
                             )
+                        elif _tap_sent_seen:
+                            _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
+                                run_id=run_id,
+                                action_id=str(_follow_persistence_ctx["action_id"]),
+                                stage="ambiguous",
+                                metadata_safe={
+                                    "physical_follow_state": _intent_follow_state or "unknown",
+                                    "tap_sent": True,
+                                },
+                            )
                         else:
                             _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
                                 run_id=run_id,
                                 action_id=str(_follow_persistence_ctx["action_id"]),
-                                stage="abandoned_before_verified_follow",
+                                stage="abandoned_before_physical_attempt",
+                                metadata_safe={"tap_sent": False},
                             )
                     except Exception as exc:
                         log(

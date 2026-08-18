@@ -795,7 +795,9 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         legacy.assert_not_called()
 
     def test_recovery_requires_fresh_exact_following(self) -> None:
-        with mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event", return_value=None
+        ), mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
             runner, "_follow_ui_state_snapshot", return_value="following"
         ), mock.patch.object(
             runner, "_persist_verified_follow_success_to_supabase", return_value=True
@@ -820,8 +822,44 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         verify.assert_not_called()
         persist.assert_not_called()
 
+    def test_generic_prepared_recovery_abandons_without_receipt_or_ui(self) -> None:
+        follow_persistence_intent.update_intent_stage(
+            run_id=RUN_ID,
+            action_id=self.action_id,
+            stage="terminal",
+        )
+        action_id = follow_persistence_rpc.deterministic_action_id(
+            ACCOUNT_ID, RUN_ID, "generic_prepared_candidate"
+        )
+        follow_persistence_intent.create_mutation_intent(
+            action_id=action_id,
+            action_type="follow",
+            account_id=ACCOUNT_ID,
+            run_id=RUN_ID,
+            request_id=REQUEST_ID,
+            business_session_id="session",
+            candidate_username="generic_prepared_candidate",
+            source_target_id=TARGET_ID,
+            source_ct_username="source",
+        )
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event"
+        ) as receipt, mock.patch.object(runner, "verify_profile") as verify, mock.patch.object(
+            runner, "_follow_ui_state_snapshot"
+        ) as snapshot:
+            self.assertTrue(
+                runner._recover_verified_follow_persistence_intents(
+                    object(), account_id=ACCOUNT_ID, run_id=RUN_ID, supabase_mode=True
+                )
+            )
+        receipt.assert_not_called()
+        verify.assert_not_called()
+        snapshot.assert_not_called()
+
     def test_recovery_without_following_marks_review_and_stops(self) -> None:
-        with mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event", return_value=None
+        ), mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
             runner, "_follow_ui_state_snapshot", return_value="follow"
         ), mock.patch.object(
             runner, "_persist_verified_follow_success_to_supabase"
@@ -831,8 +869,113 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             ))
         persist.assert_not_called()
 
+    def test_auto_restart_receipt_first_uses_original_run_and_starts_no_ui(self) -> None:
+        prior_run = RUN_ID
+        current_run = "77777777-7777-4777-8777-777777777777"
+        session_id = "88888888-8888-4888-8888-888888888888"
+        action_id = follow_persistence_rpc.deterministic_action_id(
+            ACCOUNT_ID, prior_run, "arnaud_blanchard74"
+        )
+        follow_persistence_intent.create_mutation_intent(
+            action_id=action_id,
+            action_type="follow",
+            account_id=ACCOUNT_ID,
+            run_id=prior_run,
+            request_id=REQUEST_ID,
+            business_session_id=session_id,
+            candidate_username="arnaud_blanchard74",
+            source_target_id=TARGET_ID,
+            source_ct_username="bmybusinesses",
+            settings_revision=SETTINGS_REVISION,
+        )
+        follow_persistence_intent.update_intent_stage(
+            run_id=prior_run,
+            action_id=action_id,
+            stage="physical_attempt_started",
+        )
+        receipt = {
+            "id": action_id,
+            "account_id": ACCOUNT_ID,
+            "run_id": prior_run,
+            "username": "arnaud_blanchard74",
+            "interaction_type": "follow",
+        }
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event", return_value=receipt
+        ), mock.patch.object(runner, "verify_profile") as verify, mock.patch.object(
+            runner, "_follow_ui_state_snapshot"
+        ) as snapshot, mock.patch.object(
+            runner, "_persist_verified_follow_success_to_supabase"
+        ) as persist:
+            self.assertTrue(
+                runner._recover_verified_follow_persistence_intents(
+                    object(),
+                    account_id=ACCOUNT_ID,
+                    run_id=current_run,
+                    business_session_id=session_id,
+                    supabase_mode=True,
+                )
+            )
+        verify.assert_not_called()
+        snapshot.assert_not_called()
+        persist.assert_not_called()
+        stored = json.loads(
+            Path(self.tmp.name, prior_run, f"{action_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(stored["stage"], "persisted")
+        self.assertEqual(stored["source_ct_username"], "bmybusinesses")
+
+    def test_receipt_first_replay_is_terminal_and_second_recovery_is_empty(self) -> None:
+        receipt = {
+            "id": self.action_id,
+            "account_id": ACCOUNT_ID,
+            "run_id": RUN_ID,
+            "username": "candidate",
+            "interaction_type": "follow",
+        }
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event", return_value=receipt
+        ) as lookup, mock.patch.object(runner, "verify_profile") as verify:
+            self.assertTrue(
+                runner._recover_verified_follow_persistence_intents(
+                    object(), account_id=ACCOUNT_ID, run_id=RUN_ID, supabase_mode=True
+                )
+            )
+            self.assertTrue(
+                runner._recover_verified_follow_persistence_intents(
+                    object(), account_id=ACCOUNT_ID, run_id=RUN_ID, supabase_mode=True
+                )
+            )
+        lookup.assert_called_once()
+        verify.assert_not_called()
+
 
 class SupabaseFollowPersistenceClientTest(unittest.TestCase):
+    def test_unfollow_rpc_payload_uses_versioned_idempotent_function(self) -> None:
+        response = {"ok": True, "status": "persisted", "invariants_confirmed": True}
+        with mock.patch.object(supabase_client, "_request_json", return_value=response) as req:
+            value = supabase_client.persist_verified_unfollow_success_rpc(
+                action_id="a",
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                request_id=REQUEST_ID,
+                candidate_username="Arnaud_Blanchard74",
+                interaction_row_id=TARGET_ID,
+                attempted_at=FOLLOWED_AT,
+                business_date="2026-08-18",
+                unfollow_mode="unfollow-after-delay",
+                verification_method="exact",
+                metadata_safe={"fixture": "arnaud_blanchard74"},
+            )
+        self.assertTrue(value["ok"])
+        self.assertEqual(
+            req.call_args.args[:2],
+            ("POST", "rpc/persist_verified_unfollow_success_v1"),
+        )
+        self.assertEqual(req.call_args.kwargs["body"]["p_candidate_username"], "Arnaud_Blanchard74")
+
     def test_rpc_payload_uses_versioned_function(self) -> None:
         with mock.patch.object(supabase_client, "_request_json", return_value=rpc_success("a")) as req:
             value = supabase_client.persist_verified_follow_success_rpc(

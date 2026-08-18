@@ -18,6 +18,8 @@ import uiautomator2 as u2
 import config
 import account_protection_lists
 import supabase_client
+import follow_persistence_intent
+from ambiguous_mutation_reconciliation import deterministic_mutation_action_id
 from account_identity_guard import verify_active_instagram_account_matches_expected
 from instagram_list_continuation import (
     InstagramListContinuationSignals,
@@ -1402,8 +1404,59 @@ def _persist_unfollow_outcome_for_session(
     verify_ok: bool,
     interaction_row_id: str | None,
     failure_reason: str,
+    mutation_intent: dict[str, Any] | None = None,
+    request_id: str | None = None,
+    business_date_sast: str | None = None,
 ) -> dict[str, Any]:
     mode = str(getattr(settings, "mode", "") or "")
+    if mutation_intent is not None:
+        action_id = str(mutation_intent.get("action_id") or "")
+        intent_run_id = str(mutation_intent.get("run_id") or "")
+        if verify_ok:
+            if not all((action_id, intent_run_id, request_id, interaction_row_id, business_date_sast)):
+                return {"ok": False, "error": "unfollow_verified_persistence_context_missing"}
+            attempted_at = str(
+                mutation_intent.get("physical_attempt_started_at")
+                or datetime.now(timezone.utc).isoformat()
+            )
+            out = supabase_client.persist_verified_unfollow_success_rpc(
+                action_id=action_id,
+                account_id=aid,
+                run_id=intent_run_id,
+                request_id=str(request_id),
+                candidate_username=target_username,
+                interaction_row_id=str(interaction_row_id),
+                attempted_at=attempted_at,
+                business_date=str(business_date_sast),
+                unfollow_mode=mode,
+                verification_method="worker_exact_not_following_state",
+                metadata_safe={
+                    "source": "unfollow_ambiguous_mutation_v1",
+                    "business_session_id": mutation_intent.get("business_session_id"),
+                    "source_target_id": mutation_intent.get("source_target_id"),
+                    "source_ct_username": mutation_intent.get("source_ct_username"),
+                },
+            )
+            if out.get("ok") and out.get("invariants_confirmed") is True:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=intent_run_id,
+                    action_id=action_id,
+                    stage="persisted",
+                    metadata_safe={
+                        "canonical_status": str(out.get("status") or ""),
+                        "counter_delta": int(out.get("counter_delta") or 0),
+                    },
+                )
+            return out
+        # An ambiguous physical result is journaled but must not increment any
+        # canonical counter or overwrite relationship state as a failure.
+        follow_persistence_intent.update_intent_stage(
+            run_id=intent_run_id,
+            action_id=action_id,
+            stage="ambiguous",
+            metadata_safe={"failure_reason": str(failure_reason or "")[:300]},
+        )
+        return {"ok": False, "ambiguous": True, "error": failure_reason}
     return supabase_client.record_unfollow_interaction_outcome(
         aid,
         target_username,
@@ -1414,6 +1467,183 @@ def _persist_unfollow_outcome_for_session(
         failure_reason=failure_reason,
         allow_any_upsert=(mode == UNFOLLOW_MODE_ANY),
     )
+
+
+def _prepare_unfollow_mutation_intent(
+    *,
+    account_id: str,
+    run_id: str | None,
+    request_id: str | None,
+    business_session_id: str | None,
+    session_attempt: int,
+    target_username: str,
+    interaction_row_id: str | None,
+    source_target_id: str | None,
+    source_ct_username: str | None,
+    business_date_sast: str,
+    worker_sha: str | None,
+    settings: Any,
+) -> dict[str, Any]:
+    if not all((account_id, run_id, request_id, target_username, interaction_row_id)):
+        raise RuntimeError("unfollow_mutation_identity_incomplete")
+    action_id = deterministic_mutation_action_id(
+        account_id=account_id,
+        run_id=str(run_id),
+        candidate_username=target_username,
+        action_type="unfollow",
+    )
+    return follow_persistence_intent.create_mutation_intent(
+        action_id=action_id,
+        action_type="unfollow",
+        account_id=account_id,
+        run_id=str(run_id),
+        request_id=str(request_id),
+        business_session_id=business_session_id,
+        attempt_id=str(session_attempt),
+        candidate_username=target_username,
+        source_target_id=source_target_id,
+        source_ct_username=source_ct_username,
+        business_date=business_date_sast,
+        worker_sha=worker_sha,
+        settings_revision=str(getattr(settings, "updated_at", "") or ""),
+        interaction_row_id=interaction_row_id,
+        mode=str(getattr(settings, "mode", "") or ""),
+    )
+
+
+def _reconcile_unfollow_mutation_intents(
+    d: u2.Device,
+    *,
+    account_id: str,
+    run_id: str | None,
+    business_session_id: str | None,
+) -> bool:
+    """Receipt-first, bounded recovery before any new Unfollow business work."""
+    if not run_id:
+        return True
+    try:
+        intents = follow_persistence_intent.load_scoped_nonterminal_intents(
+            account_id=account_id,
+            current_run_id=str(run_id),
+            business_session_id=business_session_id,
+        )
+    except Exception as exc:
+        log("error", "unfollow_mutation_reconciliation_load_failed", reason=str(exc)[:300])
+        return False
+    for intent in intents:
+        if str(intent.get("action_type") or "") != "unfollow":
+            continue
+        action_id = str(intent.get("action_id") or "")
+        intent_run_id = str(intent.get("run_id") or "")
+        username = str(intent.get("candidate_username") or "")
+        if str(intent.get("stage") or "") == "prepared":
+            follow_persistence_intent.update_intent_stage(
+                run_id=intent_run_id,
+                action_id=action_id,
+                stage="abandoned_before_physical_attempt",
+                metadata_safe={"reconciled_without_ui": True, "tap_sent": False},
+            )
+            continue
+        try:
+            receipt = supabase_client.get_unfollow_persistence_event(action_id)
+        except Exception as exc:
+            log(
+                "error",
+                "unfollow_mutation_receipt_lookup_failed",
+                action_id=action_id,
+                reason=type(exc).__name__,
+                safe_to_continue_ui=False,
+            )
+            return False
+        if receipt is not None:
+            exact = (
+                str(receipt.get("id") or "") == action_id
+                and str(receipt.get("account_id") or "") == str(account_id)
+                and str(receipt.get("run_id") or "") == intent_run_id
+                and normalize_unfollow_username(str(receipt.get("username") or ""))
+                == normalize_unfollow_username(username)
+                and str(receipt.get("interaction_type") or "").lower() == "unfollow"
+            )
+            if not exact:
+                log("error", "unfollow_mutation_receipt_binding_mismatch", action_id=action_id)
+                return False
+            follow_persistence_intent.update_intent_stage(
+                run_id=intent_run_id,
+                action_id=action_id,
+                stage="persisted",
+                metadata_safe={"reconciled_from_canonical_receipt": True},
+            )
+            log(
+                "info",
+                "unfollow_mutation_reconciled_receipt_first",
+                action_id=action_id,
+                username=username,
+                device_actions_started=False,
+            )
+            continue
+
+        opened = open_exact_profile_for_unfollow(d, username)
+        exact_profile = bool(opened.get("ok"))
+        if exact_profile:
+            exact_profile = bool(
+                verify_unfollow_target_profile_strict(
+                    d, expected_target_username=username
+                ).get("ok")
+            )
+        observations: list[str] = []
+        if exact_profile:
+            for _ in range(2):
+                verified = verify_unfollow_action_success_after_tap(
+                    d,
+                    target_username=username,
+                    profile_identity_certified=True,
+                    private_flow_engaged=False,
+                    timeout_s=1.5,
+                )
+                observations.append("not_following" if verified.get("ok") else "unknown")
+        if observations != ["not_following", "not_following"]:
+            follow_persistence_intent.update_intent_stage(
+                run_id=intent_run_id,
+                action_id=action_id,
+                stage="unresolved",
+                metadata_safe={
+                    "fresh_observations": observations,
+                    "exact_profile": exact_profile,
+                    "physical_retry_dispatched": False,
+                },
+            )
+            log(
+                "error",
+                "unfollow_mutation_reconciliation_unresolved",
+                action_id=action_id,
+                username=username,
+                fresh_observations=observations,
+                safe_to_continue_ui=False,
+            )
+            return False
+
+        out = supabase_client.persist_verified_unfollow_success_rpc(
+            action_id=action_id,
+            account_id=account_id,
+            run_id=intent_run_id,
+            request_id=str(intent.get("request_id") or ""),
+            candidate_username=username,
+            interaction_row_id=str(intent.get("interaction_row_id") or ""),
+            attempted_at=str(intent.get("physical_attempt_started_at") or ""),
+            business_date=str(intent.get("business_date") or ""),
+            unfollow_mode=str(intent.get("mode") or ""),
+            verification_method="reconciled_two_fresh_exact_not_following_states",
+            metadata_safe={"source": "unfollow_resume_reconciliation"},
+        )
+        if not (out.get("ok") and out.get("invariants_confirmed") is True):
+            return False
+        follow_persistence_intent.update_intent_stage(
+            run_id=intent_run_id,
+            action_id=action_id,
+            stage="reconciled",
+            metadata_safe={"canonical_status": str(out.get("status") or "")},
+        )
+    return True
 
 
 def resolve_effective_unfollow_day_progress(
@@ -3453,6 +3683,62 @@ def _run_real_unfollow_multi_loop(
             }
             return emit_final("failed_unfollow_multi_action", "unfollow_option_missing")
 
+        cand = (
+            _visible_candidates_by_username({"visible_eligible_matches": list(visible_candidates.values())}).get(target_key)
+            or planned_by_username.get(target_key)
+            or {}
+        )
+        interaction_row_id = str(
+            cand.get("interaction_row_id") or cand.get("id") or ""
+        ).strip() or None
+        try:
+            mutation_intent = _prepare_unfollow_mutation_intent(
+                account_id=aid,
+                run_id=run_id,
+                request_id=request_id,
+                business_session_id=business_session_id,
+                session_attempt=session_attempt,
+                target_username=target_username,
+                interaction_row_id=interaction_row_id,
+                source_target_id=str(cand.get("source_target_id") or cand.get("target_id") or "") or None,
+                source_ct_username=str(cand.get("source_target_username") or cand.get("source_profile") or "") or None,
+                business_date_sast=business_date_sast,
+                worker_sha=worker_sha,
+                settings=settings,
+            )
+        except Exception as exc:
+            stop_reason = "unfollow_mutation_intent_prepare_failed"
+            log(
+                "error",
+                stop_reason,
+                account_id=aid,
+                run_id=run_id,
+                username=target_username,
+                reason=str(exc)[:300],
+                safe_to_tap=False,
+            )
+            return emit_final("failed_unfollow_multi_action", stop_reason)
+
+        try:
+            mutation_intent = follow_persistence_intent.update_intent_stage(
+                run_id=str(run_id),
+                action_id=str(mutation_intent["action_id"]),
+                stage="physical_attempt_started",
+                metadata_safe={"tap_dispatch_boundary_reached": True},
+            )
+        except Exception as exc:
+            stop_reason = "unfollow_mutation_attempt_start_failed"
+            log(
+                "error",
+                stop_reason,
+                account_id=aid,
+                run_id=run_id,
+                username=target_username,
+                reason=str(exc)[:300],
+                safe_to_tap=False,
+            )
+            return emit_final("failed_unfollow_multi_action", stop_reason)
+
         tap_out = tap_unfollow_in_following_sheet(
             d,
             target_username=target_username,
@@ -3465,6 +3751,12 @@ def _run_real_unfollow_multi_loop(
             if coverage_tracker is not None:
                 coverage_tracker.mark_action_attempted(target_key)
         else:
+            follow_persistence_intent.update_intent_stage(
+                run_id=str(run_id),
+                action_id=str(mutation_intent["action_id"]),
+                stage="abandoned_before_physical_attempt",
+                metadata_safe={"tap_sent": False},
+            )
             failed += 1
             stop_reason = "unfollow_tap_failed"
             ret = _return_after_unfollow_profile(
@@ -3510,19 +3802,24 @@ def _run_real_unfollow_multi_loop(
             action_verified_usernames.add(target_key)
         if verify_ok and coverage_tracker is not None:
             coverage_tracker.mark_action_verified(target_key)
-        cand = (
-            _visible_candidates_by_username({"visible_eligible_matches": list(visible_candidates.values())}).get(target_key)
-            or planned_by_username.get(target_key)
-            or {}
-        )
+        if verify_ok:
+            follow_persistence_intent.update_intent_stage(
+                run_id=str(run_id),
+                action_id=str(mutation_intent["action_id"]),
+                stage="verified",
+                metadata_safe={"physical_relationship_state": "not_following"},
+            )
         persist_out = _persist_unfollow_outcome_for_session(
             aid,
             target_username,
             run_id=run_id,
             settings=settings,
             verify_ok=verify_ok,
-            interaction_row_id=str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None,
+            interaction_row_id=interaction_row_id,
             failure_reason=durable_failure_reason,
+            mutation_intent=mutation_intent,
+            request_id=request_id,
+            business_date_sast=business_date_sast,
         )
         persist_ok = bool(persist_out.get("ok"))
         persistence_delta = unfollow_persistence_count_delta(
@@ -3933,6 +4230,26 @@ def run_unfollow_session(
         0,
         int(getattr(settings, "session_limit", 0) or 0),
     )
+    business_date_sast, _business_day_start, _business_day_end = (
+        supabase_client.sast_business_day_window()
+    )
+    # Recovery owns the first mutation boundary of the resumed session.  It
+    # must complete before counters/caps are loaded so an ACK-lost success is
+    # reflected exactly once in the quota used for all subsequent planning.
+    if not _reconcile_unfollow_mutation_intents(
+        d,
+        account_id=aid,
+        run_id=run_id,
+        business_session_id=business_session_id,
+    ):
+        log(
+            "error",
+            "unfollow_mutation_reconciliation_blocked_new_work",
+            account_id=aid,
+            run_id=run_id,
+            business_date_sast=business_date_sast,
+        )
+        return 1
     try:
         unfollows_done_today = supabase_client.count_successful_unfollows_today(aid)
     except Exception as exc:
@@ -3968,9 +4285,6 @@ def run_unfollow_session(
         business_action_deadline or os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
     ).strip() or None
     domain_real_action_max = real_action_max
-    business_date_sast, _business_day_start, _business_day_end = (
-        supabase_client.sast_business_day_window()
-    )
     plan_after_days = frozen_unfollow_after_days(
         account_id=aid,
         business_date_sast=business_date_sast,
@@ -4741,6 +5055,59 @@ def run_unfollow_session(
         return 0 if status == "success_probe" else 1
 
     # Phase 2C: real Unfollow tap (max 1 per run; visible DB eligibility only).
+    target_key = normalize_unfollow_username(target_username)
+    cand = (
+        visible_candidates_by_username.get(target_key)
+        or planned_by_username.get(target_key)
+        or {}
+    )
+    interaction_row_id = str(
+        cand.get("interaction_row_id") or cand.get("id") or ""
+    ).strip() or None
+    try:
+        mutation_intent = _prepare_unfollow_mutation_intent(
+            account_id=aid,
+            run_id=run_id,
+            request_id=request_id,
+            business_session_id=business_session_id,
+            session_attempt=session_attempt,
+            target_username=target_username,
+            interaction_row_id=interaction_row_id,
+            source_target_id=str(cand.get("source_target_id") or cand.get("target_id") or "") or None,
+            source_ct_username=str(cand.get("source_target_username") or cand.get("source_profile") or "") or None,
+            business_date_sast=business_date_sast,
+            worker_sha=worker_sha,
+            settings=settings,
+        )
+    except Exception as exc:
+        summary = {
+            **base_summary,
+            **target_fields,
+            "status": "failed_unfollow_mutation_intent_prepare",
+            "failure_reason": str(exc)[:300],
+            "unfollow_actions_sent": 0,
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _emit_summary(summary)
+        return 1
+    try:
+        mutation_intent = follow_persistence_intent.update_intent_stage(
+            run_id=str(run_id),
+            action_id=str(mutation_intent["action_id"]),
+            stage="physical_attempt_started",
+            metadata_safe={"tap_dispatch_boundary_reached": True},
+        )
+    except Exception as exc:
+        summary = {
+            **base_summary,
+            **target_fields,
+            "status": "failed_unfollow_mutation_attempt_start",
+            "failure_reason": str(exc)[:300],
+            "unfollow_actions_sent": 0,
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _emit_summary(summary)
+        return 1
     tap_out = tap_unfollow_in_following_sheet(
         d,
         target_username=target_username,
@@ -4748,6 +5115,12 @@ def run_unfollow_session(
     )
     actions_sent = 1 if tap_out.get("ok") else 0
     if not tap_out.get("ok"):
+        follow_persistence_intent.update_intent_stage(
+            run_id=str(run_id),
+            action_id=str(mutation_intent["action_id"]),
+            stage="abandoned_before_physical_attempt",
+            metadata_safe={"tap_sent": False},
+        )
         ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
         summary = {
             **base_summary,
@@ -4772,13 +5145,13 @@ def run_unfollow_session(
         private_flow_engaged=True,
     )
     verify_ok = bool(verify_out.get("ok"))
-    target_key = normalize_unfollow_username(target_username)
-    cand = (
-        visible_candidates_by_username.get(target_key)
-        or planned_by_username.get(target_key)
-        or {}
-    )
-    interaction_row_id = str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None
+    if verify_ok:
+        follow_persistence_intent.update_intent_stage(
+            run_id=str(run_id),
+            action_id=str(mutation_intent["action_id"]),
+            stage="verified",
+            metadata_safe={"physical_relationship_state": "not_following"},
+        )
     persist_out = _persist_unfollow_outcome_for_session(
         aid,
         target_username,
@@ -4787,6 +5160,9 @@ def run_unfollow_session(
         verify_ok=verify_ok,
         interaction_row_id=interaction_row_id,
         failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
+        mutation_intent=mutation_intent,
+        request_id=request_id,
+        business_date_sast=business_date_sast,
     )
     persist_ok = bool(persist_out.get("ok"))
     persistence_delta = unfollow_persistence_count_delta(

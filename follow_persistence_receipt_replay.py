@@ -34,14 +34,19 @@ def replay_verified_receipts(
             continue
         if run_id and str(intent.get("run_id") or "") != str(run_id):
             continue
-        if str(intent.get("receipt_schema") or "") != follow_persistence_intent.RECEIPT_SCHEMA:
+        if str(intent.get("receipt_schema") or "") not in {
+            follow_persistence_intent.RECEIPT_SCHEMA,
+            follow_persistence_intent.MUTATION_INTENT_SCHEMA,
+        }:
             ignored_legacy += 1
             continue
         stage = str(intent.get("stage") or "")
         if stage == "prepared_before_follow_tap":
             ignored_prepared += 1
             continue
-        if stage != "follow_physically_verified":
+        if str(intent.get("action_type") or "follow") != "follow":
+            continue
+        if stage not in {"follow_physically_verified", "verified"}:
             continue
         pending_verified += 1
         if time.monotonic() - started >= max(0.1, float(time_budget_seconds)):

@@ -7,8 +7,16 @@ from pathlib import Path
 from typing import Any
 
 
-TERMINAL_STAGES = {"persisted", "abandoned_before_verified_follow", "review_required"}
+TERMINAL_STAGES = {
+    "persisted",
+    "reconciled",
+    "terminal",
+    "abandoned_before_verified_follow",
+    "abandoned_before_physical_attempt",
+    "review_required",
+}
 RECEIPT_SCHEMA = "FOLLOW_CANDIDATE_LOCAL_RECEIPT_V2"
+MUTATION_INTENT_SCHEMA = "AMBIGUOUS_MUTATION_INTENT_V1"
 
 
 def _root() -> Path:
@@ -77,6 +85,58 @@ def create_prepared_intent(
     return payload
 
 
+def create_mutation_intent(
+    *,
+    action_id: str,
+    action_type: str,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    candidate_username: str,
+    business_session_id: str | None = None,
+    attempt_id: str | None = None,
+    source_target_id: str | None = None,
+    source_ct_username: str | None = None,
+    business_date: str | None = None,
+    worker_sha: str | None = None,
+    settings_revision: str | None = None,
+    interaction_row_id: str | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    action = str(action_type or "").strip().lower()
+    if action not in {"follow", "unfollow"}:
+        raise ValueError("unsupported_mutation_action_type")
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "version": 3,
+        "receipt_schema": MUTATION_INTENT_SCHEMA,
+        "action_id": str(action_id),
+        "idempotency_key": str(action_id),
+        "action_type": action,
+        "account_id": str(account_id),
+        "business_session_id": str(business_session_id or "") or None,
+        "run_id": str(run_id),
+        "request_id": str(request_id),
+        "attempt_id": str(attempt_id or "") or None,
+        "candidate_username": str(candidate_username).strip().lstrip("@").lower(),
+        "source_target_id": str(source_target_id or "") or None,
+        "source_ct_username": str(source_ct_username or "").strip().lstrip("@").lower() or None,
+        "business_date": str(business_date or "") or None,
+        "worker_sha": str(worker_sha or "") or None,
+        "settings_revision": str(settings_revision or ""),
+        "interaction_row_id": str(interaction_row_id or "") or None,
+        "mode": str(mode or "") or None,
+        "stage": "prepared",
+        "physical_attempt_started_at": None,
+        "physical_retry_count": 0,
+        "followed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _atomic_write(_intent_path(run_id, action_id), payload)
+    return payload
+
+
 def update_intent_stage(
     *,
     run_id: str,
@@ -88,6 +148,10 @@ def update_intent_stage(
     path = _intent_path(run_id, action_id)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["stage"] = str(stage)
+    if str(stage) == "physical_attempt_started" and not payload.get(
+        "physical_attempt_started_at"
+    ):
+        payload["physical_attempt_started_at"] = datetime.now(timezone.utc).isoformat()
     if followed_at is not None:
         payload["followed_at"] = str(followed_at)
     if metadata_safe:
@@ -130,6 +194,36 @@ def load_nonterminal_intents(*, account_id: str, run_id: str) -> list[dict[str, 
             raise RuntimeError(f"follow_persistence_intent_run_mismatch:{path.name}")
         if str(payload.get("stage") or "") not in TERMINAL_STAGES:
             out.append(payload)
+    return out
+
+
+def load_scoped_nonterminal_intents(
+    *,
+    account_id: str,
+    current_run_id: str,
+    business_session_id: str | None,
+) -> list[dict[str, Any]]:
+    """Load only ambiguity that can belong to the active business lineage.
+
+    Auto Restart creates a new run id while retaining the business-session id.
+    A current-run-only lookup would therefore lose the exact interruption this
+    journal exists to reconcile.  Conversely, an old business session must
+    never gate future work.  Legacy V2 receipts have no business-session id and
+    remain deliberately current-run scoped.
+    """
+    session_id = str(business_session_id or "").strip()
+    out: list[dict[str, Any]] = []
+    for payload in load_all_nonterminal_intents(limit=1000):
+        if str(payload.get("account_id") or "") != str(account_id):
+            continue
+        payload_run_id = str(payload.get("run_id") or "")
+        payload_session_id = str(payload.get("business_session_id") or "").strip()
+        if session_id:
+            if payload_session_id != session_id:
+                continue
+        elif payload_run_id != str(current_run_id):
+            continue
+        out.append(payload)
     return out
 
 
