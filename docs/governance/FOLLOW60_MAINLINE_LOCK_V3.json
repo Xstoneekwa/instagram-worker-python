@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "9091c9225c2f1d7e3ac71bf89e066e443cd722ec",
-    "change_id": "p0b-cooperative-safe-stop-v1-20260818",
-    "expires_at": "2026-08-18T19:53:11.920733+00:00",
-    "final_diff_hash": "0542fd02838a1df924ed191d2b3382b868fc3ee953f6766f1b936e2b09517200",
-    "final_manifest_hash": "030d100ccc67140cc42cd3b488a7d7e598684762372dc040ba48c9642226d5ea",
-    "final_protected_scope_hash": "3aa3d63422bc880a9bf30bdb92aa343556303b59fe951afd43bec4ea61014975",
+    "base_sha": "e0d12949532a74c7d41035d5629799bb26c8e61b",
+    "change_id": "post-first-v2-mythyl-unfollow36-v1-20260818",
+    "expires_at": "2026-08-18T23:53:41.733542+00:00",
+    "final_diff_hash": "bdcce91f2d4e5756b9237d62f43e9b0f76c3e8671b06eaaa30642661188a1be6",
+    "final_manifest_hash": "c215e4cef0e9e3099a2ca14eae8eec3cbd01bceced3c0943ce4423e563144057",
+    "final_protected_scope_hash": "be1758c661ff2b4046e1fb0694b10930ff00a21ddc48a9846682619be14b9955",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -276,6 +276,22 @@
         "unfollow_session_orchestrator.py"
       ],
       "requested_scope": "canonical scheduler-owned business deadline, cooperative safe-stop and ACK, hard-watchdog fallback, exact stop taxonomy, and dynamic Follow-to-Unfollow reserve",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "e0d12949532a74c7d41035d5629799bb26c8e61b",
+      "candidate_tree_sha": "3e295a246f384b3732510074d65e95dd05eb2bda",
+      "change_id": "post-first-v2-mythyl-unfollow36-v1-20260818",
+      "consumed_at": "2026-08-18T19:53:41.733542+00:00",
+      "diff_sha256": "bdcce91f2d4e5756b9237d62f43e9b0f76c3e8671b06eaaa30642661188a1be6",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "instagram_navigation.py",
+        "tests/test_post_follow_like_samsung_fast.py",
+        "tests/test_post_open_intent_v2.py"
+      ],
+      "requested_scope": "POST_FIRST_V2 intent-age hardening with one exact XML-only reissue, fail-closed fallback preservation, and Mythyl Unfollow-36 forensic closure",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1478,13 +1494,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "6b90b7dd065e931ede89d367b77fdae134830394",
+      "git_blob_oid": "cf601d3edd584749aae9c926d187a0ac6e1b1cbe",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "584d5f47e96669419895a96127f2baa054b23303026db83be2bc5a90357d1d7c",
-      "size": 2438587
+      "sha256": "3dfdf13ee5d74230306c894832de3fceabbbf288613988de1eba430df70ec59d",
+      "size": 2453385
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -1937,13 +1953,13 @@
       "size": 68251
     },
     "tests/test_post_follow_like_samsung_fast.py": {
-      "git_blob_oid": "02b125363a90663c91e333d34b9ef0c1b4997abc",
+      "git_blob_oid": "77dba99ebf218323c47f74b4f9aa87ce095691c6",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "tests/test_post_follow_like_samsung_fast.py",
       "role": "regression_contract",
-      "sha256": "4afd2989f43969a19f71c6aa72e24fc35a46901ce09ace3496d8d4d31e65d96d",
-      "size": 330681
+      "sha256": "f01bd2c4631fe889d651d31efe04a7c46b75e62207968800e5a9fd5c6fc2e5aa",
+      "size": 332966
     },
     "tests/test_post_viewer_story_highlight_identity_guard.py": {
       "git_blob_oid": "29f9ec0952c8b91fb47aae143f7049ec70b66658",
@@ -2144,7 +2160,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "3aa3d63422bc880a9bf30bdb92aa343556303b59fe951afd43bec4ea61014975",
+  "protected_scope_sha256": "be1758c661ff2b4046e1fb0694b10930ff00a21ddc48a9846682619be14b9955",
   "protected_transitive_dependency_count": 109,
   "runtime_contract": {
     "binding_kind": "mainline",

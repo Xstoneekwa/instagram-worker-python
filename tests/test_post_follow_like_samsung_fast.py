@@ -2115,6 +2115,22 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         },
                     )
                 )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_open_intent_jit_surface",
+                        return_value={
+                            "ok": True,
+                            "current_package": "com.instagram.android",
+                            "current_activity": "profile",
+                            "viewport_width": 1080,
+                            "viewport_height": 2340,
+                            "app_current_ms": 0.2,
+                            "window_size_ms": 0.1,
+                            "total_ms": 0.3,
+                        },
+                    )
+                )
                 fresh_tap = stack.enter_context(
                     mock.patch.object(
                         nav,
@@ -2133,9 +2149,11 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     intent: object,
                     binding: dict[str, object] | None,
                     candidate_username: str,
+                    prevalidated_surface: dict[str, object] | None = None,
                 ) -> dict[str, object]:
                     self.assertIsNotNone(intent)
                     self.assertEqual(candidate_username, "cand")
+                    self.assertTrue(prevalidated_surface)
                     current_device.click(180, 1080)
                     return {
                         "ok": True,
@@ -2431,10 +2449,45 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                         },
                     )
                 )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_open_intent_jit_surface",
+                        return_value={
+                            "ok": True,
+                            "current_package": "com.instagram.android",
+                            "current_activity": "profile",
+                            "viewport_width": 1080,
+                            "viewport_height": 2340,
+                            "app_current_ms": 0.2,
+                            "window_size_ms": 0.1,
+                            "total_ms": 0.3,
+                        },
+                    )
+                )
                 create_tap_proof = stack.enter_context(
                     mock.patch.object(
                         nav,
                         "_post_follow_create_fresh_tap_proof_from_grid",
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_create_post_open_intent_from_final_proof",
+                        return_value=object(),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_open_intent_lightweight_reissue_evidence",
+                        return_value={
+                            "ok": False,
+                            "reason": "post_open_jit_reissue_candidate_identity_missing",
+                            "dump_count": 1,
+                            "duration_ms": 0.4,
+                        },
                     )
                 )
                 intent_dispatch = stack.enter_context(

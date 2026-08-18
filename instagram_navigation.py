@@ -27390,15 +27390,34 @@ def _dispatch_post_open_intent_v2_tap(
     intent: Any,
     binding: dict[str, Any] | None,
     candidate_username: str,
+    prevalidated_surface: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Consume the one-shot intent and dispatch its sole physical tap."""
+    """Consume the one-shot intent and dispatch its sole physical tap.
+
+    Device RPCs must happen before the immutable intent is created. A caller
+    may therefore pass the live package/activity and viewport it acquired at
+    the final proof boundary. Runtime generations are still checked here,
+    immediately before the tap, because reading them is local and cannot age
+    the intent while waiting on the phone.
+    """
     _validation_started = time.perf_counter()
     try:
         from follow_60s_canary import runtime_context as _intent_runtime_context
         from post_open_intent_v2 import consume_post_open_intent_v2
 
-        meta = _followers_current_pkg_activity(d)
-        width, height = d.window_size()
+        surface = dict(prevalidated_surface or {})
+        if surface:
+            meta = {
+                "current_package": str(surface.get("current_package") or ""),
+                "current_activity": str(surface.get("current_activity") or ""),
+            }
+            width = int(surface.get("viewport_width") or 0)
+            height = int(surface.get("viewport_height") or 0)
+        else:
+            # Backward-compatible fail-closed path for Golden callers that do
+            # not yet provide a JIT surface. SAFE passes it unconditionally.
+            meta = _followers_current_pkg_activity(d)
+            width, height = d.window_size()
         runtime = _intent_runtime_context()
         accepted, age_ms, reason = consume_post_open_intent_v2(
             intent,
@@ -27421,6 +27440,7 @@ def _dispatch_post_open_intent_v2_tap(
                 "intent_age_ms": age_ms,
                 "intent_final_validation_ms": _validation_ms,
                 "command_tap_ack_ms": 0.0,
+                "prevalidated_surface_used": bool(surface),
             }
         bounds = dict(accepted.bounds)
         tap_x = (int(bounds["left"]) + int(bounds["right"])) // 2
@@ -27495,6 +27515,7 @@ def _dispatch_post_open_intent_v2_tap(
             "post_open_stage_provenance": stage_provenance,
             "intent_final_validation_ms": _validation_ms,
             "command_tap_ack_ms": _tap_ack_ms,
+            "prevalidated_surface_used": bool(surface),
         }
     except Exception as exc:
         return {
@@ -27505,7 +27526,169 @@ def _dispatch_post_open_intent_v2_tap(
                 (time.perf_counter() - _validation_started) * 1000.0, 2
             ),
             "command_tap_ack_ms": 0.0,
+            "prevalidated_surface_used": bool(prevalidated_surface),
         }
+
+
+def _post_open_intent_jit_surface(
+    d: u2.Device,
+    *,
+    expected_package: str,
+    expected_activity: str,
+) -> dict[str, Any]:
+    """Acquire slow live device state before creating a short-lived intent."""
+    started = time.perf_counter()
+    meta_started = time.perf_counter()
+    try:
+        meta = _followers_current_pkg_activity(d)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"post_open_jit_surface_meta_error:{type(exc).__name__}",
+        }
+    meta_ms = round((time.perf_counter() - meta_started) * 1000.0, 2)
+    viewport_started = time.perf_counter()
+    try:
+        width, height = d.window_size()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"post_open_jit_surface_viewport_error:{type(exc).__name__}",
+            "app_current_ms": meta_ms,
+        }
+    viewport_ms = round((time.perf_counter() - viewport_started) * 1000.0, 2)
+    current_package = str(meta.get("current_package") or "")
+    current_activity = str(meta.get("current_activity") or "")
+    if (
+        current_package != str(expected_package or "")
+        or current_activity != str(expected_activity or "")
+        or int(width) <= 0
+        or int(height) <= 0
+    ):
+        return {
+            "ok": False,
+            "reason": "post_open_jit_surface_mismatch",
+            "current_package": current_package,
+            "current_activity": current_activity,
+            "viewport_width": int(width),
+            "viewport_height": int(height),
+            "app_current_ms": meta_ms,
+            "window_size_ms": viewport_ms,
+        }
+    return {
+        "ok": True,
+        "reason": "",
+        "current_package": current_package,
+        "current_activity": current_activity,
+        "viewport_width": int(width),
+        "viewport_height": int(height),
+        "app_current_ms": meta_ms,
+        "window_size_ms": viewport_ms,
+        "total_ms": round((time.perf_counter() - started) * 1000.0, 2),
+    }
+
+
+def _post_open_intent_lightweight_reissue_evidence(
+    d: u2.Device,
+    *,
+    original_evidence: dict[str, Any],
+    original_bounds: dict[str, int],
+    candidate_username: str,
+    viewport_width: int,
+    viewport_height: int,
+) -> dict[str, Any]:
+    """Reissue evidence once from XML, without screenshot or Vision.
+
+    The current XML must name the exact candidate and independently classify
+    the same physical top-left bounds as a safe post row. Any discrepancy
+    returns immediately to the caller's existing fail-closed fallback.
+    """
+    started = time.perf_counter()
+    try:
+        hierarchy_xml = str(d.dump_hierarchy(compressed=False) or "")
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"post_open_jit_reissue_xml_error:{type(exc).__name__}",
+            "dump_count": 1,
+        }
+    expected = _normalize_handle(candidate_username)
+    xml_tokens = {
+        _normalize_handle(token)
+        for token in re.split(r"[^A-Za-z0-9._]+", hierarchy_xml)
+        if token
+    }
+    if not expected or expected not in xml_tokens:
+        return {
+            "ok": False,
+            "reason": "post_open_jit_reissue_candidate_identity_missing",
+            "dump_count": 1,
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        }
+    classified = _post_follow_post_grid_evidence_from_xml(
+        hierarchy_xml,
+        candidate_username=candidate_username,
+        ww=int(viewport_width),
+        wh=int(viewport_height),
+        profile_identity_exact=False,
+    )
+    refreshed_bounds = classified.get("post_bounds")
+    normalized_refreshed = (
+        {
+            key: int(refreshed_bounds.get(key) or 0)
+            for key in ("left", "top", "right", "bottom")
+        }
+        if isinstance(refreshed_bounds, dict)
+        else {}
+    )
+    normalized_original = {
+        key: int(original_bounds.get(key) or 0)
+        for key in ("left", "top", "right", "bottom")
+    }
+    if (
+        str(classified.get("outcome") or "") != "POST_ROW_POSITIVE_SAFE"
+        or not bool(classified.get("identity_exact"))
+        or not bool(classified.get("grid_selected"))
+        or bool(classified.get("loading_visible"))
+        or bool(classified.get("private_profile_visible"))
+        or bool(classified.get("reels_or_tagged_selected"))
+        or bool(classified.get("suggested_overlay_visible"))
+        or normalized_refreshed != normalized_original
+    ):
+        return {
+            "ok": False,
+            "reason": str(
+                classified.get("rejection_reason")
+                or "post_open_jit_reissue_grid_or_bounds_mismatch"
+            ),
+            "dump_count": 1,
+            "classification": classified,
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        }
+    xml_hash = hashlib.sha256(
+        hierarchy_xml.encode("utf-8", errors="replace")
+    ).hexdigest()
+    refreshed = dict(original_evidence)
+    refreshed.update(classified)
+    refreshed["coordinate_frame"] = dict(
+        _post_follow_screen_dimensions_from_hierarchy(
+            hierarchy_xml,
+            raw_width=int(viewport_width),
+            raw_height=int(viewport_height),
+        ).get("coordinate_frame")
+        or original_evidence.get("coordinate_frame")
+        or {}
+    )
+    return {
+        "ok": True,
+        "reason": "",
+        "evidence": refreshed,
+        "bounds": dict(refreshed_bounds),
+        "xml_hash": xml_hash,
+        "fingerprint": xml_hash[:20],
+        "dump_count": 1,
+        "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+    }
 
 
 def _post_follow_golden_can_reuse_positive_post_grid_existence(
@@ -56640,41 +56823,155 @@ def run_post_follow_post_likes_phase(
             )
             if _intent_frame:
                 _intent_evidence["coordinate_frame"] = _intent_frame
-            try:
-                _intent_ww, _intent_wh = d.window_size()
-            except Exception:
-                _intent_ww, _intent_wh = 1080, 2340
-            _post_open_intent = _create_post_open_intent_from_final_proof(
-                binding=authoritative_binding,
-                candidate_username=cand,
-                target_username=src,
-                source_branch="SAFE",
-                bounds=_fresh_bounds,
-                package=_intent_package,
-                activity=_intent_activity,
-                evidence=_intent_evidence,
-                viewport_width=int(_intent_ww),
-                viewport_height=int(_intent_wh),
-                xml_hash=_intent_fingerprint,
-                fingerprint=_intent_fingerprint,
-                absolute_row=int(
-                    _canary_grid_evidence.get("absolute_row_index") or 0
-                ),
-                absolute_column=int(
-                    _canary_grid_evidence.get("absolute_column_index") or 0
-                ),
-                candidate_bound_provenance=str(
-                    _canary_grid_evidence.get("post_bounds_source")
-                    or "final_post_grid_evidence"
-                ),
-                ttl_ms=1250.0,
-            )
-            _intent_dispatch = _dispatch_post_open_intent_v2_tap(
+            # Acquire potentially slow phone state before the 1250 ms intent
+            # exists, then consume the immutable proof immediately.
+            _jit_surface = _post_open_intent_jit_surface(
                 d,
-                intent=_post_open_intent,
-                binding=authoritative_binding,
-                candidate_username=cand,
+                expected_package=_intent_package,
+                expected_activity=_intent_activity,
             )
+            _intent_ww = int(_jit_surface.get("viewport_width") or 0)
+            _intent_wh = int(_jit_surface.get("viewport_height") or 0)
+            _post_open_intent = None
+            if bool(_jit_surface.get("ok")):
+                _post_open_intent = _create_post_open_intent_from_final_proof(
+                    binding=authoritative_binding,
+                    candidate_username=cand,
+                    target_username=src,
+                    source_branch="SAFE",
+                    bounds=_fresh_bounds,
+                    package=_intent_package,
+                    activity=_intent_activity,
+                    evidence=_intent_evidence,
+                    viewport_width=int(_intent_ww),
+                    viewport_height=int(_intent_wh),
+                    xml_hash=_intent_fingerprint,
+                    fingerprint=_intent_fingerprint,
+                    absolute_row=int(
+                        _canary_grid_evidence.get("absolute_row_index") or 0
+                    ),
+                    absolute_column=int(
+                        _canary_grid_evidence.get("absolute_column_index") or 0
+                    ),
+                    candidate_bound_provenance=str(
+                        _canary_grid_evidence.get("post_bounds_source")
+                        or "final_post_grid_evidence"
+                    ),
+                    ttl_ms=1250.0,
+                )
+            if _post_open_intent is None:
+                _intent_dispatch = {
+                    "ok": False,
+                    "reason": str(
+                        _jit_surface.get("reason")
+                        or "post_open_intent_creation_or_consumption_rejected"
+                    ),
+                    "intent_age_ms": 0.0,
+                    "intent_final_validation_ms": 0.0,
+                    "command_tap_ack_ms": 0.0,
+                }
+            else:
+                _intent_dispatch = _dispatch_post_open_intent_v2_tap(
+                    d,
+                    intent=_post_open_intent,
+                    binding=authoritative_binding,
+                    candidate_username=cand,
+                    prevalidated_surface=_jit_surface,
+                )
+            _intent_dispatch["jit_app_current_ms"] = _jit_surface.get(
+                "app_current_ms"
+            )
+            _intent_dispatch["jit_window_size_ms"] = _jit_surface.get(
+                "window_size_ms"
+            )
+            _intent_dispatch["jit_surface_total_ms"] = _jit_surface.get(
+                "total_ms"
+            )
+            _intent_dispatch["jit_reissue_attempted"] = False
+            # One bounded XML-only reissue is allowed for a real expiry race.
+            # It cannot scroll, sleep, take a screenshot, invoke Vision or tap.
+            if str(_intent_dispatch.get("reason") or "") == "post_open_intent_expired":
+                _intent_dispatch["jit_reissue_attempted"] = True
+                _reissue = _post_open_intent_lightweight_reissue_evidence(
+                    d,
+                    original_evidence=_intent_evidence,
+                    original_bounds=_fresh_bounds,
+                    candidate_username=cand,
+                    viewport_width=int(_intent_ww),
+                    viewport_height=int(_intent_wh),
+                )
+                _intent_dispatch["jit_reissue_dump_count"] = _reissue.get(
+                    "dump_count"
+                )
+                _intent_dispatch["jit_reissue_duration_ms"] = _reissue.get(
+                    "duration_ms"
+                )
+                if bool(_reissue.get("ok")):
+                    _reissue_surface = _post_open_intent_jit_surface(
+                        d,
+                        expected_package=_intent_package,
+                        expected_activity=_intent_activity,
+                    )
+                    _reissued_intent = None
+                    if bool(_reissue_surface.get("ok")):
+                        _reissued_intent = _create_post_open_intent_from_final_proof(
+                            binding=authoritative_binding,
+                            candidate_username=cand,
+                            target_username=src,
+                            source_branch="SAFE",
+                            bounds=dict(_reissue.get("bounds") or {}),
+                            package=_intent_package,
+                            activity=_intent_activity,
+                            evidence=dict(_reissue.get("evidence") or {}),
+                            viewport_width=int(
+                                _reissue_surface.get("viewport_width") or 0
+                            ),
+                            viewport_height=int(
+                                _reissue_surface.get("viewport_height") or 0
+                            ),
+                            xml_hash=str(_reissue.get("xml_hash") or ""),
+                            fingerprint=str(_reissue.get("fingerprint") or ""),
+                            absolute_row=int(
+                                _canary_grid_evidence.get("absolute_row_index") or 0
+                            ),
+                            absolute_column=int(
+                                _canary_grid_evidence.get("absolute_column_index") or 0
+                            ),
+                            candidate_bound_provenance=(
+                                "jit_reissue_fresh_xml_same_bounds"
+                            ),
+                            ttl_ms=1250.0,
+                        )
+                    if _reissued_intent is not None:
+                        _intent_dispatch = _dispatch_post_open_intent_v2_tap(
+                            d,
+                            intent=_reissued_intent,
+                            binding=authoritative_binding,
+                            candidate_username=cand,
+                            prevalidated_surface=_reissue_surface,
+                        )
+                        _intent_dispatch.update(
+                            {
+                                "jit_app_current_ms": _reissue_surface.get(
+                                    "app_current_ms"
+                                ),
+                                "jit_window_size_ms": _reissue_surface.get(
+                                    "window_size_ms"
+                                ),
+                                "jit_surface_total_ms": _reissue_surface.get(
+                                    "total_ms"
+                                ),
+                                "jit_reissue_attempted": True,
+                                "jit_reissue_succeeded": bool(
+                                    _intent_dispatch.get("ok")
+                                ),
+                                "jit_reissue_dump_count": 1,
+                                "jit_reissue_duration_ms": _reissue.get(
+                                    "duration_ms"
+                                ),
+                            }
+                        )
+                _intent_dispatch.setdefault("jit_reissue_succeeded", False)
             if not bool(_intent_dispatch.get("ok")):
                 _tap_failure_reason = str(
                     _intent_dispatch.get("reason")
@@ -56687,9 +56984,13 @@ def run_post_follow_post_likes_phase(
                         age_ms=_intent_dispatch.get("intent_age_ms"),
                         reason=_tap_failure_reason,
                         fallback_used=True,
-                        dumps=0,
+                        dumps=int(
+                            _intent_dispatch.get("jit_reissue_dump_count") or 0
+                        ),
                         screenshots=0,
-                        retries=0,
+                        retries=int(
+                            bool(_intent_dispatch.get("jit_reissue_attempted"))
+                        ),
                     )
                 except Exception:
                     pass
@@ -56730,15 +57031,34 @@ def run_post_follow_post_likes_phase(
                     golden_reason=_tap_failure_reason,
                     ok=bool(_canary_preopened_out.get("ok")),
                     post_detected=bool(_canary_preopened_out.get("post_detected")),
+                    jit_app_current_ms=_intent_dispatch.get("jit_app_current_ms"),
+                    jit_window_size_ms=_intent_dispatch.get("jit_window_size_ms"),
+                    jit_surface_total_ms=_intent_dispatch.get("jit_surface_total_ms"),
+                    jit_reissue_attempted=bool(
+                        _intent_dispatch.get("jit_reissue_attempted")
+                    ),
+                    jit_reissue_succeeded=bool(
+                        _intent_dispatch.get("jit_reissue_succeeded")
+                    ),
+                    jit_reissue_dump_count=int(
+                        _intent_dispatch.get("jit_reissue_dump_count") or 0
+                    ),
+                    jit_reissue_duration_ms=_intent_dispatch.get(
+                        "jit_reissue_duration_ms"
+                    ),
                 )
             else:
                 _record_follow_60s_outcome(
                     "like_fresh_cell_bounds",
                     "used",
                     age_ms=_intent_dispatch.get("intent_age_ms"),
-                    dumps=0,
+                    dumps=int(
+                        _intent_dispatch.get("jit_reissue_dump_count") or 0
+                    ),
                     screenshots=0,
-                    retries=0,
+                    retries=int(
+                        bool(_intent_dispatch.get("jit_reissue_attempted"))
+                    ),
                     estimated_gain_ms=6500.0,
                 )
                 _viewer = _visual_wait_post_viewer_opened_after_tap(
@@ -56795,6 +57115,21 @@ def run_post_follow_post_likes_phase(
                         "intent_final_validation_ms"
                     ),
                     command_tap_ack_ms=_intent_dispatch.get("command_tap_ack_ms"),
+                    jit_app_current_ms=_intent_dispatch.get("jit_app_current_ms"),
+                    jit_window_size_ms=_intent_dispatch.get("jit_window_size_ms"),
+                    jit_surface_total_ms=_intent_dispatch.get("jit_surface_total_ms"),
+                    jit_reissue_attempted=bool(
+                        _intent_dispatch.get("jit_reissue_attempted")
+                    ),
+                    jit_reissue_succeeded=bool(
+                        _intent_dispatch.get("jit_reissue_succeeded")
+                    ),
+                    jit_reissue_dump_count=int(
+                        _intent_dispatch.get("jit_reissue_dump_count") or 0
+                    ),
+                    jit_reissue_duration_ms=_intent_dispatch.get(
+                        "jit_reissue_duration_ms"
+                    ),
                     acquisitions_count=0,
                     classifications_count=0,
                     reveal_count_total_for_like_phase=int(

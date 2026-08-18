@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
 import unittest
 from unittest import mock
 
@@ -197,6 +198,123 @@ class PostOpenIntentV2Tests(unittest.TestCase):
             "ui_generation": 6,
         })
         self.assertIsNone(intent)
+
+    def test_dispatch_uses_prevalidated_surface_without_slow_device_rpc(self):
+        device = mock.Mock()
+        now = time.monotonic()
+        item = replace(
+            self._intent(),
+            created_at_monotonic=now,
+            expires_at_monotonic=now + 1.25,
+        )
+        surface = {
+            "current_package": "com.instagram.android",
+            "current_activity": (
+                "com.instagram.mainactivity.InstagramMainActivity"
+            ),
+            "viewport_width": 1080,
+            "viewport_height": 2340,
+        }
+        with mock.patch(
+            "follow_60s_canary.runtime_context",
+            return_value={
+                "navigation_counter": 4,
+                "scroll_counter": 2,
+                "ui_generation": 6,
+            },
+        ), mock.patch.object(
+            nav, "_followers_current_pkg_activity"
+        ) as live_surface:
+            result = nav._dispatch_post_open_intent_v2_tap(
+                device,
+                intent=item,
+                binding=self.binding,
+                candidate_username="candidate",
+                prevalidated_surface=surface,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["prevalidated_surface_used"])
+        live_surface.assert_not_called()
+        device.window_size.assert_not_called()
+        device.click.assert_called_once_with(180, 1080)
+
+    def test_lightweight_reissue_is_one_xml_dump_and_same_bounds_only(self):
+        device = mock.Mock()
+        device.dump_hierarchy.return_value = (
+            '<hierarchy rotation="0"><node text="candidate" /></hierarchy>'
+        )
+        bounds = {"left": 0, "top": 900, "right": 360, "bottom": 1260}
+        classified = {
+            "outcome": "POST_ROW_POSITIVE_SAFE",
+            "identity_exact": True,
+            "grid_selected": True,
+            "loading_visible": False,
+            "private_profile_visible": False,
+            "reels_or_tagged_selected": False,
+            "suggested_overlay_visible": False,
+            "post_bounds": dict(bounds),
+        }
+        with mock.patch.object(
+            nav,
+            "_post_follow_post_grid_evidence_from_xml",
+            return_value=classified,
+        ), mock.patch.object(
+            nav,
+            "_post_follow_screen_dimensions_from_hierarchy",
+            return_value={
+                "coordinate_frame": {"transform_version": "coordinate_frame_v1"}
+            },
+        ):
+            result = nav._post_open_intent_lightweight_reissue_evidence(
+                device,
+                original_evidence={},
+                original_bounds=bounds,
+                candidate_username="candidate",
+                viewport_width=1080,
+                viewport_height=2340,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dump_count"], 1)
+        self.assertEqual(result["bounds"], bounds)
+        device.dump_hierarchy.assert_called_once_with(compressed=False)
+        device.click.assert_not_called()
+        device.screenshot.assert_not_called()
+
+    def test_lightweight_reissue_rejects_changed_bounds(self):
+        device = mock.Mock()
+        device.dump_hierarchy.return_value = (
+            '<hierarchy rotation="0"><node text="candidate" /></hierarchy>'
+        )
+        original = {"left": 0, "top": 900, "right": 360, "bottom": 1260}
+        changed = {"left": 360, "top": 900, "right": 720, "bottom": 1260}
+        with mock.patch.object(
+            nav,
+            "_post_follow_post_grid_evidence_from_xml",
+            return_value={
+                "outcome": "POST_ROW_POSITIVE_SAFE",
+                "identity_exact": True,
+                "grid_selected": True,
+                "loading_visible": False,
+                "private_profile_visible": False,
+                "reels_or_tagged_selected": False,
+                "suggested_overlay_visible": False,
+                "post_bounds": changed,
+            },
+        ):
+            result = nav._post_open_intent_lightweight_reissue_evidence(
+                device,
+                original_evidence={},
+                original_bounds=original,
+                candidate_username="candidate",
+                viewport_width=1080,
+                viewport_height=2340,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["dump_count"], 1)
+        device.click.assert_not_called()
 
 
 if __name__ == "__main__":
