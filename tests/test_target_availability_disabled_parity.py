@@ -380,6 +380,30 @@ def _without_reviewed_target_local_failure_propagation(
     )
 
 
+def _without_reviewed_cooperative_safe_stop(
+    node: ast.FunctionDef,
+) -> ast.FunctionDef:
+    """Remove only the approved P0B safe-stop terminal branch for parity."""
+
+    normalized = copy.deepcopy(node)
+
+    class RemoveCooperativeSafeStop(ast.NodeTransformer):
+        def visit_If(self, item):
+            if any(
+                isinstance(child, ast.Constant)
+                and child.value == "follow_to_unfollow_time_handoff"
+                for child in ast.walk(item.test)
+            ) and any(
+                isinstance(child, ast.Constant)
+                and child.value == "scheduled_business_deadline"
+                for child in ast.walk(item.test)
+            ):
+                return None
+            return self.generic_visit(item)
+
+    return ast.fix_missing_locations(RemoveCooperativeSafeStop().visit(normalized))
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -394,13 +418,15 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_target_local_failure_propagation(
-            _without_reviewed_follow60_first_stop_preservation(
-                _without_reviewed_follow60_evaluation_barrier(
-                    _without_reviewed_follow60_binding(
-                        _without_reviewed_resume_quota_bound(
-                            _without_availability_or_provenance_hooks(
-                                _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_cooperative_safe_stop(
+            _without_reviewed_target_local_failure_propagation(
+                _without_reviewed_follow60_first_stop_preservation(
+                    _without_reviewed_follow60_evaluation_barrier(
+                        _without_reviewed_follow60_binding(
+                            _without_reviewed_resume_quota_bound(
+                                _without_availability_or_provenance_hooks(
+                                    _function(current_source, "_run_follow_target_rotation")
+                                )
                             )
                         )
                     )

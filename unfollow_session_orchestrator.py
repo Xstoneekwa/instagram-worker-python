@@ -2181,6 +2181,50 @@ def _run_real_unfollow_multi_loop(
     any_mode_deadline_checks = 0
     any_mode_last_deadline_check = -float("inf")
     while verified < real_action_max:
+        from cooperative_business_stop import (
+            StopContext as _StopContext,
+            acknowledge_stop as _acknowledge_stop,
+            action_start_allowed as _action_start_allowed,
+            read_stop as _read_cooperative_stop,
+            request_stop as _request_cooperative_stop,
+        )
+
+        _stop_context = _StopContext.from_env()
+        if _stop_context is not None and business_action_deadline:
+            if not _action_start_allowed(
+                deadline=business_action_deadline,
+                bounded_action_seconds=max(
+                    1,
+                    int(adaptive_coverage_budget.estimated_seconds_per_unfollow),
+                ),
+            ):
+                _request_cooperative_stop(
+                    _stop_context,
+                    reason="scheduled_business_deadline",
+                    deadline=business_action_deadline,
+                )
+        _stop_intent = _read_cooperative_stop(_stop_context)
+        if _stop_intent is not None:
+            _stop_reason = str(_stop_intent.get("reason") or "")
+            _acknowledge_stop(
+                _stop_context,
+                phase="unfollow",
+                safe_boundary="before_unfollow_candidate_tap",
+                session_termination_class="scheduled_safe_stop",
+            )
+            stop_reason = _stop_reason
+            log(
+                "info",
+                "unfollow_cooperative_safe_stop",
+                account_id=aid,
+                run_id=run_id,
+                originating_stop_reason=_stop_reason,
+                first_causal_reason=_stop_reason,
+                session_termination_class="scheduled_safe_stop",
+                no_new_candidate_started=True,
+                unfollow_actions_verified=verified,
+            )
+            return emit_final("success_unfollow_skipped_insufficient_time")
         target_opened_directly = False
         if coverage_tracker is not None:
             coverage_preflight = coverage_tracker.preflight_decision(

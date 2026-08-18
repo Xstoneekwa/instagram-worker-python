@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import config
@@ -86,6 +86,15 @@ from runtime_incident_matrix import (
     classify_terminal_run_failure,
 )
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
+from cooperative_business_stop import (
+    StopContext,
+    clear_context as clear_cooperative_stop_context,
+    parse_utc as parse_cooperative_stop_utc,
+    read_ack as read_cooperative_stop_ack,
+    read_stop as read_cooperative_stop_intent,
+    record_termination_origin,
+    request_stop as request_cooperative_stop,
+)
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
@@ -2047,6 +2056,7 @@ def _finalize_manual_run_after_subprocess(
     request_snapshot: dict[str, Any] | None = None,
     cleanup_completed: bool | None = None,
     lock_released: bool | None = None,
+    cooperative_stop: dict[str, Any] | None = None,
 ) -> None:
     latest = get_account_run_request(request_id) or request_snapshot or {}
     run_id = str(latest.get("run_id") or "").strip() or None
@@ -2064,6 +2074,46 @@ def _finalize_manual_run_after_subprocess(
     if latest.get("claimed_at"):
         request_metadata.setdefault("claimed_at", latest.get("claimed_at"))
 
+    stop_proof = dict(cooperative_stop or {})
+    if stop_proof:
+        request_metadata["cooperative_stop"] = stop_proof
+    if (
+        run_type == "account_session"
+        and stop_proof.get("acknowledged") is True
+        and stop_proof.get("originating_stop_reason") == "scheduled_business_deadline"
+    ):
+        _safe_complete_account_run_request(request_id, cfg.worker_id, "completed")
+        _reconcile_linked_run(
+            account_id=account_id,
+            run_id=run_id,
+            terminal_status="completed",
+            request_id=request_id,
+            exit_code=0,
+        )
+        if run_id:
+            from account_session_resume_plan_store import record_end_of_session
+
+            record_end_of_session(
+                run_id=run_id,
+                session_plan={
+                    "restart_allowed": False,
+                    "restart_block_reason": "scheduled_business_deadline",
+                    "terminal_reason_code": "scheduled_business_deadline",
+                    "session_termination_class": "scheduled_safe_stop",
+                    "first_causal_reason": "scheduled_business_deadline",
+                },
+                session_status="success",
+            )
+        _audit(
+            account_id=account_id,
+            action_type="account_session_scheduled_safe_stop",
+            status="success",
+            message="Account session cooperatively stopped at its canonical business deadline.",
+            run_id=run_id,
+            payload={"request_id": request_id, **stop_proof},
+        )
+        return
+
     if timed_out:
         if _is_login_run_type(run_type):
             _terminal_result, timeout_summary = _terminalize_auto_login_failure(
@@ -2071,7 +2121,7 @@ def _finalize_manual_run_after_subprocess(
                 request_id=request_id,
                 account_id=account_id,
                 run_id=run_id,
-                internal_reason="subprocess_timeout",
+                internal_reason="dispatcher_watchdog_timeout",
                 phase="cleanup",
                 exit_code=exit_code,
             )
@@ -2082,8 +2132,8 @@ def _finalize_manual_run_after_subprocess(
                 request_id,
                 cfg.worker_id,
                 "failed",
-                error_code="subprocess_timeout",
-                error_message_safe="Worker subprocess exceeded dispatcher timeout.",
+                error_code="dispatcher_watchdog_timeout",
+                error_message_safe="Worker did not exit before the canonical device boundary.",
             )
             _reconcile_linked_run(
                 account_id=account_id,
@@ -2096,9 +2146,9 @@ def _finalize_manual_run_after_subprocess(
             account_id=account_id,
             action_type="manual_run_failed",
             status="failed",
-            message="Worker subprocess exceeded dispatcher timeout.",
+            message="Dispatcher watchdog terminated a Worker that missed its cooperative stop boundary.",
             run_id=run_id,
-            payload={"request_id": request_id},
+            payload={"request_id": request_id, **stop_proof},
         )
         _publish_run_failure_incident(
             request_id=request_id,
@@ -2439,14 +2489,53 @@ def _wait_for_subprocess(
     account_id: str,
     device_id: str | None = None,
     device_lock_renewal: bool = False,
+    stop_context: StopContext | None = None,
+    business_action_deadline: str | None = None,
+    scheduled_session_end: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
-    deadline = time.monotonic() + cfg.subprocess_timeout_seconds
+    fallback_deadline = time.monotonic() + cfg.subprocess_timeout_seconds
+    business_deadline = parse_cooperative_stop_utc(business_action_deadline)
+    hard_deadline = parse_cooperative_stop_utc(scheduled_session_end)
+    if hard_deadline is None and business_deadline is not None:
+        hard_deadline = business_deadline + timedelta(minutes=10)
+    soft_stop_requested = False
     next_lock_renew = time.monotonic()
     lock_renew_interval = max(30.0, float(cfg.heartbeat_seconds) * 2.0)
     last_control_plane_error_logged_at: float | None = None
+
+    def capture_cooperative_stop_proof() -> None:
+        if stop_context is None or diagnostics is None:
+            return
+        intent = read_cooperative_stop_intent(stop_context)
+        ack = read_cooperative_stop_ack(stop_context)
+        if intent is not None:
+            diagnostics.update(
+                {
+                    "soft_stop_requested": True,
+                    "originating_stop_reason": intent.get("reason"),
+                    "business_action_deadline": intent.get("deadline"),
+                    "stop_intent_requested_at": intent.get("requested_at"),
+                }
+            )
+        if ack is not None:
+            diagnostics.update(
+                {
+                    "acknowledged": True,
+                    "safe_boundary": ack.get("safe_boundary"),
+                    "phase": ack.get("phase"),
+                    "session_termination_class": ack.get("session_termination_class"),
+                    "stop_acknowledged_at": ack.get("acknowledged_at"),
+                }
+            )
+
     while True:
         exit_code = proc.poll()
         if exit_code is not None:
+            # The Worker can request and ACK a preemptive safe stop before the
+            # dispatcher reaches the nominal deadline. Capture that terminal
+            # proof before cleanup removes the exact-session token.
+            capture_cooperative_stop_proof()
             return int(exit_code), False
 
         try:
@@ -2479,6 +2568,8 @@ def _wait_for_subprocess(
                 request_id=request_id,
                 worker_id=cfg.worker_id,
             )
+            if stop_context is not None:
+                record_termination_origin(stop_context, reason="human_manual_stop")
             # The scoped Follow 60s canary may need to replay one verified Follow intent and
             # flush bounded deferred projections. Keep every other account on
             # the exact Golden 30-second termination contract.
@@ -2510,7 +2601,60 @@ def _wait_for_subprocess(
                 )
             next_lock_renew = time.monotonic() + lock_renew_interval
 
-        if time.monotonic() >= deadline:
+        now_utc = datetime.now(timezone.utc)
+        if business_deadline is not None and not soft_stop_requested and now_utc >= business_deadline:
+            if stop_context is not None:
+                request_cooperative_stop(
+                    stop_context,
+                    reason="scheduled_business_deadline",
+                    deadline=business_action_deadline,
+                )
+                soft_stop_requested = True
+                if diagnostics is not None:
+                    diagnostics.update(
+                        {
+                            "soft_stop_requested": True,
+                            "originating_stop_reason": "scheduled_business_deadline",
+                            "business_action_deadline": business_action_deadline,
+                        }
+                    )
+                log(
+                    "info",
+                    "account_session_cooperative_stop_requested",
+                    account_id=account_id,
+                    request_id=request_id,
+                    reason="scheduled_business_deadline",
+                    business_action_deadline=business_action_deadline,
+                )
+
+        capture_cooperative_stop_proof()
+
+        if hard_deadline is not None and now_utc >= hard_deadline:
+            if stop_context is not None:
+                record_termination_origin(stop_context, reason="dispatcher_watchdog")
+            if diagnostics is not None:
+                diagnostics.update(
+                    {
+                        "hard_watchdog_used": True,
+                        "originating_stop_reason": "dispatcher_watchdog",
+                        "hard_deadline": scheduled_session_end or business_action_deadline,
+                    }
+                )
+            return _terminate_subprocess(proc), True
+
+        # The historical fixed ceiling remains only for unscheduled/manual
+        # subprocesses.  It no longer acts as an account-session deadline.
+        if hard_deadline is None and time.monotonic() >= fallback_deadline:
+            if stop_context is not None:
+                record_termination_origin(stop_context, reason="dispatcher_watchdog")
+            if diagnostics is not None:
+                diagnostics.update(
+                    {
+                        "hard_watchdog_used": True,
+                        "originating_stop_reason": "dispatcher_watchdog",
+                        "hard_deadline": "fixed_unscheduled_safety_ceiling",
+                    }
+                )
             return _terminate_subprocess(proc), True
 
         time.sleep(1.0)
@@ -3193,9 +3337,34 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             run_type=run_type,
             **protection_metadata,
         )
+    deadline_env: dict[str, str] = {}
+    cooperative_stop_context: StopContext | None = None
+    cooperative_stop_diagnostics: dict[str, Any] = {}
     if run_type == "account_session":
         deadline_env = _account_session_deadline_env(request_metadata, dispatch_ctx)
-        subprocess_env = {**subprocess_env, **deadline_env}
+        business_session_id = str(
+            request_metadata.get("business_session_id")
+            or request_metadata.get("schedule_session_id")
+            or request_id
+        ).strip()
+        cooperative_stop_context = StopContext(
+            account_id=account_id,
+            request_id=request_id,
+            device_id=str(device_id or dispatch_ctx.get("device_id") or "").strip(),
+            business_session_id=business_session_id,
+            run_id=str(request.get("run_id") or "").strip(),
+            generation=str(request.get("claimed_at") or request_id).strip(),
+        )
+        clear_cooperative_stop_context(cooperative_stop_context)
+        cooperative_env = {
+            "COOPERATIVE_STOP_ACCOUNT_ID": cooperative_stop_context.account_id,
+            "COOPERATIVE_STOP_REQUEST_ID": cooperative_stop_context.request_id,
+            "COOPERATIVE_STOP_DEVICE_ID": cooperative_stop_context.device_id,
+            "COOPERATIVE_STOP_BUSINESS_SESSION_ID": cooperative_stop_context.business_session_id,
+            "COOPERATIVE_STOP_RUN_ID": cooperative_stop_context.run_id,
+            "COOPERATIVE_STOP_GENERATION": cooperative_stop_context.generation,
+        }
+        subprocess_env = {**subprocess_env, **deadline_env, **cooperative_env}
         log(
             "info",
             "account_session_deadline_propagated",
@@ -3256,6 +3425,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             account_id=account_id,
             device_id=device_id if device_lock_active else None,
             device_lock_renewal=device_lock_active,
+            stop_context=cooperative_stop_context,
+            business_action_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
+            scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
+            diagnostics=cooperative_stop_diagnostics,
         )
 
     lock_released = False
@@ -3289,7 +3462,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         # timeout/forced termination cannot make that guarantee.
         cleanup_completed=not timed_out,
         lock_released=lock_released,
+        cooperative_stop=cooperative_stop_diagnostics,
     )
+    if cooperative_stop_context is not None:
+        clear_cooperative_stop_context(cooperative_stop_context)
 
 
 def _claim_next_dispatch_request(

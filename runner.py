@@ -14331,6 +14331,78 @@ def _run_followers_list_engine_session(
                 )
                 target_followers_resume_controller = None
         while processed < max_iter:
+            # Existing candidate boundary: the prior Follow composite (including
+            # Mute/Like/Return-CT/persistence) is terminal and no new physical
+            # mutation has started.  A local token check is the only added
+            # happy-path work.
+            from cooperative_business_stop import (
+                StopContext as _StopContext,
+                acknowledge_stop as _acknowledge_stop,
+                action_start_allowed as _action_start_allowed,
+                read_stop as _read_cooperative_stop,
+                request_stop as _request_cooperative_stop,
+            )
+
+            _stop_context = _StopContext.from_env()
+            _business_deadline = str(os.getenv("BUSINESS_ACTION_DEADLINE") or "").strip()
+            _follow_handoff_deadline = str(os.getenv("FOLLOW_NEW_WORK_DEADLINE") or "").strip()
+            _atomic_bound_seconds = max(
+                1,
+                int(os.getenv("FOLLOW_ATOMIC_SAFE_STOP_BOUND_SECONDS") or "180"),
+            )
+            if _stop_context is not None:
+                if _follow_handoff_deadline and not _action_start_allowed(
+                    deadline=_follow_handoff_deadline,
+                    bounded_action_seconds=0,
+                ):
+                    _request_cooperative_stop(
+                        _stop_context,
+                        reason="follow_to_unfollow_time_handoff",
+                        deadline=_follow_handoff_deadline,
+                    )
+                elif _business_deadline and not _action_start_allowed(
+                    deadline=_business_deadline,
+                    bounded_action_seconds=_atomic_bound_seconds,
+                ):
+                    _request_cooperative_stop(
+                        _stop_context,
+                        reason="scheduled_business_deadline",
+                        deadline=_business_deadline,
+                    )
+                _stop_intent = _read_cooperative_stop(_stop_context)
+            else:
+                _stop_intent = None
+            if _stop_intent is not None:
+                _stop_reason = str(_stop_intent.get("reason") or "")
+                _termination_class = (
+                    "phase_handoff_safe_pause"
+                    if _stop_reason == "follow_to_unfollow_time_handoff"
+                    else "scheduled_safe_stop"
+                )
+                _acknowledge_stop(
+                    _stop_context,
+                    phase="follow",
+                    safe_boundary="before_candidate_selection",
+                    session_termination_class=_termination_class,
+                )
+                _eng_log(
+                    "followers_engine_cooperative_safe_stop",
+                    "info",
+                    "partial_resumable",
+                    {
+                        "originating_stop_reason": _stop_reason,
+                        "first_causal_reason": _stop_reason,
+                        "session_termination_class": _termination_class,
+                        "iterations": processed,
+                        "no_new_candidate_started": True,
+                    },
+                )
+                _publish_followers_session_summary(
+                    exit_code=97,
+                    follow_session_outcome="partial_resumable",
+                    follow_stop_reason=_stop_reason,
+                )
+                return 97
             storage_health.require_irreversible_action_allowed(
                 boundary="follow60_candidate_cycle_start",
             )
@@ -23551,9 +23623,17 @@ def _main_impl() -> int:
     )
 
     def _handle_manual_stop_signal(signum: int, _frame: Any) -> None:
+        from cooperative_business_stop import StopContext, read_termination_origin
+
+        _signal_stop_origin = read_termination_origin(StopContext.from_env())
+        _signal_reason = {
+            "human_manual_stop": "manual_stop_signal",
+            "dispatcher_watchdog": "dispatcher_watchdog_timeout",
+            "deployment_shutdown": "deployment_shutdown_signal",
+        }.get(_signal_stop_origin, "manual_stop_signal")
         stop_trace = device_action_latch.request_stop(
             signal_number=signum,
-            reason="manual_stop_signal",
+            reason=_signal_reason,
         )
         try:
             from follow60_ordering_v2_ledger_v1 import record_stop_for_run
@@ -23561,7 +23641,7 @@ def _main_impl() -> int:
             _ordering_v2_stop_receipts = record_stop_for_run(
                 account_id=str(account_id or ""),
                 run_id=str(run_id or ""),
-                reason="manual_stop_signal",
+                reason=_signal_reason,
             )
         except Exception as _ordering_v2_stop_exc:
             _ordering_v2_stop_receipts = {
@@ -23570,13 +23650,19 @@ def _main_impl() -> int:
             }
         log(
             "warning",
-            "manual_stop_signal_received",
+            (
+                "manual_stop_signal_received"
+                if _signal_stop_origin == "human_manual_stop"
+                else "runtime_termination_signal_received"
+            ),
             signal=signum,
             run_id=run_id or None,
             account_id=account_id or None,
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
             stop_trace=stop_trace,
             ordering_v2_stop_receipts=_ordering_v2_stop_receipts,
+            originating_stop_reason=_signal_stop_origin,
+            first_causal_reason=_signal_reason,
         )
         try:
             from follow60_ordering_v2_shadow import (
@@ -23585,8 +23671,12 @@ def _main_impl() -> int:
             )
 
             for _shadow_terminal in _finalize_ordering_v2_contexts(
-                status="partial_manual_stop",
-                reason="manual_stop_signal",
+                status=(
+                    "partial_manual_stop"
+                    if _signal_stop_origin == "human_manual_stop"
+                    else "partial_runtime_termination"
+                ),
+                reason=_signal_reason,
                 account_id=str(account_id or ""),
                 run_id=str(run_id or ""),
             ):
@@ -23615,7 +23705,7 @@ def _main_impl() -> int:
         )
         try:
             spooled = _spool_noncritical_deferred_projections(
-                reason="manual_stop_after_device_action_latch",
+                reason=f"{_signal_reason}_after_device_action_latch",
             )
         except Exception as exc:
             spooled = {"error": str(exc)[:200]}

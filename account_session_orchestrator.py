@@ -42,6 +42,14 @@ from unfollow_session_orchestrator import (
 )
 from unfollow_eligibility_engine import plan_unfollow_targets
 from unfollow_settings import UNFOLLOW_MODE_ANY, UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
+from unfollow_ui_coverage_policy import HISTORICAL_ACTION_P90_SECONDS
+from cooperative_business_stop import (
+    StopContext,
+    acknowledge_stop,
+    clear_intent_and_ack,
+    follow_handoff_deadline,
+    read_stop,
+)
 from welcome_list_sender import get_last_welcome_list_sender_summary
 from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
@@ -69,6 +77,33 @@ FOLLOW_TARGET_LOCAL_FAILURE_OUTCOMES = frozenset(
         "target_skipped_current_attempt",
     }
 )
+
+
+def _ack_scheduled_stop_at_phase_boundary(*, phase: str, boundary: str) -> bool:
+    context = StopContext.from_env()
+    intent = read_stop(context)
+    if context is None or intent is None:
+        return False
+    reason = str(intent.get("reason") or "")
+    if reason != "scheduled_business_deadline":
+        return False
+    acknowledge_stop(
+        context,
+        phase=phase,
+        safe_boundary=boundary,
+        session_termination_class="scheduled_safe_stop",
+    )
+    log(
+        "info",
+        "account_session_cooperative_safe_stop_boundary",
+        phase=phase,
+        safe_boundary=boundary,
+        originating_stop_reason=reason,
+        first_causal_reason=reason,
+        session_termination_class="scheduled_safe_stop",
+        no_new_business_action_started=True,
+    )
+    return True
 
 
 def _target_availability_capture_requested(account_id: str) -> bool:
@@ -1371,6 +1406,44 @@ def _run_follow_target_rotation(
                 cap=global_follow_goal,
                 stop_reason="global_follow_cap_reached",
                 candidates_not_scanned_due_to_cap=True,
+            )
+            break
+        if summary_reason in {
+            "follow_to_unfollow_time_handoff",
+            "scheduled_business_deadline",
+        }:
+            final_reason = summary_reason
+            final_exit_code = 97
+            final_summary.update(
+                {
+                    "exit_code": 97,
+                    "follow_session_outcome": "partial_resumable",
+                    "follow_stop_reason": summary_reason,
+                    "first_causal_reason": summary_reason,
+                    "session_termination_class": (
+                        "phase_handoff_safe_pause"
+                        if summary_reason == "follow_to_unfollow_time_handoff"
+                        else "scheduled_safe_stop"
+                    ),
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "follow_remaining_preserved": True,
+                    "target_rotation_allowed": False,
+                    "safe_next_step": (
+                        "handoff_to_unfollow"
+                        if summary_reason == "follow_to_unfollow_time_handoff"
+                        else "end_business_session"
+                    ),
+                }
+            )
+            merge_follow_outcome(
+                final_summary,
+                stable_reason=summary_reason,
+                verified_actions=global_follows_completed,
+                target_actions=global_follow_goal,
+                current_target_id=target_id or source_profile,
+                remaining_target_ids=_follow_target_ids(remaining_after_current),
+                safe_boundary=True,
             )
             break
         if budget_reached and not exhausted:
@@ -2981,6 +3054,79 @@ def _outreach_time_budget(
     }
 
 
+def _resolve_follow_time_handoff(
+    account_id: str,
+    *,
+    business_action_deadline: str | None,
+) -> dict[str, Any]:
+    """Freeze the smallest adaptive reserve needed by mandatory Unfollow.
+
+    This is evaluated once per business session, never per Follow candidate.
+    It reuses the canonical Unfollow settings/plan and historical P90 action
+    duration already used by the Unfollow runtime budget.
+    """
+    out: dict[str, Any] = {
+        "follow_new_work_deadline": None,
+        "eligible_unfollows": 0,
+        "unfollow_quota_remaining": 0,
+        "estimated_seconds_per_unfollow": HISTORICAL_ACTION_P90_SECONDS,
+        "source": "canonical_unfollow_plan",
+    }
+    if not business_action_deadline or not _follow_to_unfollow_real_enabled(account_id):
+        out["source"] = "no_deadline_or_unfollow_disabled"
+        return out
+    try:
+        settings = load_unfollow_settings(account_id, ensure_row=False)
+        quota = _follow_to_unfollow_real_max_actions_effective(account_id)
+        protected = account_protection_lists.unfollow_whitelist_for_run(account_id)
+        plan = plan_unfollow_targets(
+            account_id,
+            settings=settings,
+            limit=max(1, quota),
+            protected_usernames=protected,
+        )
+        eligible = int(
+            plan.get("eligible_total")
+            if plan.get("eligible_total") is not None
+            else plan.get("candidates_count") or 0
+        )
+        if _is_unfollow_any_mode(str(getattr(settings, "mode", "") or "")):
+            # Any-mode eligibility is proven on the Following UI, so reserve
+            # only the authoritative bounded quota rather than guessing rows.
+            eligible = quota
+        out.update(
+            {
+                "eligible_unfollows": max(0, eligible),
+                "unfollow_quota_remaining": max(0, quota),
+                "follow_new_work_deadline": follow_handoff_deadline(
+                    business_deadline=business_action_deadline,
+                    eligible_unfollows=eligible,
+                    unfollow_quota_remaining=quota,
+                    estimated_seconds_per_unfollow=HISTORICAL_ACTION_P90_SECONDS,
+                ),
+            }
+        )
+    except Exception as exc:
+        # Fail closed for fairness without blocking the session: reserve one
+        # bounded action when canonical Unfollow is enabled but planning is
+        # temporarily unavailable.
+        out.update(
+            {
+                "eligible_unfollows": 1,
+                "unfollow_quota_remaining": 1,
+                "source": "canonical_plan_unavailable_bounded_fallback",
+                "error_type": type(exc).__name__,
+                "follow_new_work_deadline": follow_handoff_deadline(
+                    business_deadline=business_action_deadline,
+                    eligible_unfollows=1,
+                    unfollow_quota_remaining=1,
+                    estimated_seconds_per_unfollow=HISTORICAL_ACTION_P90_SECONDS,
+                ),
+            }
+        )
+    return out
+
+
 def _skip_account_session_outreach_addon(
     *,
     enabled: bool,
@@ -4218,6 +4364,12 @@ def run_account_session(
             welcome_total_ms=round((welcome_t1 - welcome_t0) * 1000.0, 2),
         )
 
+    if _ack_scheduled_stop_at_phase_boundary(
+        phase="welcome",
+        boundary="after_welcome_terminal_before_follow",
+    ):
+        return 0
+
     follow_phase_executed = False
     follow_phase_skipped_reason: str | None = None
     follow_exit_code: int | None = None
@@ -4500,8 +4652,27 @@ def run_account_session(
                     _follow60_rotation_kwargs["follow60_canary_control"] = (
                         ordering_v2_control_carrier
                     )
-            rotation_result = _run_follow_target_rotation(
-                d,
+            follow_time_handoff = _resolve_follow_time_handoff(
+                aid,
+                business_action_deadline=business_action_deadline,
+            )
+            log(
+                "info",
+                "follow_to_unfollow_time_handoff_resolved",
+                account_id=aid,
+                run_id=run_id,
+                **follow_time_handoff,
+            )
+            previous_follow_deadline = os.environ.get("FOLLOW_NEW_WORK_DEADLINE")
+            if follow_time_handoff.get("follow_new_work_deadline"):
+                os.environ["FOLLOW_NEW_WORK_DEADLINE"] = str(
+                    follow_time_handoff["follow_new_work_deadline"]
+                )
+            else:
+                os.environ.pop("FOLLOW_NEW_WORK_DEADLINE", None)
+            try:
+                rotation_result = _run_follow_target_rotation(
+                    d,
                 account_id=aid,
                 account_username=uname,
                 run_id=run_id,
@@ -4531,8 +4702,13 @@ def run_account_session(
                 ),
                 auto_restart_resume_policy=auto_restart_resume_policy,
                 worker_runtime_identity=worker_runtime_identity,
-                **_follow60_rotation_kwargs,
-            )
+                    **_follow60_rotation_kwargs,
+                )
+            finally:
+                if previous_follow_deadline is None:
+                    os.environ.pop("FOLLOW_NEW_WORK_DEADLINE", None)
+                else:
+                    os.environ["FOLLOW_NEW_WORK_DEADLINE"] = previous_follow_deadline
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
             follow_exit_code = int(rotation_result.get("exit_code") or 0)
@@ -4542,6 +4718,35 @@ def run_account_session(
             follow_engine_summary["rotation_reason"] = str(rotation_result.get("reason") or "")
             follow_engine_summary["follow_total_ms"] = round((follow_t1 - follow_t0) * 1000.0, 2)
             follow_outcome = dict(follow_engine_summary.get("follow_outcome") or {})
+            cooperative_context = StopContext.from_env()
+            cooperative_intent = read_stop(cooperative_context)
+            cooperative_reason = str((cooperative_intent or {}).get("reason") or "")
+            if cooperative_reason == "scheduled_business_deadline":
+                log(
+                    "info",
+                    "account_session_scheduled_safe_stop_completed",
+                    account_id=aid,
+                    run_id=run_id,
+                    originating_stop_reason=cooperative_reason,
+                    first_causal_reason=cooperative_reason,
+                    session_termination_class="scheduled_safe_stop",
+                    follow_remaining_preserved=True,
+                    incident_created=False,
+                )
+                return 0
+            if cooperative_reason == "follow_to_unfollow_time_handoff" and cooperative_context is not None:
+                clear_intent_and_ack(cooperative_context)
+                follow_engine_summary["follow_session_outcome"] = "partial_resumable"
+                follow_engine_summary["follow_stop_reason"] = cooperative_reason
+                log(
+                    "info",
+                    "account_session_follow_time_handoff_consumed",
+                    account_id=aid,
+                    run_id=run_id,
+                    originating_stop_reason=cooperative_reason,
+                    session_termination_class="phase_handoff_safe_pause",
+                    follow_remaining_preserved=True,
+                )
             follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
                 account_id=aid,
                 account_username=uname,
@@ -4784,6 +4989,12 @@ def run_account_session(
                     else os.environ.get("WORKER_GIT_SHA")
                 ),
             )
+
+    if _ack_scheduled_stop_at_phase_boundary(
+        phase="unfollow",
+        boundary="after_unfollow_terminal_before_outreach",
+    ):
+        return 0
 
     if _account_session_outreach_addon_enabled():
         if not follow_phase_executed:
