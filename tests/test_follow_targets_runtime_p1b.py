@@ -1255,6 +1255,186 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(result["summary"]["target_id"], "t2")
         self.assertIn("follow_target_switched", [event for _level, event, _kw in logs])
 
+    @staticmethod
+    def _target_local_failure_summary(
+        reason: str = "search_results_still_blank_after_recovery",
+        *,
+        outcome: str = "target_unavailable_retryable",
+        safe_to_skip: bool = True,
+        retryable: bool = True,
+    ) -> dict:
+        return {
+            "follows_completed_count": 0,
+            "follow_session_outcome": outcome,
+            "follow_stop_reason": reason,
+            "target_outcome": outcome,
+            "target_reason": reason,
+            "target_retryable": retryable,
+            "target_safe_to_skip": safe_to_skip,
+            "target_completed": False,
+            "target_local_failure": True,
+            "first_causal_reason": reason,
+            "last_recovery_reason": reason,
+        }
+
+    def test_nab_fixture_ct2_missing_rotates_to_ct3_without_global_completion(self) -> None:
+        engine = FakeFollowersEngine([
+            (0, {
+                "follows_completed_count": 30,
+                "global_follows_goal_effective": 80,
+                "follow_session_outcome": "target_budget_reached",
+                "follow_stop_reason": "target_budget_reached",
+            }),
+            (7, self._target_local_failure_summary()),
+            (0, {
+                "follows_completed_count": 20,
+                "global_follows_goal_effective": 80,
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": "safe_operator_stop",
+            }),
+        ])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[
+                target("t1", "ct_one", 0),
+                target("t2", "stellar.studio.paris", 1),
+                target("t3", "ct_three", 2),
+            ],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=3,
+            max_follows_per_target_per_run=30,
+            authorized_follow_quota=80,
+        )
+
+        self.assertEqual([call["target_id"] for call in engine.calls], ["t1", "t2", "t3"])
+        self.assertEqual(result["global_follows_completed"], 50)
+        self.assertNotEqual(result["reason"], "target_completed")
+        failures = result["summary"]["target_local_failures"]
+        self.assertEqual([row["target_id"] for row in failures], ["t2"])
+        self.assertEqual(
+            result["summary"]["first_causal_reason"],
+            "search_results_still_blank_after_recovery",
+        )
+
+    def test_two_unavailable_targets_are_excluded_and_ct4_runs(self) -> None:
+        engine = FakeFollowersEngine([
+            (7, self._target_local_failure_summary("ct2_missing")),
+            (8, self._target_local_failure_summary(
+                "ct3_profile_verify_failed",
+                outcome="target_open_failed_retryable",
+            )),
+            (0, {
+                "follows_completed_count": 1,
+                "global_follows_goal_effective": 1,
+                "follow_session_outcome": "global_follow_cap_reached",
+                "follow_stop_reason": "global_follow_cap_reached",
+            }),
+        ])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[
+                target("t2", "ct_two", 0),
+                target("t3", "ct_three", 1),
+                target("t4", "ct_four", 2),
+            ],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=3,
+            authorized_follow_quota=1,
+        )
+
+        self.assertEqual([call["target_id"] for call in engine.calls], ["t2", "t3", "t4"])
+        self.assertEqual(result["reason"], "global_follow_cap_reached")
+        self.assertEqual(result["summary"]["attempt_excluded_target_ids"], ["t2", "t3"])
+
+    def test_all_targets_temporarily_unavailable_is_incomplete_and_resumable(self) -> None:
+        engine = FakeFollowersEngine([
+            (7, self._target_local_failure_summary("ct1_missing")),
+            (40, self._target_local_failure_summary(
+                "ct2_followers_not_opened",
+                outcome="target_open_failed_retryable",
+            )),
+        ])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[target("t1", "ct_one", 0), target("t2", "ct_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            authorized_follow_quota=80,
+        )
+
+        self.assertEqual(result["reason"], "all_targets_temporarily_unavailable")
+        self.assertEqual(result["summary"]["follow_session_outcome"], "partial_resumable")
+        self.assertFalse(result["summary"]["target_completed"])
+        self.assertFalse(result["all_targets_exhausted"])
+
+    def test_missing_local_outcome_never_defaults_to_target_completed(self) -> None:
+        engine = FakeFollowersEngine([(7, {"follows_completed_count": 0})])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[target("t1", "ct_one", 0), target("t2", "ct_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            authorized_follow_quota=80,
+        )
+
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["summary"]["follow_session_outcome"], "partial_not_resumable")
+        self.assertEqual(result["summary"]["target_outcome"], "target_local_outcome_unknown")
+        self.assertNotEqual(result["reason"], "target_completed")
+
+    def test_critical_target_open_failure_still_stops_globally(self) -> None:
+        engine = FakeFollowersEngine([(
+            73,
+            self._target_local_failure_summary(
+                "search_surface_wrong_app_launcher",
+                outcome="target_open_failed_terminal",
+                safe_to_skip=False,
+                retryable=False,
+            ),
+        )])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[target("t1", "ct_one", 0), target("t2", "ct_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            authorized_follow_quota=80,
+        )
+
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["reason"], "search_surface_wrong_app_launcher")
+        self.assertEqual(result["summary"]["follow_session_outcome"], "partial_not_resumable")
+        self.assertEqual(result["summary"]["safe_next_step"], "manual_review")
+
     def test_resume_authorized_follow_quota_is_hard_bound_from_first_target(self) -> None:
         engine = FakeFollowersEngine([
             (0, {

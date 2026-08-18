@@ -268,6 +268,118 @@ def _without_reviewed_follow60_first_stop_preservation(
     return ast.fix_missing_locations(RemoveFirstStopPreservation().visit(normalized))
 
 
+def _without_reviewed_target_local_failure_propagation(
+    node: ast.FunctionDef,
+) -> ast.FunctionDef:
+    """Remove only the reviewed target-local/global-outcome separation delta."""
+
+    normalized = copy.deepcopy(node)
+    local_names = {
+        "attempt_excluded_keys",
+        "target_local_failures",
+        "target_local_contract",
+    }
+    attempt_fields = {
+        "target_outcome",
+        "target_retryable",
+        "target_safe_to_skip",
+        "first_causal_reason",
+    }
+
+    class RemoveTargetLocalPropagation(ast.NodeTransformer):
+        def visit_Assign(self, item):
+            if any(
+                isinstance(target, ast.Name) and target.id in local_names
+                for target in item.targets
+            ):
+                return None
+            if any(
+                isinstance(target, ast.Name) and target.id == "first_causal_reason"
+                for target in item.targets
+            ):
+                return None
+            if any(
+                isinstance(target, ast.Name) and target.id == "final_reason"
+                for target in item.targets
+            ) and isinstance(item.value, ast.BoolOp) and any(
+                isinstance(child, ast.Constant)
+                and child.value == "target_local_outcome_unknown"
+                for child in ast.walk(item.value)
+            ):
+                return ast.parse(
+                    'final_reason = str(summary.get("follow_session_outcome") or "target_completed")'
+                ).body[0]
+            return self.generic_visit(item)
+
+        def visit_AnnAssign(self, item):
+            if isinstance(item.target, ast.Name) and item.target.id in local_names:
+                return None
+            return self.generic_visit(item)
+
+        def visit_If(self, item):
+            if any(
+                isinstance(child, ast.Name) and child.id == "target_local_contract"
+                for child in ast.walk(item.test)
+            ):
+                return None
+            if isinstance(item.test, ast.Name) and item.test.id == "target_local_failures":
+                return None
+            updated = self.generic_visit(item)
+            return updated
+
+        def visit_Compare(self, item):
+            updated = self.generic_visit(item)
+            if any(
+                isinstance(child, ast.Name) and child.id == "attempt_excluded_keys"
+                for child in ast.walk(updated)
+            ):
+                return ast.Constant(value=False)
+            return updated
+
+        def visit_BoolOp(self, item):
+            updated = self.generic_visit(item)
+            updated.values = [
+                value
+                for value in updated.values
+                if not (isinstance(value, ast.Constant) and value.value is False)
+            ]
+            if len(updated.values) == 1:
+                return updated.values[0]
+            return updated
+
+        def visit_Dict(self, item):
+            updated = self.generic_visit(item)
+            pairs = [
+                (key, value)
+                for key, value in zip(updated.keys, updated.values)
+                if not (
+                    isinstance(key, ast.Constant)
+                    and key.value in attempt_fields
+                    and any(
+                        isinstance(child, ast.Name)
+                        and child.id == "target_local_contract"
+                        for child in ast.walk(value)
+                    )
+                )
+            ]
+            updated.keys = [key for key, _value in pairs]
+            updated.values = [value for _key, value in pairs]
+            return updated
+
+        def visit_Expr(self, item):
+            if any(
+                isinstance(child, ast.Constant)
+                and child.value == "target_local_outcome_unknown"
+                for child in ast.walk(item)
+            ):
+                return None
+            return self.generic_visit(item)
+
+    return ast.fix_missing_locations(
+        RemoveTargetLocalPropagation().visit(normalized)
+    )
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -282,12 +394,14 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
-        actual = _without_reviewed_follow60_first_stop_preservation(
-            _without_reviewed_follow60_evaluation_barrier(
-                _without_reviewed_follow60_binding(
-                    _without_reviewed_resume_quota_bound(
-                        _without_availability_or_provenance_hooks(
-                            _function(current_source, "_run_follow_target_rotation")
+        actual = _without_reviewed_target_local_failure_propagation(
+            _without_reviewed_follow60_first_stop_preservation(
+                _without_reviewed_follow60_evaluation_barrier(
+                    _without_reviewed_follow60_binding(
+                        _without_reviewed_resume_quota_bound(
+                            _without_availability_or_provenance_hooks(
+                                _function(current_source, "_run_follow_target_rotation")
+                            )
                         )
                     )
                 )

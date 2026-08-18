@@ -58,10 +58,17 @@ def _require_irreversible_social_action_storage(action: str) -> None:
 _search_ui_mode = "accounts_tab"
 
 _TYPE_SEARCH_FAILURE_REASON: str | None = None
+_TAP_ACCOUNT_RESULT_FAILURE_REASON: str | None = None
 
 
 def get_type_search_failure_reason() -> str | None:
     return _TYPE_SEARCH_FAILURE_REASON
+
+
+def get_tap_account_result_failure_reason() -> str | None:
+    """Return the stable first failure from the latest account-row tap attempt."""
+
+    return _TAP_ACCOUNT_RESULT_FAILURE_REASON
 
 
 def _startup_timing_log(
@@ -4701,6 +4708,8 @@ def tap_account_result(
     preverified_exact_result_method: str = "",
 ) -> bool:
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
+    global _TAP_ACCOUNT_RESULT_FAILURE_REASON
+    _TAP_ACCOUNT_RESULT_FAILURE_REASON = None
     follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
     outreach_active = bool(outreach_search_context)
     preverified_bounds: dict[str, int] = {}
@@ -5247,15 +5256,16 @@ def tap_account_result(
             _perf["profile_transition_wait_ms"] = 0.0
             _log_row_evaluation_summary(found=False, selected_path="not_found")
             _dump_no_real_account_row_debug(d, username)
+            _TAP_ACCOUNT_RESULT_FAILURE_REASON = (
+                "search_results_still_blank_after_recovery"
+                if follow_ct_active
+                else "account_result_not_found"
+            )
             log(
                 "error",
                 "tap_account_no_element",
                 username=username,
-                final_reason=(
-                    "search_results_still_blank_after_recovery"
-                    if follow_ct_active
-                    else "not_found"
-                ),
+                final_reason=_TAP_ACCOUNT_RESULT_FAILURE_REASON,
             )
             return False
     _perf["row_tap_command_ms"] = 0.0
@@ -5448,6 +5458,7 @@ def tap_account_result(
             _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
         return True
     except Exception as e:
+        _TAP_ACCOUNT_RESULT_FAILURE_REASON = "account_row_tap_failed"
         log("error", "account_row_tap_failed", error=str(e))
         _perf["post_tap_settle_ms"] = 0.0
         _perf["profile_transition_wait_ms"] = 0.0

@@ -102,6 +102,7 @@ from instagram_navigation import (
     get_last_dm_send_result,
     get_last_dm_thread_attempted,
     get_last_dm_thread_state,
+    get_tap_account_result_failure_reason,
     get_type_search_failure_reason,
     instagram_warm_session_eligible,
     invalidate_search_surface_cache,
@@ -12731,6 +12732,53 @@ def _run_followers_list_engine_session(
         if int(payload["candidates_rejected_count"]) > 0 or int(follows_completed_count) == 0:
             log("info", "target_scan_no_candidate_summary", **payload)
 
+    def _abort_target_acquisition(
+        exit_code: int,
+        *,
+        first_causal_reason: str,
+        target_outcome: str,
+        retryable: bool,
+        safe_to_skip: bool,
+        last_recovery_reason: str = "",
+    ) -> int:
+        """Publish a target-local failure without claiming target/global completion."""
+
+        reason = str(first_causal_reason or f"exit_code_{int(exit_code)}")
+        recovery_reason = str(last_recovery_reason or reason)
+        _publish_followers_session_summary(
+            exit_code=int(exit_code),
+            follow_processed_count=int(processed),
+            follows_completed_count=int(follows_completed_count),
+            target_id=str(target_id or "") or None,
+            target_username=source_profile_username,
+            follow_session_outcome=str(target_outcome),
+            follow_stop_reason=reason,
+            target_outcome=str(target_outcome),
+            target_reason=reason,
+            target_retryable=bool(retryable),
+            target_safe_to_skip=bool(safe_to_skip),
+            target_completed=False,
+            target_local_failure=True,
+            first_causal_reason=reason,
+            last_recovery_reason=recovery_reason,
+            global_follow_remaining=(
+                max(
+                    0,
+                    int(global_follow_goal_effective)
+                    - int(follows_completed_count),
+                )
+                if global_follow_goal_effective is not None
+                else None
+            ),
+            safe_next_step=(
+                "rotate_next_ct"
+                if safe_to_skip
+                else ("schedule_resume" if retryable else "manual_review")
+            ),
+        )
+        _emit_target_scan_completed(stop_reason=reason)
+        return int(exit_code)
+
     log(
         "info",
         "target_scan_started",
@@ -12855,7 +12903,17 @@ def _run_followers_list_engine_session(
                         "source_profile_username": source_profile_username,
                     },
                 )
-                return 40
+                return _abort_target_acquisition(
+                    40,
+                    first_causal_reason="prevalidated_followers_surface_lost",
+                    target_outcome="target_open_failed_retryable",
+                    retryable=True,
+                    safe_to_skip=True,
+                    last_recovery_reason=str(
+                        (reval_meta or {}).get("reason")
+                        or "followers_surface_not_validated"
+                    ),
+                )
             open_list_meta = {
                 **(prevalidated_followers_list_meta or {}),
                 "open_detection_method": str((reval_meta or {}).get("open_detection_method") or "fast_target_rotation"),
@@ -12895,7 +12953,15 @@ def _run_followers_list_engine_session(
                     exit_code=64,
                     target_username=source_profile_username,
                 )
-                return 64
+                return _abort_target_acquisition(
+                    64,
+                    first_causal_reason=str(
+                        gsurf.get("reason") or "global_search_surface_failed"
+                    ),
+                    target_outcome="target_recovery_failed",
+                    retryable=True,
+                    safe_to_skip=False,
+                )
             if not _open_search_with_recovery(
                 d,
                 pkg=pkg,
@@ -12904,7 +12970,13 @@ def _run_followers_list_engine_session(
                 skip_when_follow_ct_surface_fresh=True,
             ):
                 _eng_log("followers_engine_aborted", "failed", "open_search_failed", {})
-                return 4
+                return _abort_target_acquisition(
+                    4,
+                    first_causal_reason="open_search_failed",
+                    target_outcome="target_recovery_failed",
+                    retryable=True,
+                    safe_to_skip=False,
+                )
             if not type_search(
                 d,
                 source_profile_username,
@@ -12914,10 +12986,28 @@ def _run_followers_list_engine_session(
                 reason = get_type_search_failure_reason() or "type_search_failed"
                 _eng_log("followers_engine_aborted", "failed", reason, {})
                 if reason == "search_surface_wrong_app_launcher":
-                    return 73
+                    return _abort_target_acquisition(
+                        73,
+                        first_causal_reason=reason,
+                        target_outcome="target_open_failed_terminal",
+                        retryable=False,
+                        safe_to_skip=False,
+                    )
                 if reason == "search_field_not_cleared":
-                    return 9
-                return 5
+                    return _abort_target_acquisition(
+                        9,
+                        first_causal_reason=reason,
+                        target_outcome="target_recovery_failed",
+                        retryable=True,
+                        safe_to_skip=False,
+                    )
+                return _abort_target_acquisition(
+                    5,
+                    first_causal_reason=reason,
+                    target_outcome="target_recovery_failed",
+                    retryable=True,
+                    safe_to_skip=False,
+                )
 
             if bool(getattr(config, "FAST_SKIP_ACCOUNTS_TAB", True)) and bool(
                 getattr(config, "FAST_PATH_MODE", False)
@@ -12934,7 +13024,18 @@ def _run_followers_list_engine_session(
                 follow_ct_search_context=True,
             ):
                 _eng_log("followers_engine_aborted", "failed", "tap_account_failed", {})
-                return 7
+                tap_failure_reason = (
+                    get_tap_account_result_failure_reason()
+                    or "tap_account_failed"
+                )
+                return _abort_target_acquisition(
+                    7,
+                    first_causal_reason=tap_failure_reason,
+                    target_outcome="target_unavailable_retryable",
+                    retryable=True,
+                    safe_to_skip=True,
+                    last_recovery_reason=tap_failure_reason,
+                )
         finally:
             clear_follow_ct_search_context()
         _t_ct_profile_verify = time.perf_counter()
@@ -12951,7 +13052,13 @@ def _run_followers_list_engine_session(
         )
         if not verify_profile(d, source_profile_username):
             _eng_log("followers_engine_aborted", "failed", "profile_verify_failed", {})
-            return 8
+            return _abort_target_acquisition(
+                8,
+                first_causal_reason="profile_verify_failed",
+                target_outcome="target_open_failed_retryable",
+                retryable=True,
+                safe_to_skip=True,
+            )
         _t_followers_open_requested = time.perf_counter()
         _startup_timing_log(
             "startup_timing_ct_profile_verified",
@@ -13045,7 +13152,18 @@ def _run_followers_list_engine_session(
                 "followers_list_not_opened",
                 fb_payload,
             )
-            return 40
+            return _abort_target_acquisition(
+                40,
+                first_causal_reason="followers_list_not_opened",
+                target_outcome="target_open_failed_retryable",
+                retryable=True,
+                safe_to_skip=True,
+                last_recovery_reason=str(
+                    open_list_meta.get("reason")
+                    or open_list_meta.get("failure_reason")
+                    or "followers_list_not_opened"
+                ),
+            )
     followers_list_ready = True
     navigation_loop_state: dict[str, Any] = {"last_state": None}
 

@@ -60,6 +60,15 @@ FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
 FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
+FOLLOW_TARGET_LOCAL_FAILURE_OUTCOMES = frozenset(
+    {
+        "target_unavailable_retryable",
+        "target_open_failed_retryable",
+        "target_open_failed_terminal",
+        "target_recovery_failed",
+        "target_skipped_current_attempt",
+    }
+)
 
 
 def _target_availability_capture_requested(account_id: str) -> bool:
@@ -717,6 +726,48 @@ def is_follow_target_safe_partial_rotation(
     )
 
 
+def _follow_target_local_failure_contract(
+    *,
+    exit_code: int,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Separate target-local failure from target/global completion."""
+
+    outcome = str(
+        summary.get("target_outcome")
+        or summary.get("follow_session_outcome")
+        or ""
+    ).strip()
+    first_reason = str(
+        summary.get("first_causal_reason")
+        or summary.get("follow_stop_reason")
+        or summary.get("target_reason")
+        or (f"exit_code_{int(exit_code)}" if int(exit_code) != 0 else "")
+    ).strip()
+    is_local = bool(
+        summary.get("target_local_failure") is True
+        or outcome in FOLLOW_TARGET_LOCAL_FAILURE_OUTCOMES
+    )
+    safe_to_skip = bool(
+        is_local
+        and summary.get("target_safe_to_skip") is True
+        and summary.get("target_completed") is not True
+        and int(summary.get("follows_completed_count") or 0) == 0
+    )
+    return {
+        "is_target_local_failure": is_local,
+        "target_outcome": outcome or ("target_recovery_failed" if exit_code else ""),
+        "target_reason": first_reason or "target_local_outcome_unknown",
+        "target_retryable": bool(is_local and summary.get("target_retryable") is True),
+        "target_safe_to_skip": safe_to_skip,
+        "target_completed": False if is_local else bool(summary.get("target_completed")),
+        "first_causal_reason": first_reason or "target_local_outcome_unknown",
+        "last_recovery_reason": str(
+            summary.get("last_recovery_reason") or first_reason or ""
+        ),
+    }
+
+
 def _follow_target_rotation_contract(
     summary: dict[str, Any],
     *,
@@ -816,8 +867,10 @@ def _run_follow_target_rotation(
     bounded_targets = follow_targets[:max_targets]
     exhausted_keys: set[str] = set()
     budget_reached_keys: set[str] = set()
+    attempt_excluded_keys: set[str] = set()
     exhausted_targets: list[dict[str, Any]] = []
     partial_resumable_targets: list[dict[str, Any]] = []
+    target_local_failures: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
     global_follows_completed = 0
     global_follow_goal = (
@@ -892,7 +945,12 @@ def _run_follow_target_rotation(
 
     for attempt_index, target in enumerate(bounded_targets):
         target_key = _follow_target_key(target)
-        if not target_key or target_key in exhausted_keys or target_key in budget_reached_keys:
+        if (
+            not target_key
+            or target_key in exhausted_keys
+            or target_key in budget_reached_keys
+            or target_key in attempt_excluded_keys
+        ):
             continue
         global_remaining = (
             max(0, global_follow_goal - global_follows_completed)
@@ -1104,6 +1162,12 @@ def _run_follow_target_rotation(
                 "exit_code": exit_code,
             }
         )
+        target_local_contract = _follow_target_local_failure_contract(
+            exit_code=exit_code,
+            summary=summary,
+        )
+        if target_local_contract["is_target_local_failure"]:
+            summary.update(target_local_contract)
         _observe_target_availability(
             "summary",
             tenant_id=str(tenant_id or ""),
@@ -1145,6 +1209,10 @@ def _run_follow_target_rotation(
                 "follows_completed_count": target_follows_completed,
                 "target_budget": target_budget,
                 "global_follows_completed": global_follows_completed,
+                "target_outcome": target_local_contract["target_outcome"],
+                "target_retryable": target_local_contract["target_retryable"],
+                "target_safe_to_skip": target_local_contract["target_safe_to_skip"],
+                "first_causal_reason": target_local_contract["first_causal_reason"],
             }
         )
         final_exit_code = exit_code
@@ -1513,6 +1581,118 @@ def _run_follow_target_rotation(
             )
             break
         if not exhausted:
+            if target_local_contract["is_target_local_failure"]:
+                first_causal_reason = str(
+                    target_local_contract["first_causal_reason"]
+                    or "target_local_outcome_unknown"
+                )
+                target_outcome = str(
+                    target_local_contract["target_outcome"]
+                    or "target_recovery_failed"
+                )
+                safe_to_skip = bool(target_local_contract["target_safe_to_skip"])
+                retryable = bool(target_local_contract["target_retryable"])
+                attempt_excluded_keys.add(target_key)
+                local_failure = {
+                    "target_id": target_id,
+                    "source_profile": source_profile,
+                    "target_index": target_index,
+                    "target_outcome": target_outcome,
+                    "target_reason": first_causal_reason,
+                    "target_retryable": retryable,
+                    "target_safe_to_skip": safe_to_skip,
+                    "target_completed": False,
+                    "first_causal_reason": first_causal_reason,
+                    "last_recovery_reason": target_local_contract[
+                        "last_recovery_reason"
+                    ],
+                    "follows_completed_count": target_follows_completed,
+                }
+                target_local_failures.append(local_failure)
+                remaining_local_targets = [
+                    candidate
+                    for candidate in bounded_targets[attempt_index + 1 :]
+                    if _follow_target_key(candidate) not in exhausted_keys
+                    and _follow_target_key(candidate) not in budget_reached_keys
+                    and _follow_target_key(candidate) not in attempt_excluded_keys
+                ]
+                if supabase_mode and exit_code not in (0, 97, 98):
+                    _record_follow_target_metric(
+                        "runtime_error_non_exhaustion",
+                        account_id=account_id,
+                        target_id=target_id,
+                        source_profile=source_profile,
+                        run_id=run_id,
+                        reason=first_causal_reason,
+                        outcome=target_outcome,
+                    )
+                if safe_to_skip and remaining_local_targets:
+                    next_target = remaining_local_targets[0]
+                    log(
+                        "warning",
+                        "follow_target_local_failure_skipped_current_attempt",
+                        account_id=account_id,
+                        run_id=run_id,
+                        target_id=target_id,
+                        source_profile=source_profile,
+                        next_target_id=_as_target_id(next_target.get("target_id")) or None,
+                        next_source_profile=_as_source_profile(
+                            next_target.get("source_profile")
+                        ),
+                        target_index=target_index,
+                        target_outcome=target_outcome,
+                        first_causal_reason=first_causal_reason,
+                        last_recovery_reason=target_local_contract[
+                            "last_recovery_reason"
+                        ],
+                        global_follow_remaining=(
+                            max(0, global_follow_goal - global_follows_completed)
+                            if global_follow_goal is not None
+                            else None
+                        ),
+                        remaining_target_count=len(remaining_local_targets),
+                        safe_next_step="rotate_next_ct",
+                    )
+                    continue
+
+                final_reason = (
+                    "all_targets_temporarily_unavailable"
+                    if safe_to_skip and not remaining_local_targets
+                    else first_causal_reason
+                )
+                final_summary.update(
+                    {
+                        "follow_session_outcome": (
+                            "partial_resumable"
+                            if retryable
+                            else "partial_not_resumable"
+                        ),
+                        "follow_stop_reason": final_reason,
+                        "original_follow_stop_reason": first_causal_reason,
+                        "first_causal_reason": first_causal_reason,
+                        "target_outcome": target_outcome,
+                        "target_reason": first_causal_reason,
+                        "target_retryable": retryable,
+                        "target_safe_to_skip": safe_to_skip,
+                        "target_completed": False,
+                        "target_local_failures": list(target_local_failures),
+                        "attempt_excluded_target_ids": sorted(attempt_excluded_keys),
+                        "safe_next_step": (
+                            "schedule_resume" if retryable else "manual_review"
+                        ),
+                    }
+                )
+                merge_follow_outcome(
+                    final_summary,
+                    stable_reason=final_reason,
+                    verified_actions=global_follows_completed,
+                    target_actions=global_follow_goal,
+                    current_target_id=target_id or source_profile,
+                    remaining_target_ids=_follow_target_ids(remaining_local_targets),
+                    safe_boundary=bool(retryable),
+                    extra_diagnostics=local_failure,
+                )
+                break
             if summary_reason in FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS:
                 final_reason = summary_reason
                 final_summary.update(
@@ -1717,7 +1897,26 @@ def _run_follow_target_rotation(
                     reason=str(summary.get("follow_stop_reason") or summary.get("follow_session_outcome") or f"exit_code_{exit_code}"),
                     outcome=str(summary.get("follow_session_outcome") or ""),
                 )
-            final_reason = str(summary.get("follow_session_outcome") or "target_completed")
+            first_causal_reason = str(
+                summary.get("first_causal_reason")
+                or summary.get("follow_stop_reason")
+                or summary.get("follow_session_outcome")
+                or f"exit_code_{exit_code}"
+            )
+            final_reason = first_causal_reason or "target_local_outcome_unknown"
+            final_summary.update(
+                {
+                    "follow_session_outcome": "partial_not_resumable",
+                    "follow_stop_reason": final_reason,
+                    "first_causal_reason": final_reason,
+                    "target_outcome": "target_local_outcome_unknown",
+                    "target_reason": final_reason,
+                    "target_retryable": False,
+                    "target_safe_to_skip": False,
+                    "target_completed": False,
+                    "safe_next_step": "manual_review",
+                }
+            )
             break
         exhausted_keys.add(target_key)
         exhausted_targets.append(
@@ -1881,6 +2080,17 @@ def _run_follow_target_rotation(
         if global_follow_goal is not None:
             final_summary["follows_goal_effective"] = global_follow_goal
             final_summary["global_follows_goal_effective"] = global_follow_goal
+        if target_local_failures:
+            final_summary["target_local_failures"] = list(target_local_failures)
+            final_summary["attempt_excluded_target_ids"] = sorted(
+                attempt_excluded_keys
+            )
+            # The first target-local failure remains the causal boundary even
+            # when a later CT reaches a normal stop.  Do not let a downstream
+            # summary replace it with the last recovery/stop reason.
+            final_summary["first_causal_reason"] = str(
+                target_local_failures[0].get("first_causal_reason") or ""
+            )
 
     remaining_target_ids = _follow_target_ids(
         [
@@ -1932,6 +2142,24 @@ def _run_follow_target_rotation(
             all_targets_exhausted=bool(final_summary.get("all_targets_exhausted")),
             safe_boundary=True,
         )
+
+    if target_local_failures:
+        final_summary["first_causal_reason"] = str(
+            target_local_failures[0].get("first_causal_reason") or ""
+        )
+        terminal_local_failure = target_local_failures[-1]
+        terminal_local_reason = str(
+            terminal_local_failure.get("first_causal_reason") or ""
+        )
+        if final_reason in {
+            terminal_local_reason,
+            "all_targets_temporarily_unavailable",
+        }:
+            final_summary["safe_next_step"] = (
+                "schedule_resume"
+                if terminal_local_failure.get("target_retryable") is True
+                else "manual_review"
+            )
 
     log(
         "info",
