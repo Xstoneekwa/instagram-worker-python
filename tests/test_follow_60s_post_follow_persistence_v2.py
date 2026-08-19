@@ -221,10 +221,14 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(
             result["reason"],
-            "follow60_cycle_incomplete_missing_required_mute_stage",
+            "follow60_candidate_local_post_follow_recovery_required",
         )
         self.assertEqual(result["missing_required_stages"], ["mute_posts_verified"])
         self.assertTrue(result["partial_receipts_persisted"])
+        self.assertTrue(result["candidate_local"])
+        self.assertTrue(result["partial_resumable"])
+        self.assertTrue(result["retained_for_idempotent_recovery"])
+        self.assertEqual(outbox.pending_count(self.path), 2)
         self.assertIs(rpc.call_args.kwargs["cycle_complete"], True)
         ledger_rpc.assert_not_called()
 

@@ -489,11 +489,18 @@ def flush_pending(
                 "flushed": flushed,
             }
         if return_ct_present and not completed_cycle_ready:
-            _delete_confirmed(group, path)
-            flushed += 1
+            # The candidate-local UI cycle is incomplete, but every stage
+            # acknowledged above is authoritative.  Keep the journal group so
+            # a bounded recovery can complete the missing Mute axis without
+            # repeating Follow or fabricating a cycle-complete receipt.
+            _mark_delivery_error(
+                group,
+                path,
+                "candidate_local_post_follow_recovery_required",
+            )
             log(
                 "error",
-                "follow60_cycle_incomplete_missing_required_mute_stage",
+                "follow60_candidate_local_post_follow_recovery_required",
                 account_id=first["account_id"],
                 run_id=first["original_run_id"],
                 request_id=first["original_request_id"],
@@ -503,14 +510,25 @@ def flush_pending(
                 missing_required_stages=missing_required_mute_stages,
                 cycle_ledger_ack_skipped=True,
                 next_candidate_blocked=True,
+                partial_resumable=True,
+                retained_for_idempotent_recovery=True,
             )
             return {
                 "ok": False,
-                "reason": "follow60_cycle_incomplete_missing_required_mute_stage",
+                "reason": "follow60_candidate_local_post_follow_recovery_required",
                 "flushed": flushed,
+                "candidate_local": True,
+                "partial_resumable": True,
                 "partial_receipts_persisted": True,
+                "account_id": first["account_id"],
+                "run_id": first["original_run_id"],
+                "request_id": first["original_request_id"],
+                "action_id_hash": first["action_id_hash"],
+                "candidate_username": first["candidate_username"],
+                "source_profile": first["source_profile"],
                 "persisted_stages": sorted(expected_stages),
                 "missing_required_stages": missing_required_mute_stages,
+                "retained_for_idempotent_recovery": True,
                 "pending": _active_pending_count(
                     _load_groups(path),
                     active_binding=binding,

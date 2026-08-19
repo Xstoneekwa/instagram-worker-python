@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "bdbc16825fa83909ca0c9a2bdfde20ae9e88009f",
-    "change_id": "ecd1cd73-0dad-4af2-b909-48e929fc7170",
-    "final_diff_hash": "0ea49276db46de4cd1012b8c86055a9b896c13b663a59f02f3efd3c4e255a1ff",
-    "final_manifest_hash": "f127a3fa15951e7eedc5803c3b09c443f98da1764c8b73c279290b4d6560ee3f",
-    "final_protected_scope_hash": "9eca8fc32d622ec1156b82c2c835612b6e57e278c9351b255ea4f8344d820639",
+    "base_sha": "87e5aaa928c9ce785e3f5c8c8855f266937a43f8",
+    "change_id": "follow60-mute-structural-post-follow-recovery-v1",
+    "final_diff_hash": "a469ab7b1b01d6a1e619b107be4c9a839135112b17e48e45b67435236118a917",
+    "final_manifest_hash": "6336083b6b6f74b96d02b3c8611eb64bcba0d8cd1a045278be5f028a94b7cf27",
+    "final_protected_scope_hash": "cdb7a6eb9c75e6c465e5ccf495f107f101dca46e518a8b4db08f6c950f840852",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -320,6 +320,26 @@
         "tests/test_p0c_runtime_identity_hotfix_v1.py"
       ],
       "requested_scope": "P0C runtime identity preflight, global failure classification, evidence-derived recovery, request lease renewal and same-SHA circuit breaker",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "87e5aaa928c9ce785e3f5c8c8855f266937a43f8",
+      "candidate_tree_sha": "ba6ca136f708e45665fd4b26d370bdc7c6db0eb3",
+      "change_id": "follow60-mute-structural-post-follow-recovery-v1",
+      "consumed_at": "2026-08-19T14:07:19.839538+00:00",
+      "diff_sha256": "a469ab7b1b01d6a1e619b107be4c9a839135112b17e48e45b67435236118a917",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_orchestrator.py",
+        "docs/checkpoints/2026-08-19-follow60-mute-structural-post-follow-recovery-v1.md",
+        "instagram_navigation.py",
+        "post_follow_stage_outbox.py",
+        "runner.py",
+        "tests/test_follow60_mute_structural_recovery_v1.py",
+        "tests/test_follow_60s_post_follow_persistence_v2.py"
+      ],
+      "requested_scope": "generic structural Mute CTA ownership, bounded post-follow recovery, candidate-local persistence and phase-safe Unfollow handoff",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1063,13 +1083,13 @@
       "size": 9317
     },
     "account_session_orchestrator.py": {
-      "git_blob_oid": "deeb745f6427f07446c5a70da26c4efae0e55948",
+      "git_blob_oid": "15f342259323226864a0aefd1b96ba2ce984fcfa",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "db9b46c4bfe66a8987c6256d8aaeaa7b9eba23613eba3498100d0038f5b790b0",
-      "size": 242493
+      "sha256": "96f77161dcb0ee65ba58706e00aecbfe02a6036aee129a8de9180f8c78e82da6",
+      "size": 243559
     },
     "account_session_phase_notification.py": {
       "git_blob_oid": "c5bac646636bf02bd8f92d06aabfd2fae9a44117",
@@ -1549,13 +1569,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "437cadb7cee72a71a2a1028dc5ba30d51246eefe",
+      "git_blob_oid": "4800e97b4dd032deaa3596b411007ee1209a71a1",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "5fe631bed93e5c42425ee24679fc31bb86fb2be413e9c420874af0c0e1e7c2ba",
-      "size": 2453514
+      "sha256": "35af32535b424fbee0eef4185908c0aea85746a180bb2efac0d0131b393c4daf",
+      "size": 2461577
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -1648,13 +1668,13 @@
       "size": 13784
     },
     "post_follow_stage_outbox.py": {
-      "git_blob_oid": "5167b1b5b6ea1e5acbd963ecaf0390d9569cd9c1",
+      "git_blob_oid": "14deedd4e9ee398913b393f40a673760df6ef497",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "post_follow_stage_outbox.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "c6f51ff560d99fe52d3fb70c86bf121a4de94d1f343f762901f8b6f955b3444d",
-      "size": 25507
+      "sha256": "a9f923f0c05d6ef5625e7991ee5dcde6fc8988643177009c56c5bf9275210acc",
+      "size": 26484
     },
     "post_open_intent_v2.py": {
       "git_blob_oid": "c333997768bfd90e23265f282b3144fdcf80675c",
@@ -1666,13 +1686,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "fde5a431255f60d4df262c72e54f8339191726b3",
+      "git_blob_oid": "dfd5edc552381118eb068a78d00c9d2be7c041b5",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "dcd17017e13e7a0546d31a5f04e0e9ff7a862160b85810024eefefa320270f6c",
-      "size": 1254337
+      "sha256": "bfc3f57cda98af09e6e8e6a973e6636bd5a871a02889e18bcf85fac40b4f37f8",
+      "size": 1257585
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2215,7 +2235,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "9eca8fc32d622ec1156b82c2c835612b6e57e278c9351b255ea4f8344d820639",
+  "protected_scope_sha256": "cdb7a6eb9c75e6c465e5ccf495f107f101dca46e518a8b4db08f6c950f840852",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

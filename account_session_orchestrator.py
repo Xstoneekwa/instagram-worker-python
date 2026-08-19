@@ -2617,7 +2617,14 @@ def _restart_eligibility(
     follow_quota_remaining: int | None,
     follow_to_unfollow_diagnostic: dict[str, Any],
     follow_to_unfollow_real: dict[str, Any],
+    follow_outcome: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
+    canonical_follow_outcome = dict(follow_outcome or {})
+    if (
+        canonical_follow_outcome.get("post_follow_recovery_required") is True
+        and canonical_follow_outcome.get("no_new_follow_until_recovered") is True
+    ):
+        return "blocked", "candidate_local_post_follow_recovery_required"
     blocked = _blocked_class_from_markers(
         follow_to_unfollow_diagnostic,
         follow_to_unfollow_real,
@@ -2687,6 +2694,18 @@ def _follow_exit_handoff_gate(
     follow_outcome: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     outcome = dict(follow_outcome or {})
+    if follow_exit_code == 53:
+        if (
+            outcome.get("phase_status") == "partial_resumable"
+            and outcome.get("scope") == "follow_phase"
+            and outcome.get("safe_boundary") is True
+            and outcome.get("candidate_local_failure") is True
+            and outcome.get("post_follow_recovery_required") is True
+            and outcome.get("safe_next_step") == "handoff_to_unfollow"
+            and outcome.get("no_new_follow_until_recovered") is True
+        ):
+            return True, "follow_candidate_local_post_follow_partial_safe_for_unfollow"
+        return False, "follow_candidate_local_partial_contract_unproved"
     if outcome:
         if (
             outcome.get("phase_status") != "completed"
@@ -5125,6 +5144,7 @@ def run_account_session(
         follow_quota_remaining=follow_quota_remaining,
         follow_to_unfollow_diagnostic=follow_to_unfollow_diagnostic,
         follow_to_unfollow_real=follow_to_unfollow_real,
+        follow_outcome=canonical_follow_outcome,
     )
     mandatory_unfollow_executed = bool(
         follow_to_unfollow_real.get("executed")

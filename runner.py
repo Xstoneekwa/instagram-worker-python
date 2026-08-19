@@ -22836,6 +22836,61 @@ def _run_followers_list_engine_session(
                     next_candidate_allowed=bool(_critical_persist_ok),
                 )
                 if not _critical_persist_ok:
+                    _candidate_local_mute_recovery_required = bool(
+                        str(_follow60_composite_flush.get("reason") or "")
+                        == "follow60_candidate_local_post_follow_recovery_required"
+                        and _follow60_composite_flush.get("candidate_local") is True
+                        and _follow60_composite_flush.get("partial_resumable") is True
+                        and _pf.get("return_ok") is True
+                    )
+                    if _candidate_local_mute_recovery_required:
+                        _candidate_local_first_reason = str(
+                            ((_pf.get("mute") or {}).get("first_failure_reason"))
+                            if isinstance(_pf.get("mute"), dict)
+                            else ""
+                        ).strip() or "post_follow_required_mute_incomplete"
+                        log(
+                            "warning",
+                            "post_follow_candidate_local_partial_resumable",
+                            target_username=source_profile_username,
+                            candidate_username=str(follower_un or ""),
+                            first_causal_reason=_candidate_local_first_reason,
+                            missing_required_stages=list(
+                                _follow60_composite_flush.get("missing_required_stages")
+                                or []
+                            ),
+                            physical_follow_preserved=True,
+                            follow_retap_allowed=False,
+                            safe_boundary=True,
+                            safe_next_step="handoff_to_unfollow",
+                        )
+                        _publish_followers_session_summary(
+                            exit_code=53,
+                            follow_session_outcome="partial_resumable",
+                            follow_stop_reason="post_follow_required_mute_incomplete",
+                            phase_status="partial_resumable",
+                            scope="follow_phase",
+                            safe_boundary=True,
+                            safe_next_step="handoff_to_unfollow",
+                            first_causal_reason=_candidate_local_first_reason,
+                            candidate_local_failure=True,
+                            post_follow_recovery_required=True,
+                            no_new_follow_until_recovered=True,
+                            missing_required_stages=list(
+                                _follow60_composite_flush.get("missing_required_stages")
+                                or []
+                            ),
+                            follows_completed_count=int(follows_completed_count),
+                            target_follow_budget_effective=target_follow_budget_effective,
+                        )
+                        _emit_performance_summary(
+                            t0=t0,
+                            warm_session_used=warm_session_used,
+                            force_stop_used=force_stop_used,
+                            exit_code=53,
+                            target_username=source_profile_username,
+                        )
+                        return 53
                     log(
                         "error",
                         "post_return_critical_persist_failed",

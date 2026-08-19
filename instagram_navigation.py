@@ -50655,6 +50655,59 @@ def _mute_engine_v2_following_header_text_ok(txt: str) -> bool:
     return False
 
 
+def _mute_engine_v2_following_cta_structure_ok(
+    *,
+    bounds: dict[str, Any],
+    peer_controls: list[dict[str, Any]],
+    ww: int,
+    wh: int,
+    candidate_profile_confirmed: bool,
+) -> tuple[bool, str]:
+    """Prove that an exact Following control belongs to the profile action row.
+
+    Instagram moves the action row vertically as the header grows.  A global
+    percentage cutoff therefore cannot be authoritative.  The proof is based
+    on exact candidate-profile identity plus either a wide standalone CTA or
+    an aligned Message/Contact/add-person peer.  It deliberately rejects list
+    rows, suggested cards and controls below the profile tabs.
+    """
+    if not candidate_profile_confirmed:
+        return False, "candidate_profile_identity_unproved"
+    try:
+        left = int(bounds.get("left", 0))
+        top = int(bounds.get("top", 0))
+        right = int(bounds.get("right", 0))
+        bottom = int(bounds.get("bottom", 0))
+    except Exception:
+        return False, "bounds_invalid"
+    width = max(0, right - left)
+    height = max(1, bottom - top)
+    cy = (top + bottom) // 2
+    if width < int(ww * 0.12) or cy < int(wh * 0.07) or cy > int(wh * 0.78):
+        return False, "outside_profile_action_region"
+    if width >= int(ww * 0.42):
+        return True, "wide_profile_action_cta"
+    for peer in peer_controls:
+        text = str(peer.get("text") or "").strip().lower()
+        rid = str(peer.get("resource_id") or "").strip().lower()
+        if not (
+            text in {"message", "contact"}
+            or "message" in rid
+            or "contact" in rid
+            or "add_people" in rid
+            or "add_person" in rid
+        ):
+            continue
+        pb = dict(peer.get("bounds") or {})
+        try:
+            pcy = (int(pb.get("top", 0)) + int(pb.get("bottom", 0))) // 2
+        except Exception:
+            continue
+        if abs(pcy - cy) <= max(18, int(height * 0.8)):
+            return True, "aligned_profile_action_peer"
+    return False, "profile_action_row_ownership_unproved"
+
+
 def _mute_engine_v2_pick_following_cta(
     d: u2.Device,
     *,
@@ -50663,6 +50716,8 @@ def _mute_engine_v2_pick_following_cta(
     t0: float,
     visual_candidate_id: str = "",
     source_profile_username: str = "",
+    follower_username: str = "",
+    candidate_profile_confirmed: bool | None = None,
 ) -> tuple[Any | None, str]:
     rem = _mute_engine_v2_remaining_s(t0)
     vcid = str(visual_candidate_id or "").strip()
@@ -50685,8 +50740,43 @@ def _mute_engine_v2_pick_following_cta(
             pass
     log("info", "mute_engine_v2_following_button_search_started", **base_log)
     ex_to = max(0.05, min(0.14, rem * 0.32))
-    y_header_max = int(wh * 0.52)
-    y_header_min = int(wh * 0.07)
+    profile_confirmed = candidate_profile_confirmed
+    if profile_confirmed is None:
+        try:
+            live_profile = str(read_current_profile_username_for_follow_gate(d) or "")
+            profile_confirmed = bool(
+                follower_username
+                and _normalize_handle(live_profile)
+                == _normalize_handle(follower_username)
+            )
+        except Exception:
+            profile_confirmed = False
+    structural_peers: list[dict[str, Any]] | None = None
+
+    def _load_structural_peers() -> list[dict[str, Any]]:
+        nonlocal structural_peers
+        if structural_peers is not None:
+            return structural_peers
+        structural_peers = []
+        try:
+            for peer in d(
+                classNameMatches=r".*(Button|TextView|ImageView)", clickable=True
+            ).all()[:64]:
+                info = dict(peer.info or {})
+                structural_peers.append(
+                    {
+                        "text": str(
+                            info.get("text") or info.get("contentDescription") or ""
+                        ),
+                        "resource_id": str(
+                            info.get("resourceName") or info.get("resourceId") or ""
+                        ),
+                        "bounds": dict(info.get("bounds") or {}),
+                    }
+                )
+        except Exception:
+            structural_peers = []
+        return structural_peers
 
     def _element_passes(el: Any, *, pick_reason: str) -> tuple[Any | None, str]:
         try:
@@ -50725,12 +50815,28 @@ def _mute_engine_v2_pick_following_cta(
             rx = int(b.get("right", 0))
         except Exception:
             return None, ""
-        if cy < y_header_min or cy > y_header_max:
+        try:
+            control_width = max(0, int(b.get("right", 0)) - int(b.get("left", 0)))
+        except Exception:
+            control_width = 0
+        # The canonical wide profile CTA needs no peer scan.  Only compact
+        # variants pay the bounded structural-peer fallback cost.
+        peer_controls = (
+            [] if control_width >= int(ww * 0.42) else _load_structural_peers()
+        )
+        structure_ok, structure_reason = _mute_engine_v2_following_cta_structure_ok(
+            bounds=dict(b),
+            peer_controls=peer_controls,
+            ww=int(ww),
+            wh=int(wh),
+            candidate_profile_confirmed=bool(profile_confirmed),
+        )
+        if not structure_ok:
             log(
                 "info",
                 "mute_engine_v2_following_button_rejected",
                 **base_log,
-                reason="y_outside_header_cta_band",
+                reason=structure_reason,
                 cy=int(cy),
                 pick_reason=pick_reason,
             )
@@ -50749,6 +50855,7 @@ def _mute_engine_v2_pick_following_cta(
             "mute_engine_v2_following_button_candidate",
             **base_log,
             pick_reason=pick_reason,
+            structural_proof=structure_reason,
             candidate_text=merged[:120],
             bounds={
                 "left": b.get("left"),
@@ -52311,6 +52418,7 @@ def run_mute_engine_v2(
             t0=t_all,
             visual_candidate_id=vcid,
             source_profile_username=src,
+            follower_username=fu2,
         )
         if btn_fast is not None:
             try:
@@ -52649,6 +52757,14 @@ def run_mute_engine_v2(
             t0=t_all,
             visual_candidate_id=vcid,
             source_profile_username=src,
+            follower_username=fu2,
+            candidate_profile_confirmed=(
+                True
+                if fu2
+                and ab_live
+                and _normalize_handle(ab_live) == _normalize_handle(fu2)
+                else None
+            ),
         )
         if btn is None:
             log(
@@ -60190,6 +60306,76 @@ def run_visual_candidate_post_follow_phase(
             det_hint=det_use if isinstance(det_use, dict) else None,
             candidate_context=candidate_profile_context,
         )
+        first_v2_failure_reason = str(
+            v2.get("failure_reason") or v2.get("abort_reason") or ""
+        ).strip()
+        mute_recovery_used = False
+        mute_recovery_profile_confirmed = False
+        recoverable_candidate_local_mute_failures = {
+            "following_button_not_found",
+            "following_button_search_budget_exhausted",
+            "mute_toggle_budget_starved",
+            "mute_budget_exceeded",
+        }
+        try:
+            mute_recovery_instagram_foreground = bool(
+                str((d.app_current() or {}).get("package") or "") == str(pkg or "")
+            )
+        except Exception:
+            mute_recovery_instagram_foreground = False
+        if (
+            str(v2.get("outcome") or "") not in {"success", "partial_success"}
+            and first_v2_failure_reason in recoverable_candidate_local_mute_failures
+            and mute_recovery_instagram_foreground
+        ):
+            try:
+                live_candidate = str(
+                    read_current_profile_username_for_follow_gate(d) or ""
+                )
+                mute_recovery_profile_confirmed = bool(
+                    cand
+                    and _normalize_handle(live_candidate)
+                    == _normalize_handle(cand)
+                )
+            except Exception:
+                live_candidate = ""
+                mute_recovery_profile_confirmed = False
+            if mute_recovery_profile_confirmed:
+                mute_recovery_used = True
+                log(
+                    "warning",
+                    "post_follow_mute_candidate_local_recovery_started",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    first_failure_reason=first_v2_failure_reason,
+                    follow_retap_allowed=False,
+                    recovery_attempt=1,
+                    recovery_budget=1,
+                )
+                recovered_v2 = run_mute_engine_v2(
+                    d,
+                    pkg=pkg,
+                    source_profile_username=src,
+                    visual_candidate_id=vcid,
+                    follower_username=cand,
+                    follow_state_after=fs_after,
+                    det_hint=det_use if isinstance(det_use, dict) else None,
+                    candidate_context=candidate_profile_context,
+                )
+                v2 = recovered_v2
+                log(
+                    "info" if str(v2.get("outcome") or "") in {"success", "partial_success"} else "warning",
+                    "post_follow_mute_candidate_local_recovery_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    first_failure_reason=first_v2_failure_reason,
+                    recovery_outcome=str(v2.get("outcome") or ""),
+                    recovery_failure_reason=str(v2.get("failure_reason") or ""),
+                    follow_retapped=False,
+                    recovery_attempts=1,
+                )
         outcome = str(v2.get("outcome") or "")
         mute_out = {
             "ok": bool(v2.get("ok")),
@@ -60204,6 +60390,14 @@ def run_visual_candidate_post_follow_phase(
             "timings_ms": v2.get("timings_ms") or {},
             "posts_verified": bool(v2.get("posts_verified")),
             "stories_verified": bool(v2.get("stories_verified")),
+            "recovery_used": bool(mute_recovery_used),
+            "recovery_ok": bool(
+                mute_recovery_used
+                and outcome in {"success", "partial_success"}
+            ),
+            "recovery_attempts": 1 if mute_recovery_used else 0,
+            "recovery_profile_confirmed": bool(mute_recovery_profile_confirmed),
+            "first_failure_reason": first_v2_failure_reason or None,
         }
         if bool(v2.get("posts_verified")):
             _persist_verified_stage(
