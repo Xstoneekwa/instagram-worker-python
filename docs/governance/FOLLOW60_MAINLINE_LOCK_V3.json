@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "87e5aaa928c9ce785e3f5c8c8855f266937a43f8",
-    "change_id": "follow60-mute-structural-post-follow-recovery-v1",
-    "final_diff_hash": "a469ab7b1b01d6a1e619b107be4c9a839135112b17e48e45b67435236118a917",
-    "final_manifest_hash": "6336083b6b6f74b96d02b3c8611eb64bcba0d8cd1a045278be5f028a94b7cf27",
-    "final_protected_scope_hash": "cdb7a6eb9c75e6c465e5ccf495f107f101dca46e518a8b4db08f6c950f840852",
+    "base_sha": "1365f83e6a7c22eaaddedbb5264afaa63640e9f3",
+    "change_id": "phone-farm-production-stability-closure-v1-20260819-amendment",
+    "final_diff_hash": "522d6a3a706e5c200e8f094fee912b8499aaf12f5ba402406d848e3c45f8f8eb",
+    "final_manifest_hash": "b62b9de5fa01ce17d3c93849523c6d013a697e3c56d34cdab6c5a6c7c24c6ba7",
+    "final_protected_scope_hash": "89a2069af9201285058166a050ca935a5aa3024445b84039cfae3b8362819415",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -340,6 +340,29 @@
         "tests/test_follow_60s_post_follow_persistence_v2.py"
       ],
       "requested_scope": "generic structural Mute CTA ownership, bounded post-follow recovery, candidate-local persistence and phase-safe Unfollow handoff",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "1365f83e6a7c22eaaddedbb5264afaa63640e9f3",
+      "candidate_tree_sha": "2b5d718b3a0009a072e22c8cbe9ace194688b4f8",
+      "change_id": "phone-farm-production-stability-closure-v1-20260819-amendment",
+      "consumed_at": "2026-08-19T19:20:37.427093+00:00",
+      "diff_sha256": "522d6a3a706e5c200e8f094fee912b8499aaf12f5ba402406d848e3c45f8f8eb",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_orchestrator.py",
+        "docs/dev-session-latest.md",
+        "docs/post-follow-flow.md",
+        "docs/recovery-engine.md",
+        "post_follow_stage_outbox.py",
+        "runner.py",
+        "tests/fixtures/follow60_production_stability_closure_v1.json",
+        "tests/test_follow60_mainline_v1.py",
+        "tests/test_follow60_production_stability_closure_v1.py",
+        "tests/test_follow_60s_post_follow_persistence_v2.py"
+      ],
+      "requested_scope": "production stability closure: monotonic canonical Follow, bounded candidate-local post-Follow recovery, and safe Follow-to-Unfollow handoff",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1083,13 +1106,13 @@
       "size": 9317
     },
     "account_session_orchestrator.py": {
-      "git_blob_oid": "15f342259323226864a0aefd1b96ba2ce984fcfa",
+      "git_blob_oid": "9b1a38fd5a3cfb8580a4e5816d02784859bb3627",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "96f77161dcb0ee65ba58706e00aecbfe02a6036aee129a8de9180f8c78e82da6",
-      "size": 243559
+      "sha256": "b17b954151b1ea56e4a82987b6afdced13735c85f7a8e1de27dfa561f72481c2",
+      "size": 244041
     },
     "account_session_phase_notification.py": {
       "git_blob_oid": "c5bac646636bf02bd8f92d06aabfd2fae9a44117",
@@ -1668,13 +1691,13 @@
       "size": 13784
     },
     "post_follow_stage_outbox.py": {
-      "git_blob_oid": "14deedd4e9ee398913b393f40a673760df6ef497",
+      "git_blob_oid": "e54f3305db5c9c2905035186afdeff0880ac4b91",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "post_follow_stage_outbox.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "a9f923f0c05d6ef5625e7991ee5dcde6fc8988643177009c56c5bf9275210acc",
-      "size": 26484
+      "sha256": "eb5434b912c7a03bb9dfe5c179b15dee2baf36a729693264c42452d3f35d1a1a",
+      "size": 28842
     },
     "post_open_intent_v2.py": {
       "git_blob_oid": "c333997768bfd90e23265f282b3144fdcf80675c",
@@ -1686,13 +1709,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "dfd5edc552381118eb068a78d00c9d2be7c041b5",
+      "git_blob_oid": "feee12bec7c1be6a5f01d66cd50b9b9d02de51d8",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "bfc3f57cda98af09e6e8e6a973e6636bd5a871a02889e18bcf85fac40b4f37f8",
-      "size": 1257585
+      "sha256": "4da261990ff0ed8103bd5fb50b4682a717b55c756a66bcd3ee92587054c4baf6",
+      "size": 1258895
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2235,7 +2258,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "cdb7a6eb9c75e6c465e5ccf495f107f101dca46e518a8b4db08f6c950f840852",
+  "protected_scope_sha256": "89a2069af9201285058166a050ca935a5aa3024445b84039cfae3b8362819415",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

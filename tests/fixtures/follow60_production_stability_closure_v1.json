@@ -1,0 +1,19 @@
+{
+  "schema": "PHONE_FARM_PRODUCTION_INCIDENT_FIXTURES_V1",
+  "cases": [
+    {"id": "arnaud_ambiguous_follow", "class": "ambiguous_mutation", "expected": "no_blind_retry"},
+    {"id": "bmy_real_runtime_identity_worker_sha", "class": "runtime_identity", "expected": "real_worker_sha"},
+    {"id": "bmy_candidate_recovery_already_liked", "class": "candidate_recovery", "expected": "already_liked_safe_skip"},
+    {"id": "mythyl_slow_app_current_window_size", "class": "post_first_v2", "expected": "bounded_existing_fallback"},
+    {"id": "mythyl_stage_b_two_hour_timeout", "class": "business_deadline", "expected": "cooperative_safe_stop"},
+    {"id": "growth_following_cta_cy_1255", "class": "structural_mute", "expected": "following_cta_owned"},
+    {"id": "follow_persisted_mute_incomplete", "class": "post_follow", "expected": "partial_resumable_no_retap"},
+    {"id": "return_ct_auxiliary_persistence_failure", "class": "auxiliary_persistence", "expected": "defer_without_business_failure"},
+    {"id": "target_local_zero_mutation", "class": "target_local", "expected": "rotate_without_receipt"},
+    {"id": "target_local_follow_durable_post_follow_pending", "class": "target_local", "expected": "exit_53_handoff"},
+    {"id": "suggestions_boundary", "class": "followers_surface", "expected": "exclude_suggestions"},
+    {"id": "see_more_boundary", "class": "followers_surface", "expected": "safe_see_more"},
+    {"id": "ct_resume", "class": "checkpoint", "expected": "resume_exact_ct"},
+    {"id": "follow_partial_to_unfollow", "class": "phase_handoff", "expected": "mandatory_unfollow_allowed"}
+  ]
+}

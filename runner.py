@@ -22537,6 +22537,10 @@ def _run_followers_list_engine_session(
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
+                # Non-deferred flows have already crossed the canonical Follow
+                # receipt barrier. Deferred flows overwrite this after the
+                # post-Follow UI phase below.
+                _follow_persist_ok = True
                 _follow60_composite_flush: dict[str, Any] = {}
                 if _follow_persistence_ctx is not None:
                     try:
@@ -22836,12 +22840,21 @@ def _run_followers_list_engine_session(
                     next_candidate_allowed=bool(_critical_persist_ok),
                 )
                 if not _critical_persist_ok:
+                    _post_follow_failure = (
+                        post_follow_stage_outbox.classify_post_follow_flush(
+                            _follow60_composite_flush,
+                            canonical_follow_persisted=bool(_follow_persist_ok),
+                        )
+                        if _follow60_stage_receipts
+                        else {
+                            "failure_class": "post_follow_persistence_unclassified_fail_closed",
+                            "candidate_local": False,
+                        }
+                    )
                     _candidate_local_mute_recovery_required = bool(
-                        str(_follow60_composite_flush.get("reason") or "")
-                        == "follow60_candidate_local_post_follow_recovery_required"
-                        and _follow60_composite_flush.get("candidate_local") is True
-                        and _follow60_composite_flush.get("partial_resumable") is True
-                        and _pf.get("return_ok") is True
+                        _post_follow_failure.get("failure_class")
+                        == "target_local_follow_durable_post_follow_pending"
+                        and _post_follow_failure.get("candidate_local") is True
                     )
                     if _candidate_local_mute_recovery_required:
                         _candidate_local_first_reason = str(
@@ -22860,9 +22873,18 @@ def _run_followers_list_engine_session(
                                 or []
                             ),
                             physical_follow_preserved=True,
-                            follow_retap_allowed=False,
-                            safe_boundary=True,
-                            safe_next_step="handoff_to_unfollow",
+                            follow_retap_allowed=bool(
+                                _post_follow_failure.get("follow_retap_allowed")
+                            ),
+                            failure_class=str(
+                                _post_follow_failure.get("failure_class") or ""
+                            ),
+                            safe_boundary=bool(
+                                _post_follow_failure.get("safe_boundary")
+                            ),
+                            safe_next_step=str(
+                                _post_follow_failure.get("safe_next_step") or ""
+                            ),
                         )
                         _publish_followers_session_summary(
                             exit_code=53,
@@ -22870,8 +22892,12 @@ def _run_followers_list_engine_session(
                             follow_stop_reason="post_follow_required_mute_incomplete",
                             phase_status="partial_resumable",
                             scope="follow_phase",
-                            safe_boundary=True,
-                            safe_next_step="handoff_to_unfollow",
+                            safe_boundary=bool(
+                                _post_follow_failure.get("safe_boundary")
+                            ),
+                            safe_next_step=str(
+                                _post_follow_failure.get("safe_next_step") or ""
+                            ),
                             first_causal_reason=_candidate_local_first_reason,
                             candidate_local_failure=True,
                             post_follow_recovery_required=True,

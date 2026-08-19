@@ -36,6 +36,65 @@ DEFAULT_PATH = Path(
 )
 
 
+def classify_post_follow_flush(
+    flush_result: dict[str, Any] | None,
+    *,
+    canonical_follow_persisted: bool,
+) -> dict[str, Any]:
+    """Classify a post-Follow barrier without weakening canonical persistence.
+
+    A candidate-local handoff is allowed only when the Follow itself is already
+    canonical and the outbox proves that its partial receipts, including the
+    exact Return CT boundary, were durably acknowledged and retained for
+    idempotent recovery.  Any weaker/unknown result remains fail-closed.
+    """
+    result = dict(flush_result or {})
+    persisted_stages = {
+        str(stage) for stage in list(result.get("persisted_stages") or [])
+    }
+    local_partial = bool(
+        canonical_follow_persisted
+        and result.get("reason")
+        == "follow60_candidate_local_post_follow_recovery_required"
+        and result.get("candidate_local") is True
+        and result.get("partial_resumable") is True
+        and result.get("partial_receipts_persisted") is True
+        and result.get("retained_for_idempotent_recovery") is True
+        and "return_ct_exact" in persisted_stages
+        and str(result.get("action_id_hash") or "").strip()
+        and str(result.get("candidate_username") or "").strip()
+    )
+    if local_partial:
+        return {
+            "failure_class": "target_local_follow_durable_post_follow_pending",
+            "candidate_local": True,
+            "partial_resumable": True,
+            "safe_boundary": True,
+            "safe_next_step": "handoff_to_unfollow",
+            "follow_retap_allowed": False,
+            "no_new_follow_until_recovered": True,
+        }
+    if not canonical_follow_persisted:
+        return {
+            "failure_class": "canonical_follow_persistence_failure",
+            "candidate_local": False,
+            "partial_resumable": False,
+            "safe_boundary": False,
+            "safe_next_step": "stop_fail_closed",
+            "follow_retap_allowed": False,
+            "no_new_follow_until_recovered": True,
+        }
+    return {
+        "failure_class": "post_follow_persistence_unclassified_fail_closed",
+        "candidate_local": False,
+        "partial_resumable": False,
+        "safe_boundary": False,
+        "safe_next_step": "stop_fail_closed",
+        "follow_retap_allowed": False,
+        "no_new_follow_until_recovered": True,
+    }
+
+
 def action_id_hash(action_id: str) -> str:
     return hashlib.sha256(str(action_id or "").encode("utf-8")).hexdigest()
 

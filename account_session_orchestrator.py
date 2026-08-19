@@ -3664,7 +3664,7 @@ def _evaluate_h3_follow_exit_code_gate(
     diagnostic: dict[str, Any],
     real_max_actions_effective: int,
 ) -> dict[str, Any]:
-    allowed_codes = [0, 97]
+    allowed_codes = [0, 53, 97]
     out: dict[str, Any] = {
         "follow_exit_code": follow_exit_code,
         "follow_exit_code_allowed": False,
@@ -3694,9 +3694,18 @@ def _evaluate_h3_follow_exit_code_gate(
             }
         )
         return out
-    if follow_exit_code != 97:
+    if follow_exit_code not in (53, 97):
         out["follow_exit_code_block_reason"] = "follow_exit_code_not_allowed_h3_real"
         return out
+
+    if follow_exit_code == 53:
+        partial_ok, partial_reason = _follow_exit_handoff_gate(
+            follow_exit_code,
+            dict(diagnostic.get("follow_outcome") or {}),
+        )
+        if not partial_ok:
+            out["follow_exit_code_block_reason"] = partial_reason
+            return out
 
     blockers: list[str] = []
     if not str(account_id or "").strip() or not str(account_username or "").strip():
@@ -3739,7 +3748,11 @@ def _evaluate_h3_follow_exit_code_gate(
     out.update(
         {
             "follow_exit_code_allowed": True,
-            "follow_exit_code_allow_reason": "partial_safe_follow_exit_97",
+            "follow_exit_code_allow_reason": (
+                "follow_candidate_local_post_follow_partial_safe_for_unfollow"
+                if follow_exit_code == 53
+                else "partial_safe_follow_exit_97"
+            ),
         }
     )
     return out

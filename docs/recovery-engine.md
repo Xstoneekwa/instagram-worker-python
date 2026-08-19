@@ -31,6 +31,23 @@ Les flows sensibles (followers, ouverture profil, follow, **post-follow / return
 
 La recovery n’est pas un “catch-all” opaque : chaque tentative doit être **observable** et **justifiée** dans les logs.
 
+## Follow durable, post-Follow incomplet
+
+Quand le Follow canonique est confirmé et persisté mais qu'une étape Mute/Like
+reste incomplète, la recovery ne peut ni effacer cette mutation ni retaper
+Follow. Le classifieur commun exige les reçus crash-safe de l'outbox, notamment
+`return_ct_exact`, l'identité candidat et la conservation idempotente du groupe.
+Il émet alors `target_local_follow_durable_post_follow_pending` et arrête la
+branche Follow à une frontière sûre.
+
+Le budget ajouté par cette fermeture est nul : aucune nouvelle tentative UI,
+aucun Back, aucun polling et aucun délai fixe. L'Auto Restart ou la reprise
+suivante doit traiter l'outbox avant tout nouveau Follow. La phase Unfollow
+obligatoire reste indépendante et peut démarrer après l'exit 53 uniquement si
+le handoff exact, l'identité runtime et tous les gardes compte/plateforme sont
+valides. Un exit 53 mal formé, un challenge ou une persistance Follow non prouvée
+reste bloqué fail-closed.
+
 ## Retries intelligents
 
 - Retries **conditionnés** par l’état observé (pas de retry identique sans nouveau signal).

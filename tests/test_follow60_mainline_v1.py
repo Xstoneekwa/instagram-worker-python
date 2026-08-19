@@ -138,16 +138,18 @@ class Follow60MainlineOutboxTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(
                 result["reason"],
-                "follow60_cycle_incomplete_missing_required_mute_stage",
+                "follow60_candidate_local_post_follow_recovery_required",
             )
             self.assertTrue(result["partial_receipts_persisted"])
             self.assertEqual(
                 result["missing_required_stages"], ["mute_stories_verified"]
             )
-            self.assertEqual(outbox.pending_count(path), 0)
+            self.assertTrue(result["retained_for_idempotent_recovery"])
+            self.assertEqual(outbox.pending_count(path), 2)
             # This legacy RPC argument means that Return CT closes the receipt
-            # batch.  Business-cycle completion remains false because the
-            # completed-cycle ledger is deliberately not acknowledged.
+            # batch. Business-cycle completion remains false and the local
+            # receipts remain pending because the completed-cycle ledger is
+            # deliberately not acknowledged.
             self.assertIs(persist_rpc.call_args.kwargs["cycle_complete"], True)
             ledger_rpc.assert_not_called()
 

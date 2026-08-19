@@ -646,3 +646,17 @@ remain historical evidence.
   Vision or fixed sleep was added to the healthy path.
 - Account-specific logic: none.
 - Runtime activation: forbidden until Liam Approval 2 and final relock.
+
+## Production Stability Closure V1 — candidat avant Approval 2
+
+- Base verrouillée : `1365f83e6a7c22eaaddedbb5264afaa63640e9f3`.
+- Frontière cassée : le runner privilégiait le champ transitoire `return_ok`
+  devant le reçu durable `return_ct_exact`, puis l'orchestrateur refusait
+  globalement l'exit 53 pourtant déjà validé par son handoff exact.
+- Correction générique : classification autoritaire des reçus outbox, Follow
+  canonique monotone, zéro retap Follow, exit 53 strictement borné et Unfollow
+  obligatoire indépendant sous tous les gardes existants.
+- Aucun retry UI, XML, screenshot, Vision, sleep, migration, run, tick, ADB,
+  déploiement ou activation n'est ajouté par ce chantier.
+- Validation ciblée dans l'interpréteur Python réel du Worker : `63/63 PASS`;
+  matrice historique/lock finale à geler avant la demande Approval 2.

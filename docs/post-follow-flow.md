@@ -102,6 +102,28 @@ Principes documentés côté implémentation :
 
 Voir aussi [recovery-engine.md](recovery-engine.md).
 
+## Monotonic Follow and durable post-Follow partials
+
+La preuve canonique `follow_verified` est irréversible dans le sens métier : une
+défaillance ultérieure de Mute, Like ou Return CT ne requalifie jamais le Follow
+en échec et n'autorise jamais un second tap Follow. Le WAL SQLite
+`follow60_post_follow_outbox_v2` est la source autoritaire pour les étapes
+post-Follow acquittées. Une classification locale n'est permise que si le Follow
+canonique est déjà persisté, que `return_ct_exact` figure dans les reçus durables
+et que le groupe est conservé pour reprise idempotente.
+
+Ce contrat produit le terminal borné
+`target_local_follow_durable_post_follow_pending` (exit 53) : la cible reste
+incomplète, aucun nouveau Follow ne peut être entrepris avant reprise, mais la
+phase Unfollow obligatoire de la session peut continuer. Le champ visuel
+transitoire `return_ok` n'a aucune autorité sur un reçu `return_ct_exact` déjà
+persisté. Toute absence de preuve exacte, et surtout toute défaillance de
+persistance du Follow canonique, reste fail-closed avec exit 96.
+
+Cette fermeture n'ajoute aucun XML dump, screenshot, Vision, sleep ou geste UI
+au happy path. Elle ne lance pas une nouvelle boucle locale : après la tentative
+post-Follow existante, l'état prouvé est persisté puis différé immédiatement.
+
 ## Rex Follow 60 — PostGridEvidence V2 et reçus durables
 
 Le canary Follow 60 peut produire, à la fermeture finale de la feuille

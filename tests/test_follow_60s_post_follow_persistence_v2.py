@@ -232,6 +232,15 @@ class Follow60PostFollowOutboxV2Test(unittest.TestCase):
         self.assertIs(rpc.call_args.kwargs["cycle_complete"], True)
         ledger_rpc.assert_not_called()
 
+        classified = outbox.classify_post_follow_flush(
+            result, canonical_follow_persisted=True
+        )
+        self.assertEqual(
+            classified["failure_class"],
+            "target_local_follow_durable_post_follow_pending",
+        )
+        self.assertFalse(classified["follow_retap_allowed"])
+
     def test_rpc_success_then_crash_before_delete_replays_db_only_as_duplicates(self) -> None:
         self._journal("like_verified", {"liked_count": 1})
         inserted = {
