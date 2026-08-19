@@ -1,5 +1,21 @@
 # Follow Action Engine
 
+## P0C — global persistence preflight
+
+Avant toute boucle candidat, le Worker doit prouver simultanément l'identité de
+release canonique et la capacité de créer/remplacer/fsync un intent durable.
+`follow_persistence_runtime_unavailable` est une panne globale de phase : elle
+termine le run avant tout tap et ne peut jamais être convertie en rejet local
+permettant de passer au candidat suivant. La valeur canonique du SHA est
+`WorkerRuntimeIdentity.worker_sha`, résolue par le helper de release ;
+`full_sha` n'appartient pas à ce contrat.
+
+Les candidats interrompus entre Like et Follow sont placés dans une queue
+durable, isolée par compte et indépendante du curseur CT. La récupération ne
+retape jamais Like lorsque l'état est `liked` ou ambigu. Elle ne crée reçu et
+compteur Follow qu'après une mutation Follow fraîche et vérifiée ; un profil
+déjà `following/requested` est terminalisé comme externe/non attribué.
+
 ## Vue d’ensemble (V2 / V3)
 
 Le **Follow Action Engine** est le chemin **profil déjà ouvert** (notamment candidat visuel) pour :

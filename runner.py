@@ -44,6 +44,7 @@ import runtime_events
 import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
+import follow_candidate_recovery
 import follow_persistence_receipt_replay
 from ambiguous_mutation_reconciliation import decide_reconciliation
 import deferred_projection_outbox
@@ -4833,6 +4834,8 @@ _CURRENT_RUN_ID: str | None = None
 _CURRENT_ACCOUNT_ID: str | None = None
 _CURRENT_DEVICE: Any | None = None
 _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING: dict[str, str] | None = None
+_FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS: set[str] = set()
+_FOLLOW_CANDIDATE_RECOVERY_RUN_IDS: set[str] = set()
 
 
 def _terminalize_run_request_after_cleanup(run_status: str) -> None:
@@ -5001,6 +5004,327 @@ def _open_search_with_recovery(
             reason="open_search_failed_after_permission_recovery",
         )
     return ok_retry
+
+
+def _process_follow_candidate_recovery_batch(
+    d,
+    *,
+    account_id: str,
+    run_id: str,
+    run_request_id: str | None,
+    business_session_id: str | None,
+    settings_revision: str,
+    quota_remaining: int,
+    supabase_mode: bool,
+) -> tuple[bool, int, str | None]:
+    """Drain a bounded account backlog before CT resume/new scan.
+
+    Recovery is deliberately independent of the current CT cursor.  A fresh
+    exact profile proof is required and Like is fail-closed: historical liked
+    or ambiguous state is never tapped again.  ``False`` means the global
+    persistence boundary failed and the caller must terminate the run.
+    """
+
+    global _RUNTIME_FOLLOW_COUNT
+    run_key = str(run_id or f"account:{account_id}")
+    if run_key in _FOLLOW_CANDIDATE_RECOVERY_RUN_IDS or quota_remaining <= 0:
+        return True, 0, None
+    worker_id = _run_control_dispatcher_worker_id()
+    try:
+        rows = follow_candidate_recovery.claim_pending(
+            account_id=account_id,
+            worker_id=worker_id,
+            limit=min(20, max(1, int(quota_remaining))),
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "follow_candidate_recovery_claim_failed",
+            account_id=account_id,
+            run_id=run_id,
+            error_type=type(exc).__name__,
+            device_actions_started=False,
+            safe_to_continue_ui=False,
+            root_failure_code="follow_candidate_recovery_queue_unavailable",
+            failure_category="systemic_persistence_failure",
+        )
+        return False, 0, "follow_candidate_recovery_queue_unavailable"
+    _FOLLOW_CANDIDATE_RECOVERY_RUN_IDS.add(run_key)
+    recovered = 0
+    for row in rows:
+        recovery_id = str(row.get("id") or "")
+        candidate = follow_candidate_recovery.normalize_username(
+            str(row.get("candidate_username") or "")
+        )
+        source_target_id = str(row.get("source_target_id") or "") or None
+        source_ct = follow_candidate_recovery.normalize_username(
+            str(row.get("source_ct_username") or "")
+        )
+        evidence = dict(row.get("evidence") or {})
+        log(
+            "info",
+            "follow_candidate_recovery_started",
+            account_id=account_id,
+            run_id=run_id,
+            recovery_id=recovery_id or None,
+            candidate_username=candidate or None,
+            source_target_id=source_target_id,
+            source_ct_username=source_ct or None,
+        )
+        if not recovery_id or not candidate:
+            continue
+        if recovered >= int(quota_remaining):
+            follow_candidate_recovery.defer(
+                recovery_id=recovery_id, worker_id=worker_id, reason="quota_unavailable"
+            )
+            continue
+        try:
+            surface = ensure_global_search_surface(
+                d,
+                intended_username=candidate,
+                source_profile_username=source_ct,
+                source_account_context=account_id,
+            )
+            opened = bool(surface.get("ok")) and _open_search_with_recovery(
+                d,
+                pkg=config.INSTAGRAM_PACKAGE,
+                username=candidate,
+                context="follow_candidate_recovery",
+            )
+            typed = opened and type_search(d, candidate, previous_username=None)
+            if typed:
+                accounts_tab_clicked = open_accounts_tab(d)
+                set_search_ui_mode(
+                    "accounts_tab" if accounts_tab_clicked else "mixed_results"
+                )
+            tapped = typed and tap_account_result(d, candidate)
+            profile_proved = tapped and verify_profile(d, candidate)
+            follow_states = (
+                [
+                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
+                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
+                ]
+                if profile_proved
+                else ["profile_not_verified"]
+            )
+            follow_state = (
+                follow_states[-1]
+                if len(set(follow_states)) == 1
+                else "unknown"
+            )
+            decision = follow_candidate_recovery.decide_recovery(
+                like_state=str(evidence.get("like_state") or "unknown"),
+                follow_state=follow_state,
+                quota_available=recovered < int(quota_remaining),
+            )
+            if decision.reason == "already_liked_skip":
+                log(
+                    "info",
+                    "follow_recovery_like_already_liked_skip",
+                    account_id=account_id,
+                    run_id=run_id,
+                    recovery_id=recovery_id,
+                    candidate_username=candidate,
+                    like_tap_sent=False,
+                    like_counter_delta=0,
+                    like_receipt_created=False,
+                )
+            if decision.terminal:
+                follow_candidate_recovery.complete(
+                    recovery_id=recovery_id,
+                    worker_id=worker_id,
+                    outcome="already_following_external_or_unattributed",
+                )
+                _RUNTIME_SKIPPED_USERNAMES.add(candidate)
+                log(
+                    "info",
+                    "follow_candidate_recovery_terminal",
+                    account_id=account_id,
+                    run_id=run_id,
+                    recovery_id=recovery_id,
+                    candidate_username=candidate,
+                    outcome="already_following_external_or_unattributed",
+                    follow_tap_sent=False,
+                    follow_counter_delta=0,
+                )
+                continue
+            if not decision.retry_follow:
+                follow_candidate_recovery.defer(
+                    recovery_id=recovery_id,
+                    worker_id=worker_id,
+                    reason=decision.reason,
+                )
+                continue
+
+            holder: dict[str, Any] = {}
+
+            def _prepare(pre_tap: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    request_id = _resolve_follow_persistence_request_id(run_request_id)
+                    if (
+                        not request_id
+                        or not settings_revision
+                        or pre_tap.get("safe_to_tap") is not True
+                        or pre_tap.get("follow_control_selected") is not True
+                    ):
+                        raise RuntimeError("follow_persistence_pre_tap_context_missing")
+                    action_id = deterministic_action_id(account_id, run_id, candidate)
+                    intent = follow_persistence_intent.create_mutation_intent(
+                        action_id=action_id,
+                        action_type="follow",
+                        account_id=account_id,
+                        run_id=run_id,
+                        request_id=request_id,
+                        business_session_id=business_session_id,
+                        attempt_id="recovery",
+                        candidate_username=candidate,
+                        source_target_id=source_target_id,
+                        source_ct_username=source_ct,
+                        business_date=supabase_client.sast_business_day_window()[0],
+                        settings_revision=settings_revision,
+                        worker_sha=_resolve_active_worker_release_sha() or None,
+                    )
+                    intent = _validate_follow_persistence_intent_context(
+                        intent,
+                        account_id=account_id,
+                        run_id=run_id,
+                        candidate_username=candidate,
+                    )
+                    intent = follow_persistence_intent.update_intent_stage(
+                        run_id=run_id,
+                        action_id=action_id,
+                        stage="physical_attempt_started",
+                        metadata_safe={
+                            "tap_dispatch_boundary_reached": True,
+                            "recovery_id": recovery_id,
+                        },
+                    )
+                except Exception as exc:
+                    if isinstance(
+                        exc,
+                        follow_persistence_intent.FollowPersistenceRuntimeUnavailable,
+                    ):
+                        raise
+                    raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
+                        f"follow_persistence_runtime_unavailable:{type(exc).__name__}"
+                    ) from exc
+                holder["intent"] = intent
+                return intent
+
+            follow_out = perform_follow_safe(
+                d,
+                candidate,
+                config.INSTAGRAM_PACKAGE,
+                profile_already_open=True,
+                visual_candidate_id=f"recovery:{recovery_id}",
+                source_profile_username=source_ct,
+                dont_follow_private_accounts=_dont_follow_private_accounts_for_account(
+                    account_id
+                ),
+                prepare_before_follow_tap=_prepare,
+            )
+            intent = dict(holder.get("intent") or {})
+            state_after = str(follow_out.get("follow_state_after") or "").lower()
+            tap_sent = any(
+                event in {"follow_tap_sent", "follow_action_exact_follow_tap_sent"}
+                for event, _payload in list(follow_out.get("events") or [])
+            )
+            if follow_out.get("ok") and tap_sent and state_after == "requested":
+                # A private-account request may be a real mutation, but it is
+                # not the canonical Following proof.  Terminalize without bot
+                # credit so a later recovery can never issue a duplicate tap.
+                follow_candidate_recovery.complete(
+                    recovery_id=recovery_id,
+                    worker_id=worker_id,
+                    outcome="follow_requested_after_worker_tap_uncredited",
+                )
+                _RUNTIME_SKIPPED_USERNAMES.add(candidate)
+                log(
+                    "warning",
+                    "follow_candidate_recovery_terminal",
+                    account_id=account_id,
+                    run_id=run_id,
+                    recovery_id=recovery_id,
+                    candidate_username=candidate,
+                    outcome="follow_requested_after_worker_tap_uncredited",
+                    follow_tap_sent=True,
+                    follow_counter_delta=0,
+                    duplicate_retry_suppressed=True,
+                )
+                continue
+            if not (follow_out.get("ok") and tap_sent and state_after == "following"):
+                follow_candidate_recovery.defer(
+                    recovery_id=recovery_id,
+                    worker_id=worker_id,
+                    reason=str(
+                        follow_out.get("failure_reason")
+                        or f"follow_not_verified:{state_after or 'unknown'}"
+                    )[:160],
+                )
+                continue
+            followed_at = datetime.now(timezone.utc).isoformat()
+            follow_persistence_intent.update_intent_stage(
+                run_id=run_id,
+                action_id=str(intent.get("action_id") or ""),
+                stage="physical_attempt_verified",
+                followed_at=followed_at,
+            )
+            persisted = _persist_verified_follow_success_to_supabase(
+                supabase_mode=supabase_mode,
+                account_id=account_id,
+                follower_un=candidate,
+                source_profile_username=source_ct,
+                run_id=run_id,
+                follow_out=follow_out,
+                fs_af=state_after,
+                f_st=state_after,
+                target_id=source_target_id,
+                phase="recovery_before_ct_scan",
+                request_id=str(intent.get("request_id") or ""),
+                action_id=str(intent.get("action_id") or ""),
+                settings_revision_expected=str(intent.get("settings_revision") or ""),
+                followed_at=followed_at,
+            )
+            if not persisted:
+                return False, recovered, "follow_persistence_runtime_unavailable"
+            follow_candidate_recovery.complete(
+                recovery_id=recovery_id,
+                worker_id=worker_id,
+                outcome="follow_persisted",
+            )
+            recovered += 1
+            _RUNTIME_FOLLOW_COUNT += 1
+            _RUNTIME_FOLLOWED_USERNAMES.add(candidate)
+            log(
+                "info",
+                "follow_candidate_recovery_terminal",
+                account_id=account_id,
+                run_id=run_id,
+                recovery_id=recovery_id,
+                candidate_username=candidate,
+                source_target_id=source_target_id,
+                outcome="follow_persisted",
+                follow_tap_sent=True,
+                follow_counter_delta=1,
+            )
+        except follow_persistence_intent.FollowPersistenceRuntimeUnavailable:
+            log(
+                "error",
+                "follow_persistence_runtime_global_failure",
+                account_id=account_id,
+                run_id=run_id,
+                root_failure_code="follow_persistence_runtime_unavailable",
+                failure_category="systemic_persistence_failure",
+                phase="follow_candidate_recovery",
+            )
+            return False, recovered, "follow_persistence_runtime_unavailable"
+        except Exception as exc:
+            follow_candidate_recovery.defer(
+                recovery_id=recovery_id,
+                worker_id=worker_id,
+                reason=f"recovery_exception:{type(exc).__name__}",
+            )
+    return True, recovered, None
 
 
 def _update_run_status_safe(
@@ -12380,6 +12704,72 @@ def _run_followers_list_engine_session(
         follow_processed_count=0,
         follows_completed_count=0,
     )
+    _preflight_key = str(run_id or f"account:{account_id or ''}")
+    if (
+        account_id
+        and _follow_persistence_intent_enabled_for_account(account_id)
+        and _preflight_key not in _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS
+    ):
+        try:
+            _runtime_sha = _resolve_active_worker_release_sha()
+            if not _runtime_sha:
+                raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
+                    "follow_persistence_runtime_unavailable:worker_sha_unresolved"
+                )
+            _storage_proof = follow_persistence_intent.preflight_runtime_storage()
+            log(
+                "info",
+                "follow_persistence_runtime_preflight_passed",
+                account_id=account_id,
+                run_id=run_id,
+                worker_sha=_runtime_sha,
+                storage_schema=_storage_proof.get("schema"),
+                safe_to_continue_ui=True,
+            )
+            log(
+                "info",
+                "p0c_preflight_passed",
+                account_id=account_id,
+                run_id=run_id,
+                worker_sha=_runtime_sha,
+            )
+            _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS.add(_preflight_key)
+        except Exception as exc:
+            log(
+                "error",
+                "follow_persistence_runtime_preflight_failed",
+                account_id=account_id,
+                run_id=run_id,
+                root_failure_code="follow_persistence_runtime_unavailable",
+                failure_category="systemic_persistence_failure",
+                error_type=type(exc).__name__,
+                reason=str(exc)[:200],
+                safe_to_continue_ui=False,
+            )
+            log(
+                "error",
+                "p0c_preflight_failed",
+                account_id=account_id,
+                run_id=run_id,
+                root_failure_code="follow_persistence_runtime_unavailable",
+            )
+            log(
+                "error",
+                "follow_persistence_runtime_global_failure",
+                account_id=account_id,
+                run_id=run_id,
+                root_failure_code="follow_persistence_runtime_unavailable",
+                failure_category="systemic_persistence_failure",
+            )
+            _publish_followers_session_summary(
+                follow_session_outcome="failed",
+                follow_stop_reason="follow_persistence_runtime_unavailable",
+                first_causal_reason="follow_persistence_runtime_unavailable",
+                root_failure_code="follow_persistence_runtime_unavailable",
+                failure_category="systemic_persistence_failure",
+                exit_code=1,
+            )
+            return 1
     if not _recover_verified_follow_persistence_intents(
         d,
         account_id=account_id,
@@ -12853,6 +13243,46 @@ def _run_followers_list_engine_session(
         )
         _emit_target_scan_completed(stop_reason=reason)
         return int(exit_code)
+
+    _recovery_ok, _recovery_follow_count, _recovery_failure_reason = (
+        _process_follow_candidate_recovery_batch(
+            d,
+            account_id=account_id,
+            run_id=run_id,
+            run_request_id=run_request_id,
+            business_session_id=business_session_id,
+            settings_revision=str(session_follow_persistence_settings_revision or ""),
+            quota_remaining=max(
+                0, int(_follow_max_per_run) - int(_RUNTIME_FOLLOW_COUNT)
+            ),
+            supabase_mode=supabase_mode,
+        )
+    )
+    if not _recovery_ok:
+        _recovery_root_failure = str(
+            _recovery_failure_reason or "follow_candidate_recovery_failed"
+        )
+        _publish_followers_session_summary(
+            follow_session_outcome="failed",
+            follow_stop_reason=_recovery_root_failure,
+            first_causal_reason=_recovery_root_failure,
+            root_failure_code=_recovery_root_failure,
+            failure_category="systemic_persistence_failure",
+            exit_code=1,
+        )
+        return 1
+    if _recovery_follow_count:
+        log(
+            "info",
+            "follow_candidate_recovery_batch_completed",
+            account_id=account_id,
+            run_id=run_id,
+            recovered_follow_count=int(_recovery_follow_count),
+            remaining_quota=max(
+                0, int(_follow_max_per_run) - int(_RUNTIME_FOLLOW_COUNT)
+            ),
+            normal_ct_scan_next=True,
+        )
 
     log(
         "info",
@@ -20780,11 +21210,7 @@ def _run_followers_list_engine_session(
                             source_ct_username=source_profile_username,
                             business_date=supabase_client.sast_business_day_window()[0],
                             settings_revision=_settings_revision,
-                            worker_sha=(
-                                _CERTIFIED_RUNTIME_IDENTITY.full_sha
-                                if _CERTIFIED_RUNTIME_IDENTITY is not None
-                                else None
-                            ),
+                            worker_sha=_resolve_active_worker_release_sha() or None,
                         )
                         intent = _validate_follow_persistence_intent_context(
                             intent,
@@ -20808,7 +21234,14 @@ def _run_followers_list_engine_session(
                             reason=str(exc)[:200],
                             safe_to_tap=False,
                         )
-                        raise
+                        if isinstance(
+                            exc,
+                            follow_persistence_intent.FollowPersistenceRuntimeUnavailable,
+                        ):
+                            raise
+                        raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
+                            f"follow_persistence_runtime_unavailable:{type(exc).__name__}"
+                        ) from exc
                     _follow_persistence_holder["ctx"] = intent
                     log(
                         "info",
@@ -20842,17 +21275,87 @@ def _run_followers_list_engine_session(
                             "fresh_reentry_proof": True,
                         },
                     )
-                follow_out = perform_follow_safe(
-                    d,
-                    follower_un,
-                    pkg,
-                    profile_already_open=_profile_follow_already_open,
-                    visual_candidate_id=_follow_engine_vcid or None,
-                    source_profile_username=source_profile_username,
-                    dont_follow_private_accounts=_dont_follow_private_pre,
-                    pre_follow_context=_pre_follow_tap_ctx,
-                    prepare_before_follow_tap=_prepare_before_tap,
-                )
+                try:
+                    follow_out = perform_follow_safe(
+                        d,
+                        follower_un,
+                        pkg,
+                        profile_already_open=_profile_follow_already_open,
+                        visual_candidate_id=_follow_engine_vcid or None,
+                        source_profile_username=source_profile_username,
+                        dont_follow_private_accounts=_dont_follow_private_pre,
+                        pre_follow_context=_pre_follow_tap_ctx,
+                        prepare_before_follow_tap=_prepare_before_tap,
+                    )
+                except follow_persistence_intent.FollowPersistenceRuntimeUnavailable as exc:
+                    try:
+                        follow_candidate_recovery.enqueue(
+                            account_id=account_id,
+                            candidate_username=str(follower_un or ""),
+                            source_target_id=str(target_id or "") or None,
+                            source_ct_username=source_profile_username,
+                            original_run_id=run_id,
+                            original_request_id=_resolve_follow_persistence_request_id(
+                                run_request_id
+                            ),
+                            business_session_id=business_session_id,
+                            evidence={
+                                "schema": "FOLLOW_CANDIDATE_RECOVERY_EVIDENCE_V1",
+                                "failure_reason": "follow_persistence_runtime_unavailable",
+                                "follow_tap_sent": False,
+                                "follow_receipt_exists": False,
+                                "like_state": (
+                                    "liked"
+                                    if bool(
+                                        dict(
+                                            _ordering_v2.get(
+                                                "precompleted_like_result"
+                                            )
+                                            or {}
+                                        ).get("liked_count")
+                                    )
+                                    else "ambiguous"
+                                ),
+                            },
+                        )
+                        log(
+                            "warning",
+                            "follow_candidate_recovery_queued",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=str(follower_un or ""),
+                            source_target_id=str(target_id or "") or None,
+                        )
+                    except Exception as recovery_exc:
+                        log(
+                            "error",
+                            "follow_candidate_recovery_queue_failed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=str(follower_un or ""),
+                            error_type=type(recovery_exc).__name__,
+                            safe_to_continue_ui=False,
+                        )
+                    log(
+                        "error",
+                        "follow_persistence_runtime_failed_at_tap_boundary",
+                        account_id=account_id,
+                        run_id=run_id,
+                        candidate_username=follower_un,
+                        root_failure_code="follow_persistence_runtime_unavailable",
+                        failure_category="systemic_persistence_failure",
+                        reason=str(exc)[:200],
+                        safe_to_continue_ui=False,
+                    )
+                    _publish_followers_session_summary(
+                        follow_session_outcome="failed",
+                        follow_stop_reason="follow_persistence_runtime_unavailable",
+                        first_causal_reason="follow_persistence_runtime_unavailable",
+                        root_failure_code="follow_persistence_runtime_unavailable",
+                        failure_category="systemic_persistence_failure",
+                        exit_code=1,
+                    )
+                    return 1
                 _follow_persistence_ctx: dict[str, Any] | None = (
                     _follow_persistence_holder.get("ctx")
                     if isinstance(_follow_persistence_holder.get("ctx"), dict)

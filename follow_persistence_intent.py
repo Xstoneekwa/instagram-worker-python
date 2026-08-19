@@ -19,6 +19,40 @@ RECEIPT_SCHEMA = "FOLLOW_CANDIDATE_LOCAL_RECEIPT_V2"
 MUTATION_INTENT_SCHEMA = "AMBIGUOUS_MUTATION_INTENT_V1"
 
 
+class FollowPersistenceRuntimeUnavailable(RuntimeError):
+    """Global fail-closed boundary: durable Follow intent storage is unusable."""
+
+    reason = "follow_persistence_runtime_unavailable"
+
+
+def preflight_runtime_storage() -> dict[str, Any]:
+    """Prove the intent journal can durably create/replace/fsync before UI work."""
+
+    root = _root()
+    probe_dir = root / ".preflight"
+    probe_path = probe_dir / f"{os.getpid()}.json"
+    try:
+        _atomic_write(
+            probe_path,
+            {
+                "schema": "FOLLOW_PERSISTENCE_RUNTIME_PREFLIGHT_V1",
+                "pid": os.getpid(),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        probe_path.unlink()
+        dir_fd = os.open(probe_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception as exc:
+        raise FollowPersistenceRuntimeUnavailable(
+            f"follow_persistence_runtime_unavailable:{type(exc).__name__}"
+        ) from exc
+    return {"ok": True, "root": str(root), "schema": "FOLLOW_PERSISTENCE_RUNTIME_PREFLIGHT_V1"}
+
+
 def _root() -> Path:
     runtime_home = Path(os.getenv("PHONEFARM_RUNTIME_HOME", "/Users/admin/phonefarm-runtime"))
     return Path(

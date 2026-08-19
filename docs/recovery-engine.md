@@ -1,5 +1,26 @@
 # Recovery Engine
 
+## Récupération P0C des mutations interrompues
+
+La queue `follow_candidate_recovery_queue` conserve le compte, le candidat,
+le CT source et la lineage d'origine. Le claim est atomique (`SKIP LOCKED`),
+scopé au compte, loué cinq minutes et idempotent via `recovery_key`.
+
+- quota indisponible ou surface Follow non prouvée : defer borné ;
+- Like déjà vérifié ou ambigu : zéro nouveau tap Like ;
+- CTA Follow fraîchement prouvée : seul Follow peut être retenté ;
+- état Following/Requested préexistant : terminal externe, aucun reçu ni delta ;
+- état Requested après un tap Worker : terminal sans crédit et sans nouveau retry ;
+- succès frais vérifié : receipt canonique puis compteur, exactement une fois.
+
+Une indisponibilité de la queue est globale et fail-closed : le scan CT normal
+ne démarre pas tant que l'ordre recovery-first ne peut pas être prouvé.
+
+Une panne systémique de persistance bloque aussi l'Auto Restart sur la même
+release. Le dispatcher renouvelle séparément la lease exacte
+request/run/worker tant que le child est vivant ; la device lease ne remplace
+jamais cette preuve de propriété.
+
 ## Recovery-first architecture
 
 Les flows sensibles (followers, ouverture profil, follow, **post-follow / return CT**) sont conçus pour :

@@ -21,6 +21,7 @@ import uiautomator2 as u2
 
 import config
 import account_protection_lists
+import follow_persistence_intent
 import followers_surface_proof as followers_proof
 import storage_health
 from instagram_action_restriction import guard_instagram_action_rate_limit
@@ -10507,6 +10508,8 @@ def perform_follow_safe(
             _prepared = prepare_before_follow_tap(dict(_prepare_payload))
             if not _prepared:
                 raise RuntimeError("follow_pre_tap_prepare_not_durable")
+        except follow_persistence_intent.FollowPersistenceRuntimeUnavailable:
+            raise
         except Exception as exc:
             _record(
                 "follow_pre_tap_prepare_failed",

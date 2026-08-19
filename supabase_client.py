@@ -3126,6 +3126,88 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
     )
 
 
+def renew_account_run_request_lease_v1(
+    *, request_id: str, worker_id: str, run_id: str, lease_seconds: int = 300
+) -> Any:
+    return call_rpc(
+        "renew_account_run_request_lease_v1",
+        {
+            "p_request_id": str(request_id),
+            "p_worker_id": str(worker_id),
+            "p_run_id": str(run_id),
+            "p_lease_seconds": int(lease_seconds),
+        },
+    )
+
+
+def claim_follow_candidate_recovery_v1(
+    *, account_id: str, worker_id: str, limit: int = 20
+) -> Any:
+    return call_rpc(
+        "claim_follow_candidate_recovery_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_worker_id": str(worker_id),
+            "p_limit": int(limit),
+        },
+    )
+
+
+def enqueue_follow_candidate_recovery_v1(
+    *,
+    recovery_key: str,
+    account_id: str,
+    candidate_username: str,
+    source_target_id: str | None,
+    source_ct_username: str | None,
+    original_run_id: str | None,
+    original_request_id: str | None,
+    business_session_id: str | None,
+    evidence: dict[str, Any],
+) -> Any:
+    return call_rpc(
+        "enqueue_follow_candidate_recovery_v1",
+        {
+            "p_recovery_key": str(recovery_key),
+            "p_account_id": str(account_id),
+            "p_candidate_username": str(candidate_username),
+            "p_source_target_id": str(source_target_id) if source_target_id else None,
+            "p_source_ct_username": str(source_ct_username) if source_ct_username else None,
+            "p_original_run_id": str(original_run_id) if original_run_id else None,
+            "p_original_request_id": str(original_request_id) if original_request_id else None,
+            "p_business_session_id": str(business_session_id) if business_session_id else None,
+            "p_evidence": dict(evidence or {}),
+        },
+    )
+
+
+def complete_follow_candidate_recovery_v1(
+    *, recovery_id: str, worker_id: str, outcome: str, receipt_id: str | None = None
+) -> Any:
+    return call_rpc(
+        "complete_follow_candidate_recovery_v1",
+        {
+            "p_recovery_id": str(recovery_id),
+            "p_worker_id": str(worker_id),
+            "p_outcome": str(outcome),
+            "p_receipt_id": str(receipt_id) if receipt_id else None,
+        },
+    )
+
+
+def defer_follow_candidate_recovery_v1(
+    *, recovery_id: str, worker_id: str, reason: str
+) -> Any:
+    return call_rpc(
+        "defer_follow_candidate_recovery_v1",
+        {
+            "p_recovery_id": str(recovery_id),
+            "p_worker_id": str(worker_id),
+            "p_reason": str(reason),
+        },
+    )
+
+
 def call_rpc_shadow(
     function_name: str,
     params: dict[str, Any] | None = None,

@@ -111,6 +111,29 @@ def link_account_run_request_run(request_id: str, worker_id: str, run_id: str) -
     )
 
 
+def renew_account_run_request_lease(
+    request_id: str,
+    worker_id: str,
+    run_id: str,
+    *,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    """Renew only the exact request/run/worker lineage supervised by this process."""
+
+    normalized_request_id = normalize_request_uuid(request_id)
+    normalized_run_id = normalize_request_uuid(run_id)
+    if not normalized_request_id or not normalized_run_id:
+        return None
+    return _row_or_none(
+        supabase_client.renew_account_run_request_lease_v1(
+            request_id=normalized_request_id,
+            worker_id=str(worker_id or "").strip(),
+            run_id=normalized_run_id,
+            lease_seconds=max(60, min(900, int(lease_seconds))),
+        )
+    )
+
+
 def complete_account_run_request(
     request_id: str,
     worker_id: str,

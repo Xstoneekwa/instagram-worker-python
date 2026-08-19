@@ -34,6 +34,7 @@ from account_run_control import (
     link_account_run_request_run,
     mark_account_run_request_starting,
     normalize_request_uuid,
+    renew_account_run_request_lease,
     reconcile_linked_ig_run_terminal,
     reclaim_stale_account_run_requests,
 )
@@ -2501,8 +2502,10 @@ def _wait_for_subprocess(
         hard_deadline = business_deadline + timedelta(minutes=10)
     soft_stop_requested = False
     next_lock_renew = time.monotonic()
+    next_request_lease_renew = next_lock_renew
     lock_renew_interval = max(30.0, float(cfg.heartbeat_seconds) * 2.0)
     last_control_plane_error_logged_at: float | None = None
+    lease_expiry_event_logged = False
 
     def capture_cooperative_stop_proof() -> None:
         if stop_context is None or diagnostics is None:
@@ -2582,6 +2585,75 @@ def _wait_for_subprocess(
                     proc, graceful_timeout_seconds=90.0
                 ), False
             return _terminate_subprocess(proc), False
+
+        request_lease_now = time.monotonic()
+        if latest and request_lease_now >= next_request_lease_renew:
+            linked_run_id = str(latest.get("run_id") or "").strip()
+            lease_expires_raw = str(latest.get("lease_expires_at") or "").strip()
+            if lease_expires_raw and not lease_expiry_event_logged:
+                try:
+                    lease_expires_at = datetime.fromisoformat(
+                        lease_expires_raw.replace("Z", "+00:00")
+                    )
+                    if lease_expires_at <= datetime.now(timezone.utc):
+                        log(
+                            "error",
+                            "lease_expired_while_run_active",
+                            account_id=account_id,
+                            request_id=request_id,
+                            run_id=linked_run_id or None,
+                            worker_id=cfg.worker_id,
+                            child_active=True,
+                            lease_expires_at=lease_expires_raw,
+                        )
+                        lease_expiry_event_logged = True
+                except ValueError:
+                    pass
+            try:
+                renewed = renew_account_run_request_lease(
+                    request_id,
+                    cfg.worker_id,
+                    linked_run_id,
+                    lease_seconds=max(120, int(lock_renew_interval * 3)),
+                )
+                if not renewed:
+                    raise RuntimeError("account_run_request_lease_renewal_rejected")
+                log(
+                    "info",
+                    "account_run_request_lease_renewed_while_child_active",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=linked_run_id,
+                    worker_id=cfg.worker_id,
+                )
+                log(
+                    "info",
+                    "lease_renewed",
+                    request_id=request_id,
+                    run_id=linked_run_id,
+                    worker_id=cfg.worker_id,
+                    child_active=True,
+                )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "account_run_request_lease_renew_failed_while_child_active",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=linked_run_id or None,
+                    worker_id=cfg.worker_id,
+                    error=str(exc)[:200],
+                )
+                log(
+                    "warning",
+                    "lease_renewal_failed",
+                    request_id=request_id,
+                    run_id=linked_run_id or None,
+                    worker_id=cfg.worker_id,
+                    child_active=True,
+                    error_type=type(exc).__name__,
+                )
+            next_request_lease_renew = request_lease_now + lock_renew_interval
 
         if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:
             try:

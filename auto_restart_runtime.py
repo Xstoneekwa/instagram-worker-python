@@ -363,11 +363,23 @@ def validate_auto_restart_request_at_claim(
             meta=meta,
         )
 
+    embedded = _read_record(meta.get("resume_plan"))
+    failure_category = str(
+        meta.get("failure_category") or embedded.get("failure_category") or ""
+    ).strip()
+    root_failure_code = str(
+        meta.get("root_failure_code") or embedded.get("root_failure_code") or ""
+    ).strip()
+    if (
+        failure_category == "systemic_persistence_failure"
+        or root_failure_code == "follow_persistence_runtime_unavailable"
+    ):
+        return False, "same_release_systemic_persistence_failure", None
+
     prior_run_id = str(meta.get("prior_run_id") or "").strip()
     if not prior_run_id:
         return False, "resume_plan_invalid", None
 
-    embedded = _read_record(meta.get("resume_plan"))
     schema_reason = _validate_resume_plan_schema(meta, embedded)
     if schema_reason:
         return False, schema_reason, None
