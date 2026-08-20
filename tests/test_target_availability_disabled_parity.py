@@ -404,6 +404,60 @@ def _without_reviewed_cooperative_safe_stop(
     return ast.fix_missing_locations(RemoveCooperativeSafeStop().visit(normalized))
 
 
+def _without_reviewed_authoritative_exit_53_decision(
+    node: ast.FunctionDef,
+) -> ast.FunctionDef:
+    """Remove only the approved single-decision exit-53 delta for parity."""
+
+    normalized = copy.deepcopy(node)
+
+    class RemoveAuthoritativeExit53Decision(ast.NodeTransformer):
+        @staticmethod
+        def _uses_authoritative_decision(item: ast.AST) -> bool:
+            return any(
+                isinstance(child, ast.Name)
+                and child.id == "termination_decision"
+                for child in ast.walk(item)
+            )
+
+        def visit_Assign(self, item):
+            if any(
+                isinstance(target, ast.Name)
+                and target.id
+                in {"authoritative_exit_53_consumed", "termination_decision"}
+                for target in item.targets
+            ):
+                return None
+            return self.generic_visit(item)
+
+        def visit_If(self, item):
+            if self._uses_authoritative_decision(item.test):
+                if item.orelse:
+                    restored = []
+                    for child in item.orelse:
+                        updated = self.visit(child)
+                        if updated is None:
+                            continue
+                        if isinstance(updated, list):
+                            restored.extend(updated)
+                        else:
+                            restored.append(updated)
+                    return restored
+                return None
+            if (
+                isinstance(item.test, ast.Name)
+                and item.test.id == "authoritative_exit_53_consumed"
+                and len(item.orelse) == 1
+                and isinstance(item.orelse[0], ast.If)
+            ):
+                return self.visit(item.orelse[0])
+            return self.generic_visit(item)
+
+    return ast.fix_missing_locations(
+        RemoveAuthoritativeExit53Decision().visit(normalized)
+    )
+
+
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
     def test_rotation_implementation_matches_production_after_reviewed_deltas(self):
         root = Path(__file__).resolve().parents[1]
@@ -425,7 +479,9 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
                         _without_reviewed_follow60_binding(
                             _without_reviewed_resume_quota_bound(
                                 _without_availability_or_provenance_hooks(
-                                    _function(current_source, "_run_follow_target_rotation")
+                                    _without_reviewed_authoritative_exit_53_decision(
+                                        _function(current_source, "_run_follow_target_rotation")
+                                    )
                                 )
                             )
                         )

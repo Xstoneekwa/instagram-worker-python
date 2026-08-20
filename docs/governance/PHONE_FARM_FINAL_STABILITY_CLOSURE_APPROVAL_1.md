@@ -59,3 +59,49 @@ The field run also logged `run_log_file_init_failed` because runtime output targ
 - Corresponding protected Follow60 regression tests and the approval manifest/ledger required by Lock V3.1.
 
 No protected file is modified in Phase A. Expected healthy-path overhead is zero additional UI actions, screenshots or vision probes; the bounded structural recovery runs only after the current ownership proof fails.
+
+## Approval 1 implementation result
+
+Approval 1 was consumed only for the minimum proved closure. The runner's exact
+exit-53 receipt contract is now converted once into
+`FOLLOW_TERMINATION_DECISION_V1`. When accepted, target rotation, Follow retap
+and the legacy zero-mutation reclassification are forbidden. The authoritative
+decision preserves verified cumulative Follow counts, remains
+`partial_resumable`, and exposes `handoff_to_unfollow`; the independent H3
+health, identity, deadline, persistence and Unfollow-eligibility gates remain
+fail-closed.
+
+The zero-mutation target-local classifier is retained for failures before a
+durable Follow. It is bypassed only when the precise exit-53 contract proves a
+durable candidate-local post-Follow partial. Tests cover both one and multiple
+verified Follows, prohibit target rotation and a second Follow, and execute the
+real outer target-rotation path.
+
+The Mythyl `cy=584` rejection was caused by the structural peer query requiring
+the peer node itself to be clickable. Instagram can expose `Message` or
+`Contact` as a non-clickable label child inside the clickable action control.
+The recovery query now admits bounded Button/TextView/ImageView label children,
+then still requires a certified candidate profile plus a vertically aligned
+Message/Contact action-row peer. Bare `Following`, wrong identity, unaligned
+peers, and Suggested content remain rejected. The query count is unchanged.
+
+Mute recovery uses one shared context-local budget: two attempts total and
+eight Worker-controlled seconds total. It adds no fixed sleep and no healthy
+path UI lookup. The field Like was a precompleted receipt reuse, not a second
+tap; Like ordering and idempotence code therefore remain unchanged.
+
+Mutable run logs and the post-Follow SQLite receipt spool now resolve under
+`PHONEFARM_RUNTIME_ROOT` (or `~/phonefarm-runtime`), never beneath an immutable
+release. Canonical business persistence remains fail-closed; no canonical
+receipt authority was weakened.
+
+Certification before Approval 2:
+
+- full Worker matrix: 3,238 tests passed, 10 skipped, zero failures;
+- healthy rotation microbenchmark, 2,000 iterations: baseline p50 0.062041 ms,
+  p95 0.099792 ms; candidate p50 0.063208 ms, p95 0.096250 ms;
+- structural recovery matcher, 10,000 iterations: p50 0.001917 ms, p95
+  0.002084 ms, observed max 0.082334 ms;
+- no new device RPC, XML dump, screenshot, Vision call, network RPC or sleep;
+- no commit, push, package, runtime switch, run, tick, ADB action, incident
+  resolution or production deployment was performed under Approval 1.

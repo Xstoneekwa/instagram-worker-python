@@ -14,6 +14,11 @@
     {"id": "suggestions_boundary", "class": "followers_surface", "expected": "exclude_suggestions"},
     {"id": "see_more_boundary", "class": "followers_surface", "expected": "safe_see_more"},
     {"id": "ct_resume", "class": "checkpoint", "expected": "resume_exact_ct"},
-    {"id": "follow_partial_to_unfollow", "class": "phase_handoff", "expected": "mandatory_unfollow_allowed"}
+    {"id": "follow_partial_to_unfollow", "class": "phase_handoff", "expected": "mandatory_unfollow_allowed"},
+    {"id": "mythyl_rimmaabadjan_cy_584", "class": "structural_mute", "expected": "aligned_peer_or_fail_closed"},
+    {"id": "compact_action_label_non_clickable_child", "class": "structural_mute", "expected": "peer_label_included_without_extra_lookup"},
+    {"id": "follow_count_one_exit_53", "class": "authoritative_termination", "expected": "handoff_without_reclassification"},
+    {"id": "follow_count_multi_exit_53", "class": "authoritative_termination", "expected": "preserve_verified_count_without_rotation"},
+    {"id": "immutable_release_run_log_path", "class": "runtime_path", "expected": "mutable_phonefarm_runtime"}
   ]
 }

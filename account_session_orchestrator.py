@@ -803,6 +803,33 @@ def _follow_target_local_failure_contract(
     }
 
 
+def _authoritative_follow_termination_decision(
+    *,
+    exit_code: int,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the single terminal decision for a durable post-Follow partial.
+
+    Exit 53 is emitted only after the runner has frozen the durable stage
+    receipts.  Once that exact contract is accepted, target rotation and the
+    legacy zero-mutation classifier are no longer allowed to reinterpret it.
+    """
+
+    follow_outcome = dict(summary.get("follow_outcome") or {})
+    accepted, reason = _follow_exit_handoff_gate(int(exit_code), follow_outcome)
+    is_exit_53 = int(exit_code) == 53
+    return {
+        "schema": "FOLLOW_TERMINATION_DECISION_V1",
+        "authoritative": bool(is_exit_53),
+        "accepted": bool(is_exit_53 and accepted),
+        "reason": reason if is_exit_53 else "not_applicable",
+        "exit_code": int(exit_code),
+        "follow_outcome": follow_outcome,
+        "rotation_allowed": False if is_exit_53 else None,
+        "follow_retap_allowed": False if is_exit_53 else None,
+    }
+
+
 def _follow_target_rotation_contract(
     summary: dict[str, Any],
     *,
@@ -919,6 +946,7 @@ def _run_follow_target_rotation(
     final_target: dict[str, Any] | None = None
     prevalidated_followers_target_key: str | None = None
     prevalidated_followers_meta: dict[str, Any] = {}
+    authoritative_exit_53_consumed = False
     t0 = time.perf_counter()
 
     mainline_session_binding: dict[str, Any] = {}
@@ -1197,12 +1225,37 @@ def _run_follow_target_rotation(
                 "exit_code": exit_code,
             }
         )
-        target_local_contract = _follow_target_local_failure_contract(
+        termination_decision = _authoritative_follow_termination_decision(
             exit_code=exit_code,
             summary=summary,
         )
-        if target_local_contract["is_target_local_failure"]:
-            summary.update(target_local_contract)
+        if termination_decision["accepted"]:
+            target_local_contract = {
+                "is_target_local_failure": False,
+                "target_outcome": "target_local_follow_durable_post_follow_pending",
+                "target_reason": str(termination_decision["reason"]),
+                "target_retryable": True,
+                "target_safe_to_skip": False,
+                "target_completed": False,
+                "first_causal_reason": str(
+                    summary.get("first_causal_reason")
+                    or summary.get("follow_stop_reason")
+                    or "follow60_candidate_local_post_follow_recovery_required"
+                ),
+                "last_recovery_reason": str(
+                    summary.get("last_recovery_reason")
+                    or summary.get("first_causal_reason")
+                    or summary.get("follow_stop_reason")
+                    or ""
+                ),
+            }
+        else:
+            target_local_contract = _follow_target_local_failure_contract(
+                exit_code=exit_code,
+                summary=summary,
+            )
+            if target_local_contract["is_target_local_failure"]:
+                summary.update(target_local_contract)
         _observe_target_availability(
             "summary",
             tenant_id=str(tenant_id or ""),
@@ -1285,6 +1338,53 @@ def _run_follow_target_rotation(
             target_index=target_index,
             max_targets_per_run=max_targets,
         )
+        if termination_decision["accepted"]:
+            authoritative_exit_53_consumed = True
+            final_reason = str(
+                summary.get("first_causal_reason")
+                or summary.get("follow_stop_reason")
+                or "follow60_candidate_local_post_follow_recovery_required"
+            )
+            final_exit_code = 53
+            final_summary.update(
+                {
+                    "exit_code": 53,
+                    "follow_session_outcome": "partial_resumable",
+                    "follow_stop_reason": final_reason,
+                    "first_causal_reason": final_reason,
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "target_rotation_allowed": False,
+                    "no_next_candidate": True,
+                    "safe_next_step": "handoff_to_unfollow",
+                    "follow_retap_allowed": False,
+                    "authoritative_follow_termination_decision": dict(
+                        termination_decision
+                    ),
+                }
+            )
+            attempts[-1]["follow_outcome"] = dict(
+                termination_decision["follow_outcome"]
+            )
+            attempts[-1]["authoritative_follow_termination_decision"] = dict(
+                termination_decision
+            )
+            log(
+                "info",
+                "follow_termination_decision_consumed",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                exit_code=53,
+                follows_completed_count=global_follows_completed,
+                decision_schema=termination_decision["schema"],
+                decision_reason=termination_decision["reason"],
+                target_rotation_allowed=False,
+                follow_retap_allowed=False,
+                safe_next_step="handoff_to_unfollow",
+            )
+            break
         exhausted = is_follow_target_exhaustion_outcome(
             exit_code=exit_code,
             outcome=str(summary.get("follow_session_outcome") or ""),
@@ -2181,7 +2281,12 @@ def _run_follow_target_rotation(
         final_reason in {"global_follow_cap_reached", "all_targets_exhausted"}
         or final_summary.get("all_targets_exhausted") is True
     )
-    if not globally_completed:
+    if authoritative_exit_53_consumed:
+        # The runner's durable receipt contract is already the authoritative
+        # outcome.  A generic merge here would recreate the legacy double
+        # decision and can never be allowed to rewrite exit 53.
+        final_summary["follow_outcome"] = dict(final_contract)
+    elif not globally_completed:
         contract_remaining_target_ids = (
             []
             if final_reason in FOLLOW_TARGET_NO_ROTATION_PARTIAL_REASONS

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import account_session_orchestrator as account_session
+import instagram_navigation as navigation
+import logs
 import post_follow_stage_outbox
 from worker_runtime_identity import WorkerRuntimeIdentity
 
@@ -44,6 +49,47 @@ def _partial_outcome() -> dict[str, object]:
 
 
 class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
+    @staticmethod
+    def _run_exit_53_rotation(follows_completed_count: int) -> dict[str, object]:
+        def run_followers(_device: object, **_kwargs: object) -> int:
+            run_followers.last_session_summary = {
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": (
+                    "follow60_candidate_local_post_follow_recovery_required"
+                ),
+                "first_causal_reason": "following_button_not_found",
+                "follows_completed_count": follows_completed_count,
+                "follow_processed_count": follows_completed_count,
+                "follow_outcome": _partial_outcome(),
+            }
+            return 53
+
+        run_followers.last_session_summary = {}
+        return account_session._run_follow_target_rotation(
+            object(),
+            account_id="00000000-0000-4000-8000-000000000001",
+            account_username="sanitized_account",
+            run_id="00000000-0000-4000-8000-000000000002",
+            follow_targets=[
+                {
+                    "target_id": "00000000-0000-4000-8000-000000000003",
+                    "source_profile": "sanitized_ct",
+                    "target_index": 0,
+                },
+                {
+                    "target_id": "00000000-0000-4000-8000-000000000004",
+                    "source_profile": "must_not_rotate",
+                    "target_index": 1,
+                },
+            ],
+            run_followers_list_engine_session=run_followers,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            max_follows_per_target_per_run=50,
+        )
+
     def test_follow_persisted_partial_receipts_are_local_and_never_retap(self) -> None:
         classified = post_follow_stage_outbox.classify_post_follow_flush(
             _partial_flush(), canonical_follow_persisted=True
@@ -128,6 +174,83 @@ class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
             "follow_candidate_local_partial_contract_unproved",
         )
 
+    def test_follow_count_one_exit_53_is_not_reclassified_or_rotated(self) -> None:
+        result = self._run_exit_53_rotation(1)
+        self.assertEqual(result["exit_code"], 53)
+        self.assertEqual(len(result["attempts"]), 1)
+        summary = result["summary"]
+        self.assertEqual(summary["follow_session_outcome"], "partial_resumable")
+        self.assertEqual(summary["safe_next_step"], "handoff_to_unfollow")
+        self.assertFalse(summary["target_rotation_allowed"])
+        self.assertFalse(summary["follow_retap_allowed"])
+
+    def test_follow_count_multi_exit_53_preserves_all_verified_follows(self) -> None:
+        result = self._run_exit_53_rotation(7)
+        self.assertEqual(result["exit_code"], 53)
+        self.assertEqual(result["global_follows_completed"], 7)
+        self.assertEqual(result["summary"]["follows_completed_count"], 7)
+        self.assertEqual(len(result["attempts"]), 1)
+
+    def test_mute_cy_584_compact_cta_needs_real_aligned_peer(self) -> None:
+        bounds = {"left": 20, "top": 540, "right": 360, "bottom": 628}
+        peer = {
+            "text": "Message",
+            "resource_id": "profile_action_message",
+            "bounds": {"left": 380, "top": 542, "right": 760, "bottom": 626},
+        }
+        self.assertEqual(
+            navigation._mute_engine_v2_following_cta_structure_ok(
+                bounds=bounds,
+                peer_controls=[peer],
+                ww=1080,
+                wh=2340,
+                candidate_profile_confirmed=True,
+            ),
+            (True, "aligned_profile_action_peer"),
+        )
+        self.assertEqual(
+            navigation._mute_engine_v2_following_cta_structure_ok(
+                bounds=bounds,
+                peer_controls=[],
+                ww=1080,
+                wh=2340,
+                candidate_profile_confirmed=True,
+            ),
+            (False, "profile_action_row_ownership_unproved"),
+        )
+
+    def test_mute_peer_scan_includes_non_clickable_action_label_children(self) -> None:
+        source = Path(navigation.__file__).read_text(encoding="utf-8")
+        peer_loader = source[
+            source.index("def _load_structural_peers") :
+            source.index("def _element_passes", source.index("def _load_structural_peers"))
+        ]
+        self.assertIn('classNameMatches=r".*(Button|TextView|ImageView)"', peer_loader)
+        self.assertNotIn("clickable=True", peer_loader)
+
+    def test_recovery_budget_is_capped_at_eight_seconds(self) -> None:
+        self.assertEqual(
+            navigation._POST_FOLLOW_MUTE_RECOVERY_TOTAL_ATTEMPTS_MAX, 2
+        )
+        token = navigation._MUTE_ENGINE_V2_BUDGET_OVERRIDE_S.set(8.0)
+        try:
+            with patch.object(navigation.time, "perf_counter", return_value=105.0):
+                self.assertEqual(navigation._mute_engine_v2_remaining_s(100.0), 3.0)
+        finally:
+            navigation._MUTE_ENGINE_V2_BUDGET_OVERRIDE_S.reset(token)
+
+    def test_runtime_logs_and_receipts_default_to_mutable_runtime_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root, patch.dict(
+            os.environ,
+            {"PHONEFARM_RUNTIME_ROOT": temp_root},
+            clear=False,
+        ):
+            self.assertEqual(logs._runs_dir(), Path(temp_root) / "logs" / "runs")
+        self.assertNotIn(
+            str(Path(__file__).resolve().parents[1]),
+            str(logs._runs_dir()),
+        )
+
     def test_exit_53_still_blocks_account_or_platform_safety_markers(self) -> None:
         gate = account_session._evaluate_h3_follow_exit_code_gate(
             account_id="00000000-0000-4000-8000-000000000001",
@@ -156,12 +279,12 @@ class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
         self.assertEqual(identity.worker_sha, "b" * 40)
         self.assertFalse(hasattr(identity, "full_sha"))
 
-    def test_authoritative_incident_fixture_suite_contains_all_fourteen_cases(self) -> None:
+    def test_authoritative_incident_fixture_suite_contains_all_nineteen_cases(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema"], "PHONE_FARM_PRODUCTION_INCIDENT_FIXTURES_V1")
         cases = payload["cases"]
-        self.assertEqual(len(cases), 14)
-        self.assertEqual(len({case["id"] for case in cases}), 14)
+        self.assertEqual(len(cases), 19)
+        self.assertEqual(len({case["id"] for case in cases}), 19)
         self.assertIn(
             "follow_partial_to_unfollow", {case["id"] for case in cases}
         )

@@ -31,7 +31,16 @@ VALID_STAGES = (
 DEFAULT_PATH = Path(
     os.environ.get(
         "FOLLOW_60S_POST_FOLLOW_OUTBOX_PATH",
-        "/Users/admin/phonefarm-worker-runtime/follow_60s_post_follow_outbox_v2.sqlite3",
+        str(
+            Path(
+                os.environ.get(
+                    "PHONEFARM_RUNTIME_ROOT",
+                    str(Path.home() / "phonefarm-runtime"),
+                )
+            )
+            / "receipts"
+            / "follow_60s_post_follow_outbox_v2.sqlite3"
+        ),
     )
 )
 

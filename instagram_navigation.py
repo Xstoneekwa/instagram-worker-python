@@ -12,6 +12,7 @@ import random
 import re
 import time
 import unicodedata
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -49071,6 +49072,21 @@ _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S = (
     + MIN_FOLLOWING_CTA_SEARCH_BUDGET_S
     + MIN_MUTE_TOGGLE_STAGE_BUDGET_S
 )
+_MUTE_ENGINE_V2_BUDGET_OVERRIDE_S: ContextVar[float | None] = ContextVar(
+    "mute_engine_v2_budget_override_s",
+    default=None,
+)
+_POST_FOLLOW_MUTE_RECOVERY_TOTAL_ATTEMPTS_MAX = 2
+_POST_FOLLOW_MUTE_RECOVERY_TOTAL_BUDGET_S = 8.0
+
+
+def _mute_engine_v2_effective_total_budget_s() -> float:
+    override = _MUTE_ENGINE_V2_BUDGET_OVERRIDE_S.get()
+    return (
+        float(override)
+        if override is not None
+        else float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S)
+    )
 
 # Mute v2: post-tap settle before Switch.checked polling; verify window (replaces old 0.55s hard cap).
 _MUTE_V2_TOGGLE_POST_TAP_SETTLE_S = 0.12
@@ -50448,7 +50464,8 @@ def _mute_engine_v2_resolve_toggle_row(
 
 
 def _mute_engine_v2_remaining_s(t0: float) -> float:
-    return max(0.0, _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S - (time.perf_counter() - t0))
+    effective_total = _mute_engine_v2_effective_total_budget_s()
+    return max(0.0, effective_total - (time.perf_counter() - t0))
 
 
 def _mute_engine_v2_axis_remaining_s(axis_t0: float, axis_budget_s: float) -> float:
@@ -50759,8 +50776,14 @@ def _mute_engine_v2_pick_following_cta(
             return structural_peers
         structural_peers = []
         try:
+            # Instagram may expose the visible Message/Contact label as a
+            # non-clickable child of a clickable action-row container.  The
+            # structural proof below already requires exact candidate-profile
+            # identity and vertical alignment, so restricting this existing
+            # bounded lookup to clickable children creates false negatives
+            # without adding safety.
             for peer in d(
-                classNameMatches=r".*(Button|TextView|ImageView)", clickable=True
+                classNameMatches=r".*(Button|TextView|ImageView)"
             ).all()[:64]:
                 info = dict(peer.info or {})
                 structural_peers.append(
@@ -50832,12 +50855,32 @@ def _mute_engine_v2_pick_following_cta(
             candidate_profile_confirmed=bool(profile_confirmed),
         )
         if not structure_ok:
+            peer_evidence = [
+                {
+                    "text": str(peer.get("text") or "")[:80],
+                    "resource_id": str(peer.get("resource_id") or "")[:120],
+                    "bounds": dict(peer.get("bounds") or {}),
+                }
+                for peer in peer_controls[:6]
+            ]
             log(
                 "info",
                 "mute_engine_v2_following_button_rejected",
                 **base_log,
                 reason=structure_reason,
                 cy=int(cy),
+                candidate_profile_confirmed=bool(profile_confirmed),
+                candidate_text=merged[:120],
+                resource_id=rid[:160],
+                bounds={
+                    "left": b.get("left"),
+                    "top": b.get("top"),
+                    "right": b.get("right"),
+                    "bottom": b.get("bottom"),
+                },
+                control_width=int(control_width),
+                structural_peer_count=len(peer_controls),
+                structural_peers=peer_evidence,
                 pick_reason=pick_reason,
             )
             return None, ""
@@ -52153,7 +52196,7 @@ def run_mute_engine_v2(
         follower_username=str(follower_username or "").strip(),
         follow_state_after=fs_after,
         budget_s=_MUTE_ENGINE_V2_BUDGET_S,
-        effective_total_budget_s=_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S,
+        effective_total_budget_s=_mute_engine_v2_effective_total_budget_s(),
         following_cta_reserved_budget_s=MIN_FOLLOWING_CTA_SEARCH_BUDGET_S,
         toggle_stage_reserved_budget_s=MIN_MUTE_TOGGLE_STAGE_BUDGET_S,
         toggle_stage_required_budget_s=toggle_required_budget_s,
@@ -52203,7 +52246,7 @@ def run_mute_engine_v2(
                 result=result,
                 skip_reason=skip_reason,
                 budget_s=_MUTE_ENGINE_V2_BUDGET_S,
-                effective_total_budget_s=_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S,
+                effective_total_budget_s=_mute_engine_v2_effective_total_budget_s(),
                 toggle_stage_required_budget_s=toggle_required_budget_s,
             )
             log(
@@ -52704,7 +52747,7 @@ def run_mute_engine_v2(
 
     t_follow = time.perf_counter()
     if not skip_following and not following_clicked_fast_path:
-        _eff_total = float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S)
+        _eff_total = _mute_engine_v2_effective_total_budget_s()
         _obs_cap = max(0.0, _eff_total - float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S))
         _rem_cta = _mute_engine_v2_remaining_s(t_all)
         _starved_pre_cta, _req_pre_cta = _mute_engine_v2_budget_starved_for_toggle(
@@ -60155,7 +60198,7 @@ def run_visual_candidate_post_follow_phase(
                 result="skipped",
                 skip_reason=reason,
                 budget_s=float(_MUTE_ENGINE_V2_BUDGET_S),
-                effective_total_budget_s=float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S),
+                effective_total_budget_s=_mute_engine_v2_effective_total_budget_s(),
                 toggle_stage_required_budget_s=round(
                     float(toggle_required_budget_s), 4
                 ),
@@ -60350,19 +60393,26 @@ def run_visual_candidate_post_follow_phase(
                     candidate_username=cand,
                     first_failure_reason=first_v2_failure_reason,
                     follow_retap_allowed=False,
-                    recovery_attempt=1,
-                    recovery_budget=1,
+                    recovery_attempt=2,
+                    recovery_attempts_max=_POST_FOLLOW_MUTE_RECOVERY_TOTAL_ATTEMPTS_MAX,
+                    recovery_budget_s=_POST_FOLLOW_MUTE_RECOVERY_TOTAL_BUDGET_S,
                 )
-                recovered_v2 = run_mute_engine_v2(
-                    d,
-                    pkg=pkg,
-                    source_profile_username=src,
-                    visual_candidate_id=vcid,
-                    follower_username=cand,
-                    follow_state_after=fs_after,
-                    det_hint=det_use if isinstance(det_use, dict) else None,
-                    candidate_context=candidate_profile_context,
+                recovery_budget_token = _MUTE_ENGINE_V2_BUDGET_OVERRIDE_S.set(
+                    _POST_FOLLOW_MUTE_RECOVERY_TOTAL_BUDGET_S
                 )
+                try:
+                    recovered_v2 = run_mute_engine_v2(
+                        d,
+                        pkg=pkg,
+                        source_profile_username=src,
+                        visual_candidate_id=vcid,
+                        follower_username=cand,
+                        follow_state_after=fs_after,
+                        det_hint=det_use if isinstance(det_use, dict) else None,
+                        candidate_context=candidate_profile_context,
+                    )
+                finally:
+                    _MUTE_ENGINE_V2_BUDGET_OVERRIDE_S.reset(recovery_budget_token)
                 v2 = recovered_v2
                 log(
                     "info" if str(v2.get("outcome") or "") in {"success", "partial_success"} else "warning",
@@ -60375,6 +60425,9 @@ def run_visual_candidate_post_follow_phase(
                     recovery_failure_reason=str(v2.get("failure_reason") or ""),
                     follow_retapped=False,
                     recovery_attempts=1,
+                    total_attempts=2,
+                    recovery_attempts_max=_POST_FOLLOW_MUTE_RECOVERY_TOTAL_ATTEMPTS_MAX,
+                    recovery_budget_s=_POST_FOLLOW_MUTE_RECOVERY_TOTAL_BUDGET_S,
                 )
         outcome = str(v2.get("outcome") or "")
         mute_out = {
@@ -60396,6 +60449,7 @@ def run_visual_candidate_post_follow_phase(
                 and outcome in {"success", "partial_success"}
             ),
             "recovery_attempts": 1 if mute_recovery_used else 0,
+            "total_attempts": 2 if mute_recovery_used else 1,
             "recovery_profile_confirmed": bool(mute_recovery_profile_confirmed),
             "first_failure_reason": first_v2_failure_reason or None,
         }

@@ -33,7 +33,10 @@ _OUTPUT_ERRNOS = frozenset(
 
 
 def _runs_dir() -> Path:
-    return Path(__file__).resolve().parent / "runs"
+    runtime_root = Path(
+        str(os.environ.get("PHONEFARM_RUNTIME_ROOT") or (Path.home() / "phonefarm-runtime"))
+    ).expanduser()
+    return runtime_root / "logs" / "runs"
 
 
 def get_run_log_file_path() -> str | None:
