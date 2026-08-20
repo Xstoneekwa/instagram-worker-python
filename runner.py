@@ -59,7 +59,10 @@ from worker_runtime_identity import (
     resolve_worker_runtime_identity,
     validate_worker_runtime_identity_binding,
 )
-from follow_outcome_contract import merge_follow_outcome
+from follow_outcome_contract import (
+    build_follow_termination_decision,
+    merge_follow_outcome,
+)
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
 
 _CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
@@ -22862,6 +22865,50 @@ def _run_followers_list_engine_session(
                             if isinstance(_pf.get("mute"), dict)
                             else ""
                         ).strip() or "post_follow_required_mute_incomplete"
+                        _follow_termination_decision = (
+                            build_follow_termination_decision(
+                                exit_code=53,
+                                first_causal_reason=_candidate_local_first_reason,
+                                follows_completed_count=int(
+                                    follows_completed_count
+                                ),
+                                target_follow_budget_effective=(
+                                    target_follow_budget_effective
+                                ),
+                                target_attribution={
+                                    "account_id": account_id,
+                                    "run_id": run_id,
+                                    "request_id": run_request_id,
+                                    "action_id_hash": action_id_hash(
+                                        str(
+                                            (_follow_persistence_ctx or {}).get(
+                                                "action_id"
+                                            )
+                                            or ""
+                                        )
+                                    ),
+                                    "candidate_username": str(follower_un or ""),
+                                    "source_profile_username": (
+                                        source_profile_username
+                                    ),
+                                    "target_id": target_id,
+                                },
+                                physical_follow_preserved=True,
+                                canonical_follow_receipt_present=bool(
+                                    _follow_persist_ok
+                                ),
+                                candidate_local_failure=True,
+                                post_follow_recovery_required=True,
+                                no_new_follow_until_recovered=True,
+                                safe_boundary=bool(
+                                    _post_follow_failure.get("safe_boundary")
+                                ),
+                                safe_next_step=str(
+                                    _post_follow_failure.get("safe_next_step")
+                                    or ""
+                                ),
+                            )
+                        )
                         log(
                             "warning",
                             "post_follow_candidate_local_partial_resumable",
@@ -22908,6 +22955,14 @@ def _run_followers_list_engine_session(
                             ),
                             follows_completed_count=int(follows_completed_count),
                             target_follow_budget_effective=target_follow_budget_effective,
+                            follow_termination_decision=dict(
+                                _follow_termination_decision
+                            ),
+                            follow_outcome=dict(_follow_termination_decision),
+                            physical_follow_preserved=True,
+                            canonical_follow_receipt_present=bool(
+                                _follow_persist_ok
+                            ),
                         )
                         _emit_performance_summary(
                             t0=t0,

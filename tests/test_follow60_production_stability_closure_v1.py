@@ -11,6 +11,7 @@ import account_session_orchestrator as account_session
 import instagram_navigation as navigation
 import logs
 import post_follow_stage_outbox
+from follow_outcome_contract import build_follow_termination_decision
 from worker_runtime_identity import WorkerRuntimeIdentity
 
 
@@ -36,22 +37,34 @@ def _partial_flush() -> dict[str, object]:
     }
 
 
-def _partial_outcome() -> dict[str, object]:
-    return {
-        "phase_status": "partial_resumable",
-        "scope": "follow_phase",
-        "safe_boundary": True,
-        "candidate_local_failure": True,
-        "post_follow_recovery_required": True,
-        "safe_next_step": "handoff_to_unfollow",
-        "no_new_follow_until_recovered": True,
-    }
+def _partial_outcome(follows_completed_count: int = 1) -> dict[str, object]:
+    return build_follow_termination_decision(
+        exit_code=53,
+        first_causal_reason="following_button_not_found",
+        follows_completed_count=follows_completed_count,
+        target_follow_budget_effective=120,
+        target_attribution={
+            "account_id": "00000000-0000-4000-8000-000000000001",
+            "run_id": "00000000-0000-4000-8000-000000000002",
+            "target_id": "00000000-0000-4000-8000-000000000003",
+            "candidate_username": "sanitized_candidate",
+            "source_profile_username": "sanitized_ct",
+        },
+        physical_follow_preserved=True,
+        canonical_follow_receipt_present=True,
+        candidate_local_failure=True,
+        post_follow_recovery_required=True,
+        no_new_follow_until_recovered=True,
+        safe_boundary=True,
+        safe_next_step="handoff_to_unfollow",
+    )
 
 
 class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
     @staticmethod
     def _run_exit_53_rotation(follows_completed_count: int) -> dict[str, object]:
         def run_followers(_device: object, **_kwargs: object) -> int:
+            decision = _partial_outcome(follows_completed_count)
             run_followers.last_session_summary = {
                 "follow_session_outcome": "partial_resumable",
                 "follow_stop_reason": (
@@ -60,7 +73,8 @@ class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
                 "first_causal_reason": "following_button_not_found",
                 "follows_completed_count": follows_completed_count,
                 "follow_processed_count": follows_completed_count,
-                "follow_outcome": _partial_outcome(),
+                "follow_termination_decision": decision,
+                "follow_outcome": decision,
             }
             return 53
 
@@ -171,7 +185,7 @@ class Follow60ProductionStabilityClosureV1Test(unittest.TestCase):
         self.assertFalse(gate["follow_exit_code_allowed"])
         self.assertEqual(
             gate["follow_exit_code_block_reason"],
-            "follow_candidate_local_partial_contract_unproved",
+            "follow_termination_decision_invalid",
         )
 
     def test_follow_count_one_exit_53_is_not_reclassified_or_rotated(self) -> None:

@@ -4,6 +4,7 @@ import unittest
 
 import account_session_orchestrator as orchestrator
 import instagram_navigation as navigation
+from follow_outcome_contract import build_follow_termination_decision
 
 
 class Follow60MuteStructuralRecoveryV1Test(unittest.TestCase):
@@ -63,15 +64,20 @@ class Follow60MuteStructuralRecoveryV1Test(unittest.TestCase):
                 )
 
     def test_exit_53_handoff_requires_complete_candidate_local_contract(self) -> None:
-        outcome = {
-            "phase_status": "partial_resumable",
-            "scope": "follow_phase",
-            "safe_boundary": True,
-            "candidate_local_failure": True,
-            "post_follow_recovery_required": True,
-            "safe_next_step": "handoff_to_unfollow",
-            "no_new_follow_until_recovered": True,
-        }
+        outcome = build_follow_termination_decision(
+            exit_code=53,
+            first_causal_reason="following_button_not_found",
+            follows_completed_count=1,
+            target_follow_budget_effective=120,
+            target_attribution={"candidate_username": "sanitized_candidate"},
+            physical_follow_preserved=True,
+            canonical_follow_receipt_present=True,
+            candidate_local_failure=True,
+            post_follow_recovery_required=True,
+            no_new_follow_until_recovered=True,
+            safe_boundary=True,
+            safe_next_step="handoff_to_unfollow",
+        )
         self.assertEqual(
             orchestrator._follow_exit_handoff_gate(53, outcome),
             (True, "follow_candidate_local_post_follow_partial_safe_for_unfollow"),
@@ -79,7 +85,7 @@ class Follow60MuteStructuralRecoveryV1Test(unittest.TestCase):
         outcome["safe_boundary"] = False
         self.assertEqual(
             orchestrator._follow_exit_handoff_gate(53, outcome),
-            (False, "follow_candidate_local_partial_contract_unproved"),
+            (False, "follow_termination_decision_invalid"),
         )
 
     def test_restart_is_blocked_until_candidate_local_recovery_completes(self) -> None:

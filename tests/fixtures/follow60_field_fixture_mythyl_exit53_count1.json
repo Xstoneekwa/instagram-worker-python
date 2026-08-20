@@ -1,0 +1,11 @@
+{
+  "fixture_id": "FOLLOW60_FIELD_FIXTURE_MYTHYL_EXIT53_COUNT1",
+  "account_username": "mythyl_fitness",
+  "run_id": "910e7bab-7ce7-4ac0-b061-37780e91b4c7",
+  "exit_code": 53,
+  "follows_completed_count": 1,
+  "eligible_unfollow_candidates": 52,
+  "first_causal_reason": "following_button_not_found",
+  "candidate_username": "sanitized_candidate",
+  "source_profile_username": "sanitized_ct"
+}

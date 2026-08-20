@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "ff891a13ac3233251af1dbf47eefbcda60c7656d",
-    "change_id": "phone-farm-final-stability-closure-v1-20260820",
-    "final_diff_hash": "5a5ddbba02ffac79b4411c6cb88ff046491136c1e9eadaac8c341e4432631831",
-    "final_manifest_hash": "a8d20d59e86b03e2702778b410a3182047826586ad5fa6946a0acbcf7382e29b",
-    "final_protected_scope_hash": "62d905e6dd29c70d66a33b91a84ce50901af0ef53fcb8573efd9fe5c453ad203",
+    "base_sha": "a03352711c404196678659d90131b8b38cded099",
+    "change_id": "follow60-point-a-authoritative-termination-20260820",
+    "final_diff_hash": "cb424b621bd7dee99836c68bc4de122cb7585506459adec1d6a891b72ba7d3e6",
+    "final_manifest_hash": "db3ff0718c3be558d44be6525ca8cd909152ec0021f490a9a29a613df1697b90",
+    "final_protected_scope_hash": "4bee97a36a586d87ec4c642aa7dd3a69eedd53b071d1c11f25e4c8ed23148f9f",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -384,6 +384,31 @@
         "tests/test_target_availability_disabled_parity.py"
       ],
       "requested_scope": "final phone-farm stability closure: single authoritative Follow termination decision, bounded structural Mute recovery, durable partial preservation, and phase-safe Follow-to-Unfollow handoff",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_addenda_sha256": [
+        "68290d8ac797274612f0b99201c5c10f90915f465a7574bd4f80c17e44778f04",
+        "2f0f8f009c446cdb727216c61b95397dc2df31dd54de14b9af0b3640d2f2bf8f"
+      ],
+      "approval_1_payload_sha256": "bb33c3e1b17b015c5134dc9040d3b65ad574a601246068fa8759af7bf4aca512",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "a03352711c404196678659d90131b8b38cded099",
+      "candidate_tree_sha": "c88befadb56db588d5d50c2d12acb2ed8ccf6875",
+      "change_id": "follow60-point-a-authoritative-termination-20260820",
+      "consumed_at": "2026-08-20T19:20:39.531376+00:00",
+      "diff_sha256": "cb424b621bd7dee99836c68bc4de122cb7585506459adec1d6a891b72ba7d3e6",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_orchestrator.py",
+        "follow_outcome_contract.py",
+        "runner.py",
+        "tests/fixtures/follow60_field_fixture_mythyl_exit53_count1.json",
+        "tests/test_follow60_mute_structural_recovery_v1.py",
+        "tests/test_follow60_production_stability_closure_v1.py",
+        "tests/test_follow60_v2_mainline_v1.py"
+      ],
+      "requested_scope": "single authoritative FollowTerminationDecisionV1 from runner through account session; durable exit53 follow preservation; no retap, target rotation or reclassification; phase-safe handoff to Unfollow; fail-closed global safety",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -880,10 +905,12 @@
       "instagram_navigation.py"
     ],
     "tests/test_follow60_v2_mainline_v1.py": [
+      "account_session_orchestrator.py",
       "follow60_business_session_binding_v1.py",
       "follow60_mainline_v2.py",
       "follow60_ordering_v2_behavioral_canary_v1.py",
-      "follow60_ordering_v2_ledger_v1.py"
+      "follow60_ordering_v2_ledger_v1.py",
+      "follow_outcome_contract.py"
     ],
     "tests/test_followers_surface_proof.py": [
       "followers_surface_proof.py"
@@ -1022,7 +1049,7 @@
     ],
     "worker_runtime_identity.py": []
   },
-  "import_graph_sha256": "2868653d4bae721543a1e95969f4489651a7f71cada2a5de422b5f502cbd390d",
+  "import_graph_sha256": "4ae1ce8e0fbaa1fdf1dbecc210e019d49697870f88fa7994c3791cab0611d722",
   "lock_state": "LOCKED",
   "lock_version": "3.1.0",
   "manifest_signature": "DETACHED_ED25519_REQUIRED",
@@ -1127,13 +1154,13 @@
       "size": 9317
     },
     "account_session_orchestrator.py": {
-      "git_blob_oid": "70cbfd221b872f96e79e60be64849edfc724cfe3",
+      "git_blob_oid": "d7b8b5682fef34d467659a61ebea7171cda5d6cc",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "2b7c6374eb1525f973cca6b231b473ad4a82cf1b201d09be842628cd57fda517",
-      "size": 248644
+      "sha256": "a7a3d64e583b107b11cc49bd67ff6ee483e3215f22b069685072a20005b9792a",
+      "size": 252027
     },
     "account_session_phase_notification.py": {
       "git_blob_oid": "c5bac646636bf02bd8f92d06aabfd2fae9a44117",
@@ -1451,13 +1478,13 @@
       "size": 3770
     },
     "follow_outcome_contract.py": {
-      "git_blob_oid": "e648a90769dd449872a57dc1bad2958e2a0afc5f",
+      "git_blob_oid": "dafc28ff498ab4e1e0e715e996c860f851d235df",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "follow_outcome_contract.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "ce1959d49c3cfa47755e54752fe78a71a91985fc87d2549e3bef941b90b0a720",
-      "size": 7483
+      "sha256": "3e4c3d64a69cfad93e940752abbfd6ffbe895bd7bfca19314be92b258791ccb7",
+      "size": 12843
     },
     "follow_persistence_intent.py": {
       "git_blob_oid": "55e2ca382a25670aa99b3afd4496c80296493d02",
@@ -1730,13 +1757,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "feee12bec7c1be6a5f01d66cd50b9b9d02de51d8",
+      "git_blob_oid": "c33af704c7a5699cdc77714624b82f62cb7c757f",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "4da261990ff0ed8103bd5fb50b4682a717b55c756a66bcd3ee92587054c4baf6",
-      "size": 1258895
+      "sha256": "b234df6f4f8dc566e7f51efe74561c2559ea4ebca0dc38ca56714de84f6024bb",
+      "size": 1261822
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2045,13 +2072,13 @@
       "size": 5796
     },
     "tests/test_follow60_v2_mainline_v1.py": {
-      "git_blob_oid": "b0c4b2112aadefc11924a1efbe7a1fedd574302a",
+      "git_blob_oid": "1a7992ca81eaee85ebdbe741a0f38bebe9e793e0",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "tests/test_follow60_v2_mainline_v1.py",
       "role": "regression_contract",
-      "sha256": "5c481c714375a8f0acb1fe217574e4379e2b8f6e372ce4d1d281b00dad08eccc",
-      "size": 8353
+      "sha256": "e864aadcad6305391a40ceb4b9a6b116f2df7fa29c838a0879f6245604b53801",
+      "size": 17629
     },
     "tests/test_followers_surface_proof.py": {
       "git_blob_oid": "3766c7478fee9610052c63f4d8f9a1c28a37b8c9",
@@ -2279,8 +2306,8 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "62d905e6dd29c70d66a33b91a84ce50901af0ef53fcb8573efd9fe5c453ad203",
-  "protected_transitive_dependency_count": 139,
+  "protected_scope_sha256": "4bee97a36a586d87ec4c642aa7dd3a69eedd53b071d1c11f25e4c8ed23148f9f",
+  "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
     "engine": "FOLLOW60_V2_MAINLINE_V1",

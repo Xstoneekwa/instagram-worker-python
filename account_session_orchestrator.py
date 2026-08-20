@@ -25,7 +25,11 @@ from account_session_resume_engine import build_account_session_resume_plan
 from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import resolve_welcome_dm_real_send_enabled
-from follow_outcome_contract import merge_follow_outcome
+from follow_outcome_contract import (
+    FOLLOW_TERMINATION_DECISION_SCHEMA,
+    merge_follow_outcome,
+    validate_follow_termination_decision,
+)
 from follow60_business_session_binding_v1 import validate_business_session_binding
 from instagram_navigation import verify_app_foreground
 from logs import log
@@ -815,16 +819,26 @@ def _authoritative_follow_termination_decision(
     legacy zero-mutation classifier are no longer allowed to reinterpret it.
     """
 
-    follow_outcome = dict(summary.get("follow_outcome") or {})
-    accepted, reason = _follow_exit_handoff_gate(int(exit_code), follow_outcome)
     is_exit_53 = int(exit_code) == 53
+    decision = dict(summary.get("follow_termination_decision") or {})
+    accepted, validation_reason = validate_follow_termination_decision(
+        decision,
+        expected_exit_code=53,
+    ) if is_exit_53 else (False, "not_applicable")
     return {
-        "schema": "FOLLOW_TERMINATION_DECISION_V1",
+        "schema": FOLLOW_TERMINATION_DECISION_SCHEMA,
         "authoritative": bool(is_exit_53),
         "accepted": bool(is_exit_53 and accepted),
-        "reason": reason if is_exit_53 else "not_applicable",
+        "reason": (
+            validation_reason
+            if is_exit_53 and accepted
+            else "follow_termination_decision_invalid"
+            if is_exit_53
+            else "not_applicable"
+        ),
+        "validation_detail": validation_reason,
         "exit_code": int(exit_code),
-        "follow_outcome": follow_outcome,
+        "follow_outcome": decision,
         "rotation_allowed": False if is_exit_53 else None,
         "follow_retap_allowed": False if is_exit_53 else None,
     }
@@ -947,6 +961,7 @@ def _run_follow_target_rotation(
     prevalidated_followers_target_key: str | None = None
     prevalidated_followers_meta: dict[str, Any] = {}
     authoritative_exit_53_consumed = False
+    authoritative_exit_53_invalid = False
     t0 = time.perf_counter()
 
     mainline_session_binding: dict[str, Any] = {}
@@ -1249,13 +1264,26 @@ def _run_follow_target_rotation(
                     or ""
                 ),
             }
-        else:
+        elif not termination_decision["authoritative"]:
             target_local_contract = _follow_target_local_failure_contract(
                 exit_code=exit_code,
                 summary=summary,
             )
             if target_local_contract["is_target_local_failure"]:
                 summary.update(target_local_contract)
+        else:
+            target_local_contract = {
+                "is_target_local_failure": False,
+                "target_outcome": "follow_termination_decision_invalid",
+                "target_reason": "follow_termination_decision_invalid",
+                "target_retryable": False,
+                "target_safe_to_skip": False,
+                "target_completed": False,
+                "first_causal_reason": "follow_termination_decision_invalid",
+                "last_recovery_reason": str(
+                    termination_decision.get("validation_detail") or ""
+                ),
+            }
         _observe_target_availability(
             "summary",
             tenant_id=str(tenant_id or ""),
@@ -1352,6 +1380,21 @@ def _run_follow_target_rotation(
                     "follow_session_outcome": "partial_resumable",
                     "follow_stop_reason": final_reason,
                     "first_causal_reason": final_reason,
+                    "phase_status": str(
+                        termination_decision["follow_outcome"].get(
+                            "phase_status"
+                        )
+                        or "partial_resumable"
+                    ),
+                    "scope": str(
+                        termination_decision["follow_outcome"].get("scope")
+                        or "follow_phase"
+                    ),
+                    "safe_boundary": bool(
+                        termination_decision["follow_outcome"].get(
+                            "safe_boundary"
+                        )
+                    ),
                     "global_follows_completed": global_follows_completed,
                     "global_follows_goal_effective": global_follow_goal,
                     "target_rotation_allowed": False,
@@ -1383,6 +1426,51 @@ def _run_follow_target_rotation(
                 target_rotation_allowed=False,
                 follow_retap_allowed=False,
                 safe_next_step="handoff_to_unfollow",
+            )
+            break
+        if termination_decision["authoritative"]:
+            authoritative_exit_53_invalid = True
+            final_reason = "follow_termination_decision_invalid"
+            final_exit_code = 96
+            final_summary.update(
+                {
+                    "exit_code": 96,
+                    "follow_session_outcome": "blocked_critical",
+                    "follow_stop_reason": final_reason,
+                    "first_causal_reason": final_reason,
+                    "phase_status": "blocked_critical",
+                    "scope": "account_session",
+                    "safe_boundary": False,
+                    "safe_next_step": "manual_review",
+                    "target_rotation_allowed": False,
+                    "no_next_candidate": True,
+                    "follow_retap_allowed": False,
+                    "no_new_follow_until_recovered": True,
+                    "authoritative_follow_termination_decision": dict(
+                        termination_decision
+                    ),
+                    "follow_outcome": {
+                        "phase_status": "blocked_critical",
+                        "scope": "account_session",
+                        "stable_reason": final_reason,
+                        "safe_boundary": False,
+                        "safe_next_step": "manual_review",
+                    },
+                }
+            )
+            log(
+                "error",
+                "follow_termination_decision_invalid",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                runner_exit_code=exit_code,
+                validation_detail=termination_decision.get(
+                    "validation_detail"
+                ),
+                target_rotation_allowed=False,
+                follow_retap_allowed=False,
             )
             break
         exhausted = is_follow_target_exhaustion_outcome(
@@ -2281,10 +2369,11 @@ def _run_follow_target_rotation(
         final_reason in {"global_follow_cap_reached", "all_targets_exhausted"}
         or final_summary.get("all_targets_exhausted") is True
     )
-    if authoritative_exit_53_consumed:
+    if authoritative_exit_53_consumed or authoritative_exit_53_invalid:
         # The runner's durable receipt contract is already the authoritative
-        # outcome.  A generic merge here would recreate the legacy double
-        # decision and can never be allowed to rewrite exit 53.
+        # outcome, or its envelope was invalid and explicitly failed closed.
+        # A generic merge here would recreate the legacy double decision and
+        # can never be allowed to rewrite either exit-53 terminal.
         final_summary["follow_outcome"] = dict(final_contract)
     elif not globally_completed:
         contract_remaining_target_ids = (
@@ -2800,17 +2889,15 @@ def _follow_exit_handoff_gate(
 ) -> tuple[bool, str]:
     outcome = dict(follow_outcome or {})
     if follow_exit_code == 53:
-        if (
-            outcome.get("phase_status") == "partial_resumable"
-            and outcome.get("scope") == "follow_phase"
-            and outcome.get("safe_boundary") is True
-            and outcome.get("candidate_local_failure") is True
-            and outcome.get("post_follow_recovery_required") is True
-            and outcome.get("safe_next_step") == "handoff_to_unfollow"
-            and outcome.get("no_new_follow_until_recovered") is True
-        ):
-            return True, "follow_candidate_local_post_follow_partial_safe_for_unfollow"
-        return False, "follow_candidate_local_partial_contract_unproved"
+        valid, reason = validate_follow_termination_decision(
+            outcome,
+            expected_exit_code=53,
+        )
+        return (
+            (True, reason)
+            if valid
+            else (False, "follow_termination_decision_invalid")
+        )
     if outcome:
         if (
             outcome.get("phase_status") != "completed"

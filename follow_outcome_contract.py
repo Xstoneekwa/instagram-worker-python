@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 
 FOLLOW_OUTCOME_CONTRACT_VERSION = "follow_outcome_v1"
+FOLLOW_TERMINATION_DECISION_SCHEMA = "FOLLOW_TERMINATION_DECISION_V1"
+FOLLOW_TERMINATION_DECISION_VERSION = "follow_termination_decision_v1"
 LOCAL_ROTATABLE_REASONS = frozenset({"visible_window_exhausted_scroll_failed"})
 GLOBAL_COMPLETION_REASONS = frozenset(
     {
@@ -40,6 +42,138 @@ CRITICAL_MARKERS = (
     "restriction",
     "restricted",
 )
+
+
+def build_follow_termination_decision(
+    *,
+    exit_code: int,
+    first_causal_reason: str,
+    follows_completed_count: int,
+    target_follow_budget_effective: int | None,
+    target_attribution: dict[str, Any],
+    physical_follow_preserved: bool,
+    canonical_follow_receipt_present: bool,
+    candidate_local_failure: bool,
+    post_follow_recovery_required: bool,
+    no_new_follow_until_recovered: bool,
+    safe_boundary: bool,
+    safe_next_step: str,
+) -> dict[str, Any]:
+    """Build the runner-owned, JSON-safe Follow termination decision.
+
+    This envelope contains execution facts only.  The account orchestrator may
+    validate it and apply independent global safety gates, but must never
+    reconstruct a second Follow outcome from legacy target-local heuristics.
+    """
+
+    completed = max(0, int(follows_completed_count or 0))
+    budget = (
+        max(0, int(target_follow_budget_effective))
+        if target_follow_budget_effective is not None
+        else None
+    )
+    reason = str(first_causal_reason or "post_follow_recovery_required").strip()
+    attribution = {
+        str(key): value
+        for key, value in dict(target_attribution or {}).items()
+        if value is not None and str(value).strip()
+    }
+    return {
+        "schema": FOLLOW_TERMINATION_DECISION_SCHEMA,
+        "schema_version": FOLLOW_TERMINATION_DECISION_VERSION,
+        "contract_version": FOLLOW_TERMINATION_DECISION_VERSION,
+        "phase_status": "partial_resumable",
+        "scope": "follow_phase",
+        "exit_code": int(exit_code),
+        "first_causal_reason": reason,
+        "stable_reason": reason,
+        "physical_follow_preserved": bool(physical_follow_preserved),
+        "canonical_follow_receipt_present": bool(
+            canonical_follow_receipt_present
+        ),
+        "candidate_local_failure": bool(candidate_local_failure),
+        "post_follow_recovery_required": bool(post_follow_recovery_required),
+        "no_new_follow_until_recovered": bool(no_new_follow_until_recovered),
+        "safe_boundary": bool(safe_boundary),
+        "safe_next_step": str(safe_next_step or "").strip(),
+        "follow_quota_state": {
+            "follows_completed_count": completed,
+            "target_follow_budget_effective": budget,
+        },
+        "target_attribution": attribution,
+        "completed": False,
+        "partial": True,
+        "resumable": True,
+        "verified_actions": completed,
+        "target_actions": budget,
+        "remaining_actions": (
+            max(0, budget - completed) if budget is not None else None
+        ),
+        "remaining_target_ids": [],
+        "remaining_target_count": 0,
+        "current_ct_status": "retryable",
+        "current_ct_result": "retryable",
+        "suggested_next_action": "handoff_to_unfollow",
+        "suggested_resume_strategy": (
+            "resume_post_follow_recovery_before_new_follow"
+        ),
+        "last_safe_checkpoint": "post_follow_recovery_pending",
+        "follow_retap_allowed": False,
+        "target_rotation_allowed": False,
+    }
+
+
+def validate_follow_termination_decision(
+    decision: dict[str, Any] | None,
+    *,
+    expected_exit_code: int = 53,
+) -> tuple[bool, str]:
+    """Validate the exact runner-owned exit-53 envelope, fail closed."""
+
+    if not isinstance(decision, dict) or not decision:
+        return False, "decision_missing"
+    if decision.get("schema") != FOLLOW_TERMINATION_DECISION_SCHEMA:
+        return False, "schema_unknown"
+    if decision.get("schema_version") != FOLLOW_TERMINATION_DECISION_VERSION:
+        return False, "schema_version_unknown"
+    try:
+        actual_exit_code = int(decision.get("exit_code"))
+    except (TypeError, ValueError):
+        return False, "exit_code_invalid"
+    if actual_exit_code != int(expected_exit_code):
+        return False, "exit_code_mismatch"
+
+    required_exact = {
+        "phase_status": "partial_resumable",
+        "scope": "follow_phase",
+        "physical_follow_preserved": True,
+        "canonical_follow_receipt_present": True,
+        "candidate_local_failure": True,
+        "post_follow_recovery_required": True,
+        "no_new_follow_until_recovered": True,
+        "safe_boundary": True,
+        "safe_next_step": "handoff_to_unfollow",
+        "follow_retap_allowed": False,
+        "target_rotation_allowed": False,
+    }
+    for field, expected in required_exact.items():
+        if decision.get(field) != expected:
+            return False, f"contract_contradiction:{field}"
+
+    quota = decision.get("follow_quota_state")
+    if not isinstance(quota, dict):
+        return False, "follow_quota_state_invalid"
+    try:
+        if int(quota.get("follows_completed_count")) < 1:
+            return False, "durable_follow_count_invalid"
+    except (TypeError, ValueError):
+        return False, "durable_follow_count_invalid"
+    attribution = decision.get("target_attribution")
+    if not isinstance(attribution, dict) or not attribution:
+        return False, "target_attribution_invalid"
+    if not str(decision.get("first_causal_reason") or "").strip():
+        return False, "first_causal_reason_missing"
+    return True, "follow_candidate_local_post_follow_partial_safe_for_unfollow"
 
 
 def _clean_ids(values: Iterable[Any] | None) -> list[str]:
