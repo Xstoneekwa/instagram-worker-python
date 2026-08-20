@@ -1,0 +1,17 @@
+{
+  "schema": "PRODUCTION_LINEAGE_GATE_HISTORICAL_FAILURE_FIXTURE_V1",
+  "incident_class": "green_candidate_built_from_stale_baseline",
+  "production_sha": "2349a8e299ec28563e87423e43bcf891684304b7",
+  "candidate_sha": "ee677adc93a2dca71fdb5029b60e5a6e14931c27",
+  "lost_canonical_delta": "backend_manual_stop_next_tick",
+  "deployment_id": "dpl_6pggQuaQiCtDZ4t5iffyc2LLDydw",
+  "history": [
+    {"label": "base", "parents": []},
+    {"label": "canonical_delta", "parents": ["base"], "status": "ACTIVE"},
+    {"label": "production", "parents": ["canonical_delta"]},
+    {"label": "stale_candidate", "parents": ["base"], "unit_tests": "PASS"}
+  ],
+  "expected_gate_result": "BLOCK",
+  "expected_reason": "candidate_not_descendant_of_exact_production",
+  "why_unit_tests_are_insufficient": "The stale candidate can pass isolated tests while silently dropping canonical production behavior."
+}

@@ -1,0 +1,918 @@
+{
+  "schema": "PHONE_FARM_CANONICAL_DELTA_REGISTRY_V1",
+  "generated_for": "final_production_stability_closure_phase_a",
+  "components": {
+    "worker": {
+      "production": {
+        "verification_state": "VERIFIED",
+        "sha": "a794da764c57a50187bd94c9411f6566519ad3ca",
+        "runtime_root": "/Users/admin/phonefarm-worker-releases/a794da7-follow60-production-stability-closure-v1"
+      },
+      "artifact_provenance_required": false,
+      "deltas": [
+        {
+          "id": "worker_follow60_lock_v3_1",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "528bce2ecd280ea1829245b4a734bacf5d160f23",
+          "scope": [
+            "follow60_lock_v3_1"
+          ],
+          "activated_at": "2026-08-15T21:25:56+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_ct_resume_scroll_transition",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "e8bf0665707f8762d7c7d78c011164b11e859c2c",
+          "scope": [
+            "ct_resume_scroll_transition"
+          ],
+          "activated_at": "2026-08-15T15:09:07+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_profile_identity_boundary",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "d7b5428c4a1414cc3f475e79735b9ac86a6825be",
+          "scope": [
+            "profile_identity_boundary"
+          ],
+          "activated_at": "2026-08-15T00:51:45+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_dynamic_unfollow_after_days",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "09ac825acaacb47e34b41c0c34ca1b48b2c01de9",
+          "scope": [
+            "dynamic_unfollow_after_days"
+          ],
+          "activated_at": "2026-08-11T22:31:24+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_ct_resume_private_unfollow",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "1981980ee7a641e877819ccec29cbf4d98274730",
+          "scope": [
+            "ct_resume_private_unfollow"
+          ],
+          "activated_at": "2026-08-09T22:03:19+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_enospc_safety",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "6a2e094687b1379a5f3738fdf6935bf6a3e53716",
+          "scope": [
+            "enospc_safety"
+          ],
+          "activated_at": "2026-08-16T15:31:05+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_wrong_depth_profile_recovery",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "d40eb84d2c4fcd02c9df7236978bbb4475042176",
+          "scope": [
+            "wrong_depth_profile_recovery"
+          ],
+          "activated_at": "2026-08-16T21:26:07+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_stale_viewport_evidence",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "ba7aba09990ded4b9df6b207235aacc7ecf8d465",
+          "scope": [
+            "stale_viewport_evidence"
+          ],
+          "activated_at": "2026-08-16T23:22:02+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_target_local_failure_propagation",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "9091c9225c2f1d7e3ac71bf89e066e443cd722ec",
+          "scope": [
+            "target_local_failure_propagation"
+          ],
+          "activated_at": "2026-08-18T02:56:14+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_cooperative_business_safe_stop",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "e0d12949532a74c7d41035d5629799bb26c8e61b",
+          "scope": [
+            "cooperative_business_safe_stop"
+          ],
+          "activated_at": "2026-08-18T17:55:32+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_post_first_intent_recovery",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "ef60be62e3578ffe1099d4cf48512e4c1a878e9d",
+          "scope": [
+            "post_first_intent_recovery"
+          ],
+          "activated_at": "2026-08-18T21:55:45+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_ambiguous_mutation_reconciliation",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "bdbc16825fa83909ca0c9a2bdfde20ae9e88009f",
+          "scope": [
+            "ambiguous_mutation_reconciliation"
+          ],
+          "activated_at": "2026-08-18T23:54:19+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260818190000"
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_runtime_identity_hotfix",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "87e5aaa928c9ce785e3f5c8c8855f266937a43f8",
+          "scope": [
+            "runtime_identity_hotfix"
+          ],
+          "activated_at": "2026-08-19T13:07:03+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260819093000"
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_mute_structural_recovery",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "1365f83e6a7c22eaaddedbb5264afaa63640e9f3",
+          "scope": [
+            "mute_structural_recovery"
+          ],
+          "activated_at": "2026-08-19T16:59:26+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_production_stability_closure_v1",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "a794da764c57a50187bd94c9411f6566519ad3ca",
+          "scope": [
+            "production_stability_closure_v1"
+          ],
+          "activated_at": "2026-08-19T21:32:09+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_legacy_transient_follow_surface_resume",
+          "status": "SUPERSEDED",
+          "superseded_by": "worker_production_stability_closure_v1",
+          "repo": "worker",
+          "introduced_by_sha": "f4d00e2158dc6f6bf61ea5b82dce3328628873f0",
+          "scope": [
+            "legacy_transient_follow_surface_resume"
+          ],
+          "activated_at": "2026-08-16T16:11:37+02:00",
+          "required": false,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_legacy_phone_unlock_identity",
+          "status": "RETIRED",
+          "retirement_reason": "Runtime identity is now proven by the canonical release root and full SHA contract.",
+          "repo": "worker",
+          "introduced_by_sha": "2cfd2d47c15d51912bba53b4aff79b2f4216eb8f",
+          "scope": [
+            "legacy_phone_unlock_identity"
+          ],
+          "activated_at": "2026-08-16T13:29:31+02:00",
+          "required": false,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        }
+      ]
+    },
+    "backend": {
+      "production": {
+        "verification_state": "VERIFIED",
+        "sha": "530802780b2f3de6b0a1046c21ca4f6bde77bbb9",
+        "deployment_id": "dpl_RGDhvQ14mcTmkn9KPuGsRcS61wF2"
+      },
+      "artifact_provenance_required": false,
+      "deltas": [
+        {
+          "id": "backend_profiles_live_canonical",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "05a32ad5d793494b4f117b5cc93107254ac3a5f7",
+          "scope": [
+            "profiles_live_canonical"
+          ],
+          "activated_at": "2026-08-13T13:39:18+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_profiles_live_projection_recovery",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "9c5e63f576e93c7c76ae65cd5947c661ebdee2c6",
+          "scope": [
+            "profiles_live_projection_recovery"
+          ],
+          "activated_at": "2026-08-13T13:39:18+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_post_onboarding_readiness",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "3b60cc7e23549cd32d4c0dc8040ecdb2cf15f965",
+          "scope": [
+            "post_onboarding_readiness"
+          ],
+          "activated_at": "2026-08-13T22:28:56+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_readiness_projection",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "dfa8984fe804636de9718d76e26c24790c10ab43",
+          "scope": [
+            "readiness_projection"
+          ],
+          "activated_at": "2026-08-13T22:34:03+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_operator_review_runtime_pause",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "82dea164301738cef014a470704d7f624539a248",
+          "scope": [
+            "operator_review_runtime_pause"
+          ],
+          "activated_at": "2026-08-13T23:50:33+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_operator_review_atomic_reactivation",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "f9473f607d105d2a625ac16826c62abd977a52e6",
+          "scope": [
+            "operator_review_atomic_reactivation"
+          ],
+          "activated_at": "2026-08-14T17:29:55+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_commercial_resume_preflight",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "cd6c3cae0d26370b93dd3db6494decdc6075bde5",
+          "scope": [
+            "commercial_resume_preflight"
+          ],
+          "activated_at": "2026-08-14T18:17:18+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_lifecycle_communications",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "d7149dedcf3bf36a372fe932244538708c5fe165",
+          "scope": [
+            "lifecycle_communications"
+          ],
+          "activated_at": "2026-08-14T20:43:51+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_canonical_email_render_context",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "35e47b2f191dd8db76554e2331dc24efd0094c0e",
+          "scope": [
+            "canonical_email_render_context"
+          ],
+          "activated_at": "2026-08-14T23:38:00+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_lifecycle_pause_email",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "a69ec4ba425290d4257d3bc2d6c73082b7777ee1",
+          "scope": [
+            "lifecycle_pause_email"
+          ],
+          "activated_at": "2026-08-16T01:59:08+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_cancel_contract",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "0b7fcf4eb08a11fd3690a50e816360e762b7a830",
+          "scope": [
+            "cancel_contract"
+          ],
+          "activated_at": "2026-08-16T04:16:17+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_mandatory_unfollow_auto_restart",
+          "status": "SUPERSEDED",
+          "superseded_by": "backend_resolved_incident_generation_reactivation",
+          "repo": "backend",
+          "introduced_by_sha": "59544b9fac6cc6bd32aae3dae7e1a20c8cb86884",
+          "scope": [
+            "mandatory_unfollow_auto_restart"
+          ],
+          "activated_at": "2026-08-16T16:58:03+02:00",
+          "required": false,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_mandatory_unfollow_auto_restart_v2",
+          "status": "SUPERSEDED",
+          "superseded_by": "backend_resolved_incident_generation_reactivation",
+          "repo": "backend",
+          "introduced_by_sha": "e91988bc3ac4cf0de669eb53daf496ca03f6beaa",
+          "scope": [
+            "mandatory_unfollow_auto_restart_v2"
+          ],
+          "activated_at": "2026-08-16T17:15:15+02:00",
+          "required": false,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_manual_stop_next_tick",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "4a7604f680006f243fa01a78f21f2af750f130e9",
+          "scope": [
+            "manual_stop_next_tick"
+          ],
+          "activated_at": "2026-08-16T17:48:50+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_auto_restart_generation",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "39fd4bc42cb2f05dedbb60a876e88911bf793e01",
+          "scope": [
+            "auto_restart_generation"
+          ],
+          "activated_at": "2026-08-16T17:57:31+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_unfollow_package_provenance",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "bc309f39dde202ae5c3f014e7b38292b0b79060f",
+          "scope": [
+            "unfollow_package_provenance"
+          ],
+          "activated_at": "2026-08-18T15:32:57+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260818130124"
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_dynamic_business_deadline",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "cee4de13dd0736be735a7feef491e54236df6ef1",
+          "scope": [
+            "dynamic_business_deadline"
+          ],
+          "activated_at": "2026-08-18T17:56:33+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "backend_resolved_incident_generation_reactivation",
+          "status": "ACTIVE",
+          "repo": "backend",
+          "introduced_by_sha": "530802780b2f3de6b0a1046c21ca4f6bde77bbb9",
+          "scope": [
+            "resolved_incident_generation_reactivation"
+          ],
+          "activated_at": "2026-08-19T22:44:37+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260819204522"
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        }
+      ]
+    },
+    "botapp": {
+      "production": {
+        "verification_state": "UNVERIFIED",
+        "sha": null,
+        "installed_bundle": "/Applications/BotApp.app",
+        "reason": "Installed bundle does not expose a machine-verifiable full source SHA. Promotion must remain fail-closed until build provenance is embedded."
+      },
+      "artifact_provenance_required": true,
+      "deltas": [
+        {
+          "id": "botapp_incident_review_clarity",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "d447825879fa6005babe9cb308f15f4e32a28102",
+          "scope": [
+            "incident_review_clarity"
+          ],
+          "activated_at": "2026-08-09T19:41:41+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_onboarding_lifecycle",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "d9a0fea954310a6a060b9772054f3bd89a64bdb4",
+          "scope": [
+            "onboarding_lifecycle"
+          ],
+          "activated_at": "2026-08-09T21:24:18+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_canonical_profiles_projection",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "554c765a03184abc3689ffd64ce4dfb092f36b5d",
+          "scope": [
+            "canonical_profiles_projection"
+          ],
+          "activated_at": "2026-08-13T13:06:02+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_operator_review_priority",
+          "status": "SUPERSEDED",
+          "superseded_by": "botapp_operator_review_priority_v2",
+          "repo": "botapp",
+          "introduced_by_sha": "de3e76791dc1889caedb460880cc481e33bf78f5",
+          "scope": [
+            "operator_review_priority"
+          ],
+          "activated_at": "2026-08-13T23:51:09+02:00",
+          "required": false,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_operator_review_priority_v2",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "2d8c3fcf99eef8e7580e7808020729f8ad72b10b",
+          "scope": [
+            "operator_review_priority_v2"
+          ],
+          "activated_at": "2026-08-14T01:16:03+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_lifecycle_product_parity",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "b84f4fed370231113ddc36ef0da81ed44c6a94c4",
+          "scope": [
+            "lifecycle_product_parity"
+          ],
+          "activated_at": "2026-08-14T23:38:16+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_projection_stability",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "5e8f84199664fd4532bbf3e31a00d1eaf513467b",
+          "scope": [
+            "projection_stability"
+          ],
+          "activated_at": "2026-08-15T01:55:57+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "botapp_runtime_identity_safe_directory",
+          "status": "ACTIVE",
+          "repo": "botapp",
+          "introduced_by_sha": "aed34d55cd583faeaac00c8b35b926ff1f4ff152",
+          "scope": [
+            "runtime_identity_safe_directory"
+          ],
+          "activated_at": "2026-08-16T12:36:02+02:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+
+          ],
+          "tests": [
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        }
+      ]
+    }
+  },
+  "migrations": [
+    {
+      "id": "migration_operator_review_terminal_precedence_v2",
+      "status": "ACTIVE",
+      "production_version": "20260813231800",
+      "repo": "backend",
+      "path": "supabase/migrations/20260813225934_operator_review_terminal_precedence_v2.sql"
+    },
+    {
+      "id": "migration_incident_resolution_atomic_runtime_reactivation_v3",
+      "status": "ACTIVE",
+      "production_version": "20260814001446",
+      "repo": "backend",
+      "path": "supabase/migrations/20260813235858_incident_resolution_atomic_runtime_reactivation_v3.sql"
+    },
+    {
+      "id": "migration_follow_warmup_event_type_compat_v1",
+      "status": "ACTIVE",
+      "production_version": "20260814111413"
+    },
+    {
+      "id": "migration_commercial_resume_blocker_preflight_and_recovery_v1",
+      "status": "ACTIVE",
+      "production_version": "20260814161814",
+      "repo": "backend",
+      "path": "supabase/migrations/20260814173000_commercial_resume_blocker_preflight_and_recovery_v1.sql"
+    },
+    {
+      "id": "migration_commercial_lifecycle_email_transition_evidence_v1",
+      "status": "ACTIVE",
+      "production_version": "20260814185244",
+      "repo": "backend",
+      "path": "supabase/migrations/20260814184500_commercial_lifecycle_email_transition_evidence_v1.sql"
+    },
+    {
+      "id": "migration_unfollow_package_enablement_provenance_v1",
+      "status": "ACTIVE",
+      "production_version": "20260818130124",
+      "repo": "backend",
+      "path": "supabase/migrations/20260818130124_unfollow_package_enablement_provenance_v1.sql"
+    },
+    {
+      "id": "migration_ambiguous_unfollow_persistence_v1",
+      "status": "ACTIVE",
+      "production_version": "20260818190000",
+      "repo": "worker",
+      "path": "supabase/migrations/20260818190000_ambiguous_unfollow_persistence_v1.sql"
+    },
+    {
+      "id": "migration_p0c_runtime_identity_recovery_lease_v1",
+      "status": "ACTIVE",
+      "production_version": "20260819093000",
+      "repo": "worker",
+      "path": "supabase/migrations/20260819093000_p0c_runtime_identity_recovery_lease_v1.sql"
+    },
+    {
+      "id": "migration_incident_resolution_generation_auto_restart_v1",
+      "status": "ACTIVE",
+      "production_version": "20260819204522",
+      "repo": "backend",
+      "path": "supabase/migrations/20260819203428_incident_resolution_generation_auto_restart_v1.sql"
+    }
+  ]
+}
