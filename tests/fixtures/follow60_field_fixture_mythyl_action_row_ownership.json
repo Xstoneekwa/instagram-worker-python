@@ -1,0 +1,27 @@
+{
+  "fixture_id": "FOLLOW60_FIELD_FIXTURE_MYTHYL_ACTION_ROW_OWNERSHIP",
+  "source": "sanitized_structured_field_events",
+  "window": {
+    "width": 1080,
+    "height": 2340
+  },
+  "candidate_profile_confirmed": true,
+  "profile_surface_certified": true,
+  "evidence_fresh": true,
+  "following_cta": {
+    "text": "Following",
+    "resource_id": "com.instagram.androif:id/profile_header_follow_button",
+    "bounds": {
+      "left": 33,
+      "top": 592,
+      "right": 479,
+      "bottom": 682
+    }
+  },
+  "peer_controls": [],
+  "old_matcher": "profile_action_row_ownership_unproved",
+  "expected_matcher": "canonical_profile_header_cta",
+  "expected_valid": true,
+  "message_false_positive": false,
+  "contact_false_positive": false
+}

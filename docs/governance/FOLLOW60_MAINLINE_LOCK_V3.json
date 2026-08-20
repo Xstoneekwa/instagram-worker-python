@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "a03352711c404196678659d90131b8b38cded099",
-    "change_id": "follow60-point-a-authoritative-termination-20260820",
-    "final_diff_hash": "cb424b621bd7dee99836c68bc4de122cb7585506459adec1d6a891b72ba7d3e6",
-    "final_manifest_hash": "db3ff0718c3be558d44be6525ca8cd909152ec0021f490a9a29a613df1697b90",
-    "final_protected_scope_hash": "4bee97a36a586d87ec4c642aa7dd3a69eedd53b071d1c11f25e4c8ed23148f9f",
+    "base_sha": "1425ec8c8b54fe14198aa75586716fc47433ec19",
+    "change_id": "follow60-point-b-mute-structural-matcher-20260820",
+    "final_diff_hash": "649b6377bfefaa2e88a61f563aebad5ae99cf4b2b1609dc5de0a30f1ee1fb75b",
+    "final_manifest_hash": "5471f16aa6c7f7bf238285208b4eafabd79758ada281791573973d1fd89e4f35",
+    "final_protected_scope_hash": "3c1c05ff5d22f18e14153cb304c3affd80f6d74ffd98a98100a9cbbb49b40998",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -409,6 +409,23 @@
         "tests/test_follow60_v2_mainline_v1.py"
       ],
       "requested_scope": "single authoritative FollowTerminationDecisionV1 from runner through account session; durable exit53 follow preservation; no retap, target rotation or reclassification; phase-safe handoff to Unfollow; fail-closed global safety",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "f035128ae4c625362be870e741cd2396eaf8b8ebedbc4c4042599be1557d2701",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "1425ec8c8b54fe14198aa75586716fc47433ec19",
+      "candidate_tree_sha": "7805452bd07b102cd78dd1b4fee412ef6d63d19e",
+      "change_id": "follow60-point-b-mute-structural-matcher-20260820",
+      "consumed_at": "2026-08-20T21:03:57.271158+00:00",
+      "diff_sha256": "649b6377bfefaa2e88a61f563aebad5ae99cf4b2b1609dc5de0a30f1ee1fb75b",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "instagram_navigation.py",
+        "tests/fixtures/follow60_field_fixture_mythyl_action_row_ownership.json",
+        "tests/test_follow60_mute_structural_recovery_v1.py"
+      ],
+      "requested_scope": "Point B only: exact Following CTA ownership on a freshly certified exact candidate profile; canonical profile-header resource plus state, bounds, freshness and ambiguity guards; preserve bounded structural peers across per-node accessibility errors; no UI action, retry, phase, CT Resume, Point A, Point C or Unfollow behavior change",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -897,6 +914,11 @@
       "follow60_lock_v3.py",
       "follow60_mainline_integrity_v3.py"
     ],
+    "tests/test_follow60_mute_structural_recovery_v1.py": [
+      "account_session_orchestrator.py",
+      "follow_outcome_contract.py",
+      "instagram_navigation.py"
+    ],
     "tests/test_follow60_p0_source_contract.py": [],
     "tests/test_follow60_physical_write_lock_v3_1.py": [
       "follow60_write_lock_v3_1.py"
@@ -1049,7 +1071,7 @@
     ],
     "worker_runtime_identity.py": []
   },
-  "import_graph_sha256": "4ae1ce8e0fbaa1fdf1dbecc210e019d49697870f88fa7994c3791cab0611d722",
+  "import_graph_sha256": "1cecdbac4d715feefe2605f938b037bfb5cfda70ed818e5d7e1b45067e9a09f1",
   "lock_state": "LOCKED",
   "lock_version": "3.1.0",
   "manifest_signature": "DETACHED_ED25519_REQUIRED",
@@ -1640,13 +1662,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "c410bbc37a099213945ce0f33dec7aa7fd986e37",
+      "git_blob_oid": "13570418c05137246999d0c2b006751755689115",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "6ca77ecd57961b85eb05509ba66609d046665b982bcb293cb0f51adfe11b90b2",
-      "size": 2464141
+      "sha256": "d164a25c2024f473ae4bef2ec52db38177655f418d336392ca1ab2de415d4d38",
+      "size": 2468033
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -2017,6 +2039,15 @@
       "sha256": "585e559dfd956e3c5e5fa978e0ce215d835a193196a525a77f6dc5d5c90082ad",
       "size": 1503
     },
+    "tests/fixtures/follow60_field_fixture_mythyl_action_row_ownership.json": {
+      "git_blob_oid": "f654e55f32ef03c36905af10120fc41a2a344d66",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "tests/fixtures/follow60_field_fixture_mythyl_action_row_ownership.json",
+      "role": "regression_contract",
+      "sha256": "1995aa23b03c41e49760ac950ebeef8211ab84713f037282099b7c0e461d0711",
+      "size": 737
+    },
     "tests/follow60_generic_fixtures.py": {
       "git_blob_oid": "9105d6e445f18a4d401245352c39735308b1cf53",
       "lock_version": "3.1.0",
@@ -2043,6 +2074,15 @@
       "role": "regression_contract",
       "sha256": "d65895f3a8c4df64def3be81745538fc276806e7a209a58668326db268d72a5a",
       "size": 15936
+    },
+    "tests/test_follow60_mute_structural_recovery_v1.py": {
+      "git_blob_oid": "00a0219f96bd7290369b55b4712a032c52dd9c07",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "tests/test_follow60_mute_structural_recovery_v1.py",
+      "role": "regression_contract",
+      "sha256": "6fbba5e99579ac82f08d3ec1966110c84713cb6c55119e6ffb324dabcc9c2a77",
+      "size": 15397
     },
     "tests/test_follow60_p0_source_contract.py": {
       "git_blob_oid": "bb8fc9ec31af8ba57155556b5bf33800f05c5c20",
@@ -2306,7 +2346,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "4bee97a36a586d87ec4c642aa7dd3a69eedd53b071d1c11f25e4c8ed23148f9f",
+  "protected_scope_sha256": "3c1c05ff5d22f18e14153cb304c3affd80f6d74ffd98a98100a9cbbb49b40998",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

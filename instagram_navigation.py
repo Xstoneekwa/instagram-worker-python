@@ -50679,17 +50679,34 @@ def _mute_engine_v2_following_cta_structure_ok(
     ww: int,
     wh: int,
     candidate_profile_confirmed: bool,
+    candidate_text: str = "",
+    resource_id: str = "",
+    profile_surface_certified: bool | None = None,
+    evidence_fresh: bool = True,
 ) -> tuple[bool, str]:
     """Prove that an exact Following control belongs to the profile action row.
 
     Instagram moves the action row vertically as the header grows.  A global
     percentage cutoff therefore cannot be authoritative.  The proof is based
-    on exact candidate-profile identity plus either a wide standalone CTA or
-    an aligned Message/Contact/add-person peer.  It deliberately rejects list
-    rows, suggested cards and controls below the profile tabs.
+    on exact candidate-profile identity plus one of three independent action
+    ownership proofs: the canonical profile-header CTA resource, a wide
+    standalone CTA, or an aligned Message/Contact/add-person peer.  The
+    canonical-resource path is never sufficient by itself: it also requires
+    an exact Following state, a certified fresh profile surface, valid bounds
+    and no ambiguous duplicate canonical controls.  It deliberately rejects
+    list rows, suggested cards and controls below the profile tabs.
     """
     if not candidate_profile_confirmed:
         return False, "candidate_profile_identity_unproved"
+    surface_certified = (
+        bool(candidate_profile_confirmed)
+        if profile_surface_certified is None
+        else bool(profile_surface_certified)
+    )
+    if not surface_certified:
+        return False, "candidate_profile_surface_unproved"
+    if not evidence_fresh:
+        return False, "candidate_profile_evidence_stale"
     try:
         left = int(bounds.get("left", 0))
         top = int(bounds.get("top", 0))
@@ -50697,11 +50714,57 @@ def _mute_engine_v2_following_cta_structure_ok(
         bottom = int(bounds.get("bottom", 0))
     except Exception:
         return False, "bounds_invalid"
+    if left < 0 or top < 0 or right > int(ww) or bottom > int(wh):
+        return False, "outside_app_window"
     width = max(0, right - left)
-    height = max(1, bottom - top)
+    height = max(0, bottom - top)
+    if width <= 0 or height <= 0:
+        return False, "invalid_candidate_bounds"
     cy = (top + bottom) // 2
     if width < int(ww * 0.12) or cy < int(wh * 0.07) or cy > int(wh * 0.78):
         return False, "outside_profile_action_region"
+
+    candidate_rid = str(resource_id or "").strip().lower()
+    candidate_rid_leaf = candidate_rid.rsplit(":id/", 1)[-1]
+    if candidate_rid_leaf in {
+        "profile_header_message_button",
+        "profile_header_contact_button",
+        "profile_header_invite_button",
+    }:
+        return False, "profile_header_resource_blocked"
+    if candidate_text and not _mute_engine_v2_following_header_text_ok(candidate_text):
+        return False, "following_state_unproved"
+    canonical_profile_cta = candidate_rid_leaf == "profile_header_follow_button"
+    if canonical_profile_cta:
+        if not _mute_engine_v2_following_header_text_ok(candidate_text):
+            return False, "canonical_profile_cta_state_unproved"
+        canonical_match_bounds: set[tuple[int, int, int, int]] = {
+            (left, top, right, bottom)
+        }
+        for peer in peer_controls:
+            peer_rid = str(peer.get("resource_id") or "").strip().lower()
+            peer_rid_leaf = peer_rid.rsplit(":id/", 1)[-1]
+            peer_text = str(peer.get("text") or "").strip()
+            if (
+                peer_rid_leaf == "profile_header_follow_button"
+                and _mute_engine_v2_following_header_text_ok(peer_text)
+            ):
+                peer_bounds = dict(peer.get("bounds") or {})
+                try:
+                    canonical_match_bounds.add(
+                        (
+                            int(peer_bounds.get("left", 0)),
+                            int(peer_bounds.get("top", 0)),
+                            int(peer_bounds.get("right", 0)),
+                            int(peer_bounds.get("bottom", 0)),
+                        )
+                    )
+                except Exception:
+                    return False, "canonical_profile_cta_peer_bounds_invalid"
+        if len(canonical_match_bounds) > 1:
+            return False, "ambiguous_canonical_profile_cta"
+        return True, "canonical_profile_header_cta"
+
     if width >= int(ww * 0.42):
         return True, "wide_profile_action_cta"
     for peer in peer_controls:
@@ -50769,6 +50832,10 @@ def _mute_engine_v2_pick_following_cta(
         except Exception:
             profile_confirmed = False
     structural_peers: list[dict[str, Any]] | None = None
+    structural_peer_scan_status: dict[str, Any] = {
+        "query_failed": False,
+        "node_errors": 0,
+    }
 
     def _load_structural_peers() -> list[dict[str, Any]]:
         nonlocal structural_peers
@@ -50782,9 +50849,12 @@ def _mute_engine_v2_pick_following_cta(
             # identity and vertical alignment, so restricting this existing
             # bounded lookup to clickable children creates false negatives
             # without adding safety.
-            for peer in d(
-                classNameMatches=r".*(Button|TextView|ImageView)"
-            ).all()[:64]:
+            peers = d(classNameMatches=r".*(Button|TextView|ImageView)").all()[:64]
+        except Exception:
+            structural_peer_scan_status["query_failed"] = True
+            return structural_peers
+        for peer in peers:
+            try:
                 info = dict(peer.info or {})
                 structural_peers.append(
                     {
@@ -50797,8 +50867,10 @@ def _mute_engine_v2_pick_following_cta(
                         "bounds": dict(info.get("bounds") or {}),
                     }
                 )
-        except Exception:
-            structural_peers = []
+            except Exception:
+                structural_peer_scan_status["node_errors"] = int(
+                    structural_peer_scan_status.get("node_errors") or 0
+                ) + 1
         return structural_peers
 
     def _element_passes(el: Any, *, pick_reason: str) -> tuple[Any | None, str]:
@@ -50847,12 +50919,18 @@ def _mute_engine_v2_pick_following_cta(
         peer_controls = (
             [] if control_width >= int(ww * 0.42) else _load_structural_peers()
         )
+        # ``el.info`` and exact profile identity were read in this picker
+        # invocation.  This path does not consume a cached XML generation.
         structure_ok, structure_reason = _mute_engine_v2_following_cta_structure_ok(
             bounds=dict(b),
             peer_controls=peer_controls,
             ww=int(ww),
             wh=int(wh),
             candidate_profile_confirmed=bool(profile_confirmed),
+            candidate_text=merged,
+            resource_id=rid,
+            profile_surface_certified=bool(profile_confirmed),
+            evidence_fresh=True,
         )
         if not structure_ok:
             peer_evidence = [
@@ -50881,6 +50959,12 @@ def _mute_engine_v2_pick_following_cta(
                 control_width=int(control_width),
                 structural_peer_count=len(peer_controls),
                 structural_peers=peer_evidence,
+                structural_peer_query_failed=bool(
+                    structural_peer_scan_status.get("query_failed")
+                ),
+                structural_peer_node_errors=int(
+                    structural_peer_scan_status.get("node_errors") or 0
+                ),
                 pick_reason=pick_reason,
             )
             return None, ""
