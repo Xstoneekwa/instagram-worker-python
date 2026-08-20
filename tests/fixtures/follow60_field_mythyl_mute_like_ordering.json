@@ -1,0 +1,52 @@
+{
+  "account": "mythyl_fitness",
+  "run_id": "910e7bab-7ce7-4ac0-b061-37780e91b4c7",
+  "candidate_username": "bilalmnakhry",
+  "selected_route": "FOLLOW60_V1",
+  "route_reason": "candidate_not_direct_grid_safe",
+  "required_mute_verification_complete": false,
+  "like_tap_sent": false,
+  "like_verified": false,
+  "like_receipt_created": false,
+  "like_counter_delta": 0,
+  "like_action_state": "LIKE_NOT_PERFORMED",
+  "terminal_event": "post_follow_like_skipped_required_mute_verification_incomplete",
+  "deterministic_scenarios": {
+    "new_like_before_mute": {
+      "mute_posts_complete": false,
+      "mute_stories_complete": false,
+      "post_already_liked": false,
+      "new_like_tap": false,
+      "new_like_receipt": false,
+      "counter_delta": 0,
+      "state": "LIKE_NOT_PERFORMED"
+    },
+    "already_liked_before_mute": {
+      "mute_posts_complete": false,
+      "mute_stories_complete": false,
+      "post_already_liked": true,
+      "new_like_tap": false,
+      "new_like_receipt": false,
+      "counter_delta": 0,
+      "unlike_risk": 0,
+      "state": "POST_ALREADY_LIKED_NO_ACTION"
+    },
+    "normal_happy_path": {
+      "mute_posts_complete": true,
+      "mute_stories_complete": true,
+      "post_already_liked": false,
+      "new_like_tap": true,
+      "fresh_like_verification": true,
+      "new_like_receipt": true,
+      "counter_delta": 1,
+      "state": "LIKE_ACTION_PERFORMED_NOW"
+    },
+    "receipt_replay": {
+      "existing_canonical_receipt": true,
+      "second_like_tap": false,
+      "duplicate_receipt": false,
+      "counter_delta": 0,
+      "state": "LIKE_NOT_PERFORMED"
+    }
+  }
+}

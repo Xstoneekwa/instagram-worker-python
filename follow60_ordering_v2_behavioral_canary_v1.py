@@ -746,6 +746,9 @@ class CandidateCyclePlanV2:
     stable_proof: StableCandidateProofV2
     deferred_follow: DeferredFollowIntentV2
     started_at_monotonic: float
+    required_post_follow_mute: bool = False
+    new_like_action_authorized: bool = True
+    enforce_current_like_evidence: bool = False
     post_action_started: bool = False
     like_terminal: bool = False
     follow_terminal: bool = False
@@ -770,6 +773,16 @@ class Follow60OrderingV2OrchestratorV1:
         *,
         post_like_engine: Callable[[dict[str, Any]], Mapping[str, Any]],
     ) -> dict[str, Any]:
+        if plan.required_post_follow_mute and not plan.new_like_action_authorized:
+            return {
+                "ok": False,
+                "reason": "required_mute_precludes_post_first_like",
+                "physical_action_started": False,
+                "post_action_started": False,
+                "liked_count": 0,
+                "like_action_state": "LIKE_NOT_PERFORMED",
+                "mute_ordering_guard": "FOLLOW_THEN_MUTE_THEN_LIKE",
+            }
         out = dict(post_like_engine({
             "schema": SCHEMA,
             "stable_proof": plan.stable_proof.payload(),
@@ -786,10 +799,34 @@ class Follow60OrderingV2OrchestratorV1:
             self._ledger_apply("post_opened", {"method": "SAFE", "v5_required": True})
         else:
             return {**out, "ok": False, "reason": _text(out.get("reason")) or "v2_post_open_failed"}
-        liked = int(out.get("liked_count") or 0) > 0
+        like_action_state = _text(out.get("like_action_state"))
+        if plan.enforce_current_like_evidence:
+            liked = bool(
+                int(out.get("liked_count") or 0) > 0
+                and like_action_state == "LIKE_ACTION_PERFORMED_NOW"
+                and out.get("real_tap_sent") is True
+                and out.get("fresh_like_verified") is True
+            )
+        else:
+            liked = int(out.get("liked_count") or 0) > 0
         safely_skipped = bool(out.get("like_skipped_safely"))
         if liked:
-            self._ledger_apply("like_verified", {"liked_count": int(out.get("liked_count") or 0)})
+            receipt_payload: dict[str, Any] = {
+                "liked_count": int(out.get("liked_count") or 0)
+            }
+            if plan.enforce_current_like_evidence:
+                receipt_payload.update(
+                    {
+                        "like_action_state": like_action_state,
+                        "real_tap_sent": True,
+                        "fresh_like_verified": True,
+                        "candidate_username": plan.stable_proof.candidate_username,
+                        "action_id": plan.stable_proof.action_id,
+                        "stable_proof_hash": plan.stable_proof.proof_hash,
+                        "media_binding": plan.stable_proof.top_left_identity,
+                    }
+                )
+            self._ledger_apply("like_verified", receipt_payload)
             plan.like_terminal = True
         elif safely_skipped:
             self._ledger_apply("like_skipped", {"reason": _text(out.get("skipped_reason"))})

@@ -11986,6 +11986,8 @@ def _follow60_ordering_v2_prepare_candidate(
     private_probe_payload: dict[str, Any] | None,
     session_likes_used: int,
     commercial_policy_revision: str | None,
+    required_post_follow_mute: bool = False,
+    enforce_current_like_evidence: bool = False,
     event_recorder: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prepare one account-scoped POST_FIRST_V2 candidate or preserve V1 exactly.
@@ -12160,12 +12162,16 @@ def _follow60_ordering_v2_prepare_candidate(
         return result
 
     deferred = create_deferred_follow_intent_v2(stable, initial_cta_identity="follow")
+    required_post_follow_mute = bool(required_post_follow_mute)
     plan = CandidateCyclePlanV2(
         selected_path="POST_FIRST_V2",
         binding=binding,
         stable_proof=stable,
         deferred_follow=deferred,
         started_at_monotonic=time.monotonic(),
+        required_post_follow_mute=required_post_follow_mute,
+        new_like_action_authorized=not required_post_follow_mute,
+        enforce_current_like_evidence=bool(enforce_current_like_evidence),
     )
     store = DurableOrderingLedgerV1(
         LedgerScope(
@@ -12207,10 +12213,15 @@ def _follow60_ordering_v2_prepare_candidate(
     if "like_verified" in loaded.stages:
         precompleted = {
             "ok": True,
-            "skipped": False,
-            "phase_outcome": "success",
-            "liked_count": 1,
+            "skipped": True,
+            "phase_outcome": "skipped",
+            "liked_count": 0,
             "post_opened": True,
+            "like_skipped_safely": True,
+            "skipped_reason": "ordering_v2_durable_like_receipt_no_replay",
+            "like_action_state": "LIKE_NOT_PERFORMED",
+            "real_tap_sent": False,
+            "fresh_like_verified": False,
             "post_like_mode": "ordering_v2_post_first_replay",
         }
     elif "like_skipped" in loaded.stages:
@@ -21005,6 +21016,19 @@ def _run_followers_list_engine_session(
                             commercial_policy_revision=(
                                 session_commercial_policy_revision
                             ),
+                            required_post_follow_mute=bool(
+                                getattr(
+                                    config,
+                                    "ENABLE_VISUAL_FOLLOW_MUTE_FLOW",
+                                    False,
+                                )
+                                and getattr(
+                                    config,
+                                    "ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW",
+                                    False,
+                                )
+                            ),
+                            enforce_current_like_evidence=True,
                             event_recorder=(
                                 supabase_client.record_follow60_ordering_v2_behavioral_event_v1
                                 if supabase_mode and not follow60_mainline_active

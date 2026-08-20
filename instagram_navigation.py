@@ -54636,6 +54636,9 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
         "target_count": 0,
         "attempted_count": 0,
         "liked_count": 0,
+        "like_action_state": "LIKE_NOT_PERFORMED",
+        "real_tap_sent": False,
+        "fresh_like_verified": False,
         "skipped_already_liked_count": 0,
         "failed_navigation_count": 0,
         "post_like_mode": "profile_grid_single_v1",
@@ -54656,7 +54659,13 @@ def _post_follow_like_terminal_binding(
     ledgered without inventing a Like.
     """
     liked_count = int(likes_out.get("liked_count") or 0)
-    if liked_count > 0 and stage_persist_results.get("like_verified") is True:
+    if (
+        liked_count > 0
+        and likes_out.get("like_action_state") == "LIKE_ACTION_PERFORMED_NOW"
+        and likes_out.get("real_tap_sent") is True
+        and likes_out.get("fresh_like_verified") is True
+        and stage_persist_results.get("like_verified") is True
+    ):
         return "verified", "like_verified"
 
     phase_outcome = str(likes_out.get("phase_outcome") or "").strip()
@@ -59089,6 +59098,9 @@ def run_post_follow_post_likes_phase(
             _likes_perf_ctx["already_liked_decision_reused"] = False
             _likes_perf_ctx["already_liked_recheck_reason"] = "runner_primary_precheck"
         if al_pre.get("already_liked"):
+            out["like_action_state"] = "POST_ALREADY_LIKED_NO_ACTION"
+            out["real_tap_sent"] = False
+            out["fresh_like_verified"] = False
             skipped_already += 1
             post_rec["outcome"] = "already_liked"
             post_rec["detection_method"] = al_pre.get("detection_method")
@@ -59315,8 +59327,21 @@ def run_post_follow_post_likes_phase(
             _likes_perf_ctx["like_verify_ms"] = None
 
         if liked_verified:
-            liked_count += 1
-            post_rec["outcome"] = "liked"
+            out["real_tap_sent"] = bool(like_out.get("real_tap_sent"))
+            out["fresh_like_verified"] = bool(
+                like_out.get("real_tap_sent") and verify_on
+            )
+            out["like_action_state"] = (
+                "LIKE_ACTION_PERFORMED_NOW"
+                if out["real_tap_sent"] and out["fresh_like_verified"]
+                else "LIKE_NOT_PERFORMED"
+            )
+            if out["like_action_state"] == "LIKE_ACTION_PERFORMED_NOW":
+                liked_count += 1
+                post_rec["outcome"] = "liked"
+            else:
+                post_rec["outcome"] = "like_not_performed"
+                post_rec["failure_reason"] = "current_like_action_evidence_missing"
             per_post.append(post_rec)
         else:
             failed_nav += 1
@@ -60625,10 +60650,44 @@ def run_visual_candidate_post_follow_phase(
 
     likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
     ordering_v2_like = dict(precompleted_like_result or {})
-    if ordering_v2_like:
+    if ordering_v2_like and required_mute_verification_incomplete:
+        post_follow_ctx.mark_post_grid_blocked(
+            reason="required_mute_verification_incomplete"
+        )
+        post_follow_ctx.mark_like_done_or_skipped(
+            reason="required_mute_verification_incomplete"
+        )
+        likes_out.update(
+            {
+                "ok": False,
+                "skipped": True,
+                "phase_outcome": "skipped",
+                "skipped_reason": "required_mute_verification_incomplete",
+                "likes_failure_kind": "required_mute_verification_incomplete",
+                "required_mute_missing_axes": list(required_mute_missing_axes),
+                "like_action_state": "LIKE_NOT_PERFORMED",
+                "real_tap_sent": False,
+                "fresh_like_verified": False,
+            }
+        )
+        log(
+            "error",
+            "follow60_ordering_v2_precompleted_like_rejected_before_mute_proof",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            required_mute_missing_axes=list(required_mute_missing_axes),
+            physical_like_blocked=True,
+        )
+    elif ordering_v2_like:
         likes_out.update(ordering_v2_like)
         likes_out["ordering_v2_precompleted"] = True
-        if int(likes_out.get("liked_count") or 0) > 0:
+        if (
+            int(likes_out.get("liked_count") or 0) > 0
+            and likes_out.get("like_action_state") == "LIKE_ACTION_PERFORMED_NOW"
+            and likes_out.get("real_tap_sent") is True
+            and likes_out.get("fresh_like_verified") is True
+        ):
             _persist_verified_stage(
                 "like_verified",
                 {
@@ -60637,6 +60696,11 @@ def run_visual_candidate_post_follow_phase(
                     "post_like_mode": "ordering_v2_post_first",
                     "timings_ms": likes_out.get("timings_ms") or {},
                     "ordering_version": "FOLLOW60_ORDERING_V2",
+                    "like_action_state": "LIKE_ACTION_PERFORMED_NOW",
+                    "real_tap_sent": True,
+                    "fresh_like_verified": True,
+                    "candidate_username": cand,
+                    "action_id": vcid,
                 },
             )
         log(
@@ -60793,7 +60857,13 @@ def run_visual_candidate_post_follow_phase(
                 ),
                 expected_stage_binding=dict(stage_binding or {}),
             )
-            if int(likes_out.get("liked_count") or 0) > 0:
+            if (
+                int(likes_out.get("liked_count") or 0) > 0
+                and likes_out.get("like_action_state")
+                == "LIKE_ACTION_PERFORMED_NOW"
+                and likes_out.get("real_tap_sent") is True
+                and likes_out.get("fresh_like_verified") is True
+            ):
                 _persist_verified_stage(
                     "like_verified",
                     {
@@ -60801,6 +60871,11 @@ def run_visual_candidate_post_follow_phase(
                         "phase_outcome": str(likes_out.get("phase_outcome") or ""),
                         "post_like_mode": str(likes_out.get("post_like_mode") or ""),
                         "timings_ms": likes_out.get("timings_ms") or {},
+                        "like_action_state": "LIKE_ACTION_PERFORMED_NOW",
+                        "real_tap_sent": True,
+                        "fresh_like_verified": True,
+                        "candidate_username": cand,
+                        "action_id": vcid,
                     },
                 )
     likes_recoverable_failure = bool(

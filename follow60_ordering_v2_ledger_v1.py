@@ -156,6 +156,23 @@ class OrderingLedger:
         self.scope.validate()
         if stage not in STAGES:
             raise ValueError("ledger_action_type_invalid")
+        if stage == "like_verified" and "like_action_state" in payload:
+            if str(payload.get("like_action_state") or "") != "LIKE_ACTION_PERFORMED_NOW":
+                raise ValueError("ledger_like_verified_without_current_action")
+            if payload.get("real_tap_sent") is not True:
+                raise ValueError("ledger_like_verified_without_real_tap")
+            if payload.get("fresh_like_verified") is not True:
+                raise ValueError("ledger_like_verified_without_fresh_verification")
+            if str(payload.get("candidate_username") or "").lower().lstrip("@") != str(
+                self.scope.candidate_username or ""
+            ).lower().lstrip("@"):
+                raise ValueError("ledger_like_verified_candidate_binding_mismatch")
+            if str(payload.get("action_id") or "") != str(self.scope.action_id or ""):
+                raise ValueError("ledger_like_verified_action_binding_mismatch")
+            if not str(payload.get("stable_proof_hash") or "") or not str(
+                payload.get("media_binding") or ""
+            ):
+                raise ValueError("ledger_like_verified_media_binding_missing")
         payload_hash = self._payload_hash(payload)
         key = self.scope.idempotency_key(stage)
         existing = self.receipts.get(stage)
