@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import config
+from follow_outcome_contract import validate_follow_termination_decision
 from logs import log
 
 UNKNOWN = "unknown"
@@ -180,6 +181,21 @@ def _phase_to_run_follow(follow_remaining: int | None) -> bool | str:
     if follow_remaining is None:
         return UNKNOWN
     return follow_remaining > 0
+
+
+def _post_follow_recovery_pending(summary: dict[str, Any]) -> bool:
+    outcome = summary.get("follow_outcome")
+    if not isinstance(outcome, dict):
+        return False
+    valid, _reason = validate_follow_termination_decision(
+        outcome,
+        expected_exit_code=53,
+    )
+    return bool(
+        valid
+        and outcome.get("post_follow_recovery_required") is True
+        and outcome.get("no_new_follow_until_recovered") is True
+    )
 
 
 def _phase_to_run_unfollow(
@@ -354,9 +370,15 @@ def build_account_session_resume_plan(
     if delay_minutes is None:
         delay_minutes = 10
 
+    post_follow_recovery_pending = _post_follow_recovery_pending(safe_summary)
     phases_to_run = {
         "welcome": _phase_to_run_welcome(safe_summary),
-        "follow": _phase_to_run_follow(follow_remaining),
+        "post_follow_recovery": post_follow_recovery_pending,
+        "follow": (
+            False
+            if post_follow_recovery_pending
+            else _phase_to_run_follow(follow_remaining)
+        ),
         "unfollow": _phase_to_run_unfollow(
             safe_summary,
             unfollow_target,
@@ -492,6 +514,13 @@ def build_account_session_resume_plan(
         "suggested_resume_strategy": safe_summary.get("suggested_resume_strategy"),
         "session_termination_class": termination_class,
         "restart_eligibility": restart_eligibility,
+        "post_follow_recovery_pending": post_follow_recovery_pending,
+        "new_follow_blocked_until_recovery": post_follow_recovery_pending,
+        "safe_next_step": (
+            "post_follow_recovery"
+            if post_follow_recovery_pending
+            else "resume_planned_phases"
+        ),
         "phases_to_run": phases_to_run,
         "quota_targets": quota_targets,
         "quota_done": quota_done,

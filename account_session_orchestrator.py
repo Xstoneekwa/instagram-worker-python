@@ -2818,6 +2818,12 @@ def _restart_eligibility(
         canonical_follow_outcome.get("post_follow_recovery_required") is True
         and canonical_follow_outcome.get("no_new_follow_until_recovered") is True
     ):
+        valid_partial, _valid_reason = validate_follow_termination_decision(
+            canonical_follow_outcome,
+            expected_exit_code=53,
+        )
+        if valid_partial:
+            return "eligible", "post_follow_recovery_first"
         return "blocked", "candidate_local_post_follow_recovery_required"
     blocked = _blocked_class_from_markers(
         follow_to_unfollow_diagnostic,
@@ -3855,6 +3861,9 @@ def _evaluate_h3_follow_exit_code_gate(
     follow_exit_code: int | None,
     diagnostic: dict[str, Any],
     real_max_actions_effective: int,
+    business_action_deadline: str | None = None,
+    business_session_id: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     allowed_codes = [0, 53, 97]
     out: dict[str, Any] = {
@@ -3891,13 +3900,36 @@ def _evaluate_h3_follow_exit_code_gate(
         return out
 
     if follow_exit_code == 53:
-        partial_ok, partial_reason = _follow_exit_handoff_gate(
-            follow_exit_code,
-            dict(diagnostic.get("follow_outcome") or {}),
+        point_d = _evaluate_follow_partial_unfollow_handoff(
+            account_id=account_id,
+            account_username=account_username,
+            run_id=str(diagnostic.get("run_id") or "") or None,
+            business_session_id=business_session_id,
+            follow_outcome=dict(diagnostic.get("follow_outcome") or {}),
+            diagnostic=diagnostic,
+            real_max_actions_effective=real_max_actions_effective,
+            business_action_deadline=business_action_deadline,
+            now=now,
         )
-        if not partial_ok:
-            out["follow_exit_code_block_reason"] = partial_reason
+        out["follow_partial_handoff"] = point_d
+        out["deadline_remaining_seconds"] = point_d.get(
+            "deadline_remaining_seconds"
+        )
+        out["safe_handoff_boundary_source"] = point_d.get(
+            "safe_handoff_boundary_source"
+        )
+        if point_d.get("allowed") is not True:
+            out["follow_exit_code_block_reason"] = str(
+                point_d.get("block_reason") or "follow_partial_handoff_blocked"
+            )
             return out
+        out.update(
+            {
+                "follow_exit_code_allowed": True,
+                "follow_exit_code_allow_reason": "follow_candidate_local_post_follow_partial_safe_for_unfollow",
+            }
+        )
+        return out
 
     blockers: list[str] = []
     if not str(account_id or "").strip() or not str(account_username or "").strip():
@@ -3915,6 +3947,9 @@ def _evaluate_h3_follow_exit_code_gate(
     if int(real_max_actions_effective) < 1:
         blockers.append("unfollow_any_cap_exhausted" if is_unfollow_any else "real_max_actions_invalid")
 
+    # Preserve the pre-Point-D behavior for every non-53 Follow outcome.
+    # Point D consumes structured blockers only for its validated partial
+    # envelope; it must not weaken or reinterpret the existing 0/97 gates.
     diagnostic_blob = " ".join(str(v).lower() for v in diagnostic.values())
     unsafe_markers = (
         "active_instagram_account_mismatch",
@@ -3948,6 +3983,143 @@ def _evaluate_h3_follow_exit_code_gate(
         }
     )
     return out
+
+
+def _canonical_global_unfollow_handoff_blockers(
+    diagnostic: dict[str, Any],
+) -> list[str]:
+    """Consume structured canonical blockers only; never infer from log text."""
+    raw = diagnostic.get("canonical_global_blockers")
+    blockers: list[str] = []
+    if isinstance(raw, (list, tuple, set)):
+        for value in raw:
+            reason = str(value or "").strip()
+            if reason and reason not in blockers:
+                blockers.append(reason)
+    platform_state = str(diagnostic.get("platform_state") or "").strip().lower()
+    if platform_state in {"challenge", "restriction", "restricted", "blocked"}:
+        reason = f"unsafe_follow_signal_{platform_state}"
+        if reason not in blockers:
+            blockers.append(reason)
+    return blockers
+
+
+def _follow_partial_unfollow_time_budget(
+    *,
+    business_action_deadline: str | None,
+    executable_count: int,
+    max_actions: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Pure Stage-B entry budget using the existing deadline and Unfollow P90."""
+    raw = str(business_action_deadline or "").strip()
+    estimated_actions = max(1, min(max(0, executable_count), max(0, max_actions)))
+    estimated_seconds = float(estimated_actions * HISTORICAL_ACTION_P90_SECONDS)
+    if not raw:
+        return {
+            "allowed": True,
+            "deadline_source": "existing_runtime_deadline_fallback",
+            "deadline_remaining_seconds": None,
+            "estimated_phase_seconds": estimated_seconds,
+        }
+    try:
+        deadline = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return {
+            "allowed": False,
+            "deadline_source": "invalid_scheduler_business_action_deadline",
+            "deadline_remaining_seconds": 0.0,
+            "estimated_phase_seconds": estimated_seconds,
+        }
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    remaining = max(
+        0.0,
+        (deadline.astimezone(timezone.utc) - current.astimezone(timezone.utc)).total_seconds(),
+    )
+    return {
+        "allowed": remaining >= estimated_seconds,
+        "deadline_source": "scheduler_business_action_deadline",
+        "deadline_remaining_seconds": round(remaining, 3),
+        "estimated_phase_seconds": estimated_seconds,
+    }
+
+
+def _evaluate_follow_partial_unfollow_handoff(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    business_session_id: str | None,
+    follow_outcome: dict[str, Any],
+    diagnostic: dict[str, Any],
+    real_max_actions_effective: int,
+    business_action_deadline: str | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Single Point-D decision: preserve Follow, independently gate Unfollow."""
+    valid, validation_reason = validate_follow_termination_decision(
+        follow_outcome,
+        expected_exit_code=53,
+    )
+    executable_count = max(0, int(diagnostic.get("pending_unfollow_count") or 0))
+    mode = str(diagnostic.get("unfollow_mode") or "")
+    is_unfollow_any = _is_unfollow_any_mode(mode)
+    time_budget = _follow_partial_unfollow_time_budget(
+        business_action_deadline=business_action_deadline,
+        executable_count=(real_max_actions_effective if is_unfollow_any else executable_count),
+        max_actions=real_max_actions_effective,
+        now=now,
+    )
+    blockers = _canonical_global_unfollow_handoff_blockers(diagnostic)
+    if not valid:
+        blockers.append("follow_termination_decision_invalid")
+    if not str(account_id or "").strip() or not str(account_username or "").strip():
+        blockers.append("missing_account_context")
+    if not bool(diagnostic.get("handoff_would_run")):
+        blockers.append(
+            str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
+        )
+    if not bool(diagnostic.get("unfollow_enabled")):
+        blockers.append("unfollow_disabled")
+    if not _h3_supports_unfollow_mode(mode):
+        blockers.append("unfollow_skipped_mode_not_supported_for_h3_real")
+    if not is_unfollow_any and executable_count <= 0:
+        blockers.append("unfollow_skipped_no_safe_candidate")
+    if int(real_max_actions_effective) < 1:
+        blockers.append("unfollow_any_cap_exhausted" if is_unfollow_any else "real_max_actions_invalid")
+    if time_budget.get("allowed") is not True:
+        blockers.append("insufficient_safe_business_time")
+
+    unique_blockers = list(dict.fromkeys(reason for reason in blockers if reason))
+    allowed = not unique_blockers
+    return {
+        "schema": "FOLLOW_PARTIAL_UNFOLLOW_HANDOFF_V1",
+        "allowed": allowed,
+        "decision": "enter_unfollow" if allowed else "block_unfollow",
+        "block_reason": "" if allowed else unique_blockers[0],
+        "block_reasons": unique_blockers,
+        "follow_termination_validation_reason": validation_reason,
+        "account_id": str(account_id or ""),
+        "run_id": run_id,
+        "business_session_id": str(business_session_id or "") or None,
+        "follow_decision_version": follow_outcome.get("schema_version"),
+        "safe_boundary": follow_outcome.get("safe_boundary") is True,
+        "safe_handoff_boundary_source": (
+            "follow_termination_decision.safe_boundary:return_ct_exact_or_canonical_stable_boundary"
+            if valid
+            else "unproved"
+        ),
+        "post_follow_recovery_still_pending": valid,
+        "new_follow_allowed": False,
+        "unfollow_enabled": bool(diagnostic.get("unfollow_enabled")),
+        "unfollow_executable_count": executable_count,
+        "deadline_remaining_seconds": time_budget.get("deadline_remaining_seconds"),
+        "estimated_phase_seconds": time_budget.get("estimated_phase_seconds"),
+        "deadline_source": time_budget.get("deadline_source"),
+        "global_stop": bool(_canonical_global_unfollow_handoff_blockers(diagnostic)),
+    }
 
 
 def _run_follow_to_unfollow_real(
@@ -3985,7 +4157,43 @@ def _run_follow_to_unfollow_real(
         follow_exit_code=follow_exit_code,
         diagnostic=diagnostic,
         real_max_actions_effective=real_max_effective,
+        business_action_deadline=business_action_deadline,
+        business_session_id=business_session_id,
     )
+    point_d_handoff = dict(follow_exit_gate.get("follow_partial_handoff") or {})
+    if follow_exit_code == 53:
+        log(
+            "info",
+            "follow_partial_handoff_evaluated",
+            account_id=aid,
+            run_id=run_id,
+            business_session_id=str(business_session_id or "") or None,
+            follow_decision_version=point_d_handoff.get("follow_decision_version"),
+            safe_boundary=point_d_handoff.get("safe_boundary"),
+            safe_handoff_boundary_source=point_d_handoff.get("safe_handoff_boundary_source"),
+            unfollow_enabled=point_d_handoff.get("unfollow_enabled"),
+            unfollow_executable_count=point_d_handoff.get("unfollow_executable_count"),
+            deadline_remaining_seconds=point_d_handoff.get("deadline_remaining_seconds"),
+            block_reason=point_d_handoff.get("block_reason"),
+        )
+        log(
+            "info" if point_d_handoff.get("allowed") is True else "warning",
+            (
+                "follow_partial_handoff_to_unfollow"
+                if point_d_handoff.get("allowed") is True
+                else "follow_partial_handoff_blocked"
+            ),
+            account_id=aid,
+            run_id=run_id,
+            business_session_id=str(business_session_id or "") or None,
+            follow_decision_version=point_d_handoff.get("follow_decision_version"),
+            safe_boundary=point_d_handoff.get("safe_boundary"),
+            safe_handoff_boundary_source=point_d_handoff.get("safe_handoff_boundary_source"),
+            unfollow_enabled=point_d_handoff.get("unfollow_enabled"),
+            unfollow_executable_count=point_d_handoff.get("unfollow_executable_count"),
+            deadline_remaining_seconds=point_d_handoff.get("deadline_remaining_seconds"),
+            block_reason=point_d_handoff.get("block_reason"),
+        )
 
     log(
         "info",

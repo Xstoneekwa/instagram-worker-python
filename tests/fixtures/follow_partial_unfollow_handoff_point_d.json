@@ -1,0 +1,16 @@
+{
+  "account_id": "00000000-0000-4000-8000-000000000001",
+  "account_username": "sanitized_account",
+  "run_id": "00000000-0000-4000-8000-000000000002",
+  "business_session_id": "00000000-0000-4000-8000-000000000003",
+  "target_attribution": {
+    "target_id": "00000000-0000-4000-8000-000000000004",
+    "candidate_username": "sanitized_candidate",
+    "source_profile_username": "sanitized_ct"
+  },
+  "eligible_unfollow_candidates": 52,
+  "unfollow_enabled": true,
+  "unfollow_mode": "unfollow",
+  "real_max_actions_effective": 52,
+  "follow_counts": [1, 2, 10, 30, 80, 120]
+}

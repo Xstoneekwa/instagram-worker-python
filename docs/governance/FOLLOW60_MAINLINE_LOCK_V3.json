@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "bc1a1dc7a3203395c098cb81f2ea92612a4f7b33",
-    "change_id": "follow60-point-c-mute-like-ordering-20260820",
-    "final_diff_hash": "863c54fff8b4e6c490ebcceb93cb6e522cc422f9380e94dfffa5cd6d1fb4f0d8",
-    "final_manifest_hash": "b3aa0d96319c0de8f31ef649d80c6b10a11ae1d65759e128d371d3d40270c9ec",
-    "final_protected_scope_hash": "e5297ebdce41dcc2ae3c2dd67cca8e23161a6ebb2d6cdb06a1bbe31bd2e41c9d",
+    "base_sha": "e5b6a40e08b2556765cb6b6fd884e2d5296b5364",
+    "change_id": "follow60-point-d-safe-unfollow-handoff-20260821",
+    "final_diff_hash": "f3d85721cc71210c76ef312dbed97d535d1309c73cecaf26782da9b9b911bec6",
+    "final_manifest_hash": "c6dc4118727adc442a9707fec9f49804aad3b4d1eb6cfe9b1058109f76d553f2",
+    "final_protected_scope_hash": "4cee0ab0453ee26793136e5755093cf46a111c52f08904bb84f891d9e82b2a53",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -447,6 +447,25 @@
       ],
       "requested_scope": "Point C only: block any new Like action until required Posts and Stories Mute stages are complete; distinguish current Like action, already-liked observation and no action; require current exact candidate/action/media evidence for Like receipt and counter; preserve Point A, Point B matcher, CT Resume, Unfollow, package policy and zero happy-path IO",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "c369ecb11b9650462b8bc88acca41b85f4e8fb7be3708435b59f2b46870ff778",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "e5b6a40e08b2556765cb6b6fd884e2d5296b5364",
+      "candidate_tree_sha": "64600ba058b2c0f0526f31acfec82afcdaf89190",
+      "change_id": "follow60-point-d-safe-unfollow-handoff-20260821",
+      "consumed_at": "2026-08-21T09:27:09.208573+00:00",
+      "diff_sha256": "f3d85721cc71210c76ef312dbed97d535d1309c73cecaf26782da9b9b911bec6",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_orchestrator.py",
+        "account_session_resume_engine.py",
+        "docs/checkpoints/2026-08-21-follow-partial-safe-unfollow-handoff-point-d.md",
+        "tests/fixtures/follow_partial_unfollow_handoff_point_d.json",
+        "tests/test_follow_partial_unfollow_handoff_point_d.py"
+      ],
+      "requested_scope": "Point D only: independently gate mandatory Unfollow after a fully validated candidate-local partial Follow decision; preserve durable Follow, block new Follow until recovery, preserve Points A/B/C, CT Resume and the Unfollow engine",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
   "field_certification": "PENDING_NEXT_NATURAL_RUNS",
@@ -545,6 +564,7 @@
     "account_session_reliability_schema.py": [],
     "account_session_resume_engine.py": [
       "config.py",
+      "follow_outcome_contract.py",
       "logs.py"
     ],
     "account_session_resume_plan_store.py": [
@@ -959,6 +979,11 @@
       "follow60_ordering_v2_ledger_v1.py",
       "follow_outcome_contract.py"
     ],
+    "tests/test_follow_partial_unfollow_handoff_point_d.py": [
+      "account_session_orchestrator.py",
+      "account_session_resume_engine.py",
+      "follow_outcome_contract.py"
+    ],
     "tests/test_followers_surface_proof.py": [
       "followers_surface_proof.py"
     ],
@@ -1096,7 +1121,7 @@
     ],
     "worker_runtime_identity.py": []
   },
-  "import_graph_sha256": "26d5e18039287719ea650128b799045105f134d4ddc7832d7722dcd0e6adc58d",
+  "import_graph_sha256": "c7d4d76be527ebba1547492ccdd51164080b048486ef34bbfae8e61c1b5f3548",
   "lock_state": "LOCKED",
   "lock_version": "3.1.0",
   "manifest_signature": "DETACHED_ED25519_REQUIRED",
@@ -1201,13 +1226,13 @@
       "size": 9317
     },
     "account_session_orchestrator.py": {
-      "git_blob_oid": "d7b8b5682fef34d467659a61ebea7171cda5d6cc",
+      "git_blob_oid": "339d44aec7a0370c386df5c262b76eb59cf4f1ce",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "a7a3d64e583b107b11cc49bd67ff6ee483e3215f22b069685072a20005b9792a",
-      "size": 252027
+      "sha256": "2f71360c1f6fa08c79eb23953b62dfcee37024e41473f066fc11d38851887a29",
+      "size": 261520
     },
     "account_session_phase_notification.py": {
       "git_blob_oid": "c5bac646636bf02bd8f92d06aabfd2fae9a44117",
@@ -1228,13 +1253,13 @@
       "size": 24423
     },
     "account_session_resume_engine.py": {
-      "git_blob_oid": "93658d84398e11e2539d608931a2774343e99712",
+      "git_blob_oid": "5e2802525ae985fa5af79a790704f091622537ff",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_resume_engine.py",
       "role": "ct_resume",
-      "sha256": "3e46455d4a16ef2a6203d5934a19eff769353305d1f4fa59d4dd1079d741d3c1",
-      "size": 20490
+      "sha256": "9a21684da5d2c7e5f3f04477d88688d891f2e7993c372144bcc50a5816cc36f9",
+      "size": 21552
     },
     "account_session_resume_plan_store.py": {
       "git_blob_oid": "993487d2c517e0f7e85c1883829001ee06633487",
@@ -1388,6 +1413,15 @@
       "role": "follow60_transitive_dependency",
       "sha256": "cc9c4a9ee9de7fb520561a527be375edf7514fe274586461f27c5ef455e42f46",
       "size": 3821
+    },
+    "docs/checkpoints/2026-08-21-follow-partial-safe-unfollow-handoff-point-d.md": {
+      "git_blob_oid": "f02bada45acca8b7859ea199000f9eac72b572d7",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "docs/checkpoints/2026-08-21-follow-partial-safe-unfollow-handoff-point-d.md",
+      "role": "governance_audit",
+      "sha256": "2874e3ed54c9ce9954e24d1a84fcde78e955dc27100696c1f6870265aef4c051",
+      "size": 3920
     },
     "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_1_PUBLIC_KEY.pem": {
       "git_blob_oid": "46ac1ee892f1fc27a97a6d52375ea2e971c5dfa8",
@@ -2082,6 +2116,15 @@
       "sha256": "806bcb1ef244d50cd13b23790fc71a2d236a27e0f13a74241a695d785569982d",
       "size": 1627
     },
+    "tests/fixtures/follow_partial_unfollow_handoff_point_d.json": {
+      "git_blob_oid": "c16a027733c85cff8fef173eee2f824e643cf365",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "tests/fixtures/follow_partial_unfollow_handoff_point_d.json",
+      "role": "field_regression_fixture",
+      "sha256": "c260ab7827f42ed99cde3d70d25afb19c9dc2970bf70a6ea7cedb8a57a42954a",
+      "size": 579
+    },
     "tests/follow60_generic_fixtures.py": {
       "git_blob_oid": "9105d6e445f18a4d401245352c39735308b1cf53",
       "lock_version": "3.1.0",
@@ -2162,6 +2205,15 @@
       "role": "regression_contract",
       "sha256": "e864aadcad6305391a40ceb4b9a6b116f2df7fa29c838a0879f6245604b53801",
       "size": 17629
+    },
+    "tests/test_follow_partial_unfollow_handoff_point_d.py": {
+      "git_blob_oid": "0f904f8baebea836aff2b90a124b8e0f91da7da6",
+      "lock_version": "3.1.0",
+      "mode": "100644",
+      "path": "tests/test_follow_partial_unfollow_handoff_point_d.py",
+      "role": "regression_contract",
+      "sha256": "22fd8787748d1ddf90f9fc733cc72d863ea984ecc9961fcd8d72dc9eaa8bc9e1",
+      "size": 7577
     },
     "tests/test_followers_surface_proof.py": {
       "git_blob_oid": "3766c7478fee9610052c63f4d8f9a1c28a37b8c9",
@@ -2389,7 +2441,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "e5297ebdce41dcc2ae3c2dd67cca8e23161a6ebb2d6cdb06a1bbe31bd2e41c9d",
+  "protected_scope_sha256": "4cee0ab0453ee26793136e5755093cf46a111c52f08904bb84f891d9e82b2a53",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
