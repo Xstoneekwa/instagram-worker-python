@@ -28,6 +28,7 @@ from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import resolve_welcome_dm_real_send_enabled
 from follow_outcome_contract import (
     FOLLOW_TERMINATION_DECISION_SCHEMA,
+    build_follow_time_handoff_termination_decision,
     merge_follow_outcome,
     validate_follow_termination_decision,
 )
@@ -837,6 +838,12 @@ def _authoritative_follow_termination_decision(
     *,
     exit_code: int,
     summary: dict[str, Any],
+    account_id: str = "",
+    request_id: str = "",
+    run_id: str = "",
+    business_session_id: str = "",
+    attempt_id: str = "",
+    generation: str = "",
 ) -> dict[str, Any]:
     """Build the single terminal decision for a durable post-Follow partial.
 
@@ -845,28 +852,39 @@ def _authoritative_follow_termination_decision(
     legacy zero-mutation classifier are no longer allowed to reinterpret it.
     """
 
-    is_exit_53 = int(exit_code) == 53
     decision = dict(summary.get("follow_termination_decision") or {})
+    # Exit 53 is always runner-authoritative.  Exit 97 is authoritative only
+    # when it carries a termination envelope; other existing exit-97 classes
+    # (notably scheduled_business_deadline) retain their legacy projection.
+    is_authoritative_exit = int(exit_code) == 53 or (
+        int(exit_code) == 97 and bool(decision)
+    )
     accepted, validation_reason = validate_follow_termination_decision(
         decision,
-        expected_exit_code=53,
-    ) if is_exit_53 else (False, "not_applicable")
+        expected_exit_code=int(exit_code),
+        expected_account_id=account_id,
+        expected_request_id=request_id,
+        expected_run_id=run_id,
+        expected_business_session_id=business_session_id,
+        expected_attempt_id=attempt_id,
+        expected_generation=generation,
+    ) if is_authoritative_exit else (False, "not_applicable")
     return {
         "schema": FOLLOW_TERMINATION_DECISION_SCHEMA,
-        "authoritative": bool(is_exit_53),
-        "accepted": bool(is_exit_53 and accepted),
+        "authoritative": bool(is_authoritative_exit),
+        "accepted": bool(is_authoritative_exit and accepted),
         "reason": (
             validation_reason
-            if is_exit_53 and accepted
+            if is_authoritative_exit and accepted
             else "follow_termination_decision_invalid"
-            if is_exit_53
+            if is_authoritative_exit
             else "not_applicable"
         ),
         "validation_detail": validation_reason,
         "exit_code": int(exit_code),
         "follow_outcome": decision,
-        "rotation_allowed": False if is_exit_53 else None,
-        "follow_retap_allowed": False if is_exit_53 else None,
+        "rotation_allowed": False if is_authoritative_exit else None,
+        "follow_retap_allowed": False if is_authoritative_exit else None,
     }
 
 
@@ -987,8 +1005,8 @@ def _run_follow_target_rotation(
     final_target: dict[str, Any] | None = None
     prevalidated_followers_target_key: str | None = None
     prevalidated_followers_meta: dict[str, Any] = {}
-    authoritative_exit_53_consumed = False
-    authoritative_exit_53_invalid = False
+    authoritative_termination_consumed = False
+    authoritative_termination_invalid = False
     t0 = time.perf_counter()
 
     mainline_session_binding: dict[str, Any] = {}
@@ -1268,9 +1286,40 @@ def _run_follow_target_rotation(
                 "exit_code": exit_code,
             }
         )
+        predecision_reason = str(
+            summary.get("follow_stop_reason")
+            or summary.get("follow_session_outcome")
+            or ""
+        )
+        if exit_code == 97 and predecision_reason == "follow_to_unfollow_time_handoff":
+            prospective_completed = global_follows_completed + (
+                _as_optional_int(summary.get("follows_completed_count")) or 0
+            )
+            summary["follow_termination_decision"] = (
+                build_follow_time_handoff_termination_decision(
+                    follows_completed_count=prospective_completed,
+                    target_follow_budget_effective=global_follow_goal,
+                    target_attribution={
+                        "target_id": target_id or "",
+                        "source_profile_username": source_profile,
+                    },
+                    account_id=account_id,
+                    request_id=str(run_request_id or ""),
+                    run_id=str(run_id or ""),
+                    business_session_id=str(business_session_id or ""),
+                    attempt_id=str(follow60_attempt_id or 1),
+                    generation=str(follow60_attempt_id or 1),
+                )
+            )
         termination_decision = _authoritative_follow_termination_decision(
             exit_code=exit_code,
             summary=summary,
+            account_id=account_id,
+            request_id=str(run_request_id or ""),
+            run_id=str(run_id or ""),
+            business_session_id=str(business_session_id or ""),
+            attempt_id=str(follow60_attempt_id or 1),
+            generation=str(follow60_attempt_id or 1),
         )
         if termination_decision["accepted"]:
             target_local_contract = {
@@ -1395,16 +1444,23 @@ def _run_follow_target_rotation(
             max_targets_per_run=max_targets,
         )
         if termination_decision["accepted"]:
-            authoritative_exit_53_consumed = True
+            authoritative_termination_consumed = True
+            accepted_exit_code = int(termination_decision.get("exit_code") or exit_code)
+            accepted_outcome = dict(termination_decision["follow_outcome"])
             final_reason = str(
-                summary.get("first_causal_reason")
+                accepted_outcome.get("first_causal_reason")
+                or summary.get("first_causal_reason")
                 or summary.get("follow_stop_reason")
-                or "follow60_candidate_local_post_follow_recovery_required"
+                or (
+                    "follow_to_unfollow_time_handoff"
+                    if accepted_exit_code == 97
+                    else "follow60_candidate_local_post_follow_recovery_required"
+                )
             )
-            final_exit_code = 53
+            final_exit_code = accepted_exit_code
             final_summary.update(
                 {
-                    "exit_code": 53,
+                    "exit_code": accepted_exit_code,
                     "follow_session_outcome": "partial_resumable",
                     "follow_stop_reason": final_reason,
                     "first_causal_reason": final_reason,
@@ -1429,6 +1485,8 @@ def _run_follow_target_rotation(
                     "no_next_candidate": True,
                     "safe_next_step": "handoff_to_unfollow",
                     "follow_retap_allowed": False,
+                    "follow_termination_decision": dict(accepted_outcome),
+                    "follow_outcome": dict(accepted_outcome),
                     "authoritative_follow_termination_decision": dict(
                         termination_decision
                     ),
@@ -1447,7 +1505,7 @@ def _run_follow_target_rotation(
                 run_id=run_id,
                 target_id=target_id,
                 source_profile=source_profile,
-                exit_code=53,
+                exit_code=accepted_exit_code,
                 follows_completed_count=global_follows_completed,
                 decision_schema=termination_decision["schema"],
                 decision_reason=termination_decision["reason"],
@@ -1457,7 +1515,7 @@ def _run_follow_target_rotation(
             )
             break
         if termination_decision["authoritative"]:
-            authoritative_exit_53_invalid = True
+            authoritative_termination_invalid = True
             final_reason = "follow_termination_decision_invalid"
             final_exit_code = 96
             final_summary.update(
@@ -2397,7 +2455,7 @@ def _run_follow_target_rotation(
         final_reason in {"global_follow_cap_reached", "all_targets_exhausted"}
         or final_summary.get("all_targets_exhausted") is True
     )
-    if authoritative_exit_53_consumed or authoritative_exit_53_invalid:
+    if authoritative_termination_consumed or authoritative_termination_invalid:
         # The runner's durable receipt contract is already the authoritative
         # outcome, or its envelope was invalid and explicitly failed closed.
         # A generic merge here would recreate the legacy double decision and
@@ -2920,12 +2978,25 @@ def _restart_eligibility(
 def _follow_exit_handoff_gate(
     follow_exit_code: int | None,
     follow_outcome: dict[str, Any] | None = None,
+    *,
+    account_id: str = "",
+    request_id: str = "",
+    run_id: str = "",
+    business_session_id: str = "",
+    attempt_id: str = "",
+    generation: str = "",
 ) -> tuple[bool, str]:
     outcome = dict(follow_outcome or {})
-    if follow_exit_code == 53:
+    if follow_exit_code in (53, 97):
         valid, reason = validate_follow_termination_decision(
             outcome,
-            expected_exit_code=53,
+            expected_exit_code=int(follow_exit_code),
+            expected_account_id=account_id,
+            expected_request_id=request_id,
+            expected_run_id=run_id,
+            expected_business_session_id=business_session_id,
+            expected_attempt_id=attempt_id,
+            expected_generation=generation,
         )
         return (
             (True, reason)
@@ -2941,8 +3012,6 @@ def _follow_exit_handoff_gate(
             return False, "follow_phase_not_globally_completed"
     if follow_exit_code == 0:
         return True, "follow_completed"
-    if follow_exit_code == 97:
-        return True, "follow_partial_safe_stop_probe_candidate"
     if follow_exit_code == 98:
         return False, "follow_exit_code_not_allowed"
     if follow_exit_code is None:
@@ -2962,6 +3031,10 @@ def _run_follow_to_unfollow_handoff_diagnostic(
     session_started_at: float,
     follow_outcome: dict[str, Any] | None = None,
     unfollow_only_resume_authorized: bool = False,
+    request_id: str | None = None,
+    business_session_id: str | None = None,
+    session_attempt: int = 1,
+    generation: str | None = None,
 ) -> dict[str, Any]:
     """H1 only: DB/settings diagnostic, no Unfollow dispatch and no UI navigation."""
     diag_t0 = time.perf_counter()
@@ -2989,6 +3062,10 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         "account_id": aid,
         "account_username": uname,
         "run_id": run_id,
+        "request_id": str(request_id or "") or None,
+        "business_session_id": str(business_session_id or "") or None,
+        "session_attempt": int(session_attempt or 1),
+        "generation": str(generation or session_attempt or 1),
         "followers_source_username": src or None,
         "follow_phase_executed": bool(follow_phase_executed),
         "follow_exit_code": follow_exit_code,
@@ -3024,6 +3101,12 @@ def _run_follow_to_unfollow_handoff_diagnostic(
     follow_gate_ok, follow_gate_reason = _follow_exit_handoff_gate(
         follow_exit_code,
         follow_outcome,
+        account_id=aid,
+        request_id=str(request_id or ""),
+        run_id=str(run_id or ""),
+        business_session_id=str(business_session_id or ""),
+        attempt_id=str(session_attempt or 1),
+        generation=str(generation or session_attempt or 1),
     )
     if not follow_phase_executed and not unfollow_only_resume_authorized:
         skip_reasons.append("follow_phase_not_executed")
@@ -3891,6 +3974,9 @@ def _evaluate_h3_follow_exit_code_gate(
     real_max_actions_effective: int,
     business_action_deadline: str | None = None,
     business_session_id: str | None = None,
+    request_id: str | None = None,
+    session_attempt: int = 1,
+    generation: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     allowed_codes = [0, 53, 97]
@@ -3927,12 +4013,15 @@ def _evaluate_h3_follow_exit_code_gate(
         out["follow_exit_code_block_reason"] = "follow_exit_code_not_allowed_h3_real"
         return out
 
-    if follow_exit_code == 53:
+    if follow_exit_code in (53, 97):
         point_d = _evaluate_follow_partial_unfollow_handoff(
             account_id=account_id,
             account_username=account_username,
             run_id=str(diagnostic.get("run_id") or "") or None,
             business_session_id=business_session_id,
+            request_id=request_id,
+            session_attempt=session_attempt,
+            generation=generation,
             follow_outcome=dict(diagnostic.get("follow_outcome") or {}),
             diagnostic=diagnostic,
             real_max_actions_effective=real_max_actions_effective,
@@ -3954,63 +4043,13 @@ def _evaluate_h3_follow_exit_code_gate(
         out.update(
             {
                 "follow_exit_code_allowed": True,
-                "follow_exit_code_allow_reason": "follow_candidate_local_post_follow_partial_safe_for_unfollow",
+                "follow_exit_code_allow_reason": str(
+                    point_d.get("follow_termination_validation_reason")
+                    or "follow_partial_safe_for_unfollow"
+                ),
             }
         )
         return out
-
-    blockers: list[str] = []
-    if not str(account_id or "").strip() or not str(account_username or "").strip():
-        blockers.append("missing_account_context")
-    if not bool(diagnostic.get("handoff_would_run")):
-        blockers.append(str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met"))
-    if not bool(diagnostic.get("unfollow_enabled")):
-        blockers.append("unfollow_disabled")
-    mode = str(diagnostic.get("unfollow_mode") or "")
-    is_unfollow_any = _is_unfollow_any_mode(mode)
-    if not _h3_supports_unfollow_mode(mode):
-        blockers.append("unfollow_skipped_mode_not_supported_for_h3_real")
-    if not is_unfollow_any and int(diagnostic.get("pending_unfollow_count") or 0) <= 0:
-        blockers.append("unfollow_skipped_no_safe_candidate")
-    if int(real_max_actions_effective) < 1:
-        blockers.append("unfollow_any_cap_exhausted" if is_unfollow_any else "real_max_actions_invalid")
-
-    # Preserve the pre-Point-D behavior for every non-53 Follow outcome.
-    # Point D consumes structured blockers only for its validated partial
-    # envelope; it must not weaken or reinterpret the existing 0/97 gates.
-    diagnostic_blob = " ".join(str(v).lower() for v in diagnostic.values())
-    unsafe_markers = (
-        "active_instagram_account_mismatch",
-        "account_mismatch",
-        "challenge",
-        "restriction",
-        "restricted",
-        "blocked",
-        "crash",
-        "exception",
-    )
-    for marker in unsafe_markers:
-        if marker in diagnostic_blob:
-            blockers.append(f"unsafe_follow_signal_{marker}")
-            break
-
-    if blockers:
-        out["follow_exit_code_block_reason"] = "|".join(
-            reason for reason in dict.fromkeys(blockers) if reason
-        )
-        return out
-
-    out.update(
-        {
-            "follow_exit_code_allowed": True,
-            "follow_exit_code_allow_reason": (
-                "follow_candidate_local_post_follow_partial_safe_for_unfollow"
-                if follow_exit_code == 53
-                else "partial_safe_follow_exit_97"
-            ),
-        }
-    )
-    return out
 
 
 def _canonical_global_unfollow_handoff_blockers(
@@ -4024,6 +4063,11 @@ def _canonical_global_unfollow_handoff_blockers(
             reason = str(value or "").strip()
             if reason and reason not in blockers:
                 blockers.append(reason)
+    global_safety_reason = str(
+        diagnostic.get("global_safety_reason") or ""
+    ).strip()
+    if global_safety_reason and global_safety_reason not in blockers:
+        blockers.append(global_safety_reason)
     platform_state = str(diagnostic.get("platform_state") or "").strip().lower()
     if platform_state in {"challenge", "restriction", "restricted", "blocked"}:
         reason = f"unsafe_follow_signal_{platform_state}"
@@ -4084,12 +4128,21 @@ def _evaluate_follow_partial_unfollow_handoff(
     diagnostic: dict[str, Any],
     real_max_actions_effective: int,
     business_action_deadline: str | None,
+    request_id: str | None = None,
+    session_attempt: int = 1,
+    generation: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Single Point-D decision: preserve Follow, independently gate Unfollow."""
     valid, validation_reason = validate_follow_termination_decision(
         follow_outcome,
-        expected_exit_code=53,
+        expected_exit_code=int(follow_outcome.get("exit_code") or 53),
+        expected_account_id=account_id,
+        expected_request_id=str(request_id or ""),
+        expected_run_id=str(run_id or ""),
+        expected_business_session_id=str(business_session_id or ""),
+        expected_attempt_id=str(session_attempt or 1),
+        expected_generation=str(generation or session_attempt or 1),
     )
     executable_count = max(0, int(diagnostic.get("pending_unfollow_count") or 0))
     mode = str(diagnostic.get("unfollow_mode") or "")
@@ -4187,6 +4240,9 @@ def _run_follow_to_unfollow_real(
         real_max_actions_effective=real_max_effective,
         business_action_deadline=business_action_deadline,
         business_session_id=business_session_id,
+        request_id=request_id,
+        session_attempt=session_attempt,
+        generation=str(session_attempt or 1),
     )
     point_d_handoff = dict(follow_exit_gate.get("follow_partial_handoff") or {})
     if follow_exit_code == 53:
@@ -5254,6 +5310,9 @@ def run_account_session(
                     session_termination_class="phase_handoff_safe_pause",
                     follow_remaining_preserved=True,
                 )
+            # Consume the immutable rotation result after cooperative intent
+            # handling.  Never keep a pre-handoff local projection alive.
+            follow_outcome = dict(follow_engine_summary.get("follow_outcome") or {})
             follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
                 account_id=aid,
                 account_username=uname,
@@ -5264,6 +5323,10 @@ def run_account_session(
                 follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                 session_started_at=t0,
                 follow_outcome=follow_outcome,
+                request_id=run_request_id,
+                business_session_id=business_session_id,
+                session_attempt=follow60_attempt_id,
+                generation=str(follow60_attempt_id or 1),
             )
             probe_enabled = _follow_to_unfollow_probe_enabled()
             real_enabled = _follow_to_unfollow_real_enabled(aid)

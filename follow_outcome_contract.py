@@ -123,12 +123,89 @@ def build_follow_termination_decision(
     }
 
 
+def build_follow_time_handoff_termination_decision(
+    *,
+    follows_completed_count: int,
+    target_follow_budget_effective: int | None,
+    target_attribution: dict[str, Any],
+    account_id: str,
+    request_id: str,
+    run_id: str,
+    business_session_id: str,
+    attempt_id: str,
+    generation: str,
+) -> dict[str, Any]:
+    """Build the authoritative, scope-bound exit-97 Follow handoff."""
+
+    completed = max(0, int(follows_completed_count or 0))
+    budget = (
+        max(0, int(target_follow_budget_effective))
+        if target_follow_budget_effective is not None
+        else None
+    )
+    attribution = {
+        str(key): value
+        for key, value in dict(target_attribution or {}).items()
+        if value is not None and str(value).strip()
+    }
+    return {
+        "schema": FOLLOW_TERMINATION_DECISION_SCHEMA,
+        "schema_version": FOLLOW_TERMINATION_DECISION_VERSION,
+        "contract_version": FOLLOW_TERMINATION_DECISION_VERSION,
+        "phase_status": "partial_resumable",
+        "scope": "follow_phase",
+        "exit_code": 97,
+        "first_causal_reason": "follow_to_unfollow_time_handoff",
+        "stable_reason": "follow_to_unfollow_time_handoff",
+        "safe_boundary": True,
+        "safe_next_step": "handoff_to_unfollow",
+        "follow_remaining_preserved": True,
+        "no_new_follow_after_deadline": True,
+        "follow_quota_state": {
+            "follows_completed_count": completed,
+            "target_follow_budget_effective": budget,
+        },
+        "target_attribution": attribution,
+        "scope_binding": {
+            "account_id": str(account_id or "").strip(),
+            "request_id": str(request_id or "").strip(),
+            "run_id": str(run_id or "").strip(),
+            "business_session_id": str(business_session_id or "").strip(),
+            "attempt_id": str(attempt_id or "").strip(),
+            "generation": str(generation or "").strip(),
+        },
+        "completed": False,
+        "partial": True,
+        "resumable": True,
+        "verified_actions": completed,
+        "target_actions": budget,
+        "remaining_actions": (
+            max(0, budget - completed) if budget is not None else None
+        ),
+        "remaining_target_ids": [],
+        "remaining_target_count": 0,
+        "current_ct_status": "retryable",
+        "current_ct_result": "retryable",
+        "suggested_next_action": "handoff_to_unfollow",
+        "suggested_resume_strategy": "resume_follow_on_next_eligible_session",
+        "last_safe_checkpoint": "follow_to_unfollow_safe_boundary",
+        "follow_retap_allowed": False,
+        "target_rotation_allowed": False,
+    }
+
+
 def validate_follow_termination_decision(
     decision: dict[str, Any] | None,
     *,
     expected_exit_code: int = 53,
+    expected_account_id: str | None = None,
+    expected_request_id: str | None = None,
+    expected_run_id: str | None = None,
+    expected_business_session_id: str | None = None,
+    expected_attempt_id: str | None = None,
+    expected_generation: str | None = None,
 ) -> tuple[bool, str]:
-    """Validate the exact runner-owned exit-53 envelope, fail closed."""
+    """Validate an authoritative Follow terminal envelope, fail closed."""
 
     if not isinstance(decision, dict) or not decision:
         return False, "decision_missing"
@@ -142,6 +219,41 @@ def validate_follow_termination_decision(
         return False, "exit_code_invalid"
     if actual_exit_code != int(expected_exit_code):
         return False, "exit_code_mismatch"
+
+    if actual_exit_code == 97:
+        required_exact = {
+            "phase_status": "partial_resumable",
+            "scope": "follow_phase",
+            "first_causal_reason": "follow_to_unfollow_time_handoff",
+            "stable_reason": "follow_to_unfollow_time_handoff",
+            "safe_boundary": True,
+            "safe_next_step": "handoff_to_unfollow",
+            "follow_remaining_preserved": True,
+            "no_new_follow_after_deadline": True,
+            "follow_retap_allowed": False,
+            "target_rotation_allowed": False,
+        }
+        for field, expected in required_exact.items():
+            if decision.get(field) != expected:
+                return False, f"contract_contradiction:{field}"
+        binding = decision.get("scope_binding")
+        if not isinstance(binding, dict):
+            return False, "scope_binding_invalid"
+        expected_binding = {
+            "account_id": expected_account_id,
+            "request_id": expected_request_id,
+            "run_id": expected_run_id,
+            "business_session_id": expected_business_session_id,
+            "attempt_id": expected_attempt_id,
+            "generation": expected_generation,
+        }
+        for field, expected in expected_binding.items():
+            expected_text = str(expected or "").strip()
+            if not expected_text:
+                return False, f"expected_scope_missing:{field}"
+            if str(binding.get(field) or "").strip() != expected_text:
+                return False, f"scope_binding_mismatch:{field}"
+        return True, "follow_time_handoff_partial_safe_for_unfollow"
 
     required_exact = {
         "phase_status": "partial_resumable",

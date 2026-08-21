@@ -7,7 +7,10 @@ import unittest
 
 import account_session_orchestrator as orchestrator
 from account_session_resume_engine import build_account_session_resume_plan
-from follow_outcome_contract import build_follow_termination_decision
+from follow_outcome_contract import (
+    build_follow_termination_decision,
+    build_follow_time_handoff_termination_decision,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "follow_partial_unfollow_handoff_point_d.json"
@@ -47,6 +50,24 @@ class FollowPartialUnfollowHandoffPointDTests(unittest.TestCase):
         }
         out.update(updates)
         return out
+
+    def _time_handoff_outcome(self, **binding_updates: str) -> dict:
+        request_id = "00000000-0000-4000-8000-000000000005"
+        binding = {
+            "account_id": self.fixture["account_id"],
+            "request_id": request_id,
+            "run_id": self.fixture["run_id"],
+            "business_session_id": self.fixture["business_session_id"],
+            "attempt_id": "2",
+            "generation": "2",
+        }
+        binding.update(binding_updates)
+        return build_follow_time_handoff_termination_decision(
+            follows_completed_count=39,
+            target_follow_budget_effective=120,
+            target_attribution=self.fixture["target_attribution"],
+            **binding,
+        )
 
     def _evaluate(self, *, outcome: dict | None = None, diagnostic: dict | None = None, deadline_seconds: int = 3600) -> dict:
         return orchestrator._evaluate_follow_partial_unfollow_handoff(
@@ -162,6 +183,162 @@ class FollowPartialUnfollowHandoffPointDTests(unittest.TestCase):
             follow_session_outcome="partial_resumable",
         )
         self.assertEqual("partial_resumable", termination)
+
+    def test_exit_97_requires_exact_scope_bound_authoritative_envelope(self) -> None:
+        request_id = "00000000-0000-4000-8000-000000000005"
+        outcome = self._time_handoff_outcome()
+        diagnostic = self._diagnostic(
+            follow_outcome=outcome,
+            request_id=request_id,
+            session_attempt=2,
+            generation="2",
+        )
+        allowed = orchestrator._evaluate_h3_follow_exit_code_gate(
+            account_id=self.fixture["account_id"],
+            account_username=self.fixture["account_username"],
+            follow_exit_code=97,
+            diagnostic=diagnostic,
+            real_max_actions_effective=self.fixture["real_max_actions_effective"],
+            business_action_deadline=(self.now + timedelta(hours=1)).isoformat(),
+            business_session_id=self.fixture["business_session_id"],
+            request_id=request_id,
+            session_attempt=2,
+            generation="2",
+            now=self.now,
+        )
+        self.assertTrue(allowed["follow_exit_code_allowed"])
+        self.assertEqual(
+            "follow_time_handoff_partial_safe_for_unfollow",
+            allowed["follow_exit_code_allow_reason"],
+        )
+
+        for field, wrong in (
+            ("request_id", "wrong-request"),
+            ("business_session_id", "wrong-session"),
+            ("generation", "wrong-generation"),
+        ):
+            with self.subTest(field=field):
+                invalid = self._time_handoff_outcome(**{field: wrong})
+                rejected = orchestrator._follow_exit_handoff_gate(
+                    97,
+                    invalid,
+                    account_id=self.fixture["account_id"],
+                    request_id=request_id,
+                    run_id=self.fixture["run_id"],
+                    business_session_id=self.fixture["business_session_id"],
+                    attempt_id="2",
+                    generation="2",
+                )
+                self.assertEqual(
+                    (False, "follow_termination_decision_invalid"), rejected
+                )
+
+        self.assertEqual(
+            (False, "follow_termination_decision_invalid"),
+            orchestrator._follow_exit_handoff_gate(
+                97,
+                {},
+                account_id=self.fixture["account_id"],
+                request_id=request_id,
+                run_id=self.fixture["run_id"],
+                business_session_id=self.fixture["business_session_id"],
+                attempt_id="2",
+                generation="2",
+            ),
+        )
+
+    def test_exit_97_rotation_emits_one_immutable_handoff_and_never_rotates(self) -> None:
+        request_id = "00000000-0000-4000-8000-000000000005"
+
+        def runner(_device: object, **_kwargs: object) -> int:
+            runner.calls += 1
+            runner.last_session_summary = {
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": "follow_to_unfollow_time_handoff",
+                "first_causal_reason": "follow_to_unfollow_time_handoff",
+                "follows_completed_count": 39,
+            }
+            return 97
+
+        runner.calls = 0
+        runner.last_session_summary = {}
+        result = orchestrator._run_follow_target_rotation(
+            object(),
+            account_id=self.fixture["account_id"],
+            account_username=self.fixture["account_username"],
+            run_id=self.fixture["run_id"],
+            run_request_id=request_id,
+            business_session_id=self.fixture["business_session_id"],
+            follow60_attempt_id=2,
+            follow_targets=[
+                {
+                    "target_id": self.fixture["target_attribution"]["target_id"],
+                    "source_profile": "sanitized_ct",
+                },
+                {"target_id": "must-not-open", "source_profile": "must_not_rotate"},
+            ],
+            run_followers_list_engine_session=runner,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            max_follows_per_target_per_run=120,
+            authorized_follow_quota=120,
+        )
+        self.assertEqual(1, runner.calls)
+        self.assertEqual(97, result["exit_code"])
+        outcome = result["summary"]["follow_outcome"]
+        self.assertEqual("partial_resumable", outcome["phase_status"])
+        self.assertTrue(outcome["safe_boundary"])
+        self.assertEqual("handoff_to_unfollow", outcome["safe_next_step"])
+        self.assertEqual("follow_to_unfollow_time_handoff", outcome["first_causal_reason"])
+        self.assertEqual(request_id, outcome["scope_binding"]["request_id"])
+        self.assertFalse(result["summary"]["target_rotation_allowed"])
+
+    def test_scheduled_deadline_exit_97_keeps_existing_non_handoff_contract(self) -> None:
+        def runner(_device: object, **_kwargs: object) -> int:
+            runner.calls += 1
+            runner.last_session_summary = {
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": "scheduled_business_deadline",
+                "first_causal_reason": "scheduled_business_deadline",
+                "follows_completed_count": 7,
+            }
+            return 97
+
+        runner.calls = 0
+        runner.last_session_summary = {}
+        result = orchestrator._run_follow_target_rotation(
+            object(),
+            account_id=self.fixture["account_id"],
+            account_username=self.fixture["account_username"],
+            run_id=self.fixture["run_id"],
+            run_request_id="00000000-0000-4000-8000-000000000006",
+            business_session_id=self.fixture["business_session_id"],
+            follow60_attempt_id=2,
+            follow_targets=[
+                {
+                    "target_id": self.fixture["target_attribution"]["target_id"],
+                    "source_profile": "sanitized_ct",
+                }
+            ],
+            run_followers_list_engine_session=runner,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=1,
+            max_follows_per_target_per_run=120,
+            authorized_follow_quota=120,
+        )
+        self.assertEqual(1, runner.calls)
+        self.assertEqual(97, result["exit_code"])
+        self.assertEqual(
+            "scheduled_business_deadline", result["summary"]["first_causal_reason"]
+        )
+        self.assertEqual("scheduled_safe_stop", result["summary"]["session_termination_class"])
+        self.assertEqual("partial_not_resumable", result["summary"]["follow_outcome"]["phase_status"])
+        self.assertEqual("end_session", result["summary"]["safe_next_step"])
+        self.assertNotIn("follow_termination_decision", result["summary"])
 
 
 if __name__ == "__main__":
