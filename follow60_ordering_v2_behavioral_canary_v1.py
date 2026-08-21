@@ -747,7 +747,6 @@ class CandidateCyclePlanV2:
     deferred_follow: DeferredFollowIntentV2
     started_at_monotonic: float
     required_post_follow_mute: bool = False
-    new_like_action_authorized: bool = True
     enforce_current_like_evidence: bool = False
     post_action_started: bool = False
     like_terminal: bool = False
@@ -773,16 +772,6 @@ class Follow60OrderingV2OrchestratorV1:
         *,
         post_like_engine: Callable[[dict[str, Any]], Mapping[str, Any]],
     ) -> dict[str, Any]:
-        if plan.required_post_follow_mute and not plan.new_like_action_authorized:
-            return {
-                "ok": False,
-                "reason": "required_mute_precludes_post_first_like",
-                "physical_action_started": False,
-                "post_action_started": False,
-                "liked_count": 0,
-                "like_action_state": "LIKE_NOT_PERFORMED",
-                "mute_ordering_guard": "FOLLOW_THEN_MUTE_THEN_LIKE",
-            }
         out = dict(post_like_engine({
             "schema": SCHEMA,
             "stable_proof": plan.stable_proof.payload(),

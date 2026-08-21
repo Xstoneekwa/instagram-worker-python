@@ -1,11 +1,10 @@
 {
   "approval": {
-    "base_sha": "b09bf68a274eaa79b6d26dc173f5c25a43aaeb81",
-    "change_id": "dispatcher-24x7-phase1-v1-20260821",
-    "diff_sha256": "5c238de4b1da6d84ac1ef98f0da4bd78335adb68960a27982f1d48bbe2fccd15",
-    "expires_at": "2026-08-21T20:35:17.419335+00:00",
-    "head_sha": "0e3789a38e1ac3a5a8bea34418b0f9ba580a7df4",
-    "request_sha256": "c9f33b1a86f1a2843f52dedaab24d5db5aa946de693d7f0dd544f306b85ba7e5",
+    "base_sha": "7724b1c71b9163e20482f04e357c7ed01e1ea4f0",
+    "change_id": "f3b5352f-ab48-4769-9178-54eb91595763",
+    "final_diff_hash": "7d7dcebc6801ecdcb949d7d835f52f4a819085bd7b817493bc55abf197da590c",
+    "final_manifest_hash": "86f0d073082f9b7c05e551197f86d46a379e1af4cb5c706dd813715ca7b7d26a",
+    "final_protected_scope_hash": "c97f90a86e9dd2cee94fff5c8a8e7e56c6089515d41644de465d501469f5a495",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -507,6 +506,26 @@
       ],
       "head_sha": "0e3789a38e1ac3a5a8bea34418b0f9ba580a7df4",
       "requested_scope": "Dispatcher 24/7 Phase 1 only: local tri-state liveness, fail-closed bounded autoheal, active-child mutation guard, service-stop provenance, BotApp local-liveness/business-preflight separation; no Follow60 business behavior change",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "ce34e4d91af72e1936414907ba1b67086470c16360b1f8878391bba78ef882a1",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "7724b1c71b9163e20482f04e357c7ed01e1ea4f0",
+      "candidate_tree_sha": "5b07c22066c7ddba4a041f207c7d26c6f245bdd5",
+      "change_id": "f3b5352f-ab48-4769-9178-54eb91595763",
+      "consumed_at": "2026-08-21T20:21:04.752990+00:00",
+      "diff_sha256": "7d7dcebc6801ecdcb949d7d835f52f4a819085bd7b817493bc55abf197da590c",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "follow60_ordering_v2_behavioral_canary_v1.py",
+        "instagram_navigation.py",
+        "runner.py",
+        "tests/fixtures/follow60_v2_mainline_32a8394_contract.json",
+        "tests/test_follow60_point_c_mute_like_ordering.py",
+        "tests/test_follow60_v2_mainline_32a8394_behavioral_contract.py"
+      ],
+      "requested_scope": "follow60_ordering_v2,follow60_v2_mainline_32a8394_regression,post_follow_like_point_c",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1505,13 +1524,13 @@
       "size": 710
     },
     "follow60_ordering_v2_behavioral_canary_v1.py": {
-      "git_blob_oid": "db44a971f0a8c83d90fbe72dc87dcc9d054eafdc",
+      "git_blob_oid": "a93d1a3f2364fea55c4c594550adda2d3a81f106",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "follow60_ordering_v2_behavioral_canary_v1.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "bfbcd7e9d445771d83846dc1175f34bf550fc88c15cf24c032314ddfcecf48cb",
-      "size": 32019
+      "sha256": "211891a047e877e2da8c7e5e31eab8425473738d5f8e7be9097f815059fb2c79",
+      "size": 31501
     },
     "follow60_ordering_v2_ledger_v1.py": {
       "git_blob_oid": "2aef327586a7afb98190eda19a071cd4fc74b08c",
@@ -1739,13 +1758,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "f03ca85875c17644f8adff05a99497e47d9366e0",
+      "git_blob_oid": "1cdb5ca7a9710df128af11797a351e56093658fa",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "7d964a970ed8aa225d7cb7061804cc92e2a02f918541b0991d853e11afadd69a",
-      "size": 2471373
+      "sha256": "fd070c1b9bfe8f829e28b218f515adf5f95b310ded01df376854e45cac80636e",
+      "size": 2474238
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -1856,13 +1875,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "3e0f8d7317771b18e9b32422a8a5bac82f11cb38",
+      "git_blob_oid": "e64e88a720351c29f1926fe8a771873837b2f360",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "35c6a8139ead2bb492468f1c3aed832eb8350935b6fbb9976d72e5d48ab83f0b",
-      "size": 1273516
+      "sha256": "831a828eded73717657d7b4ef5a926f6bff3478aefefd942a11b18593b8831c1",
+      "size": 1274145
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2405,7 +2424,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "901df72cdb901e8585a9b8d4e572a244be0d4ba20907cefb8f2752ff88dbbc0f",
+  "protected_scope_sha256": "c97f90a86e9dd2cee94fff5c8a8e7e56c6089515d41644de465d501469f5a495",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

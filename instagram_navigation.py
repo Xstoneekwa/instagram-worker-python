@@ -54647,6 +54647,46 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
     }
 
 
+_POINT_C_POST_FOLLOW_MUTATION_STATES = frozenset(
+    {
+        "pending",
+        "follow_pending",
+        "tap_ready",
+        "physical_attempt_started",
+        "tap_sent",
+        "follow_sent",
+        "ambiguous",
+        "non_terminal",
+        "verified",
+        "follow_verified",
+        "following",
+        "requested",
+    }
+)
+_POINT_C_PRE_FOLLOW_MUTATION_STATES = frozenset(
+    {
+        "not_started",
+        "abandoned_before_physical_attempt",
+    }
+)
+
+
+def _point_c_follow_mutation_phase(state: Any) -> str:
+    """Classify existing evidence without probing the device or persistence.
+
+    Once a Follow mutation has reached any tap-ready or later state it is
+    permanently post-Follow for Point C.  Only an explicit no-attempt receipt
+    is pre-Follow; missing or unfamiliar evidence fails closed as UNKNOWN.
+    """
+
+    normalized = str(state or "").strip().lower().replace("-", "_")
+    if normalized in _POINT_C_POST_FOLLOW_MUTATION_STATES:
+        return "POST_FOLLOW"
+    if normalized in _POINT_C_PRE_FOLLOW_MUTATION_STATES:
+        return "PRE_FOLLOW"
+    return "UNKNOWN"
+
+
 def _post_follow_like_terminal_binding(
     likes_out: dict[str, Any],
     stage_persist_results: dict[str, Any],
@@ -59876,6 +59916,7 @@ def run_visual_candidate_post_follow_phase(
     stage_persist_callback: Callable[[str, dict[str, Any]], bool] | None = None,
     expected_stage_binding: dict[str, Any] | None = None,
     precompleted_like_result: dict[str, Any] | None = None,
+    follow_mutation_state: str | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -59959,6 +60000,14 @@ def run_visual_candidate_post_follow_phase(
             or ""
         )
         == FollowPhysicalState.FOLLOW_VERIFIED.value
+    )
+    point_c_follow_mutation_state = (
+        str(follow_mutation_state)
+        if follow_mutation_state is not None
+        else ("verified" if follow_success_verified and post_follow_was_verified_context else "")
+    )
+    point_c_follow_mutation_phase = _point_c_follow_mutation_phase(
+        point_c_follow_mutation_state
     )
     post_follow_ctx.mark_post_follow_decision(reason="post_follow_started")
 
@@ -60782,6 +60831,41 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             follower_username=cand,
             reason="post_follow_candidate_profile_lost",
+        )
+    elif (
+        follow_success_verified
+        and cand
+        and point_c_follow_mutation_phase != "POST_FOLLOW"
+    ):
+        post_follow_ctx.mark_post_grid_blocked(
+            reason="point_c_follow_mutation_state_unknown"
+        )
+        post_follow_ctx.mark_like_done_or_skipped(
+            reason="point_c_follow_mutation_state_unknown"
+        )
+        likes_out.update(
+            {
+                "ok": False,
+                "skipped": True,
+                "phase_outcome": "skipped",
+                "skipped_reason": "point_c_follow_mutation_state_unknown",
+                "likes_failure_kind": "point_c_follow_mutation_state_unknown",
+                "point_c_follow_mutation_phase": point_c_follow_mutation_phase,
+                "like_action_state": "LIKE_NOT_PERFORMED",
+                "real_tap_sent": False,
+                "fresh_like_verified": False,
+            }
+        )
+        log(
+            "error",
+            "post_follow_like_blocked_point_c_unknown_follow_mutation_state",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            follow_mutation_state=point_c_follow_mutation_state or None,
+            point_c_follow_mutation_phase=point_c_follow_mutation_phase,
+            physical_like_blocked=True,
+            extra_device_probe_count=0,
         )
     elif follow_success_verified and cand:
         likes_account_id = ""

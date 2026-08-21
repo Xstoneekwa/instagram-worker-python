@@ -13,7 +13,7 @@ import instagram_navigation as nav
 FIXTURE = Path(__file__).parent / "fixtures" / "follow60_field_mythyl_mute_like_ordering.json"
 
 
-def _plan(*, mute_required: bool, authorized: bool = True):
+def _plan(*, mute_required: bool):
     proof = SimpleNamespace(
         candidate_username="bilalmnakhry",
         action_id="mythyl-action-18",
@@ -30,7 +30,6 @@ def _plan(*, mute_required: bool, authorized: bool = True):
         deferred_follow=deferred,
         started_at_monotonic=1.0,
         required_post_follow_mute=mute_required,
-        new_like_action_authorized=authorized,
         enforce_current_like_evidence=True,
     )
 
@@ -53,21 +52,46 @@ class PointCMuteLikeOrderingTests(unittest.TestCase):
         self.assertEqual("LIKE_ACTION_PERFORMED_NOW", scenarios["normal_happy_path"]["state"])
         self.assertEqual(0, scenarios["receipt_replay"]["counter_delta"])
 
-    def test_required_mute_blocks_post_first_before_engine(self):
+    def test_required_mute_does_not_block_native_pre_follow_like(self):
         receipts = []
         called = []
         orchestrator = ordering.Follow60OrderingV2OrchestratorV1(
             ledger_apply=lambda stage, payload: receipts.append((stage, payload)) or {"ok": True}
         )
         out = orchestrator.execute_post_first(
-            _plan(mute_required=True, authorized=False),
-            post_like_engine=lambda _ctx: called.append(True) or {},
+            _plan(mute_required=True),
+            post_like_engine=lambda _ctx: called.append(True) or {
+                "post_opened": True,
+                "liked_count": 1,
+                "like_action_state": "LIKE_ACTION_PERFORMED_NOW",
+                "real_tap_sent": True,
+                "fresh_like_verified": True,
+            },
         )
-        self.assertFalse(out["ok"])
-        self.assertEqual("required_mute_precludes_post_first_like", out["reason"])
-        self.assertEqual([], called)
-        self.assertEqual([], receipts)
-        self.assertFalse(out["physical_action_started"])
+        self.assertTrue(out["ok"])
+        self.assertEqual([True], called)
+        self.assertEqual(["post_opened", "like_verified"], [stage for stage, _ in receipts])
+
+    def test_point_c_follow_mutation_phase_is_monotonic_and_unknown_fails_closed(self):
+        post_follow_states = (
+            "pending",
+            "tap-ready",
+            "tap-sent",
+            "ambiguous",
+            "non-terminal",
+            "verified",
+            "follow_pending",
+            "follow_verified",
+        )
+        for state in post_follow_states:
+            with self.subTest(state=state):
+                self.assertEqual("POST_FOLLOW", nav._point_c_follow_mutation_phase(state))
+        self.assertEqual(
+            "PRE_FOLLOW",
+            nav._point_c_follow_mutation_phase("abandoned_before_physical_attempt"),
+        )
+        self.assertEqual("UNKNOWN", nav._point_c_follow_mutation_phase(""))
+        self.assertEqual("UNKNOWN", nav._point_c_follow_mutation_phase("future_state"))
 
     def test_current_like_requires_tap_fresh_verify_and_exact_binding(self):
         receipts = []

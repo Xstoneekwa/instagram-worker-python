@@ -12344,7 +12344,6 @@ def _follow60_ordering_v2_prepare_candidate(
         deferred_follow=deferred,
         started_at_monotonic=time.monotonic(),
         required_post_follow_mute=required_post_follow_mute,
-        new_like_action_authorized=not required_post_follow_mute,
         enforce_current_like_evidence=bool(enforce_current_like_evidence),
     )
     store = DurableOrderingLedgerV1(
@@ -22788,6 +22787,18 @@ def _run_followers_list_engine_session(
                                 ),
                             }
                         )
+                _pf_follow_mutation_state = str(
+                    (_follow_persistence_ctx or {}).get("stage") or ""
+                ).strip()
+                if not _pf_follow_mutation_state:
+                    if _pf_follow_ok:
+                        _pf_follow_mutation_state = "verified"
+                    elif _tap_sent_seen:
+                        _pf_follow_mutation_state = "ambiguous"
+                    elif _ordering_v2.get("selected") is True:
+                        _pf_follow_mutation_state = "follow_pending"
+                    else:
+                        _pf_follow_mutation_state = "not_started"
                 _pf = run_visual_candidate_post_follow_phase(
                     d,
                     pkg=pkg,
@@ -22810,6 +22821,7 @@ def _run_followers_list_engine_session(
                         if _ordering_v2.get("selected") is True
                         else None
                     ),
+                    follow_mutation_state=_pf_follow_mutation_state,
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True

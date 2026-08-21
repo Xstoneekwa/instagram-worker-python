@@ -1,0 +1,10 @@
+{
+  "schema": "FOLLOW60_V2_MAINLINE_32A8394_CONTRACT_V1",
+  "canonical_sha": "32a8394",
+  "physical_order": ["LIKE", "FOLLOW", "MUTE", "RETURN_CT"],
+  "required_mute_axes": ["posts", "stories"],
+  "healthy_mute_requires_v1_fallback": false,
+  "healthy_mute_requires_global_stop": false,
+  "point_c_scope": "NEW_LIKE_AFTER_FOLLOW_MUTATION_ONLY",
+  "unknown_follow_mutation_state": "FAIL_CLOSED"
+}
