@@ -27,6 +27,7 @@ ALLOWED_REASONS = frozenset(
         "human_manual_stop",
         "dispatcher_watchdog",
         "deployment_shutdown",
+        "control_plane_service_stop",
     }
 )
 
@@ -217,7 +218,12 @@ def clear_intent_and_ack(context: StopContext) -> None:
 
 
 def record_termination_origin(context: StopContext, *, reason: str) -> None:
-    if reason not in {"human_manual_stop", "dispatcher_watchdog", "deployment_shutdown"}:
+    if reason not in {
+        "human_manual_stop",
+        "dispatcher_watchdog",
+        "deployment_shutdown",
+        "control_plane_service_stop",
+    }:
         raise ValueError("unsupported_termination_origin")
     _atomic_json(
         _path(context, "termination"),
@@ -231,11 +237,14 @@ def record_termination_origin(context: StopContext, *, reason: str) -> None:
 
 
 def read_termination_origin(context: StopContext | None) -> str:
-    if context is None:
-        return "human_manual_stop"
-    payload = _read_bound(_path(context, "termination"), context)
+    payload = _read_bound(_path(context, "termination"), context) if context is not None else None
     reason = str((payload or {}).get("reason") or "")
-    return reason if reason else "human_manual_stop"
+    if reason:
+        return reason
+    infrastructure_origin = str(os.getenv("RUN_CONTROL_SIGNAL_ORIGIN") or "").strip()
+    if infrastructure_origin == "control_plane_service_stop":
+        return infrastructure_origin
+    return "human_manual_stop"
 
 
 def action_start_allowed(

@@ -395,12 +395,19 @@ _wait_for_consumer_stop() {
   deadline=$((SECONDS + ${RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS:-15}))
   [[ -n "$pid" ]] || return 0
   while _pid_alive "$pid"; do
+    # A terminated direct child remains visible to kill(0) as a zombie until
+    # this wrapper reaps it. Treat that as stopped and reap it immediately.
+    if [[ "$(_pid_command_line "$pid")" == "" ]]; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
     if (( SECONDS >= deadline )); then
       echo "dispatcher_consumer_stop_timeout pid=$pid" >&2
       return 1
     fi
     sleep 1
   done
+  wait "$pid" 2>/dev/null || true
   return 0
 }
 
@@ -408,7 +415,10 @@ _signal_consumer_gracefully() {
   local signal_name="${1:-TERM}"
   local pid="${consumer_pid:-}"
   [[ -n "$pid" ]] || return 0
-  if _pid_alive "$pid" && _pid_is_consumer "$pid"; then
+  # consumer_pid is the exact direct child created by this wrapper. Do not
+  # make shutdown depend on a secondary ps/lsof classification that may be
+  # unavailable while the service is already terminating.
+  if _pid_alive "$pid"; then
     kill "-$signal_name" "$pid" 2>/dev/null || true
     _wait_for_consumer_stop "$pid"
   fi
@@ -452,30 +462,65 @@ _status_json() {
   local paused="false"
   local existing_pid=""
   local process_count="0"
+  local process_probe_known="true"
+  local consumer_pids=""
   local launchd_loaded="false"
-  local preflight_json=""
-  local preflight_exit="0"
+  local launchd_probe_known="true"
+  local pgrep_output=""
+  local pgrep_status="0"
+  local launchd_status="0"
+  local existing_status="0"
 
   if [[ -f "$PAUSE_FILE" ]]; then
     paused="true"
   fi
-  if existing_pid="$(_existing_dispatcher_pid)" && [[ -n "$existing_pid" ]]; then
-    :
-  else
+  set +e
+  existing_pid="$(_existing_dispatcher_pid)"
+  existing_status="$?"
+  set -e
+  if [[ "$existing_status" == "3" ]]; then
+    process_probe_known="false"
+    existing_pid=""
+  elif [[ "$existing_status" != "0" ]]; then
     existing_pid=""
   fi
-  process_count="$(_dispatcher_process_count)"
-  if _launchd_loaded; then
-    launchd_loaded="true"
+
+  set +e
+  pgrep_output="$(pgrep -f "account_run_request_consumer\\.py" 2>/dev/null)"
+  pgrep_status="$?"
+  set -e
+  if [[ "$pgrep_status" != "0" && "$pgrep_status" != "1" ]]; then
+    if [[ -n "$existing_pid" ]]; then
+      process_count="1"
+      consumer_pids="$existing_pid"
+    else
+      process_probe_known="false"
+    fi
+  else
+    while read -r candidate_pid; do
+      [[ -n "$candidate_pid" ]] || continue
+      if _pid_is_consumer "$candidate_pid"; then
+        consumer_pids="${consumer_pids}${consumer_pids:+,}${candidate_pid}"
+        process_count=$((process_count + 1))
+      fi
+    done <<< "$pgrep_output"
+    if [[ -n "$existing_pid" ]]; then
+      :
+    elif [[ -n "$consumer_pids" ]]; then
+      existing_pid="${consumer_pids%%,*}"
+    else
+      existing_pid=""
+    fi
   fi
 
-  if [[ "$paused" == "true" ]]; then
-    preflight_json='{"ok":false,"reason":"skipped_paused","active_count":0,"mode":"paused"}'
-  else
-    set +e
-    preflight_json="$("$PYTHON_BIN" account_run_request_consumer.py preflight --json)"
-    preflight_exit="$?"
-    set -e
+  set +e
+  launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1
+  launchd_status="$?"
+  set -e
+  if [[ "$launchd_status" == "0" ]]; then
+    launchd_loaded="true"
+  elif [[ "$launchd_status" != "113" ]]; then
+    launchd_probe_known="false"
   fi
 
   DISPATCHER_STATUS_WORKER_ID="$RUN_CONTROL_DISPATCHER_WORKER_ID" \
@@ -485,10 +530,10 @@ _status_json() {
   DISPATCHER_STATUS_PAUSED="$paused" \
   DISPATCHER_STATUS_PID="$existing_pid" \
   DISPATCHER_STATUS_PROCESS_COUNT="$process_count" \
-  DISPATCHER_STATUS_CONSUMER_PIDS="$(paste -sd, <(_list_consumer_pids) 2>/dev/null || true)" \
+  DISPATCHER_STATUS_CONSUMER_PIDS="$consumer_pids" \
+  DISPATCHER_STATUS_PROCESS_PROBE_KNOWN="$process_probe_known" \
   DISPATCHER_STATUS_LAUNCHD_LOADED="$launchd_loaded" \
-  DISPATCHER_STATUS_PREFLIGHT_EXIT="$preflight_exit" \
-  DISPATCHER_STATUS_PREFLIGHT_JSON="$preflight_json" \
+  DISPATCHER_STATUS_LAUNCHD_PROBE_KNOWN="$launchd_probe_known" \
   DISPATCHER_STATUS_LOG_DIR="$LOG_DIR" \
   DISPATCHER_STATUS_PID_FILE="$PID_FILE" \
   "$PYTHON_BIN" - <<'PY'
@@ -508,21 +553,11 @@ def as_int(value: str, default: int = 0) -> int:
         return default
 
 
-def safe_preflight(raw: str) -> dict:
-    try:
-        value = json.loads(raw or "{}")
-        return value if isinstance(value, dict) else {"ok": False, "reason": "preflight_output_invalid"}
-    except Exception:
-        return {
-            "ok": False,
-            "reason": "preflight_json_parse_failed",
-            "message": "Dispatcher preflight output was not valid JSON.",
-        }
-
-
 paused = as_bool(os.environ.get("DISPATCHER_STATUS_PAUSED", "false"))
 pid = os.environ.get("DISPATCHER_STATUS_PID", "").strip()
-process_count = as_int(os.environ.get("DISPATCHER_STATUS_PROCESS_COUNT", "0"))
+process_probe_known = as_bool(os.environ.get("DISPATCHER_STATUS_PROCESS_PROBE_KNOWN", "false"))
+launchd_probe_known = as_bool(os.environ.get("DISPATCHER_STATUS_LAUNCHD_PROBE_KNOWN", "false"))
+process_count = as_int(os.environ.get("DISPATCHER_STATUS_PROCESS_COUNT", "0")) if process_probe_known else None
 consumer_pids_raw = os.environ.get("DISPATCHER_STATUS_CONSUMER_PIDS", "").strip()
 consumer_pids = []
 if consumer_pids_raw:
@@ -530,34 +565,45 @@ if consumer_pids_raw:
         part = part.strip()
         if part.isdigit():
             consumer_pids.append(int(part))
-process_running = bool(pid)
-launchd_loaded = as_bool(os.environ.get("DISPATCHER_STATUS_LAUNCHD_LOADED", "false"))
+process_running = bool(pid) if process_probe_known else None
+launchd_loaded = as_bool(os.environ.get("DISPATCHER_STATUS_LAUNCHD_LOADED", "false")) if launchd_probe_known else None
 launch_enabled = as_bool(os.environ.get("DISPATCHER_STATUS_LAUNCH_ENABLED", "true"))
-preflight = safe_preflight(os.environ.get("DISPATCHER_STATUS_PREFLIGHT_JSON", ""))
-preflight_ok = bool(preflight.get("ok"))
-
 if paused:
     status = "paused"
-elif process_running and process_count > 1:
+elif process_running is True and process_count is not None and process_count > 1:
     status = "unhealthy"
-elif process_running and preflight_ok and launch_enabled:
+elif process_running is True:
     status = "running"
-elif process_running:
-    status = "unhealthy"
-elif launchd_loaded:
+elif process_running is None or launchd_loaded is None:
+    status = "unknown"
+elif launchd_loaded is True:
     status = "starting"
 else:
     status = "stopped"
 
 last_error = ""
-if not preflight_ok:
-    last_error = str(preflight.get("reason") or preflight.get("error") or "").strip()
-if process_count > 1:
+if process_count is not None and process_count > 1:
     last_error = "duplicate_dispatcher_processes"
+elif status == "unknown":
+    last_error = "local_liveness_probe_inconclusive"
+
+service_state = {
+    "running": "running",
+    "unhealthy": "running",
+    "paused": "paused",
+    "starting": "starting",
+    "stopped": "stopped",
+    "unknown": "unknown",
+}.get(status, "unknown")
+service_health = "degraded" if status in {"unhealthy", "unknown"} else "healthy"
 
 payload = {
     "ok": status in {"running", "paused", "stopped", "starting"},
     "status": status,
+    "service_state": service_state,
+    "service_health": service_health,
+    "preflight_state": "not_checked",
+    "preflight_reason": "local_status_only",
     "worker_id": os.environ.get("DISPATCHER_STATUS_WORKER_ID", ""),
     "dispatcher_id": os.environ.get("DISPATCHER_STATUS_WORKER_ID", ""),
     "paused": paused,
@@ -565,24 +611,25 @@ payload = {
     "pid": as_int(pid, 0) if pid else None,
     "processCount": process_count,
     "consumerPids": consumer_pids,
-    "duplicateProcess": process_count > 1,
+    "duplicateProcess": process_count is not None and process_count > 1,
     "launchdLoaded": launchd_loaded,
     "launchEnabled": launch_enabled,
     "healthOnly": as_bool(os.environ.get("DISPATCHER_STATUS_HEALTH_ONLY", "false")),
     "allowExistingQueue": as_bool(os.environ.get("DISPATCHER_STATUS_ALLOW_EXISTING_QUEUE", "false")),
-    "preflight": preflight,
-    "preflightOk": preflight_ok,
-    "queueActiveCount": as_int(str(preflight.get("active_count", 0))),
+    "preflight": None,
+    "preflightOk": None,
+    "queueActiveCount": None,
     "lastError": last_error or None,
     "logsPath": os.path.join(os.environ.get("DISPATCHER_STATUS_LOG_DIR", ""), "dispatcher.log"),
     "pidFile": os.environ.get("DISPATCHER_STATUS_PID_FILE", ""),
     "checkedAt": datetime.now(timezone.utc).isoformat(),
     "message": {
-        "running": "Dispatcher is healthy and ready.",
+        "running": "Dispatcher local service is running.",
         "paused": "Dispatcher is paused. Resume it before starting Auto Login or runs.",
-        "unhealthy": "Dispatcher is running but cannot process jobs.",
+        "unhealthy": "Dispatcher local service is running with degraded singleton health.",
         "stopped": "Dispatcher is stopped.",
         "starting": "Dispatcher is starting or waiting for launchd.",
+        "unknown": "Dispatcher local liveness could not be determined safely.",
     }.get(status, "Dispatcher status unavailable."),
 }
 print(json.dumps(payload, sort_keys=True))
@@ -643,7 +690,8 @@ _start_foreground() {
   trap '_handle_start_signal INT' INT
   _record_pid "$$"
   _rotate_dispatcher_log_if_needed
-  "$PYTHON_BIN" account_run_request_consumer.py >>"$LOG_DIR/dispatcher.log" 2>&1 &
+  RUN_CONTROL_SIGNAL_ORIGIN="control_plane_service_stop" \
+    "$PYTHON_BIN" account_run_request_consumer.py >>"$LOG_DIR/dispatcher.log" 2>&1 &
   consumer_pid="$!"
   _record_pid "$consumer_pid"
   set +e
@@ -741,11 +789,8 @@ case "$cmd" in
     else
       echo "process=stopped"
     fi
-    if [[ -f "$PAUSE_FILE" ]]; then
-      echo "preflight=skipped_paused"
-      exit 0
-    fi
-    "$PYTHON_BIN" account_run_request_consumer.py preflight
+    echo "preflight_state=not_checked"
+    echo "preflight_reason=local_status_only"
     ;;
   stop)
     launchctl stop "$LAUNCHD_LABEL" 2>/dev/null || true
@@ -771,27 +816,18 @@ case "$cmd" in
       echo "dispatcher_already_healthy consumer_count=1"
       exit 0
     fi
-    if [[ "$process_count" -gt "1" ]]; then
-      _kill_all_dispatcher_processes
-      sleep 1
-      process_count="$(_dispatcher_process_count)"
-    fi
-    if [[ "$process_count" == "1" ]]; then
-      if [[ ! -f "$PLIST_TARGET" ]]; then
-        "$0" install
-      elif ! _launchd_loaded; then
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
-        launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
-      fi
-      echo "dispatcher_already_healthy consumer_count=1"
-      exit 0
+    if [[ "$process_count" != "0" ]]; then
+      echo "dispatcher_recovery_refused inconsistent_process_count=$process_count" >&2
+      exit 5
     fi
     if [[ ! -f "$PLIST_TARGET" ]]; then
-      "$0" install
-    else
-      launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
-      launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+      echo "dispatcher_provisioning_required plist_missing=$PLIST_TARGET" >&2
+      exit 4
     fi
+    _assert_deployment_zero_gate
+    _prepare_auto_restart_startup_skip_once >/dev/null
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
+    launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
     launchctl kickstart "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null \
       || launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null \
       || true
@@ -800,11 +836,13 @@ case "$cmd" in
   restart)
     rm -f "$PAUSE_FILE"
     _assert_deployment_zero_gate
+    _prepare_auto_restart_startup_skip_once >/dev/null
     launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST_TARGET" >/dev/null 2>&1 || true
     _kill_all_dispatcher_processes
     sleep 1
     if [[ ! -f "$PLIST_TARGET" ]]; then
-      "$0" install
+      echo "dispatcher_provisioning_required plist_missing=$PLIST_TARGET" >&2
+      exit 4
     else
       launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
       launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
@@ -827,12 +865,14 @@ case "$cmd" in
     rm -f "$PID_FILE"
     rmdir "$LOCK_DIR" 2>/dev/null || true
     if [[ ! -f "$PLIST_TARGET" ]]; then
-      "$0" install
-    else
-      launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
-      launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
-      launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+      echo "dispatcher_provisioning_required plist_missing=$PLIST_TARGET" >&2
+      exit 4
     fi
+    _assert_deployment_zero_gate
+    _prepare_auto_restart_startup_skip_once >/dev/null
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
+    launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+    launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
     echo "dispatcher_duplicate_fixed label=$LAUNCHD_LABEL"
     ;;
   install)

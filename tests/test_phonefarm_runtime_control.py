@@ -290,7 +290,7 @@ class PhoneFarmRuntimeControlTest(TestCase):
         self.assertEqual(result["lastError"], "long_lived_command_requires_exec")
 
     def test_control_start_is_idempotent_when_running(self) -> None:
-        running = {"ok": True, "status": "running", "processRunning": True, "pid": 4242}
+        running = {"ok": True, "status": "running", "service_state": "running", "processRunning": True, "pid": 4242}
         with mock.patch.object(ctl, "_run_wrapper", return_value=running) as run_wrapper:
             with mock.patch.object(ctl, "_launchctl_kickstart") as kickstart:
                 with mock.patch.object(ctl.os, "execve") as execve:
@@ -303,20 +303,92 @@ class PhoneFarmRuntimeControlTest(TestCase):
         kickstart.assert_not_called()
         execve.assert_not_called()
 
-    def test_control_start_requests_launchd_when_stopped(self) -> None:
-        stopped = {"ok": True, "status": "starting", "processRunning": False, "pid": None}
-        with mock.patch.object(ctl, "_run_wrapper", return_value=stopped) as run_wrapper:
-            with mock.patch.object(ctl, "_launchctl_kickstart", return_value=(True, "")) as kickstart:
-                with mock.patch.object(ctl.os, "execve") as execve:
-                    result = ctl.control_start("heartbeat")
+    def test_control_start_safe_recovery_when_absence_is_proven(self) -> None:
+        stopped = {"ok": True, "status": "stopped", "service_state": "stopped", "processRunning": False, "pid": None}
+        starting = {"ok": True, "status": "starting", "service_state": "starting", "processRunning": False}
+        armed = {"ok": True, "status": "unknown"}
+        resumed = {"ok": True, "status": "starting"}
+        with mock.patch.object(ctl, "_run_wrapper", side_effect=[stopped, stopped, armed, resumed, starting]) as run_wrapper, \
+             mock.patch.object(ctl, "_active_worker_children", return_value=[]), \
+             mock.patch.object(ctl, "deployment_zero_gate", return_value={"ok": True}), \
+             mock.patch.object(ctl, "_acquire_autoheal_lock", return_value=(Path("/tmp/test-lock"), True)), \
+             mock.patch.object(ctl, "_release_autoheal_lock"):
+            result = ctl.control_start("dispatcher")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["recoveryAction"], "safe_resume")
+        self.assertTrue(result["startupTickSkipArmed"])
+        commands = [call.args[1] for call in run_wrapper.call_args_list]
+        self.assertEqual(commands, ["status", "status", "prepare-auto-restart-startup-skip", "resume", "status"])
+
+    def test_control_start_preserves_non_dispatcher_kickstart_contract(self) -> None:
+        stopped = {"ok": True, "status": "stopped", "processRunning": False, "pid": None}
+        running = {"ok": True, "status": "running", "processRunning": True, "pid": 42}
+        with mock.patch.object(ctl, "_run_wrapper", side_effect=[stopped, running]) as run_wrapper, \
+             mock.patch.object(ctl, "_launchctl_kickstart", return_value=(True, "")) as kickstart:
+            result = ctl.control_start("heartbeat")
         self.assertTrue(result["launchdKickstart"])
-        self.assertIn("start_requested", result["message"])
         kickstart.assert_called_once_with("com.boost.phonefarm.device-heartbeat")
-        # Jamais parent du worker : uniquement status + kickstart launchd.
-        self.assertEqual(run_wrapper.call_count, 2)
-        for call in run_wrapper.call_args_list:
-            self.assertEqual(call.args[1], "status")
-        execve.assert_not_called()
+        self.assertEqual([call.args[1] for call in run_wrapper.call_args_list], ["status", "status"])
+
+    def test_timeout_unknown_never_mutates(self) -> None:
+        unknown = {
+            "ok": False,
+            "status": "unknown",
+            "service_state": "unknown",
+            "service_health": "degraded",
+            "processRunning": None,
+            "launchdLoaded": None,
+            "lastError": "dispatcher_command_timeout",
+        }
+        with mock.patch.object(ctl, "_run_wrapper", return_value=unknown), \
+             mock.patch.object(ctl, "_acquire_autoheal_lock") as acquire, \
+             mock.patch.object(ctl, "deployment_zero_gate") as gate:
+            result = ctl.control_start("dispatcher")
+        self.assertEqual(result["recoveryAction"], "none")
+        acquire.assert_not_called()
+        gate.assert_not_called()
+
+    def test_active_child_blocks_recovery_before_any_resume(self) -> None:
+        stopped = {"ok": True, "status": "stopped", "service_state": "stopped", "processRunning": False}
+        with mock.patch.object(ctl, "_run_wrapper", side_effect=[stopped, stopped]) as run_wrapper, \
+             mock.patch.object(ctl, "_active_worker_children", return_value=[{"pid": 99}]), \
+             mock.patch.object(ctl, "_acquire_autoheal_lock", return_value=(Path("/tmp/test-lock"), True)), \
+             mock.patch.object(ctl, "_release_autoheal_lock"), \
+             mock.patch.object(ctl, "deployment_zero_gate") as gate:
+            result = ctl.control_start("dispatcher")
+        self.assertEqual(result["recoveryAction"], "none")
+        self.assertIn("active_child", result["message"])
+        self.assertEqual([call.args[1] for call in run_wrapper.call_args_list], ["status", "status"])
+        gate.assert_not_called()
+
+    def test_concurrent_recovery_lock_fails_closed(self) -> None:
+        stopped = {"ok": True, "status": "stopped", "service_state": "stopped", "processRunning": False}
+        with mock.patch.object(ctl, "_run_wrapper", return_value=stopped) as run_wrapper, \
+             mock.patch.object(ctl, "_acquire_autoheal_lock", return_value=(Path("/tmp/test-lock"), False)):
+            result = ctl.control_start("dispatcher")
+        self.assertEqual(result["recoveryAction"], "none")
+        self.assertIn("already_in_progress", result["message"])
+        run_wrapper.assert_called_once()
+
+    def test_dead_autoheal_lock_from_prior_boot_is_reclaimed(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw) / "run"
+            paths = mock.Mock(run_dir=run_dir)
+            lock_dir = run_dir / "dispatcher-autoheal.lock"
+            lock_dir.mkdir(parents=True)
+            (lock_dir / "owner.json").write_text(
+                json.dumps({"pid": 999999, "created_epoch": 999999999999.0}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(ctl, "_pid_alive", return_value=False):
+                acquired_dir, acquired = ctl._acquire_autoheal_lock(paths)
+            self.assertTrue(acquired)
+            self.assertEqual(acquired_dir, lock_dir)
+            owner = json.loads((lock_dir / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual(owner["pid"], os.getpid())
+            ctl._release_autoheal_lock(lock_dir)
 
     def test_status_stays_read_only(self) -> None:
         import tempfile

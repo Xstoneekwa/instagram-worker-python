@@ -3830,7 +3830,17 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     def _handle_signal(signum, frame) -> None:
         nonlocal stop
         stop = True
-        log("info", "run_control_dispatcher_stop_signal", signal=signum)
+        signal_origin = str(
+            os.environ.get("RUN_CONTROL_SIGNAL_ORIGIN")
+            or "control_plane_service_stop"
+        ).strip()
+        log(
+            "info",
+            "run_control_dispatcher_stop_signal",
+            signal=signum,
+            termination_origin=signal_origin,
+            human_manual_stop=False,
+        )
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)

@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -323,7 +324,18 @@ def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int 
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return _with_root(root, {"ok": False, "status": "degraded", "lastError": f"{component}_command_timeout"})
+        return _with_root(root, {
+            "ok": False,
+            "status": "unknown",
+            "service_state": "unknown",
+            "service_health": "degraded",
+            "preflight_state": "unknown",
+            "preflight_reason": f"{component}_command_timeout",
+            "processRunning": None,
+            "launchdLoaded": None,
+            "processCount": None,
+            "lastError": f"{component}_command_timeout",
+        })
 
     parsed = _json_line(proc.stdout)
     if parsed is None:
@@ -386,6 +398,83 @@ def _launchctl_kickstart(label: str) -> tuple[bool, str]:
     return proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()[:200]
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _active_worker_children() -> list[dict[str, Any]] | None:
+    """Return local Runner-like children; never performs network/device I/O."""
+    children: list[dict[str, Any]] = []
+    needles = (" runner.py", "/runner.py", " account_session.py", "/account_session.py")
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid,ppid,command"],
+            text=True,
+            errors="replace",
+        )
+    except Exception:
+        return None
+    rows: list[tuple[int, int, str]] = []
+    for line in output.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        except ValueError:
+            continue
+    for pid, ppid, command in rows:
+        if any(needle in f" {command}" for needle in needles):
+            children.append({"pid": pid, "ppid": ppid, "command": command[:240]})
+    return children
+
+
+def _acquire_autoheal_lock(paths: RuntimePaths, *, stale_seconds: float = 30.0) -> tuple[Path, bool]:
+    lock_dir = paths.run_dir / "dispatcher-autoheal.lock"
+    owner_file = lock_dir / "owner.json"
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(2):
+        try:
+            lock_dir.mkdir(mode=0o700)
+            owner_file.write_text(
+                json.dumps({"pid": os.getpid(), "created_epoch": time.time()}),
+                encoding="utf-8",
+            )
+            return lock_dir, True
+        except FileExistsError:
+            try:
+                owner = json.loads(owner_file.read_text(encoding="utf-8"))
+                owner_pid = int(owner.get("pid") or 0)
+                created_epoch = float(owner.get("created_epoch") or 0.0)
+                age = time.time() - created_epoch
+                if created_epoch <= 0.0 or age < 0.0:
+                    age = stale_seconds + 1.0
+            except Exception:
+                owner_pid, age = 0, stale_seconds + 1.0
+            if owner_pid > 0 and _pid_alive(owner_pid):
+                return lock_dir, False
+            if age <= stale_seconds:
+                return lock_dir, False
+            try:
+                owner_file.unlink(missing_ok=True)
+                lock_dir.rmdir()
+            except OSError:
+                return lock_dir, False
+    return lock_dir, False
+
+
+def _release_autoheal_lock(lock_dir: Path) -> None:
+    try:
+        (lock_dir / "owner.json").unlink(missing_ok=True)
+        lock_dir.rmdir()
+    except OSError:
+        pass
+
+
 def control_start(component: str) -> dict[str, Any]:
     """Short, idempotent start used by BotApp and operators.
 
@@ -394,28 +483,115 @@ def control_start(component: str) -> dict[str, Any]:
     long-lived `serve` job and returns a structured, non-blocking state.
     """
     status = _run_wrapper(component, "status", [], timeout=20)
-    if status.get("processRunning"):
+    if status.get("service_state") == "running" and status.get("processRunning") is True:
         return {
             **status,
             "ok": True,
             "command": "start",
             "message": f"{component}_already_running pid={status.get('pid')}",
         }
-    label = _component_launchd_label(component)
-    kicked, kick_detail = _launchctl_kickstart(label)
-    refreshed = _run_wrapper(component, "status", [], timeout=20)
-    launch_requested_ok = kicked or bool(refreshed.get("processRunning"))
-    return {
-        **refreshed,
-        "ok": bool(refreshed.get("ok")) and launch_requested_ok,
-        "command": "start",
-        "launchdKickstart": kicked,
-        "message": (
-            f"{component}_start_requested label={label}"
-            if launch_requested_ok
-            else f"{component}_start_request_failed detail={kick_detail}"
-        ),
-    }
+    if component != "dispatcher":
+        if status.get("processRunning") is not False:
+            return {
+                **status,
+                "ok": False,
+                "command": "start",
+                "recoveryAction": "none",
+                "message": f"{component}_recovery_refused_liveness_not_conclusively_absent",
+            }
+        label = _component_launchd_label(component)
+        kicked, kick_detail = _launchctl_kickstart(label)
+        refreshed = _run_wrapper(component, "status", [], timeout=20)
+        launch_requested_ok = kicked or bool(refreshed.get("processRunning"))
+        return {
+            **refreshed,
+            "ok": bool(refreshed.get("ok")) and launch_requested_ok,
+            "command": "start",
+            "launchdKickstart": kicked,
+            "message": (
+                f"{component}_start_requested label={label}"
+                if launch_requested_ok
+                else f"{component}_start_request_failed detail={kick_detail}"
+            ),
+        }
+    if status.get("service_state") != "stopped" or status.get("processRunning") is not False:
+        return {
+            **status,
+            "ok": False,
+            "command": "start",
+            "recoveryAction": "none",
+            "message": f"{component}_recovery_refused_liveness_not_conclusively_absent",
+        }
+
+    paths = runtime_paths()
+    lock_dir, acquired = _acquire_autoheal_lock(paths)
+    if not acquired:
+        return {
+            **status,
+            "ok": False,
+            "command": "start",
+            "recoveryAction": "none",
+            "message": f"{component}_recovery_already_in_progress",
+        }
+    try:
+        revalidated = _run_wrapper(component, "status", [], timeout=20)
+        if revalidated.get("service_state") != "stopped" or revalidated.get("processRunning") is not False:
+            return {
+                **revalidated,
+                "ok": bool(revalidated.get("processRunning")),
+                "command": "start",
+                "recoveryAction": "none",
+                "message": f"{component}_recovery_canceled_after_revalidation",
+            }
+        local_children = _active_worker_children()
+        if local_children is None:
+            return {
+                **revalidated,
+                "ok": False,
+                "command": "start",
+                "recoveryAction": "none",
+                "message": f"{component}_recovery_blocked_child_probe_inconclusive",
+            }
+        if local_children:
+            return {
+                **revalidated,
+                "ok": False,
+                "command": "start",
+                "recoveryAction": "none",
+                "activeWorkerChildren": local_children,
+                "message": f"{component}_recovery_blocked_active_child",
+            }
+        gate = deployment_zero_gate(paths)
+        if not gate.get("ok"):
+            return {
+                **revalidated,
+                "ok": False,
+                "command": "start",
+                "recoveryAction": "none",
+                "activeRunGate": gate,
+                "message": f"{component}_recovery_blocked_active_runtime_work",
+            }
+        armed = _run_wrapper(component, "prepare-auto-restart-startup-skip", [], timeout=10)
+        if not armed.get("ok"):
+            return {
+                **revalidated,
+                "ok": False,
+                "command": "start",
+                "recoveryAction": "none",
+                "message": f"{component}_recovery_blocked_startup_skip_not_armed",
+            }
+        recovered = _run_wrapper(component, "resume", [], timeout=20)
+        refreshed = _run_wrapper(component, "status", [], timeout=20)
+        return {
+            **refreshed,
+            "ok": bool(recovered.get("ok")) and refreshed.get("service_state") in {"running", "starting"},
+            "command": "start",
+            "recoveryAction": "safe_resume",
+            "startupTickSkipArmed": True,
+            "message": f"{component}_safe_recovery_requested",
+        }
+    finally:
+        _release_autoheal_lock(lock_dir)
 
 
 def _runtime_root_payload(root: RuntimeRoot, *, component: str = "runtime", command: str = "status") -> dict[str, Any]:
@@ -496,6 +672,11 @@ def _detect_component_mismatch(component: str, payload: dict[str, Any], root: Ru
             **payload,
             "ok": False,
             "status": "runtime_root_mismatch",
+            "service_state": "running",
+            "service_health": "degraded",
+            "processRunning": True,
+            "processCount": len(matching),
+            "pid": matching[0].get("pid") if matching else payload.get("pid"),
             "lastError": "service_running_from_non_active_root",
             "message": "Service process exists, but not from the active runtime root.",
             "processes": matching,

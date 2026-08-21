@@ -24643,6 +24643,7 @@ def _main_impl() -> int:
             "human_manual_stop": "manual_stop_signal",
             "dispatcher_watchdog": "dispatcher_watchdog_timeout",
             "deployment_shutdown": "deployment_shutdown_signal",
+            "control_plane_service_stop": "control_plane_service_stop_signal",
         }.get(_signal_stop_origin, "manual_stop_signal")
         stop_trace = device_action_latch.request_stop(
             signal_number=signum,

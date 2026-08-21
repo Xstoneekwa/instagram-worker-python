@@ -247,6 +247,7 @@ def test_sigterm_wrapper_stops_child_and_cleans_state(tmp_path):
     events = tmp_path / "events.log"
     process = _start_wrapper(harness, events)
     child_pid = _wait_for_consumer_pid(harness, process.pid)
+    _wait_for(lambda: _event_count(events, "started:") == 1)
 
     process.terminate()
     process.wait(timeout=5)
