@@ -144,6 +144,7 @@ def _request_urlopen(
     op: str,
     timeout: float | None = None,
     max_retries: int | None = None,
+    retry_backoff_cap: float | None = None,
 ) -> bytes:
     """Issue a Supabase REST request with bounded retries and safe errors."""
     timeout_s = float(timeout if timeout is not None else _rest_timeout_seconds())
@@ -153,6 +154,8 @@ def _request_urlopen(
         else max(0, int(max_retries))
     )
     backoff_s = _rest_retry_backoff_seconds()
+    if retry_backoff_cap is not None:
+        backoff_s = min(backoff_s, max(0.0, float(retry_backoff_cap)))
     last_exc: BaseException | None = None
 
     for attempt in range(retry_limit + 1):
@@ -239,6 +242,7 @@ def _request_json(
     prefer_resolution: str | None = None,
     request_timeout: float | None = None,
     max_retries: int | None = None,
+    retry_backoff_cap: float | None = None,
 ) -> Any:
     base = _base_url()
     key = _service_key()
@@ -269,6 +273,7 @@ def _request_json(
             op=f"{method} {table}",
             timeout=request_timeout,
             max_retries=max_retries,
+            retry_backoff_cap=retry_backoff_cap,
         )
         if not raw:
             return None
@@ -3660,6 +3665,9 @@ def persist_verified_follow_success_rpc(
     settings_revision_expected: str,
     verification_method: str,
     metadata_safe: dict[str, Any] | None = None,
+    request_timeout: float | None = None,
+    max_retries: int | None = None,
+    retry_backoff_cap: float | None = None,
 ) -> dict[str, Any]:
     value = _request_json(
         "POST",
@@ -3679,6 +3687,9 @@ def persist_verified_follow_success_rpc(
             "p_metadata_safe": dict(metadata_safe or {}),
         },
         prefer_representation=True,
+        request_timeout=request_timeout,
+        max_retries=max_retries,
+        retry_backoff_cap=retry_backoff_cap,
     )
     if isinstance(value, list):
         value = value[0] if value else None
@@ -3691,7 +3702,13 @@ def persist_verified_follow_success_rpc(
     return value
 
 
-def get_follow_persistence_event(action_id: str) -> dict[str, Any] | None:
+def get_follow_persistence_event(
+    action_id: str,
+    *,
+    request_timeout: float | None = None,
+    max_retries: int | None = None,
+    retry_backoff_cap: float | None = None,
+) -> dict[str, Any] | None:
     rows = _request_json(
         "GET",
         "ig_interaction_events",
@@ -3703,6 +3720,9 @@ def get_follow_persistence_event(action_id: str) -> dict[str, Any] | None:
             "id": f"eq.{str(action_id)}",
             "limit": "1",
         },
+        request_timeout=request_timeout,
+        max_retries=max_retries,
+        retry_backoff_cap=retry_backoff_cap,
     )
     return rows[0] if isinstance(rows, list) and rows else None
 
@@ -4235,6 +4255,80 @@ def fetch_visible_unfollow_eligibility_rows(
         if key:
             out[key] = row
     return out
+
+
+def fetch_social_memory_batch_exact(
+    account_id: str,
+    usernames: list[str],
+    *,
+    normalization_version: str,
+    query_generation: str,
+    revision_generation: str,
+) -> dict[str, Any]:
+    """Return an explicit completeness envelope for a <=50 key viewport.
+
+    Absence is authoritative only when the response cannot have been truncated
+    and every binding supplied by the caller is echoed exactly.  Consumers must
+    treat every other envelope as UNKNOWN and use bounded unit fallback.
+    """
+    aid = str(account_id or "").strip()
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw in usernames:
+        key = _canonical_interaction_username(str(raw or ""))
+        if not key or key in seen or _invalid_interacted_username_reason(key):
+            continue
+        seen.add(key)
+        requested.append(key)
+        if len(requested) >= 50:
+            break
+    envelope: dict[str, Any] = {
+        "schema": "SOCIAL_MEMORY_BATCH_EXACT_V1",
+        "account_id": aid,
+        "requested_keys": requested,
+        "normalization_version": str(normalization_version or ""),
+        "query_generation": str(query_generation or ""),
+        "revision_generation": str(revision_generation or ""),
+        "rows_by_key": {},
+        "complete": False,
+        "truncated": True,
+    }
+    if not aid or not requested:
+        envelope.update({"complete": True, "truncated": False})
+        return envelope
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            "select": "*",
+            "account_id": f"eq.{aid}",
+            "username": f"in.({','.join(requested)})",
+            # One spare row makes limit truncation observable while keeping the
+            # request viewport-bounded.
+            "limit": str(len(requested) + 1),
+        },
+        request_timeout=1.5,
+        max_retries=1,
+        retry_backoff_cap=0.25,
+    )
+    if not isinstance(rows, list):
+        return envelope
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    exact = True
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("account_id") or "") != aid:
+            exact = False
+            break
+        key = _canonical_interaction_username(str(row.get("username") or ""))
+        if not key or key not in seen or key in rows_by_key:
+            exact = False
+            break
+        rows_by_key[key] = dict(row)
+    truncated = len(rows) > len(requested)
+    envelope["rows_by_key"] = rows_by_key if exact else {}
+    envelope["truncated"] = bool(truncated or not exact)
+    envelope["complete"] = bool(exact and not truncated)
+    return envelope
 
 
 def fetch_followers_by_usernames(

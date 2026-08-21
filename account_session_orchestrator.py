@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import os
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -65,6 +66,31 @@ from account_commercial_policy import (
 
 FollowEngineRunner = Callable[..., int]
 FastRotationRunner = Callable[..., dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class AccountSessionCPlusSnapshot:
+    """Immutable inputs reused by every CT phase in one account attempt."""
+
+    schema_version: str
+    created_at: str
+    account_id: str
+    request_id: str
+    run_id: str
+    attempt_id: str
+    business_session_id: str
+    worker_runtime_root: str
+    worker_full_sha: str
+    instagram_package: str
+    commercial_policy_revision: str
+    settings_revision: str
+    resolved_follow_cap: int
+    business_action_deadline: str
+    deadline_revision: str
+    p0c_intent_generation: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return asdict(self)
 
 H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
 FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN"
@@ -936,6 +962,7 @@ def _run_follow_target_rotation(
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
+    account_session_snapshot: AccountSessionCPlusSnapshot | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -1174,6 +1201,7 @@ def _run_follow_target_rotation(
                 else None
             ),
             "worker_runtime_identity": worker_runtime_identity,
+            "account_session_snapshot": account_session_snapshot,
         }
         if follow60_canary_active:
             call_kwargs.update(
@@ -5103,37 +5131,84 @@ def run_account_session(
             else:
                 os.environ.pop("FOLLOW_NEW_WORK_DEADLINE", None)
             try:
+                _identity = worker_runtime_identity
+                try:
+                    _follow_persistence_settings = (
+                        supabase_client.get_account_unfollow_settings(aid) or {}
+                    )
+                except Exception as exc:
+                    log(
+                        "error",
+                        "account_session_cplus_snapshot_settings_unavailable",
+                        account_id=aid,
+                        run_id=run_id,
+                        reason=type(exc).__name__,
+                        device_actions_started=False,
+                    )
+                    _follow_persistence_settings = {}
+                account_session_snapshot = AccountSessionCPlusSnapshot(
+                    schema_version="ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    account_id=aid,
+                    request_id=str(run_request_id or ""),
+                    run_id=str(run_id or ""),
+                    attempt_id=str(follow60_attempt_id or 1),
+                    business_session_id=str(business_session_id or ""),
+                    worker_runtime_root=str(
+                        getattr(_identity, "runtime_root", "") or ""
+                    ),
+                    worker_full_sha=str(
+                        getattr(_identity, "worker_sha", "")
+                        or os.environ.get("WORKER_GIT_SHA")
+                        or ""
+                    ),
+                    instagram_package=str(config.INSTAGRAM_PACKAGE or ""),
+                    commercial_policy_revision=str(session_policy_revision or ""),
+                    settings_revision=str(
+                        _follow_persistence_settings.get("updated_at") or ""
+                    ),
+                    resolved_follow_cap=int(
+                        _authorized_resume_follow_quota(auto_restart_resume_policy)
+                        or 0
+                    ),
+                    business_action_deadline=str(business_action_deadline or ""),
+                    deadline_revision=str(
+                        follow_time_handoff.get("business_action_deadline") or ""
+                    ),
+                    p0c_intent_generation=str(follow60_attempt_id or 1),
+                )
                 rotation_result = _run_follow_target_rotation(
                     d,
-                account_id=aid,
-                account_username=uname,
-                run_id=run_id,
-                tenant_id=target_availability_tenant_id,
-                target_availability_scope_rejection_reason=target_availability_scope_rejection_reason,
-                follow_targets=rotation_targets,
-                run_followers_list_engine_session=run_followers_list_engine_session,
-                supabase_mode=supabase_mode,
-                warm_session_used=warm_session_used,
-                force_stop_used=force_stop_used,
-                max_targets_per_run=(
-                    max_follow_targets_per_run
-                    if max_follow_targets_per_run is not None
-                    else int(rotation_settings["max_targets_per_run"])
-                ),
-                max_follows_per_target_per_run=(
-                    max_follows_per_target_per_run
-                    if max_follows_per_target_per_run is not None
-                    else int(rotation_settings["max_follows_per_target_per_run"])
-                ),
-                authorized_follow_quota=_authorized_resume_follow_quota(
-                    auto_restart_resume_policy
-                ),
-                fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
-                target_followers_resume_source_request_id=(
-                    target_followers_resume_source_request_id
-                ),
-                auto_restart_resume_policy=auto_restart_resume_policy,
-                worker_runtime_identity=worker_runtime_identity,
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    tenant_id=target_availability_tenant_id,
+                    target_availability_scope_rejection_reason=target_availability_scope_rejection_reason,
+                    follow_targets=rotation_targets,
+                    run_followers_list_engine_session=run_followers_list_engine_session,
+                    supabase_mode=supabase_mode,
+                    warm_session_used=warm_session_used,
+                    force_stop_used=force_stop_used,
+                    max_targets_per_run=(
+                        max_follow_targets_per_run
+                        if max_follow_targets_per_run is not None
+                        else int(rotation_settings["max_targets_per_run"])
+                    ),
+                    max_follows_per_target_per_run=(
+                        max_follows_per_target_per_run
+                        if max_follows_per_target_per_run is not None
+                        else int(rotation_settings["max_follows_per_target_per_run"])
+                    ),
+                    authorized_follow_quota=_authorized_resume_follow_quota(
+                        auto_restart_resume_policy
+                    ),
+                    fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
+                    target_followers_resume_source_request_id=(
+                        target_followers_resume_source_request_id
+                    ),
+                    auto_restart_resume_policy=auto_restart_resume_policy,
+                    worker_runtime_identity=worker_runtime_identity,
+                    account_session_snapshot=account_session_snapshot,
                     **_follow60_rotation_kwargs,
                 )
             finally:

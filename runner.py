@@ -717,6 +717,10 @@ _RUNTIME_UNFOLLOWED_USERNAMES: set[str] = set()
 _RUNTIME_SKIPPED_USERNAMES: set[str] = set()
 _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION: int = 0
 _FOLLOW_SETTINGS_CACHE: dict[str, Any] = {}
+_SOCIAL_MEMORY_EXACT_PHASE_CACHE: dict[
+    tuple[str, str, str, str], tuple[str, dict[str, Any] | None]
+] = {}
+_SOCIAL_MEMORY_REVISION_BY_RUN: dict[str, str] = {}
 _SESSION_SOCIAL_ID: str = ""
 _SESSION_COUNTERS: dict[str, int] = {
     "follows": 0,
@@ -2364,18 +2368,73 @@ def _social_memory_load_and_evaluate(
 ) -> social_memory.FollowEligibility:
     db_row = None
     if supabase_mode and account_id and getattr(config, "SOCIAL_MEMORY_ENABLED", True):
-        db_row = _safe_supabase_call(
-            "load_interacted_user",
-            account_id,
-            target_username,
-            source_profile or "",
+        key = social_memory.normalize_social_username(target_username)
+        query_generation = str(run_id or "")
+        revision_generation = str(
+            _SOCIAL_MEMORY_REVISION_BY_RUN.get(str(run_id or ""))
+            or os.environ.get("SOCIAL_MEMORY_REVISION_GENERATION")
+            or os.environ.get("WORKER_GIT_SHA")
+            or "unknown"
         )
+        cache_key = (str(account_id), key, query_generation, revision_generation)
+        state, cached_row = _SOCIAL_MEMORY_EXACT_PHASE_CACHE.get(
+            cache_key, (social_memory.UNKNOWN, None)
+        )
+        if state == social_memory.UNKNOWN:
+            try:
+                envelope = supabase_client.fetch_social_memory_batch_exact(
+                    account_id,
+                    [key],
+                    normalization_version=(
+                        social_memory.SOCIAL_MEMORY_NORMALIZATION_VERSION
+                    ),
+                    query_generation=query_generation,
+                    revision_generation=revision_generation,
+                )
+                state, cached_row = social_memory.resolve_exact_batch_state(
+                    envelope,
+                    account_id=account_id,
+                    requested_keys=[key],
+                    query_generation=query_generation,
+                    revision_generation=revision_generation,
+                ).get(key, (social_memory.UNKNOWN, None))
+            except Exception:
+                state, cached_row = social_memory.UNKNOWN, None
+        if state == social_memory.UNKNOWN:
+            # Exact unit fallback.  Failure is not absence: fail closed.
+            try:
+                cached_row = supabase_client.load_interacted_user(
+                    account_id, target_username, source_profile or ""
+                )
+                state = (
+                    social_memory.KNOWN_PROCESSED
+                    if cached_row is not None
+                    else social_memory.KNOWN_NOT_PROCESSED
+                )
+            except Exception as exc:
+                log(
+                    "error",
+                    "social_memory_unknown_fail_closed",
+                    account_id=account_id,
+                    target_username=target_username,
+                    reason=type(exc).__name__,
+                )
+                return social_memory.FollowEligibility(
+                    allowed=False,
+                    reason="social_memory_unknown",
+                    log_event="social_memory_follow_blocked",
+                    interaction_state=social_memory.FAILED,
+                    detail={"memory_status": social_memory.UNKNOWN},
+                )
+        _SOCIAL_MEMORY_EXACT_PHASE_CACHE[cache_key] = (state, cached_row)
+        db_row = cached_row
         log(
             "info",
             "social_memory_loaded",
             target_username=target_username,
             source_profile=source_profile or "",
             has_row=bool(db_row),
+            memory_status=state,
         )
     return social_memory.evaluate_follow_eligibility(
         target_username=target_username,
@@ -2387,6 +2446,53 @@ def _social_memory_load_and_evaluate(
         runtime_skipped=_RUNTIME_SKIPPED_USERNAMES,
         config=config,
     )
+
+
+def _prime_social_memory_exact_viewport(
+    *,
+    account_id: str,
+    run_id: str,
+    candidates: list[dict[str, Any]],
+    supabase_mode: bool,
+    revision_generation: str,
+) -> None:
+    """Prime an exact <=50-key viewport without authorizing uncertain absence."""
+    if not (supabase_mode and account_id and candidates):
+        return
+    keys: list[str] = []
+    for candidate in candidates:
+        key = social_memory.normalize_social_username(
+            str(candidate.get("username") or candidate.get("resolved_username_hint") or "")
+        )
+        if key and key not in keys:
+            keys.append(key)
+        if len(keys) >= 50:
+            break
+    if not keys:
+        return
+    query_generation = str(run_id or "")
+    try:
+        envelope = supabase_client.fetch_social_memory_batch_exact(
+            account_id,
+            keys,
+            normalization_version=social_memory.SOCIAL_MEMORY_NORMALIZATION_VERSION,
+            query_generation=query_generation,
+            revision_generation=revision_generation,
+        )
+        states = social_memory.resolve_exact_batch_state(
+            envelope,
+            account_id=account_id,
+            requested_keys=keys,
+            query_generation=query_generation,
+            revision_generation=revision_generation,
+        )
+    except Exception:
+        states = {key: (social_memory.UNKNOWN, None) for key in keys}
+    for key, value in states.items():
+        if value[0] != social_memory.UNKNOWN:
+            _SOCIAL_MEMORY_EXACT_PHASE_CACHE[
+                (str(account_id), key, query_generation, revision_generation)
+            ] = value
 
 
 def _persist_social_memory_follow_block(
@@ -4122,6 +4228,10 @@ def _persist_verified_follow_success_to_supabase(
     action_id: str | None = None,
     settings_revision_expected: str | None = None,
     followed_at: str | None = None,
+    request_timeout: float | None = None,
+    max_retries: int | None = None,
+    retry_backoff_cap: float | None = None,
+    ambiguous_canonical_reread: bool = True,
 ) -> bool:
     """Persist follow outcome after post-follow so mute/like are not blocked on DB I/O."""
     if not (supabase_mode and account_id):
@@ -4213,6 +4323,9 @@ def _persist_verified_follow_success_to_supabase(
                 settings_revision_expected=str(settings_revision_expected),
                 verification_method="worker_exact_following_state",
                 metadata_safe={"source": "runner_point3", "phase": str(phase)},
+                request_timeout=request_timeout,
+                max_retries=max_retries,
+                retry_backoff_cap=retry_backoff_cap,
             )
         except supabase_client.SupabaseRestError as exc:
             rpc_error = exc
@@ -4239,7 +4352,7 @@ def _persist_verified_follow_success_to_supabase(
             "supabase_dns_failed",
             "supabase_tls_failed",
             "supabase_rpc_response_invalid",
-        }:
+        } and ambiguous_canonical_reread:
             rpc_value = _reconcile_follow_persistence_from_canonical_rows(
                 action_id=str(action_id),
                 account_id=str(account_id),
@@ -4265,7 +4378,12 @@ def _persist_verified_follow_success_to_supabase(
             "supabase_schema_payload_incompatible",
         }:
             try:
-                associated_event = supabase_client.get_follow_persistence_event(str(action_id))
+                associated_event = supabase_client.get_follow_persistence_event(
+                    str(action_id),
+                    request_timeout=request_timeout,
+                    max_retries=max_retries,
+                    retry_backoff_cap=retry_backoff_cap,
+                )
             except Exception:
                 associated_event = None
             if associated_event is None:
@@ -4612,17 +4730,33 @@ def _recover_verified_follow_persistence_intents(
     run_id: str,
     supabase_mode: bool,
     business_session_id: str | None = None,
-) -> bool:
+    attempt_id: str | None = None,
+    intent_generation: str | None = None,
+    lineage_run_ids: list[str] | None = None,
+    total_budget_seconds: float = 8.0,
+) -> str:
+    recovery_started = time.monotonic()
+
+    def _remaining() -> float:
+        return max(0.0, float(total_budget_seconds) - (time.monotonic() - recovery_started))
+
+    def _budget_available(minimum: float = 0.05) -> bool:
+        return _remaining() >= minimum
+
     if not (
         supabase_mode
         and _follow_persistence_intent_enabled_for_account(account_id)
     ):
-        return True
+        return "RECOVERY_NOT_REQUIRED"
     try:
         intents = follow_persistence_intent.load_scoped_nonterminal_intents(
             account_id=account_id,
             current_run_id=run_id,
             business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            intent_generation=intent_generation,
+            lineage_run_ids=lineage_run_ids,
+            strict_lineage_only=True,
         )
     except Exception as exc:
         log(
@@ -4632,8 +4766,28 @@ def _recover_verified_follow_persistence_intents(
             reason=str(exc)[:200],
             safe_to_continue_ui=False,
         )
-        return False
+        return "RECOVERY_INFRA_UNAVAILABLE"
+    intents.sort(
+        key=lambda item: (
+            str(item.get("run_id") or "") != str(run_id),
+            str(item.get("stage") or "") in {"prepared", "prepared_before_follow_tap"},
+            str(item.get("created_at") or ""),
+        )
+    )
+    if not intents:
+        return "RECOVERY_NOT_REQUIRED"
     for intent in intents:
+        if not _budget_available():
+            log(
+                "warning",
+                "p0c_recovery_budget_exhausted",
+                account_id=account_id,
+                run_id=run_id,
+                budget_ms=int(float(total_budget_seconds) * 1000),
+                elapsed_ms=int((time.monotonic() - recovery_started) * 1000),
+                safe_to_continue_ui=False,
+            )
+            return "RECOVERY_PENDING_RETRYABLE"
         action_id = str(intent.get("action_id") or "")
         intent_run_id = str(intent.get("run_id") or "")
         prior_stage = str(intent.get("stage") or "")
@@ -4654,7 +4808,7 @@ def _recover_verified_follow_persistence_intents(
                     reason=str(exc)[:200],
                     safe_to_continue_ui=False,
                 )
-                return False
+                return "RECOVERY_INFRA_UNAVAILABLE"
             log(
                 "info",
                 "follow_persistence_intent_recovered",
@@ -4678,12 +4832,17 @@ def _recover_verified_follow_persistence_intents(
                 reason="unsupported_nonterminal_stage",
                 safe_to_continue_ui=False,
             )
-            return False
+            return "RECOVERY_BLOCKED_NONRETRYABLE"
 
         # Receipt-first: a committed canonical receipt is authoritative and
         # must terminalize the local intent without another UI read or tap.
         try:
-            canonical_receipt = supabase_client.get_follow_persistence_event(action_id)
+            canonical_receipt = supabase_client.get_follow_persistence_event(
+                action_id,
+                request_timeout=min(1.5, max(0.1, _remaining())),
+                max_retries=1 if _remaining() >= 1.75 else 0,
+                retry_backoff_cap=0.25,
+            )
         except Exception as exc:
             log(
                 "error",
@@ -4692,7 +4851,7 @@ def _recover_verified_follow_persistence_intents(
                 reason=type(exc).__name__,
                 safe_to_continue_ui=False,
             )
-            return False
+            return "RECOVERY_INFRA_UNAVAILABLE"
         if canonical_receipt is not None:
             receipt_exact = (
                 str(canonical_receipt.get("id") or "") == action_id
@@ -4709,7 +4868,7 @@ def _recover_verified_follow_persistence_intents(
                     action_id_hash=action_id_hash(action_id),
                     safe_to_continue_ui=False,
                 )
-                return False
+                return "RECOVERY_BLOCKED_NONRETRYABLE"
             follow_persistence_intent.update_intent_stage(
                 run_id=intent_run_id,
                 action_id=action_id,
@@ -4727,7 +4886,11 @@ def _recover_verified_follow_persistence_intents(
             )
             continue
 
+        if not _budget_available(2.0):
+            return "RECOVERY_PENDING_RETRYABLE"
         fresh_profile = bool(username and verify_profile(d, username))
+        if not _budget_available():
+            return "RECOVERY_PENDING_RETRYABLE"
         try:
             fresh_follow_states = (
                 [
@@ -4748,27 +4911,30 @@ def _recover_verified_follow_persistence_intents(
         )
         fresh_follow_state = fresh_follow_states[-1]
         if decision.decision != "reconciled":
-            try:
-                follow_persistence_intent.update_intent_stage(
-                    run_id=intent_run_id,
-                    action_id=action_id,
-                    stage="unresolved",
-                )
-            except Exception:
-                pass
+            nonretryable = decision.reason in {"unsupported_action"}
             log(
-                "error",
+                "error" if nonretryable else "warning",
                 "follow_persistence_intent_recovered",
                 action_id_hash=action_id_hash(action_id),
                 prior_stage=prior_stage,
                 fresh_follow_state=fresh_follow_state,
-                decision="safe_stop_review_required",
+                decision=(
+                    "safe_stop_blocked_nonretryable"
+                    if nonretryable
+                    else "safe_stop_partial_resumable"
+                ),
                 reconciliation_reason=decision.reason,
                 retry_was_not_dispatched=True,
                 safe_to_continue_ui=False,
             )
-            return False
+            return (
+                "RECOVERY_BLOCKED_NONRETRYABLE"
+                if nonretryable
+                else "RECOVERY_PENDING_RETRYABLE"
+            )
 
+        if not _budget_available(1.75):
+            return "RECOVERY_PENDING_RETRYABLE"
         persisted = _persist_verified_follow_success_to_supabase(
             supabase_mode=True,
             account_id=account_id,
@@ -4789,6 +4955,13 @@ def _recover_verified_follow_persistence_intents(
                 or str(intent.get("physical_attempt_started_at") or "")
                 or None
             ),
+            request_timeout=min(1.5, max(0.1, _remaining() - 0.25)),
+            max_retries=0,
+            retry_backoff_cap=0.25,
+            # Receipt-first already ran.  An ambiguous RPC is left pending so
+            # the next startup can reconcile its canonical receipt without a
+            # second multi-table reread consuming this attempt's 8s budget.
+            ambiguous_canonical_reread=False,
         )
         log(
             "info" if persisted else "error",
@@ -4799,8 +4972,8 @@ def _recover_verified_follow_persistence_intents(
             decision="rpc_persisted" if persisted else "safe_stop_persistence_failed",
         )
         if not persisted:
-            return False
-    return True
+            return "RECOVERY_PENDING_RETRYABLE"
+    return "RECOVERY_RESOLVED"
 
 
 def _cleanup_session_apps(d) -> None:
@@ -5180,6 +5353,7 @@ def _process_follow_candidate_recovery_batch(
                         request_id=request_id,
                         business_session_id=business_session_id,
                         attempt_id="recovery",
+                        intent_generation="recovery",
                         candidate_username=candidate,
                         source_target_id=source_target_id,
                         source_ct_username=source_ct,
@@ -12456,6 +12630,7 @@ def _run_followers_list_engine_session(
     target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
+    account_session_snapshot: Any | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -12465,6 +12640,49 @@ def _run_followers_list_engine_session(
     global _RUNTIME_SKIPPED_USERNAMES
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+    _snapshot_payload = (
+        account_session_snapshot.to_payload()
+        if hasattr(account_session_snapshot, "to_payload")
+        else dict(account_session_snapshot or {})
+    )
+    _snapshot_expected = {
+        "account_id": str(account_id or ""),
+        "request_id": str(run_request_id or ""),
+        "run_id": str(run_id or ""),
+        "attempt_id": str(follow60_attempt_id or 1),
+        "business_session_id": str(business_session_id or ""),
+        "instagram_package": str(config.INSTAGRAM_PACKAGE or ""),
+    }
+    _snapshot_valid = bool(
+        _snapshot_payload.get("schema_version") == "ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1"
+        and all(
+            str(_snapshot_payload.get(key) or "") == expected
+            for key, expected in _snapshot_expected.items()
+        )
+        and str(_snapshot_payload.get("worker_full_sha") or "")
+        == str(getattr(worker_runtime_identity, "worker_sha", "") or "")
+        and bool(str(_snapshot_payload.get("worker_runtime_root") or "").strip())
+        and bool(
+            str(_snapshot_payload.get("commercial_policy_revision") or "").strip()
+        )
+        and bool(str(_snapshot_payload.get("settings_revision") or "").strip())
+    )
+    if (follow60_mainline_active or follow60_canary_active) and not _snapshot_valid:
+        log(
+            "error",
+            "account_session_cplus_snapshot_invalid",
+            account_id=account_id,
+            run_id=run_id,
+            device_actions_started=False,
+        )
+        return 96
+    _social_revision_generation = str(
+        _snapshot_payload.get("settings_revision")
+        or _snapshot_payload.get("worker_full_sha")
+        or os.environ.get("WORKER_GIT_SHA")
+        or "unknown"
+    )
+    _SOCIAL_MEMORY_REVISION_BY_RUN[str(run_id or "")] = _social_revision_generation
     _mainline_session_binding: dict[str, Any] = {}
     if follow60_mainline_active:
         from follow60_business_session_binding_v1 import (
@@ -12568,6 +12786,95 @@ def _run_followers_list_engine_session(
         run_id=str(run_id or ""),
     )
     target_scan_tracker["_ct_checkpoint"] = ct_checkpoint
+
+    # C+ upstream boundary: P0C is completed once before checkpoint
+    # load/claim and before any CT Resume planning.  Only the explicit current
+    # Auto-Restart lineage is eligible; the journal loader never scans history.
+    _preflight_key = str(run_id or f"account:{account_id or ''}")
+    if (
+        account_id
+        and _follow_persistence_intent_enabled_for_account(account_id)
+        and _preflight_key not in _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS
+    ):
+        try:
+            _runtime_sha = _resolve_active_worker_release_sha()
+            if not _runtime_sha:
+                raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
+                    "follow_persistence_runtime_unavailable:worker_sha_unresolved"
+                )
+            follow_persistence_intent.preflight_runtime_storage()
+            _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS.add(_preflight_key)
+        except Exception as exc:
+            log(
+                "error",
+                "p0c_preflight_failed",
+                account_id=account_id,
+                run_id=run_id,
+                reason=str(exc)[:200],
+                safe_to_continue_ui=False,
+            )
+            return 1
+    _resume_policy = dict(auto_restart_resume_policy or {})
+    _p0c_lineage_run_ids = [
+        str(_resume_policy.get(key) or "")
+        for key in (
+            "source_run_id",
+            "previous_run_id",
+            "resume_from_run_id",
+            "interrupted_run_id",
+        )
+        if str(_resume_policy.get(key) or "").strip()
+    ]
+    _p0c_state = _recover_verified_follow_persistence_intents(
+        d,
+        account_id=account_id,
+        run_id=run_id,
+        business_session_id=business_session_id,
+        attempt_id=str(_snapshot_payload.get("attempt_id") or follow60_attempt_id or 1),
+        intent_generation=str(
+            _snapshot_payload.get("p0c_intent_generation")
+            or follow60_attempt_id
+            or 1
+        ),
+        lineage_run_ids=_p0c_lineage_run_ids,
+        total_budget_seconds=8.0,
+        supabase_mode=supabase_mode,
+    )
+    log(
+        "info",
+        "p0c_recovery_before_ct_resume_completed",
+        account_id=account_id,
+        run_id=run_id,
+        p0c_result_state=_p0c_state,
+        attempt_id=int(follow60_attempt_id or 1),
+        intent_generation=str(follow60_attempt_id or 1),
+        recovery_device_read_may_have_occurred=bool(
+            _p0c_state != "RECOVERY_NOT_REQUIRED"
+        ),
+    )
+    if _p0c_state in {
+        "RECOVERY_PENDING_RETRYABLE",
+        "RECOVERY_INFRA_UNAVAILABLE",
+    }:
+        _followers_session_summary.update(
+            {
+                "follow_processed_count": 0,
+                "follows_completed_count": 0,
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": _p0c_state.lower(),
+                "first_causal_reason": _p0c_state.lower(),
+                "safe_to_resume": True,
+                "exit_code": 97,
+            }
+        )
+        setattr(
+            _run_followers_list_engine_session,
+            "last_session_summary",
+            dict(_followers_session_summary),
+        )
+        return 97
+    if _p0c_state == "RECOVERY_BLOCKED_NONRETRYABLE":
+        return 1
 
     def _target_followers_resume_v2_emit(event: str, payload: dict[str, Any]) -> None:
         safe_payload = dict(payload or {})
@@ -12718,85 +13025,6 @@ def _run_followers_list_engine_session(
         follow_processed_count=0,
         follows_completed_count=0,
     )
-    _preflight_key = str(run_id or f"account:{account_id or ''}")
-    if (
-        account_id
-        and _follow_persistence_intent_enabled_for_account(account_id)
-        and _preflight_key not in _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS
-    ):
-        try:
-            _runtime_sha = _resolve_active_worker_release_sha()
-            if not _runtime_sha:
-                raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
-                    "follow_persistence_runtime_unavailable:worker_sha_unresolved"
-                )
-            _storage_proof = follow_persistence_intent.preflight_runtime_storage()
-            log(
-                "info",
-                "follow_persistence_runtime_preflight_passed",
-                account_id=account_id,
-                run_id=run_id,
-                worker_sha=_runtime_sha,
-                storage_schema=_storage_proof.get("schema"),
-                safe_to_continue_ui=True,
-            )
-            log(
-                "info",
-                "p0c_preflight_passed",
-                account_id=account_id,
-                run_id=run_id,
-                worker_sha=_runtime_sha,
-            )
-            _FOLLOW_PERSISTENCE_PREFLIGHT_RUN_IDS.add(_preflight_key)
-        except Exception as exc:
-            log(
-                "error",
-                "follow_persistence_runtime_preflight_failed",
-                account_id=account_id,
-                run_id=run_id,
-                root_failure_code="follow_persistence_runtime_unavailable",
-                failure_category="systemic_persistence_failure",
-                error_type=type(exc).__name__,
-                reason=str(exc)[:200],
-                safe_to_continue_ui=False,
-            )
-            log(
-                "error",
-                "p0c_preflight_failed",
-                account_id=account_id,
-                run_id=run_id,
-                root_failure_code="follow_persistence_runtime_unavailable",
-            )
-            log(
-                "error",
-                "follow_persistence_runtime_global_failure",
-                account_id=account_id,
-                run_id=run_id,
-                root_failure_code="follow_persistence_runtime_unavailable",
-                failure_category="systemic_persistence_failure",
-            )
-            _publish_followers_session_summary(
-                follow_session_outcome="failed",
-                follow_stop_reason="follow_persistence_runtime_unavailable",
-                first_causal_reason="follow_persistence_runtime_unavailable",
-                root_failure_code="follow_persistence_runtime_unavailable",
-                failure_category="systemic_persistence_failure",
-                exit_code=1,
-            )
-            return 1
-    if not _recover_verified_follow_persistence_intents(
-        d,
-        account_id=account_id,
-        run_id=run_id,
-        business_session_id=business_session_id,
-        supabase_mode=supabase_mode,
-    ):
-        _publish_followers_session_summary(
-            follow_session_outcome="failed",
-            follow_stop_reason="follow_persistence_intent_recovery_failed",
-            exit_code=1,
-        )
-        return 1
     log(
         "info",
         "visual_followers_ct_source_loaded",
@@ -12806,9 +13034,17 @@ def _run_followers_list_engine_session(
         account_id=str(account_id or ""),
     )
 
-    session_commercial_policy_revision: str | None = None
-    session_follow_persistence_settings_revision: str | None = None
-    if account_id:
+    session_commercial_policy_revision: str | None = (
+        str(_snapshot_payload.get("commercial_policy_revision") or "").strip()
+        or None
+    )
+    session_follow_persistence_settings_revision: str | None = (
+        str(_snapshot_payload.get("settings_revision") or "").strip() or None
+    )
+    # A valid C+ snapshot is the immutable account-attempt authority.  Legacy
+    # callers without that upstream binding retain the existing canonical
+    # reads; mainline/canary cannot enter this branch with an invalid snapshot.
+    if account_id and not _snapshot_valid:
         try:
             from account_commercial_policy import load_account_commercial_policy_revision
 
@@ -12820,7 +13056,11 @@ def _run_followers_list_engine_session(
             ).strip() or None
         except Exception:
             session_commercial_policy_revision = None
-    if account_id and _follow_persistence_intent_enabled_for_account(account_id):
+    if (
+        account_id
+        and _follow_persistence_intent_enabled_for_account(account_id)
+        and not _snapshot_valid
+    ):
         session_follow_persistence_settings_revision = (
             _load_follow_persistence_settings_revision(account_id)
         )
@@ -17217,6 +17457,14 @@ def _run_followers_list_engine_session(
                 if _stale_pic is not None:
                     return _stale_pic
 
+            _prime_social_memory_exact_viewport(
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                candidates=candidates if isinstance(candidates, list) else [],
+                supabase_mode=supabase_mode,
+                revision_generation=_social_revision_generation,
+            )
+
             def _first_eligible_follower_pick(cand_list: list) -> dict | None:
                 visual_loop_state["_ac_pending_had_skip_hit"] = False
                 _expl_v1.begin_visible_window(cand_list)
@@ -21232,6 +21480,7 @@ def _run_followers_list_engine_session(
                             request_id=_persistence_request_id,
                             business_session_id=business_session_id,
                             attempt_id=str(follow60_attempt_id or 1),
+                            intent_generation=str(follow60_attempt_id or 1),
                             candidate_username=follower_un,
                             source_target_id=target_id,
                             source_ct_username=source_profile_username,

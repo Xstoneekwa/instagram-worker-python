@@ -129,6 +129,7 @@ def create_mutation_intent(
     candidate_username: str,
     business_session_id: str | None = None,
     attempt_id: str | None = None,
+    intent_generation: str | None = None,
     source_target_id: str | None = None,
     source_ct_username: str | None = None,
     business_date: str | None = None,
@@ -152,6 +153,7 @@ def create_mutation_intent(
         "run_id": str(run_id),
         "request_id": str(request_id),
         "attempt_id": str(attempt_id or "") or None,
+        "intent_generation": str(intent_generation or attempt_id or "") or None,
         "candidate_username": str(candidate_username).strip().lstrip("@").lower(),
         "source_target_id": str(source_target_id or "") or None,
         "source_ct_username": str(source_ct_username or "").strip().lstrip("@").lower() or None,
@@ -236,6 +238,10 @@ def load_scoped_nonterminal_intents(
     account_id: str,
     current_run_id: str,
     business_session_id: str | None,
+    attempt_id: str | None = None,
+    intent_generation: str | None = None,
+    lineage_run_ids: list[str] | tuple[str, ...] | None = None,
+    strict_lineage_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Load only ambiguity that can belong to the active business lineage.
 
@@ -246,18 +252,61 @@ def load_scoped_nonterminal_intents(
     remain deliberately current-run scoped.
     """
     session_id = str(business_session_id or "").strip()
+    attempt = str(attempt_id or "").strip()
+    generation = str(intent_generation or attempt_id or "").strip()
+    # P0C is a synchronous recovery boundary.  Never spend its fixed budget
+    # walking the historical journal.  The caller must provide the exact
+    # current/restart lineage; current_run_id is always inspected first.
+    if not strict_lineage_only and lineage_run_ids is None and session_id:
+        # Compatibility path for non-P0C maintenance callers.  The C+ recovery
+        # boundary always supplies strict_lineage_only=True and can therefore
+        # never reach this historical journal scan.
+        return [
+            payload
+            for payload in load_all_nonterminal_intents(limit=1000)
+            if str(payload.get("account_id") or "") == str(account_id)
+            and str(payload.get("business_session_id") or "").strip() == session_id
+        ]
+    exact_run_ids: list[str] = []
+    for raw in (str(current_run_id), *(lineage_run_ids or ())):
+        value = str(raw or "").strip()
+        if value and value not in exact_run_ids:
+            exact_run_ids.append(value)
     out: list[dict[str, Any]] = []
-    for payload in load_all_nonterminal_intents(limit=1000):
-        if str(payload.get("account_id") or "") != str(account_id):
+    for run_key in exact_run_ids:
+        run_dir = _root() / run_key
+        if not run_dir.is_dir():
             continue
-        payload_run_id = str(payload.get("run_id") or "")
-        payload_session_id = str(payload.get("business_session_id") or "").strip()
-        if session_id:
-            if payload_session_id != session_id:
+        for path in sorted(run_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"follow_persistence_intent_unreadable:{path.name}"
+                ) from exc
+            if str(payload.get("stage") or "") in TERMINAL_STAGES:
                 continue
-        elif payload_run_id != str(current_run_id):
-            continue
-        out.append(payload)
+            if str(payload.get("account_id") or "") != str(account_id):
+                continue
+            payload_run_id = str(payload.get("run_id") or "")
+            payload_session_id = str(payload.get("business_session_id") or "").strip()
+            payload_attempt = str(payload.get("attempt_id") or "").strip()
+            payload_generation = str(
+                payload.get("intent_generation") or payload_attempt
+            ).strip()
+            if payload_run_id != run_key:
+                raise RuntimeError(
+                    f"follow_persistence_intent_run_mismatch:{path.name}"
+                )
+            if session_id and payload_session_id != session_id:
+                continue
+            if not session_id and payload_run_id != str(current_run_id):
+                continue
+            if attempt and payload_attempt and payload_attempt != attempt:
+                continue
+            if generation and payload_generation and payload_generation != generation:
+                continue
+            out.append(payload)
     return out
 
 

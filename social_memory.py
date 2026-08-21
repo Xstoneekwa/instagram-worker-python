@@ -13,10 +13,63 @@ UNFOLLOWED_COMPLETED = "unfollowed_completed"
 BLOCKED_FUTURE_FOLLOW = "blocked_future_follow"
 SKIPPED = "skipped"
 FAILED = "failed"
+KNOWN_PROCESSED = "KNOWN_PROCESSED"
+KNOWN_NOT_PROCESSED = "KNOWN_NOT_PROCESSED"
+UNKNOWN = "UNKNOWN"
+SOCIAL_MEMORY_NORMALIZATION_VERSION = "ig_handle_lower_v1"
 
 
 def normalize_social_username(u: str) -> str:
     return (u or "").strip().lstrip("@").lower()
+
+
+def resolve_exact_batch_state(
+    envelope: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+    requested_keys: list[str],
+    query_generation: str,
+    revision_generation: str,
+) -> dict[str, tuple[str, dict[str, Any] | None]]:
+    """Validate the complete batch contract before authorizing absence.
+
+    A missing row is KNOWN_NOT_PROCESSED only after exact scope, normalization,
+    generation and completeness proof.  Any mismatch is UNKNOWN.
+    """
+    keys = []
+    for raw in requested_keys:
+        key = normalize_social_username(raw)
+        if key and key not in keys:
+            keys.append(key)
+    unknown = {key: (UNKNOWN, None) for key in keys}
+    if not isinstance(envelope, Mapping):
+        return unknown
+    if (
+        str(envelope.get("schema") or "") != "SOCIAL_MEMORY_BATCH_EXACT_V1"
+        or str(envelope.get("account_id") or "") != str(account_id or "")
+        or list(envelope.get("requested_keys") or []) != keys
+        or str(envelope.get("normalization_version") or "")
+        != SOCIAL_MEMORY_NORMALIZATION_VERSION
+        or str(envelope.get("query_generation") or "") != str(query_generation or "")
+        or str(envelope.get("revision_generation") or "")
+        != str(revision_generation or "")
+        or envelope.get("complete") is not True
+        or envelope.get("truncated") is not False
+    ):
+        return unknown
+    rows = envelope.get("rows_by_key")
+    if not isinstance(rows, Mapping) or any(str(k) not in keys for k in rows):
+        return unknown
+    out: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    for key in keys:
+        row = rows.get(key)
+        if row is None:
+            out[key] = (KNOWN_NOT_PROCESSED, None)
+        elif isinstance(row, dict):
+            out[key] = (KNOWN_PROCESSED, dict(row))
+        else:
+            return unknown
+    return out
 
 
 def _row_pick(row: Mapping[str, Any], key: str) -> Any:
