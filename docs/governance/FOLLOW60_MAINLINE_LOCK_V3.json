@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "405cb58fe6127756d35ab2caa799fcb9a5090cb1",
-    "change_id": "unfollow-consolidation-v1-20260822",
-    "diff_sha256": "15c92990d8a2f34828b2a8e2cfe1e60bb9aa8a8506432b5ab91c90dc668fb5a2",
-    "expires_at": "2026-08-22T20:00:25.978766+00:00",
-    "head_sha": "955da344af85fb0e6fd77cf9b2790df680ef123f",
-    "request_sha256": "7b268f3f6f01667d458f89b12e75b60019d90e1d24e37068d6e6a3d5cbdbb9fe",
+    "base_sha": "0c103745dd7c32f8e14ddd4cae9ed992a33a7fa2",
+    "change_id": "follow60-physical-write-lock-v3-1-20260816",
+    "diff_sha256": "c8cafd166359d1cb6ca546c099b639a3d4ea5c689283d66055c520a1067350d2",
+    "expires_at": "2026-08-23T01:40:49.106344+00:00",
+    "head_sha": "e2ef101deb1f6bac0295b20dfc9932e7862477c1",
+    "request_sha256": "a4e1e9809552b7ea80fe4251b181ec3325defb654e9c3975fcd48cc35dce7030",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -40,32 +40,6 @@
       ],
       "head_sha": "ddef1b523a60c93d5e69ce9f83fb829cb732ffd6",
       "requested_scope": "followers_surface_proof_navigation_generation_v1_and_follow60_lock_v3_1",
-      "schema": "FOLLOW60_LOCK_AUDIT_V1"
-    },
-    {
-      "approval_token_status": "consumed_once",
-      "base_sha": "528bce2ecd280ea1829245b4a734bacf5d160f23",
-      "change_id": "follow60-physical-write-lock-v3-1-20260816",
-      "consumed_at": "2026-08-15T23:31:26.504890+00:00",
-      "diff_sha256": "fd2c2e54bb5a196b36a8abd7cda74d8ffb02689194426901027c2add4139b36f",
-      "field_status": "PENDING_NEXT_NATURAL_RUNS",
-      "files": [
-        ".gitattributes",
-        ".githooks/pre-commit",
-        ".githooks/pre-push",
-        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.json",
-        "docs/governance/FOLLOW60_LOCK_COMMIT_AUTHORIZATION_V3_1.sig",
-        "docs/governance/FOLLOW60_MAINLINE_LOCK_V3_SCOPE.json",
-        "follow60_write_lock_v3_1.py",
-        "scripts/guard-follow60-protected-index-v3-1.py",
-        "scripts/install-follow60-physical-write-lock-v3-1.py",
-        "scripts/promote-follow60-v2-mainline.sh",
-        "scripts/request-follow60-protected-index-commit-v3-1.py",
-        "scripts/verify-follow60-physical-write-lock-v3-1.py",
-        "tests/test_follow60_physical_write_lock_v3_1.py"
-      ],
-      "head_sha": "4271faddab33e032a3d5b04b9894149630378845",
-      "requested_scope": "root-owned immutable physical Follow60 V3.1 write lock, self-protected governance scope, and signed commit/package/activation gates",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     },
     {
@@ -580,6 +554,25 @@
       ],
       "head_sha": "955da344af85fb0e6fd77cf9b2790df680ef123f",
       "requested_scope": "unfollow execution context; canonical durable Follow receipt backlog admission; bounded S1-S3 resume; terminal already-not-following and not-found; performance boundary telemetry; no Follow60, Search picker, cursor, Business Deadline or Following-entry behavior change",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "0c103745dd7c32f8e14ddd4cae9ed992a33a7fa2",
+      "change_id": "follow60-physical-write-lock-v3-1-20260816",
+      "consumed_at": "2026-08-22T21:52:38.496259+00:00",
+      "diff_sha256": "c8cafd166359d1cb6ca546c099b639a3d4ea5c689283d66055c520a1067350d2",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "supabase/migrations/20260822211317_repair_unfollow_candidate_availability_v2_evidence_contract.sql",
+        "supabase_client.py",
+        "tests/test_unfollow_candidate_availability.py",
+        "tests/test_unfollow_candidate_availability_v2_evidence_contract.py",
+        "tests/test_unfollow_one_healthy_session_contract.py",
+        "unfollow_session_orchestrator.py"
+      ],
+      "head_sha": "e2ef101deb1f6bac0295b20dfc9932e7862477c1",
+      "requested_scope": "physical root-owned immutable write lock, signed staged-commit gate, package and activation enforcement",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -2118,13 +2111,13 @@
       "size": 8661
     },
     "supabase_client.py": {
-      "git_blob_oid": "810282277b2ea1a8755f8bb3c92ae7acd12ca5d5",
+      "git_blob_oid": "97419cace2e3adfb4cdcd4ef7d728889dee0fd22",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "supabase_client.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "43e5182c0847490f4cf59ebe7e4e264496d775729a8b78d4a57d3718f93c9e0d",
-      "size": 183131
+      "sha256": "8f48c93c1dc85532d8463ceac0885f7daa1e8877931ffd3f782a22d53ef78d94",
+      "size": 183138
     },
     "target_availability_memory_probe.py": {
       "git_blob_oid": "0f51c20c77e22747e1a9aba704f55f7c01cbefcf",
@@ -2379,13 +2372,13 @@
       "size": 6911
     },
     "unfollow_session_orchestrator.py": {
-      "git_blob_oid": "b6804be0e54c12e85ef44a925f2a8e87d7de4fe4",
+      "git_blob_oid": "4155393502227c7684e5be68720cf28e68a89f6c",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "9f16514f983f0de7ff4e16f3334d935f24b48ce01f9b917f41073dedef6a6554",
-      "size": 236232
+      "sha256": "ba1964fdff41885de15644052a206d9a68dba8ef2f008156d0633cd6bde837c1",
+      "size": 236265
     },
     "unfollow_settings.py": {
       "git_blob_oid": "60eda86a5e6779fbd199a47b4b7fd8de65093eeb",
@@ -2478,7 +2471,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "aabcb551cbc09b58127d0492e2303140c63fe8143e852421c52e9f8f215e4fc1",
+  "protected_scope_sha256": "cdda540856b36823eb926a0b3af3b934b8f5ec89195d24d0f003470133745a47",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
