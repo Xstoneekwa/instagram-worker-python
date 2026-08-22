@@ -232,7 +232,7 @@ def _phase_to_run_unfollow(
 def _attempt_ids(
     summary: dict[str, Any],
     settings: dict[str, Any],
-) -> tuple[int | str, int | str]:
+) -> tuple[int | str, int | str | None]:
     current = _as_int(summary.get("current_attempt_id"))
     if current is None:
         current = _as_int(summary.get("attempt_id"))
@@ -242,16 +242,34 @@ def _attempt_ids(
         # A normal scheduler/manual session is attempt 1. Auto Restart request
         # metadata supplies attempt 2/3 explicitly through ``settings``.
         current = 1
-    return current, current + 1
+    # S1/S2/S3 are the complete bounded lineage.  Never expose a synthetic S4
+    # identifier, even in a blocked/advisory plan that will not be scheduled.
+    return current, (current + 1 if current < AUTO_RESTART_TOTAL_ATTEMPTS else None)
 
 
 def _business_session_id(summary: dict[str, Any], settings: dict[str, Any]) -> str:
     value = (
-        summary.get("business_session_id")
+        summary.get("root_business_session_id")
+        or _setting(settings, "root_business_session_id", None)
+        or summary.get("business_session_id")
         or _setting(settings, "business_session_id", None)
         or summary.get("run_id")
     )
     return str(value).strip() if value else UNKNOWN
+
+
+def _unfollow_runtime_internal_error(summary: dict[str, Any]) -> bool:
+    direct = str(summary.get("unfollow_execution_outcome_class") or "").strip()
+    if direct == "RUNTIME_INTERNAL_ERROR":
+        return True
+    outcome = summary.get("unfollow_outcome")
+    if not isinstance(outcome, dict):
+        outcome = _nested(summary, "follow_to_unfollow_real", "unfollow_outcome")
+    return bool(
+        isinstance(outcome, dict)
+        and str(outcome.get("execution_outcome_class") or "").strip()
+        == "RUNTIME_INTERNAL_ERROR"
+    )
 
 
 def _initial_block_reason(
@@ -401,10 +419,14 @@ def build_account_session_resume_plan(
     }
 
     restart_allowed = False
-    restart_block_reason = _initial_block_reason(
-        termination_class=termination_class,
-        restart_eligibility=restart_eligibility,
-        unsafe_markers=unsafe,
+    restart_block_reason = (
+        "runtime_internal_error_same_generation"
+        if _unfollow_runtime_internal_error(safe_summary)
+        else _initial_block_reason(
+            termination_class=termination_class,
+            restart_eligibility=restart_eligibility,
+            unsafe_markers=unsafe,
+        )
     )
     if not restart_block_reason:
         restart_block_reason = _follow_resume_checkpoint_block_reason(safe_summary)
@@ -470,6 +492,7 @@ def build_account_session_resume_plan(
         "restart_delay_authoritative": False,
         "restart_delay_policy_source": "backend:auto_restart_settings:global",
         "business_session_id": _business_session_id(safe_summary, safe_settings),
+        "root_business_session_id": _business_session_id(safe_summary, safe_settings),
         "current_attempt_id": current_attempt_id,
         "next_attempt_id": next_attempt_id,
         "attempt_id": current_attempt_id,

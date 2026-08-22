@@ -3388,6 +3388,81 @@ def count_successful_follows_today(account_id: str) -> int:
     return len(rows or []) if isinstance(rows, list) else 0
 
 
+def fetch_canonical_follow_receipts_for_unfollow(
+    account_id: str,
+    *,
+    followed_at_floor: datetime,
+    snapshot_at: datetime,
+    page_size: int = 1000,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load the exhaustive append-only Follow truth used for backlog admission."""
+
+    aid = str(account_id or "").strip()
+    if not aid:
+        return [], {
+            "receipt_rows_loaded": 0,
+            "receipt_pages_loaded": 0,
+            "receipt_scan_exhaustive": True,
+            "receipt_source": "ig_interaction_events:verified_follow_success",
+        }
+    floor = followed_at_floor.astimezone(timezone.utc)
+    ceiling = snapshot_at.astimezone(timezone.utc)
+    bounded_page_size = max(1, min(int(page_size), 1000))
+    rows_out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    offset = 0
+    pages_loaded = 0
+    for _ in range(10_000):
+        page = _request_json(
+            "GET",
+            "ig_interaction_events",
+            query={
+                "select": (
+                    "id,account_id,run_id,username,event_type,event_status,"
+                    "interaction_type,interaction_status,event_at"
+                ),
+                "account_id": f"eq.{aid}",
+                "interaction_type": "eq.follow",
+                "interaction_status": "eq.success",
+                "event_status": "eq.success",
+                "event_type": "in.(follow_verified,follow_verified_persisted_v1)",
+                "run_id": "not.is.null",
+                "and": (
+                    f"(event_at.gte.{floor.isoformat()},"
+                    f"event_at.lte.{ceiling.isoformat()})"
+                ),
+                "order": "event_at.asc,id.asc",
+                "limit": str(bounded_page_size),
+                "offset": str(offset),
+            },
+        )
+        if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+            raise RuntimeError("unfollow_follow_receipt_scan_contract_invalid")
+        if page:
+            pages_loaded += 1
+        for row in page:
+            receipt_id = str(row.get("id") or "").strip()
+            if not receipt_id:
+                raise RuntimeError("unfollow_follow_receipt_missing_id")
+            if receipt_id in seen_ids:
+                raise RuntimeError("unfollow_follow_receipt_duplicate_page_row")
+            seen_ids.add(receipt_id)
+            rows_out.append(dict(row))
+        if len(page) < bounded_page_size:
+            break
+        offset += len(page)
+    else:
+        raise RuntimeError("unfollow_follow_receipt_scan_max_pages_exceeded")
+    return rows_out, {
+        "receipt_rows_loaded": len(rows_out),
+        "receipt_pages_loaded": pages_loaded,
+        "receipt_scan_exhaustive": True,
+        "receipt_snapshot_at": ceiling.isoformat(),
+        "receipt_floor_at": floor.isoformat(),
+        "receipt_source": "ig_interaction_events:verified_follow_success",
+    }
+
+
 def get_account_package_summary(account_id: str) -> dict[str, Any] | None:
     """Load account_package_summary projection row (no insert)."""
     aid = str(account_id or "").strip()
@@ -3987,6 +4062,39 @@ def fetch_unfollow_strict_candidate_rows(
     else:
         raise RuntimeError("unfollow_candidate_pagination_max_pages_exceeded")
 
+    valid_followed_times = [
+        parsed
+        for parsed in (parse_utc_iso_timestamp(row.get("followed_at")) for row in out)
+        if parsed is not None
+    ]
+    receipt_floor = min(valid_followed_times) if valid_followed_times else cutoff
+    receipts, receipt_metadata = fetch_canonical_follow_receipts_for_unfollow(
+        aid,
+        followed_at_floor=receipt_floor - timedelta(seconds=1),
+        snapshot_at=snapshot_at,
+        page_size=page_size,
+    )
+    receipts_by_lineage: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        key = (
+            _canonical_interaction_username(receipt.get("username")),
+            str(receipt.get("run_id") or "").strip(),
+        )
+        if all(key):
+            receipts_by_lineage.setdefault(key, []).append(receipt)
+    for row in out:
+        username_key = _canonical_interaction_username(row.get("username"))
+        row_run_id = str(row.get("run_id") or "").strip()
+        followed_at = parse_utc_iso_timestamp(row.get("followed_at"))
+        matched_receipt: dict[str, Any] | None = None
+        if username_key and row_run_id and followed_at is not None:
+            for receipt in receipts_by_lineage.get((username_key, row_run_id), []):
+                receipt_at = parse_utc_iso_timestamp(receipt.get("event_at"))
+                if receipt_at is not None and receipt_at >= followed_at - timedelta(seconds=1):
+                    matched_receipt = receipt
+                    break
+        row["canonical_follow_receipt"] = dict(matched_receipt or {})
+
     metadata = {
         "source_rows_loaded": len(out),
         "page_size": page_size,
@@ -3997,6 +4105,8 @@ def fetch_unfollow_strict_candidate_rows(
         "pagination_strategy": "stable_offset_snapshot_v1",
         "scan_as_of": snapshot_at.isoformat(),
         "eligibility_cutoff": cutoff.isoformat(),
+        "canonical_follow_receipt_enforced": True,
+        **receipt_metadata,
     }
     return (out, metadata) if include_metadata else out
 

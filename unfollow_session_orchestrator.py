@@ -83,7 +83,10 @@ from unfollow_diagnostic_contract_v2 import UnfollowDiagnosticSession
 from unfollow_action_outcome import (
     ACTION_ATTEMPTED_AMBIGUOUS_COOLDOWN_MINUTES,
     UnfollowActionOutcomeClass,
+    UnfollowExecutionContext,
+    UnfollowExecutionOutcomeClass,
     ambiguous_failure_reason,
+    classify_unfollow_execution_outcome,
     decide_verify_failure_after_recovery,
     is_action_attempted_ambiguous_reason,
 )
@@ -1735,9 +1738,7 @@ def _log_unfollow_success_observed(
 def _run_real_unfollow_multi_loop(
     d: u2.Device,
     *,
-    aid: str,
-    uname: str,
-    run_id: str | None,
+    execution_context: UnfollowExecutionContext,
     settings: Any,
     base_summary: dict[str, Any],
     planned_usernames: set[str],
@@ -1756,6 +1757,10 @@ def _run_real_unfollow_multi_loop(
     diagnostic_session: UnfollowDiagnosticSession | None,
     t0: float,
 ) -> int:
+    execution_context.validate()
+    aid = execution_context.account_id
+    uname = execution_context.account_username
+    run_id = execution_context.run_id
     verified = 0
     sent = 0
     failed = 0
@@ -1860,6 +1865,9 @@ def _run_real_unfollow_multi_loop(
     direct_search_retryable_failures = 0
     candidate_availability_persistence_failures = 0
     candidate_availability_persistence_failure_usernames: list[str] = []
+    performance_boundaries: list[dict[str, Any]] = list(
+        base_summary.get("performance_boundary_telemetry") or []
+    )
     search_surface_health = SearchSurfaceCircuitBreaker()
     session_completion_policy = UnfollowSessionCompletionPolicy()
     direct_fallback_armed = False
@@ -1880,6 +1888,25 @@ def _run_real_unfollow_multi_loop(
                 behavior_affected=False,
             )
             return None
+
+    def record_performance_boundary(
+        boundary: str,
+        started_at: float,
+        *,
+        username: str = "",
+        ok: bool = True,
+    ) -> None:
+        """Record an existing call boundary without adding an observation."""
+
+        item = {
+            "boundary": str(boundary),
+            "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+            "iteration_index": iteration_index,
+            "username_normalized": normalize_unfollow_username(username),
+            "ok": bool(ok),
+        }
+        performance_boundaries.append(item)
+        log("info", "unfollow_performance_boundary_v1", **item)
 
     def coverage_elapsed_seconds() -> float:
         return max(0.0, time.perf_counter() - coverage_started_at)
@@ -2270,6 +2297,14 @@ def _run_real_unfollow_multi_loop(
                 "reuse_authoritative_daily_plan_remaining_queue"
             )
         global_remaining_count = int(canonical_outcome.get("remaining_count") or 0)
+        execution_outcome_class = classify_unfollow_execution_outcome(
+            status=status,
+            stable_reason=stable_reason,
+            remaining_count=global_remaining_count,
+            resume_recommended=bool(canonical_outcome.get("resume_recommended")),
+        )
+        canonical_outcome["execution_outcome_class"] = execution_outcome_class.value
+        canonical_outcome["first_causal_reason"] = stable_reason
         summary = {
             **base_summary,
             **last_fields,
@@ -2331,6 +2366,10 @@ def _run_real_unfollow_multi_loop(
             "resume_strategy": canonical_outcome.get("resume_strategy"),
             "status": status,
             "failure_reason": failure_reason,
+            "unfollow_execution_outcome_class": execution_outcome_class.value,
+            "first_causal_reason": stable_reason,
+            "unfollow_execution_context": execution_context.as_safe_dict(),
+            "performance_boundary_telemetry": performance_boundaries[:250],
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
         log(
@@ -2544,13 +2583,13 @@ def _run_real_unfollow_multi_loop(
                     if classification == "username_not_found_confirmed":
                         try:
                             availability_state = (
-                                supabase_client.record_unfollow_candidate_availability_v2(
+                                supabase_client.record_unfollow_candidate_not_found(
                                     aid,
                                     target_key,
                                     source_run_id=run_id,
-                                    classification=classification,
                                     reason=stable_failure_reason,
-                                    technical_cooldown_minutes=30,
+                                    cooldown_hours=24,
+                                    max_attempts=2,
                                 )
                             )
                         except Exception as exc:
@@ -2559,7 +2598,7 @@ def _run_real_unfollow_multi_loop(
                                 candidate_availability_persistence_failure_usernames.append(target_key)
                             log(
                                 "error",
-                                "unfollow_candidate_availability_v2_persist_failed",
+                                "unfollow_candidate_not_found_evidence_persist_failed",
                                 account_id=aid,
                                 run_id=run_id,
                                 username=target_username,
@@ -2569,12 +2608,25 @@ def _run_real_unfollow_multi_loop(
                             )
                             stop_reason = "unfollow_candidate_availability_persistence_failed"
                             return emit_final("failed_unfollow_multi_action", stop_reason)
-                        search_surface_health.record(classification)
+                        availability_status = str(
+                            availability_state.get("status") or ""
+                        ).strip()
+                        terminal_not_found = availability_status in {
+                            "exhausted",
+                            "username_not_found_confirmed",
+                        }
+                        search_surface_health.record(
+                            classification if terminal_not_found else "temporary_search_miss"
+                        )
                         coverage_tracker.mark_candidate_unavailable(target_key)
                         direct_search_unavailable.add(target_key)
                         log(
                             "info",
-                            "unfollow_candidate_not_found_terminalized",
+                            (
+                                "unfollow_candidate_not_found_terminalized"
+                                if terminal_not_found
+                                else "unfollow_candidate_not_found_retryable_hold"
+                            ),
                             account_id=aid,
                             run_id=run_id,
                             username=target_username,
@@ -2583,12 +2635,19 @@ def _run_real_unfollow_multi_loop(
                                 direct_result.get("local_retry_count") or 0
                             ),
                             persisted=bool(availability_state.get("ok")),
-                            availability_status=str(
-                                availability_state.get("status") or ""
-                            ),
+                            availability_status=availability_status,
                             terminal_at=availability_state.get("terminal_at"),
                             backlog_actionable=False,
                             unfollow_marked_success=False,
+                            terminal_evidence=terminal_not_found,
+                            observation_count=int(
+                                availability_state.get("not_found_attempt_count") or 0
+                            ),
+                            outcome_class=(
+                                UnfollowExecutionOutcomeClass.CANDIDATE_LOCAL_TERMINAL.value
+                                if terminal_not_found
+                                else UnfollowExecutionOutcomeClass.CANDIDATE_LOCAL_RETRYABLE.value
+                            ),
                         )
                         continue
 
@@ -3388,6 +3447,17 @@ def _run_real_unfollow_multi_loop(
             row_cta_class=str(target_row.get("row_cta_class") or ""),
             cta_text=str(target_row.get("cta_text") or "")[:80],
         )
+        record_performance_boundary(
+            "candidate_selected",
+            selection_t0,
+            username=target_username,
+        )
+        if iteration_index > 1:
+            record_performance_boundary(
+                "next_candidate",
+                selection_t0,
+                username=target_username,
+            )
 
         if coverage_tracker is not None and not target_opened_directly:
             current_surface = detect_own_following_list_screen(
@@ -3432,10 +3502,17 @@ def _run_real_unfollow_multi_loop(
         if target_opened_directly:
             tapped, tap_meta = True, {"ok": True, "method": "direct_exact_search"}
         else:
+            candidate_tap_t0 = time.perf_counter()
             tapped, tap_meta = tap_following_list_username_row_for_unfollow_probe(
                 d,
                 target_row,
                 selection_reason=selection_reason,
+            )
+            record_performance_boundary(
+                "candidate_cta_tap",
+                candidate_tap_t0,
+                username=target_username,
+                ok=bool(tapped),
             )
         if not tapped:
             failed += 1
@@ -3446,6 +3523,7 @@ def _run_real_unfollow_multi_loop(
                 str(tap_meta.get("failure_reason") or "target_row_tap_failed"),
             )
 
+        profile_proof_t0 = time.perf_counter()
         profile_det = (
             {"ok": True, "method": "direct_exact_search_preverified"}
             if target_opened_directly
@@ -3453,6 +3531,12 @@ def _run_real_unfollow_multi_loop(
                 d,
                 expected_target_username=target_username,
             )
+        )
+        record_performance_boundary(
+            "profile_proof",
+            profile_proof_t0,
+            username=target_username,
+            ok=bool(profile_det.get("ok")),
         )
         if not profile_det.get("ok"):
             failed += 1
@@ -3473,10 +3557,23 @@ def _run_real_unfollow_multi_loop(
                 str(profile_det.get("failure_reason") or "target_profile_open_failed"),
             )
 
+        action_sheet_t0 = time.perf_counter()
         sheet = open_unfollow_actions_sheet_from_profile_probe(
             d,
             expected_target_username=target_username,
             profile_exact_confirmed=True,
+        )
+        record_performance_boundary(
+            "cta_tap",
+            action_sheet_t0,
+            username=target_username,
+            ok=bool(sheet.get("tap_ok", sheet.get("ok"))),
+        )
+        record_performance_boundary(
+            "action_sheet_proof",
+            action_sheet_t0,
+            username=target_username,
+            ok=bool(sheet.get("ok")),
         )
         if not sheet.get("ok"):
             failed += 1
@@ -3691,22 +3788,34 @@ def _run_real_unfollow_multi_loop(
         interaction_row_id = str(
             cand.get("interaction_row_id") or cand.get("id") or ""
         ).strip() or None
+        intent_t0 = time.perf_counter()
         try:
             mutation_intent = _prepare_unfollow_mutation_intent(
                 account_id=aid,
                 run_id=run_id,
-                request_id=request_id,
-                business_session_id=business_session_id,
-                session_attempt=session_attempt,
+                request_id=execution_context.request_id,
+                business_session_id=execution_context.root_business_session_id,
+                session_attempt=execution_context.attempt_ordinal,
                 target_username=target_username,
                 interaction_row_id=interaction_row_id,
                 source_target_id=str(cand.get("source_target_id") or cand.get("target_id") or "") or None,
                 source_ct_username=str(cand.get("source_target_username") or cand.get("source_profile") or "") or None,
-                business_date_sast=business_date_sast,
-                worker_sha=worker_sha,
+                business_date_sast=execution_context.business_date_sast,
+                worker_sha=execution_context.worker_sha,
                 settings=settings,
             )
+            record_performance_boundary(
+                "intent_prepared",
+                intent_t0,
+                username=target_username,
+            )
         except Exception as exc:
+            record_performance_boundary(
+                "intent_prepared",
+                intent_t0,
+                username=target_username,
+                ok=False,
+            )
             stop_reason = "unfollow_mutation_intent_prepare_failed"
             log(
                 "error",
@@ -3739,10 +3848,17 @@ def _run_real_unfollow_multi_loop(
             )
             return emit_final("failed_unfollow_multi_action", stop_reason)
 
+        unfollow_tap_t0 = time.perf_counter()
         tap_out = tap_unfollow_in_following_sheet(
             d,
             target_username=target_username,
             sheet_context_signals=dict(sheet.get("sheet_context_signals") or {}),
+        )
+        record_performance_boundary(
+            "unfollow_tap",
+            unfollow_tap_t0,
+            username=target_username,
+            ok=bool(tap_out.get("ok")),
         )
         if tap_out.get("ok"):
             sent += 1
@@ -3778,11 +3894,18 @@ def _run_real_unfollow_multi_loop(
                 str(tap_out.get("failure_reason") or "unfollow_tap_failed"),
             )
 
+        verify_t0 = time.perf_counter()
         verify_out = verify_unfollow_action_success_after_tap(
             d,
             target_username=target_username,
             profile_identity_certified=True,
             private_flow_engaged=True,
+        )
+        record_performance_boundary(
+            "verified",
+            verify_t0,
+            username=target_username,
+            ok=bool(verify_out.get("ok")),
         )
         verify_ok = bool(verify_out.get("ok"))
         verify_failure_reason = str(
@@ -3809,6 +3932,7 @@ def _run_real_unfollow_multi_loop(
                 stage="verified",
                 metadata_safe={"physical_relationship_state": "not_following"},
             )
+        persist_t0 = time.perf_counter()
         persist_out = _persist_unfollow_outcome_for_session(
             aid,
             target_username,
@@ -3818,8 +3942,14 @@ def _run_real_unfollow_multi_loop(
             interaction_row_id=interaction_row_id,
             failure_reason=durable_failure_reason,
             mutation_intent=mutation_intent,
-            request_id=request_id,
-            business_date_sast=business_date_sast,
+            request_id=execution_context.request_id,
+            business_date_sast=execution_context.business_date_sast,
+        )
+        record_performance_boundary(
+            "persisted",
+            persist_t0,
+            username=target_username,
+            ok=bool(persist_out.get("ok")),
         )
         persist_ok = bool(persist_out.get("ok"))
         persistence_delta = unfollow_persistence_count_delta(
@@ -4099,11 +4229,18 @@ def _run_real_unfollow_multi_loop(
                 stop_reason,
             )
 
+        return_list_t0 = time.perf_counter()
         ret = _return_after_unfollow_profile(
             d,
             account_username=uname,
             direct_exact_search=target_opened_directly,
             profile_departure_certified=verify_ok,
+        )
+        record_performance_boundary(
+            "return_list",
+            return_list_t0,
+            username=target_username,
+            ok=bool(ret.get("ok")),
         )
         return_ok = bool(ret.get("ok"))
         search_session_reused = bool(ret.get("search_session_reused"))
@@ -4469,6 +4606,52 @@ def run_unfollow_session(
             **time_budget,
         }
     )
+    execution_context: UnfollowExecutionContext | None = None
+    if real_action_active:
+        try:
+            execution_context = UnfollowExecutionContext.build(
+                account_id=aid,
+                account_username=uname,
+                request_id=(request_id or os.environ.get("ACCOUNT_RUN_REQUEST_ID")),
+                run_id=run_id,
+                root_business_session_id=business_session_id,
+                attempt_ordinal=max(1, int(session_attempt or 1)),
+                business_date_sast=business_date_sast,
+                worker_sha=(worker_sha or os.environ.get("WORKER_GIT_SHA")),
+                runtime_root=os.path.realpath(os.path.dirname(__file__)),
+                daily_plan_context=daily_plan_context,
+                device_id=os.environ.get("ANDROID_SERIAL"),
+                app_instance_id=os.environ.get("PHONEFARM_APP_INSTANCE_ID"),
+                package_name=config.INSTAGRAM_PACKAGE,
+            )
+        except Exception as exc:
+            stable_reason = f"runtime_internal_error:{type(exc).__name__}:{exc}"
+            summary = {
+                **base_summary,
+                "status": "failed_unfollow_execution_context",
+                "failure_reason": stable_reason,
+                "first_causal_reason": stable_reason,
+                "unfollow_execution_outcome_class": (
+                    UnfollowExecutionOutcomeClass.RUNTIME_INTERNAL_ERROR.value
+                ),
+                "session_termination_class": "runtime_internal_error",
+                "restart_eligibility": "blocked",
+                "unfollow_actions_sent": 0,
+                "unfollow_actions_verified": 0,
+                "unfollow_results_persisted_count": 0,
+                "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
+            log(
+                "error",
+                "unfollow_execution_context_invalid",
+                account_id=aid,
+                run_id=run_id,
+                first_causal_reason=stable_reason,
+                safe_to_tap=False,
+                restart_eligibility="blocked",
+            )
+            _emit_summary(summary)
+            return 1
     diagnostic_session: UnfollowDiagnosticSession | None = None
     if real_action_active:
         try:
@@ -4596,7 +4779,34 @@ def run_unfollow_session(
         _emit_summary(summary)
         return 1
 
+    following_entry_t0 = time.perf_counter()
     ok_open, open_meta = open_own_following_list_from_own_profile(d, uname)
+    following_entry_elapsed_ms = round(
+        (time.perf_counter() - following_entry_t0) * 1000.0,
+        2,
+    )
+    following_entry_boundaries = [
+        {
+            "boundary": boundary,
+            "duration_upper_bound_ms": following_entry_elapsed_ms,
+            "measurement_scope": "existing_following_entry_call",
+            "ok": bool(ok_open),
+        }
+        for boundary in (
+            "own_profile_ready",
+            "following_cta_found",
+            "following_tap",
+        )
+    ]
+    log(
+        "info",
+        "unfollow_performance_following_entry_v1",
+        duration_ms=following_entry_elapsed_ms,
+        ok=bool(ok_open),
+        boundaries=[item["boundary"] for item in following_entry_boundaries],
+        added_ui_observations=0,
+    )
+    base_summary["performance_boundary_telemetry"] = following_entry_boundaries
     if not ok_open:
         summary = {
             **base_summary,
@@ -4611,7 +4821,19 @@ def run_unfollow_session(
         _emit_summary(summary)
         return 1
 
+    list_proof_t0 = time.perf_counter()
     det = detect_own_following_list_screen(d, account_username=uname)
+    list_proof_boundary = {
+        "boundary": "list_proof",
+        "duration_ms": round((time.perf_counter() - list_proof_t0) * 1000.0, 2),
+        "measurement_scope": "existing_list_proof_call",
+        "ok": bool(det.get("is_following_list")),
+    }
+    base_summary["performance_boundary_telemetry"] = [
+        *following_entry_boundaries,
+        list_proof_boundary,
+    ]
+    log("info", "unfollow_performance_boundary_v1", **list_proof_boundary)
     if not bool(det.get("is_following_list")):
         summary = {
             **base_summary,
@@ -4787,11 +5009,11 @@ def run_unfollow_session(
             }
 
     if real_action_active:
+        if execution_context is None:
+            raise RuntimeError("unfollow_execution_context_missing")
         return _run_real_unfollow_multi_loop(
             d,
-            aid=aid,
-            uname=uname,
-            run_id=run_id,
+            execution_context=execution_context,
             settings=settings,
             base_summary=base_summary,
             planned_usernames=planned_usernames,

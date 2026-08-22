@@ -10,6 +10,111 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
+
+
+@dataclass(frozen=True)
+class UnfollowExecutionContext:
+    """Immutable identity contract for one real Unfollow execution attempt."""
+
+    account_id: str
+    account_username: str
+    request_id: str
+    run_id: str
+    root_business_session_id: str
+    attempt_ordinal: int
+    business_date_sast: str
+    worker_sha: str
+    runtime_root: str
+    plan_id: str
+    plan_generation: str
+    device_id: str = ""
+    app_instance_id: str = ""
+    package_name: str = "com.instagram.android"
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        account_id: str,
+        account_username: str,
+        request_id: str | None,
+        run_id: str | None,
+        root_business_session_id: str | None,
+        attempt_ordinal: int,
+        business_date_sast: str,
+        worker_sha: str | None,
+        runtime_root: str,
+        daily_plan_context: dict[str, Any],
+        device_id: str | None = None,
+        app_instance_id: str | None = None,
+        package_name: str = "com.instagram.android",
+    ) -> "UnfollowExecutionContext":
+        plan_id = str(daily_plan_context.get("plan_id") or "").strip()
+        plan_generation = str(
+            daily_plan_context.get("generation")
+            or daily_plan_context.get("revision")
+            or daily_plan_context.get("created_at")
+            or daily_plan_context.get("business_date_sast")
+            or business_date_sast
+            or ""
+        ).strip()
+        context = cls(
+            account_id=str(account_id or "").strip(),
+            account_username=str(account_username or "").strip(),
+            request_id=str(request_id or "").strip(),
+            run_id=str(run_id or "").strip(),
+            root_business_session_id=str(root_business_session_id or "").strip(),
+            attempt_ordinal=max(0, int(attempt_ordinal or 0)),
+            business_date_sast=str(business_date_sast or "").strip(),
+            worker_sha=str(worker_sha or "").strip(),
+            runtime_root=str(runtime_root or "").strip(),
+            plan_id=plan_id,
+            plan_generation=plan_generation,
+            device_id=str(device_id or "").strip(),
+            app_instance_id=str(app_instance_id or "").strip(),
+            package_name=str(package_name or "").strip(),
+        )
+        context.validate()
+        return context
+
+    def validate(self) -> None:
+        required = {
+            "account_id": self.account_id,
+            "account_username": self.account_username,
+            "request_id": self.request_id,
+            "run_id": self.run_id,
+            "root_business_session_id": self.root_business_session_id,
+            "business_date_sast": self.business_date_sast,
+            "worker_sha": self.worker_sha,
+            "runtime_root": self.runtime_root,
+            "plan_id": self.plan_id,
+            "plan_generation": self.plan_generation,
+            "package_name": self.package_name,
+        }
+        missing = sorted(key for key, value in required.items() if not str(value).strip())
+        if missing:
+            raise ValueError("unfollow_execution_context_missing:" + ",".join(missing))
+        if self.attempt_ordinal not in {1, 2, 3}:
+            raise ValueError("unfollow_execution_context_attempt_out_of_range")
+
+    def as_safe_dict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "account_username": self.account_username,
+            "request_id": self.request_id,
+            "run_id": self.run_id,
+            "root_business_session_id": self.root_business_session_id,
+            "attempt_ordinal": self.attempt_ordinal,
+            "business_date_sast": self.business_date_sast,
+            "worker_sha": self.worker_sha,
+            "runtime_root": self.runtime_root,
+            "plan_id": self.plan_id,
+            "plan_generation": self.plan_generation,
+            "device_id": self.device_id,
+            "app_instance_id": self.app_instance_id,
+            "package_name": self.package_name,
+        }
 
 
 class UnfollowActionOutcomeClass(str, Enum):
@@ -21,6 +126,66 @@ class UnfollowActionOutcomeClass(str, Enum):
     SEARCH_NOT_FOUND_CONFIRMED = "SEARCH_NOT_FOUND_CONFIRMED"
     TRANSIENT_UI_FAILURE = "TRANSIENT_UI_FAILURE"
     SECURITY_BLOCK = "SECURITY_BLOCK"
+
+
+class UnfollowExecutionOutcomeClass(str, Enum):
+    """Authoritative phase-level taxonomy; never infer this from exit code."""
+
+    CANDIDATE_LOCAL_TERMINAL = "CANDIDATE_LOCAL_TERMINAL"
+    CANDIDATE_LOCAL_RETRYABLE = "CANDIDATE_LOCAL_RETRYABLE"
+    PHASE_PARTIAL_RESUMABLE = "PHASE_PARTIAL_RESUMABLE"
+    SCHEDULED_SAFE_STOP = "SCHEDULED_SAFE_STOP"
+    GLOBAL_SAFETY_BLOCKER = "GLOBAL_SAFETY_BLOCKER"
+    PERSISTENCE_AMBIGUOUS = "PERSISTENCE_AMBIGUOUS"
+    RUNTIME_INTERNAL_ERROR = "RUNTIME_INTERNAL_ERROR"
+    COMPLETED = "COMPLETED"
+
+
+_RUNTIME_INTERNAL_REASONS = {
+    "unfollow_execution_context_invalid",
+    "unfollow_execution_context_missing",
+    "unfollow_plan_contains_protected_candidate",
+    "unfollow_candidate_funnel_reconciliation_failed",
+}
+
+
+def classify_unfollow_execution_outcome(
+    *,
+    status: str,
+    stable_reason: str,
+    remaining_count: int,
+    resume_recommended: bool,
+) -> UnfollowExecutionOutcomeClass:
+    normalized_status = str(status or "").strip().lower()
+    reason = str(stable_reason or "").strip().lower()
+    if reason.startswith("runtime_internal_error:") or reason in _RUNTIME_INTERNAL_REASONS:
+        return UnfollowExecutionOutcomeClass.RUNTIME_INTERNAL_ERROR
+    if "persistence" in reason or "mutation_intent" in reason:
+        return UnfollowExecutionOutcomeClass.PERSISTENCE_AMBIGUOUS
+    if reason in {
+        "session_time_budget_exhausted",
+        "business_action_deadline_reached",
+        "scheduled_safe_stop",
+    }:
+        return UnfollowExecutionOutcomeClass.SCHEDULED_SAFE_STOP
+    if reason in {
+        "username_not_found_confirmed",
+        "already_not_following_confirmed",
+        "candidate_unavailable_exhausted",
+    }:
+        return UnfollowExecutionOutcomeClass.CANDIDATE_LOCAL_TERMINAL
+    if reason in {
+        "temporary_search_miss",
+        "search_surface_unhealthy",
+        "candidate_technical_hold",
+        "transient_ui_failure",
+    }:
+        return UnfollowExecutionOutcomeClass.CANDIDATE_LOCAL_RETRYABLE
+    if normalized_status.startswith("failed_"):
+        return UnfollowExecutionOutcomeClass.GLOBAL_SAFETY_BLOCKER
+    if remaining_count > 0 and resume_recommended:
+        return UnfollowExecutionOutcomeClass.PHASE_PARTIAL_RESUMABLE
+    return UnfollowExecutionOutcomeClass.COMPLETED
 
 
 ACTION_ATTEMPTED_AMBIGUOUS_REASON_PREFIX = "action_attempted_ambiguous:"

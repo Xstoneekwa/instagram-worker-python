@@ -35,6 +35,7 @@ _STRICT_SKIP_KEYS = (
     "already_unfollowed",
     "missing_followed_by_bot",
     "missing_followed_at",
+    "missing_canonical_follow_receipt",
     "lifecycle_ineligible",
     "follow_status_not_following",
     "missing_followback_confirmation",
@@ -129,6 +130,7 @@ def _strict_unfollow_skip_reason(
     settings: UnfollowSettings,
     now: datetime,
     visible_lookup: bool = False,
+    require_canonical_follow_receipt: bool = False,
 ) -> str:
     if _row_effective_unfollowed(row):
         return "already_unfollowed"
@@ -138,6 +140,13 @@ def _strict_unfollow_skip_reason(
 
     if not row.get("followed_at"):
         return "missing_followed_at"
+
+    if require_canonical_follow_receipt and not isinstance(
+        row.get("canonical_follow_receipt"), dict
+    ):
+        return "missing_canonical_follow_receipt"
+    if require_canonical_follow_receipt and not row.get("canonical_follow_receipt"):
+        return "missing_canonical_follow_receipt"
 
     if _row_follow_status(row) != "following":
         return "follow_status_not_following"
@@ -184,6 +193,11 @@ def _candidate_payload_from_row(
 ) -> dict[str, Any]:
     eligible_at = _resolve_eligible_unfollow_at(row, after_days=settings.after_days)
     username = str(row.get("username") or "").strip()
+    receipt = (
+        dict(row.get("canonical_follow_receipt") or {})
+        if isinstance(row.get("canonical_follow_receipt"), dict)
+        else {}
+    )
     return {
         "username": username,
         "username_normalized": normalize_social_username(username),
@@ -214,6 +228,15 @@ def _candidate_payload_from_row(
             or ("unfollowed" if row.get("unfollowed_at") else "unknown")
         ),
         "eligibility_reason": "bot_follow_delay_elapsed",
+        "canonical_follow_receipt_id": str(receipt.get("id") or ""),
+        "canonical_follow_receipt_event_type": str(receipt.get("event_type") or ""),
+        "canonical_follow_receipt_run_id": str(receipt.get("run_id") or ""),
+        "canonical_follow_receipt_at": receipt.get("event_at"),
+        "unfollow_backlog_follow_admission_source": (
+            "ig_interaction_events:follow_verified|follow_verified_persisted_v1"
+            if receipt
+            else "compatibility_fixture_only"
+        ),
     }
 
 
@@ -347,7 +370,14 @@ def plan_unfollow_targets(
             skipped["invalid_username"] = int(skipped.get("invalid_username", 0)) + 1
             continue
 
-        skip_reason = _strict_unfollow_skip_reason(row, settings=cfg, now=now)
+        skip_reason = _strict_unfollow_skip_reason(
+            row,
+            settings=cfg,
+            now=now,
+            require_canonical_follow_receipt=bool(
+                scan_metadata.get("canonical_follow_receipt_enforced")
+            ),
+        )
         if skip_reason:
             skipped[skip_reason] = int(skipped.get(skip_reason, 0)) + 1
             continue
@@ -436,6 +466,17 @@ def plan_unfollow_targets(
         )
         + int(skipped.get("candidate_unavailable_exhausted", 0)),
         "scan_as_of": str(scan_metadata.get("scan_as_of") or now.isoformat()),
+        "unfollow_backlog_follow_admission_source": (
+            "ig_interaction_events:follow_verified|follow_verified_persisted_v1"
+            if scan_metadata.get("canonical_follow_receipt_enforced")
+            else "compatibility_fixture_only"
+        ),
+        "canonical_follow_receipt_enforced": bool(
+            scan_metadata.get("canonical_follow_receipt_enforced")
+        ),
+        "canonical_follow_receipt_rows_loaded": int(
+            scan_metadata.get("receipt_rows_loaded") or 0
+        ),
     }
     log(
         "info",

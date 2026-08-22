@@ -81,14 +81,31 @@ def _settings(
 class UnfollowCandidatePaginationTests(unittest.TestCase):
     def _paged_request(self, rows: list[dict[str, object]]):
         calls: list[dict[str, str]] = []
+        receipts = [
+            {
+                "id": f"10000000-0000-4000-8000-{index:012d}",
+                "account_id": str(row["account_id"]),
+                "run_id": str(row["run_id"]),
+                "username": str(row["username"]),
+                "event_type": "follow_verified",
+                "interaction_type": "follow",
+                "interaction_status": "success",
+                "event_status": "success",
+                "event_at": str(row["followed_at"]),
+            }
+            for index, row in enumerate(rows)
+        ]
 
         def fake_request(method: str, table: str, *, query=None, **_kwargs):
-            self.assertEqual((method, table), ("GET", "ig_interacted_users"))
+            self.assertEqual(method, "GET")
             safe_query = dict(query or {})
-            calls.append(safe_query)
             offset = int(safe_query["offset"])
             limit = int(safe_query["limit"])
-            return rows[offset : offset + limit]
+            if table == "ig_interacted_users":
+                calls.append(safe_query)
+                return rows[offset : offset + limit]
+            self.assertEqual(table, "ig_interaction_events")
+            return receipts[offset : offset + limit]
 
         return calls, fake_request
 
