@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "2a027854c43874490f949abf199920b9beee0553",
-    "change_id": "ct-resume-cplus-residual-optimization-v1-20260822",
-    "diff_sha256": "474cd9bb6a462cfd99b91387be4c7784ceed19188e081aef1abcd611d8a6a85e",
-    "expires_at": "2026-08-22T13:35:35.528120+00:00",
-    "head_sha": "a847c6024a9cd948fef1f91f93bed415b1de35f8",
-    "request_sha256": "59d79c9c0ee869384fa9f33f7bc86a99c347a60743f0b0375e4361071ffafba2",
+    "base_sha": "405cb58fe6127756d35ab2caa799fcb9a5090cb1",
+    "change_id": "unfollow-consolidation-v1-20260822",
+    "diff_sha256": "15c92990d8a2f34828b2a8e2cfe1e60bb9aa8a8506432b5ab91c90dc668fb5a2",
+    "expires_at": "2026-08-22T20:00:25.978766+00:00",
+    "head_sha": "955da344af85fb0e6fd77cf9b2790df680ef123f",
+    "request_sha256": "7b268f3f6f01667d458f89b12e75b60019d90e1d24e37068d6e6a3d5cbdbb9fe",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -559,6 +559,27 @@
       ],
       "head_sha": "a847c6024a9cd948fef1f91f93bed415b1de35f8",
       "requested_scope": "ct_resume_cplus_residual_optimization;generation_scoped_exact_search_row_proof;single_use_search_surface_token;option_c_not_implemented",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "405cb58fe6127756d35ab2caa799fcb9a5090cb1",
+      "change_id": "unfollow-consolidation-v1-20260822",
+      "consumed_at": "2026-08-22T16:02:48.884675+00:00",
+      "diff_sha256": "15c92990d8a2f34828b2a8e2cfe1e60bb9aa8a8506432b5ab91c90dc668fb5a2",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_resume_engine.py",
+        "supabase_client.py",
+        "tests/test_unfollow_candidate_ledger_pagination.py",
+        "tests/test_unfollow_consolidation_v1.py",
+        "tests/test_unfollow_one_healthy_session_contract.py",
+        "unfollow_action_outcome.py",
+        "unfollow_eligibility_engine.py",
+        "unfollow_session_orchestrator.py"
+      ],
+      "head_sha": "955da344af85fb0e6fd77cf9b2790df680ef123f",
+      "requested_scope": "unfollow execution context; canonical durable Follow receipt backlog admission; bounded S1-S3 resume; terminal already-not-following and not-found; performance boundary telemetry; no Follow60, Search picker, cursor, Business Deadline or Following-entry behavior change",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1332,13 +1353,13 @@
       "size": 24423
     },
     "account_session_resume_engine.py": {
-      "git_blob_oid": "5e2802525ae985fa5af79a790704f091622537ff",
+      "git_blob_oid": "bfa3a1672bb8c12668d8bd7bfae46bb526d4361d",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_resume_engine.py",
       "role": "ct_resume",
-      "sha256": "9a21684da5d2c7e5f3f04477d88688d891f2e7993c372144bcc50a5816cc36f9",
-      "size": 21552
+      "sha256": "caceb075f6f1424de606b6a202a1253c3f403b6b9b415805ccd20a6cae0904f6",
+      "size": 22659
     },
     "account_session_resume_plan_store.py": {
       "git_blob_oid": "993487d2c517e0f7e85c1883829001ee06633487",
@@ -2097,13 +2118,13 @@
       "size": 8661
     },
     "supabase_client.py": {
-      "git_blob_oid": "78ede1ca75231795dbfe32b859ff7adc2ff5a038",
+      "git_blob_oid": "810282277b2ea1a8755f8bb3c92ae7acd12ca5d5",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "supabase_client.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "839005bf093cf6a49b6dd27674fb6f3c2e97b35bf45f50833c9278ba6c4f04bb",
-      "size": 178558
+      "sha256": "43e5182c0847490f4cf59ebe7e4e264496d775729a8b78d4a57d3718f93c9e0d",
+      "size": 183131
     },
     "target_availability_memory_probe.py": {
       "git_blob_oid": "0f51c20c77e22747e1a9aba704f55f7c01cbefcf",
@@ -2277,13 +2298,13 @@
       "size": 81943
     },
     "unfollow_action_outcome.py": {
-      "git_blob_oid": "b65068ab9217d6270dd5ee984e1f7b4bc148150f",
+      "git_blob_oid": "946b233ccff95857ac322fe6ef23e977195c2157",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_action_outcome.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "873ce385cbe84cf58a738874be8742d2b76571a4fb22d9d2a61a0542325c8ccf",
-      "size": 5027
+      "sha256": "9dfeb0cd78b31ae27c6ffba72855bc3824e53f007a1f9d52cadc94ebf44ff406",
+      "size": 11336
     },
     "unfollow_daily_plan.py": {
       "git_blob_oid": "2b7f1c63d16bf079d2f80705bf1e8621f169dafb",
@@ -2304,13 +2325,13 @@
       "size": 31950
     },
     "unfollow_eligibility_engine.py": {
-      "git_blob_oid": "068862bf26a60e3746b48e907bd595c9f772c805",
+      "git_blob_oid": "47e0c72df0823f6f12e7a7cd94465b1804a4f4fb",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_eligibility_engine.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "5cb6dbfc167e373268146a18969b078ddb787895869f9c4daf538b5f582ff187",
-      "size": 21380
+      "sha256": "322f469a0a953680f1b1cfba4cd7ef95e381028a7b0253cb669d5bf70dc5d4f9",
+      "size": 23141
     },
     "unfollow_hybrid_strategy.py": {
       "git_blob_oid": "2328e7362862de699501da1fd26bfba65b1200bc",
@@ -2358,13 +2379,13 @@
       "size": 6911
     },
     "unfollow_session_orchestrator.py": {
-      "git_blob_oid": "798b2b225d24a3e208b0d63ad2e04800add38a82",
+      "git_blob_oid": "b6804be0e54c12e85ef44a925f2a8e87d7de4fe4",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "d5cfd58d5338dfa938b053e8272d146492afa4b631ce1ecc380f9d5d6ab10680",
-      "size": 227092
+      "sha256": "9f16514f983f0de7ff4e16f3334d935f24b48ce01f9b917f41073dedef6a6554",
+      "size": 236232
     },
     "unfollow_settings.py": {
       "git_blob_oid": "60eda86a5e6779fbd199a47b4b7fd8de65093eeb",
@@ -2457,7 +2478,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "88caf37d9004da74ee924bc03c9919dd545a483d2689719c876568c7ed44657f",
+  "protected_scope_sha256": "aabcb551cbc09b58127d0492e2303140c63fe8143e852421c52e9f8f215e4fc1",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
