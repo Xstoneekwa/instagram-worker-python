@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -106,19 +107,81 @@ _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT: float = 0.0
 # Followers-engine CT open only (Search → tap CT profile). Never set for DM sender.
 _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE: bool = False
 _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS: dict[str, int] | None = None
+_FOLLOW_CT_SEARCH_CONTEXT_GENERATION: int = 0
+_FOLLOW_CT_SEARCH_NAVIGATION_GENERATION: int = 0
+_FOLLOW_CT_SEARCH_SURFACE_GENERATION: int = 0
+_FOLLOW_CT_SEARCH_HIERARCHY_GENERATION: int = 0
+_FOLLOW_CT_SEARCH_ACCOUNT_SCOPE: str = ""
+_FOLLOW_CT_SEARCH_SURFACE_PROOF_CONSUMED_GENERATION: int = 0
 
 
-def enter_follow_ct_search_context() -> None:
+@dataclass(frozen=True)
+class SearchSurfaceProofToken:
+    """One-transition proof; never a substitute for the normal surface cache."""
+
+    package: str
+    activity: str
+    activity_family: str
+    account_scope: str
+    search_context_generation: int
+    navigation_generation: int
+    surface_generation: int
+    observed_at_monotonic: float
+
+
+@dataclass(frozen=True)
+class ExactSearchRowProof:
+    """Immutable evidence captured from one exact Search-row hierarchy read."""
+
+    normalized_username: str
+    row_text: str
+    bounds: tuple[int, int, int, int]
+    screen_size: tuple[int, int]
+    resource_id: str
+    element_class: str
+    expected_package: str
+    account_scope: str
+    hierarchy_generation: int
+    navigation_generation: int
+    search_surface_generation: int
+    search_context_generation: int
+    observed_at_monotonic: float
+
+
+def _advance_follow_ct_search_context_generation() -> None:
+    global _FOLLOW_CT_SEARCH_CONTEXT_GENERATION
+    global _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION
+    _FOLLOW_CT_SEARCH_CONTEXT_GENERATION += 1
+    _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION += 1
+
+
+def _advance_follow_ct_search_navigation_generation(_reason: str = "") -> int:
+    global _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION
+    _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION += 1
+    return _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION
+
+
+def _advance_follow_ct_search_hierarchy_generation() -> int:
+    global _FOLLOW_CT_SEARCH_HIERARCHY_GENERATION
+    _FOLLOW_CT_SEARCH_HIERARCHY_GENERATION += 1
+    return _FOLLOW_CT_SEARCH_HIERARCHY_GENERATION
+
+
+def enter_follow_ct_search_context(*, account_scope: str = "") -> None:
     """Followers engine: enable Follow-CT-only search fast paths until clear."""
-    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE
+    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE, _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE
     _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE = True
+    _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE = str(account_scope or "").strip()
+    _advance_follow_ct_search_context_generation()
     _clear_follow_ct_exact_row_tap_bounds()
     _clear_follow_ct_serp_band_cache()
 
 
 def clear_follow_ct_search_context() -> None:
-    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE
+    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE, _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE
     _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE = False
+    _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE = ""
+    _advance_follow_ct_search_context_generation()
     _clear_follow_ct_exact_row_tap_bounds()
     _clear_follow_ct_serp_band_cache()
     clear_follow_ct_open_search_strict_verified()
@@ -628,9 +691,114 @@ def should_reuse_search_surface(d: u2.Device, pkg: str) -> bool:
         return False
 
 
-def _mark_search_surface_ok(d: u2.Device, pkg: str) -> None:
+def _build_search_surface_proof_token(
+    current: dict[str, Any] | None,
+    *,
+    pkg: str,
+) -> SearchSurfaceProofToken | None:
+    """Freeze the app_current result already consumed by strict Search proof."""
+    global _FOLLOW_CT_SEARCH_SURFACE_GENERATION
+    if not is_follow_ct_search_context_active():
+        return None
+    cur = dict(current or {})
+    observed_package = str(cur.get("package") or "").strip()
+    activity = str(cur.get("activity") or "").strip()
+    activity_family = _activity_family(activity)
+    if (
+        observed_package != str(pkg or "").strip()
+        or activity_family not in {"MainActivity", "InstagramMainActivity"}
+    ):
+        return None
+    _FOLLOW_CT_SEARCH_SURFACE_GENERATION += 1
+    return SearchSurfaceProofToken(
+        package=observed_package,
+        activity=activity,
+        activity_family=activity_family,
+        account_scope=_FOLLOW_CT_SEARCH_ACCOUNT_SCOPE,
+        search_context_generation=_FOLLOW_CT_SEARCH_CONTEXT_GENERATION,
+        navigation_generation=_FOLLOW_CT_SEARCH_NAVIGATION_GENERATION,
+        surface_generation=_FOLLOW_CT_SEARCH_SURFACE_GENERATION,
+        observed_at_monotonic=time.monotonic(),
+    )
+
+
+def _search_surface_proof_token_valid(
+    token: SearchSurfaceProofToken | None,
+    *,
+    pkg: str,
+) -> tuple[bool, str]:
+    if token is None:
+        return False, "token_absent"
+    if token.package != str(pkg or "").strip():
+        return False, "package_mismatch"
+    if token.account_scope != _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE:
+        return False, "account_scope_changed"
+    if (
+        not token.activity
+        or token.activity_family != _activity_family(token.activity)
+        or token.activity_family not in {"MainActivity", "InstagramMainActivity"}
+    ):
+        return False, "activity_mismatch"
+    if token.search_context_generation != _FOLLOW_CT_SEARCH_CONTEXT_GENERATION:
+        return False, "search_context_generation_changed"
+    if token.navigation_generation != _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION:
+        return False, "navigation_generation_changed"
+    if (
+        token.surface_generation <= 0
+        or token.surface_generation != _FOLLOW_CT_SEARCH_SURFACE_GENERATION
+    ):
+        return False, "search_surface_generation_invalid"
+    if token.surface_generation == _FOLLOW_CT_SEARCH_SURFACE_PROOF_CONSUMED_GENERATION:
+        return False, "token_already_consumed"
+    age_ms = (time.monotonic() - token.observed_at_monotonic) * 1000.0
+    if age_ms < 0.0 or age_ms > 1_250.0:
+        return False, "token_stale"
+    return True, "ok"
+
+
+def _mark_search_surface_ok(
+    d: u2.Device,
+    pkg: str,
+    *,
+    proof_token: SearchSurfaceProofToken | None = None,
+) -> None:
     global _LAST_SEARCH_SURFACE_TS, _LAST_SEARCH_SURFACE_OK
     global _LAST_SEARCH_SURFACE_PKG, _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY
+    global _FOLLOW_CT_SEARCH_SURFACE_PROOF_CONSUMED_GENERATION
+    token_ok, token_reason = _search_surface_proof_token_valid(proof_token, pkg=pkg)
+    if token_ok and proof_token is not None:
+        _LAST_SEARCH_SURFACE_OK = True
+        _LAST_SEARCH_SURFACE_TS = time.time()
+        _LAST_SEARCH_SURFACE_PKG = pkg
+        _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY = proof_token.activity_family
+        _FOLLOW_CT_SEARCH_SURFACE_PROOF_CONSUMED_GENERATION = proof_token.surface_generation
+        try:
+            log(
+                "info",
+                "follow_ct_search_surface_proof_token_reused",
+                package=pkg,
+                activity_family=proof_token.activity_family,
+                navigation_generation=proof_token.navigation_generation,
+                surface_generation=proof_token.surface_generation,
+                proof_age_ms=round(
+                    (time.monotonic() - proof_token.observed_at_monotonic) * 1000.0,
+                    2,
+                ),
+                redundant_app_current_removed=True,
+            )
+        except Exception:
+            pass
+        return
+    if proof_token is not None:
+        try:
+            log(
+                "info",
+                "follow_ct_search_surface_proof_token_fallback",
+                package=pkg,
+                reason=token_reason,
+            )
+        except Exception:
+            pass
     try:
         cur = d.app_current()
         _LAST_SEARCH_SURFACE_OK = True
@@ -713,6 +881,11 @@ def _collect_raw_row_search_elements(
         if isinstance(trace_context, dict)
         else ""
     ) or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
+    row_text_by_element = (
+        trace_context.setdefault("row_text_by_element", {})
+        if isinstance(trace_context, dict)
+        else {}
+    )
 
     def _selector_trace_enabled() -> bool:
         return isinstance(trace_context, dict) and bool(trace_context.get("follow_ct"))
@@ -721,7 +894,9 @@ def _collect_raw_row_search_elements(
         if not target:
             return False
         try:
-            return _normalize_handle(str(el.get_text() or "")) == target
+            txt = str(el.get_text() or "")
+            row_text_by_element[id(el)] = txt
+            return _normalize_handle(txt) == target
         except Exception:
             return False
 
@@ -976,28 +1151,162 @@ def _collect_raw_row_search_elements(
     return raw
 
 
+_EXACT_SEARCH_ROW_ALLOWED_CLASSES = frozenset({"android.widget.TextView"})
+
+
+def _build_exact_search_row_proof(
+    d: u2.Device,
+    text_el: object,
+    username: str,
+    *,
+    row_text: str,
+    resource_id_hint: str,
+    trace_context: dict[str, Any] | None,
+) -> ExactSearchRowProof | None:
+    """Capture fields already needed by the legacy evaluator, exactly once."""
+    if not isinstance(trace_context, dict) or not bool(trace_context.get("follow_ct")):
+        return None
+    target = _normalize_handle(username)
+    if not target or _normalize_handle(row_text) != target:
+        return None
+    expected_package = str(trace_context.get("expected_package") or "").strip()
+    if not expected_package:
+        return None
+    try:
+        info = dict(text_el.info or {})
+        bounds_raw = dict(info.get("bounds") or {})
+        bounds = tuple(
+            int(bounds_raw[key]) for key in ("left", "top", "right", "bottom")
+        )
+        resource_id = str(
+            info.get("resourceName")
+            or info.get("resourceId")
+            or resource_id_hint
+            or ""
+        ).strip()
+        element_class = str(info.get("className") or info.get("class") or "").strip()
+        width, height = d.window_size()
+    except Exception:
+        return None
+    resource_package = resource_id.split(":id/", 1)[0] if ":id/" in resource_id else ""
+    if (
+        not _is_exact_row_search_resource_id(resource_id)
+        or resource_package != expected_package
+        or element_class not in _EXACT_SEARCH_ROW_ALLOWED_CLASSES
+    ):
+        return None
+    left, top, right, bottom = bounds
+    if not (0 <= left < right <= int(width) and 0 <= top < bottom <= int(height)):
+        return None
+    return ExactSearchRowProof(
+        normalized_username=target,
+        row_text=str(row_text),
+        bounds=(left, top, right, bottom),
+        screen_size=(int(width), int(height)),
+        resource_id=resource_id,
+        element_class=element_class,
+        expected_package=expected_package,
+        account_scope=_FOLLOW_CT_SEARCH_ACCOUNT_SCOPE,
+        hierarchy_generation=int(trace_context.get("hierarchy_generation") or 0),
+        navigation_generation=int(trace_context.get("navigation_generation") or 0),
+        search_surface_generation=int(trace_context.get("search_surface_generation") or 0),
+        search_context_generation=int(trace_context.get("search_context_generation") or 0),
+        observed_at_monotonic=time.monotonic(),
+    )
+
+
+def _exact_search_row_proof_valid(
+    proof: ExactSearchRowProof | None,
+    *,
+    username: str,
+    expected_package: str,
+) -> tuple[bool, str]:
+    if proof is None:
+        return False, "proof_absent"
+    target = _normalize_handle(username)
+    if proof.normalized_username != target or _normalize_handle(proof.row_text) != target:
+        return False, "exact_username_mismatch"
+    if proof.expected_package != str(expected_package or "").strip():
+        return False, "expected_package_mismatch"
+    if proof.account_scope != _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE:
+        return False, "account_scope_changed"
+    resource_package = (
+        proof.resource_id.split(":id/", 1)[0]
+        if ":id/" in proof.resource_id
+        else ""
+    )
+    if resource_package != proof.expected_package:
+        return False, "resource_ownership_mismatch"
+    if (
+        not _is_exact_row_search_resource_id(proof.resource_id)
+        or proof.element_class not in _EXACT_SEARCH_ROW_ALLOWED_CLASSES
+    ):
+        return False, "resource_or_class_mismatch"
+    if proof.search_context_generation != _FOLLOW_CT_SEARCH_CONTEXT_GENERATION:
+        return False, "search_context_generation_changed"
+    if proof.navigation_generation != _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION:
+        return False, "navigation_generation_changed"
+    if proof.search_surface_generation != _FOLLOW_CT_SEARCH_SURFACE_GENERATION:
+        return False, "search_surface_generation_changed"
+    if proof.hierarchy_generation != _FOLLOW_CT_SEARCH_HIERARCHY_GENERATION:
+        return False, "hierarchy_generation_changed"
+    if (
+        proof.search_context_generation <= 0
+        or proof.navigation_generation <= 0
+        or proof.search_surface_generation <= 0
+        or proof.hierarchy_generation <= 0
+    ):
+        return False, "proof_generation_invalid"
+    age_ms = (time.monotonic() - proof.observed_at_monotonic) * 1000.0
+    if age_ms < 0.0 or age_ms > 1_250.0:
+        return False, "proof_stale"
+    width, height = proof.screen_size
+    left, top, right, bottom = proof.bounds
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        return False, "bounds_invalid"
+    return True, "ok"
+
+
 def find_first_row_search_username_hot(
     d: u2.Device,
     username: str,
     *,
     trace_context: dict[str, Any] | None = None,
+    return_exact_proof: bool = False,
 ):
     """
     First exact-normalized match on resource-id row_search_user_username only.
     No avatar/parent/XPath/XML/ranking.
     """
     target = _normalize_handle(username)
-    for el, _rid_hint in _collect_raw_row_search_elements(
+    for el, rid_hint in _collect_raw_row_search_elements(
         d,
         trace_context=trace_context,
     ):
         try:
-            txt = el.get_text() or ""
+            observed = (
+                trace_context.get("row_text_by_element", {})
+                if isinstance(trace_context, dict)
+                else {}
+            )
+            txt = observed.get(id(el))
+            if txt is None:
+                txt = el.get_text() or ""
             if _normalize_handle(txt) == target:
+                if return_exact_proof:
+                    proof = _build_exact_search_row_proof(
+                        d,
+                        el,
+                        username,
+                        row_text=str(txt),
+                        resource_id_hint=rid_hint,
+                        trace_context=trace_context,
+                    )
+                    return el, proof
                 return el
         except Exception:
             continue
-    return None
+    return (None, None) if return_exact_proof else None
 
 
 def find_username_elements_by_resource_id(
@@ -1519,28 +1828,54 @@ def evaluate_row_search_username_element(
     mixed_results: bool,
     follow_ct_search_context: bool = False,
     resource_id_hint: str = "",
+    exact_row_proof: ExactSearchRowProof | None = None,
 ) -> dict:
     """
     row_search_user_username resource id: account SERP row; accept without avatar.
     No top_suggestion_row / layout_username_x / recent-without-avatar rejections.
     """
-    w, h = d.window_size()
     target = _normalize_handle(username)
-    try:
-        txt = text_el.get_text()
-        tb = {k: int(text_el.info["bounds"][k]) for k in ("left", "top", "right", "bottom")}
-    except Exception:
-        return {
-            "accept": False,
-            "reason": "bad_element",
-            "el": text_el,
-            "bounds": {},
-            "center_y": 0,
-            "has_avatar": False,
-            "has_remove_button": False,
-            "avatar_area": 0,
-            "from_resource_id": True,
-        }
+    proof_ok, proof_reason = _exact_search_row_proof_valid(
+        exact_row_proof,
+        username=username,
+        expected_package=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+    )
+    if proof_ok and exact_row_proof is not None:
+        w, h = exact_row_proof.screen_size
+        txt = exact_row_proof.row_text
+        left, top, right, bottom = exact_row_proof.bounds
+        tb = {"left": left, "top": top, "right": right, "bottom": bottom}
+    else:
+        if exact_row_proof is not None:
+            try:
+                log(
+                    "info",
+                    "follow_ct_exact_search_row_proof_fallback",
+                    username=username,
+                    reason=proof_reason,
+                )
+            except Exception:
+                pass
+        try:
+            w, h = d.window_size()
+            txt = text_el.get_text()
+            info = text_el.info
+            tb = {
+                k: int(info["bounds"][k])
+                for k in ("left", "top", "right", "bottom")
+            }
+        except Exception:
+            return {
+                "accept": False,
+                "reason": "bad_element",
+                "el": text_el,
+                "bounds": {},
+                "center_y": 0,
+                "has_avatar": False,
+                "has_remove_button": False,
+                "avatar_area": 0,
+                "from_resource_id": True,
+            }
 
     cy = (tb["top"] + tb["bottom"]) // 2
     if _normalize_handle(txt) != target:
@@ -1566,7 +1901,11 @@ def evaluate_row_search_username_element(
         and mixed_results
         and _is_exact_row_search_resource_id(rid_hint)
     ):
-        element_rid = _element_resource_name(text_el)
+        element_rid = (
+            exact_row_proof.resource_id
+            if proof_ok and exact_row_proof is not None
+            else _element_resource_name(text_el)
+        )
         effective_rid = element_rid or rid_hint
         if rid_hint and not element_rid:
             try:
@@ -1671,7 +2010,11 @@ def evaluate_row_search_username_element(
 
     tab_b, posts_t, hh = _serp_y_band(d)
     search_bottom = _chrome_bottom_y(d, hh, tab_b)
-    element_rid = _element_resource_name(text_el)
+    element_rid = (
+        exact_row_proof.resource_id
+        if proof_ok and exact_row_proof is not None
+        else _element_resource_name(text_el)
+    )
     effective_rid = element_rid or rid_hint
     if rid_hint and not element_rid and _is_exact_row_search_resource_id(rid_hint):
         try:
@@ -2497,6 +2840,8 @@ def open_search(
     )
     clicked, click_name = _click_search_tab_in_open_search(d)
     if clicked and click_name:
+        if is_follow_ct_search_context_active():
+            _advance_follow_ct_search_navigation_generation()
         log("info", "open_search_clicked", selector=click_name, caller_context=ctx or None)
 
     if not clicked:
@@ -2527,6 +2872,8 @@ def open_search(
             y_ratio=0.94,
         )
         d.click(int(w * 0.72), int(h * 0.94))
+        if is_follow_ct_search_context_active():
+            _advance_follow_ct_search_navigation_generation()
         click_name = "percent_fallback"
         _perf["recovery_used"] = True
         log(
@@ -2604,13 +2951,19 @@ def open_search(
     t_strict = time.perf_counter()
     strict_ok = False
     strict_why = ""
+    search_surface_proof: dict[str, Any] = {}
     search_tab_rid_click = bool(
         clicked
         and click_name
         and str(click_name) != "percent_fallback"
     )
     if is_follow_ct_search_context_active() and search_tab_rid_click:
-        strict_ok, strict_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg)
+        strict_ok, strict_why = _follow_ct_trusted_type_search_surface_ok(
+            d,
+            ed,
+            pkg=pkg,
+            proof_out=search_surface_proof,
+        )
         trusted_verify_ms = (time.perf_counter() - t_strict) * 1000
         log(
             "info",
@@ -2624,7 +2977,11 @@ def open_search(
         if not strict_ok:
             t_fb = time.perf_counter()
             strict_ok, strict_why = instagram_search_surface_strict_ok(
-                d, ed, pkg=pkg, source_profile_username=src_user
+                d,
+                ed,
+                pkg=pkg,
+                source_profile_username=src_user,
+                proof_out=search_surface_proof,
             )
             fallback_verify_ms = (time.perf_counter() - t_fb) * 1000
             log(
@@ -2639,7 +2996,11 @@ def open_search(
             )
     else:
         strict_ok, strict_why = instagram_search_surface_strict_ok(
-            d, ed, pkg=pkg, source_profile_username=src_user
+            d,
+            ed,
+            pkg=pkg,
+            source_profile_username=src_user,
+            proof_out=search_surface_proof,
         )
         log(
             "info",
@@ -2685,7 +3046,11 @@ def open_search(
             search_click_ms=round(search_click_ms, 2),
             search_field_ready_ms=round(search_field_ready_ms, 2),
         )
-        _mark_search_surface_ok(d, pkg)
+        _mark_search_surface_ok(
+            d,
+            pkg,
+            proof_token=search_surface_proof.get("token"),
+        )
         if is_follow_ct_search_context_active():
             mark_follow_ct_open_search_strict_verified()
         return True
@@ -3230,6 +3595,7 @@ def instagram_search_surface_strict_ok(
     *,
     pkg: str | None = None,
     source_profile_username: str = "",
+    proof_out: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     True only when Instagram is foreground, the focused search EditText is from IG,
@@ -3237,7 +3603,11 @@ def instagram_search_surface_strict_ok(
     Rejects Followers-list local search bars (DM sender / global search must not reuse them).
     """
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
-    fg = _current_foreground_package(d)
+    try:
+        current = dict(d.app_current() or {})
+    except Exception:
+        current = {}
+    fg = str(current.get("package") or "").strip()
     if fg != pkg:
         return False, f"foreground_package_mismatch:{fg}"
     ed_pkg = _edittext_package_name(ed)
@@ -3255,6 +3625,8 @@ def instagram_search_surface_strict_ok(
     txt = _search_edittext_text_strip(ed)
     if _visible_text_suggests_android_launcher_search(txt):
         return False, "launcher_search_hint_in_field"
+    if isinstance(proof_out, dict):
+        proof_out["token"] = _build_search_surface_proof_token(current, pkg=pkg)
     return True, "ok"
 
 
@@ -3263,13 +3635,18 @@ def _follow_ct_trusted_type_search_surface_ok(
     ed,
     *,
     pkg: str | None = None,
+    proof_out: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Follow CT: minimal rails when ensure_global/open_search already proved global Search.
     Skips duplicate get_text launcher probe (deferred to first mismatch recovery).
     """
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
-    fg = _current_foreground_package(d)
+    try:
+        current = dict(d.app_current() or {})
+    except Exception:
+        current = {}
+    fg = str(current.get("package") or "").strip()
     if fg != pkg:
         return False, f"foreground_package_mismatch:{fg}"
     ed_pkg = _edittext_package_name(ed)
@@ -3277,6 +3654,8 @@ def _follow_ct_trusted_type_search_surface_ok(
         return False, f"edittext_package_mismatch:{ed_pkg}"
     if is_followers_list_surface_quick(d):
         return False, "followers_list_local_search_surface"
+    if isinstance(proof_out, dict):
+        proof_out["token"] = _build_search_surface_proof_token(current, pkg=pkg)
     return True, "ok"
 
 
@@ -4218,6 +4597,8 @@ def type_search(
             typing_confirm_ms=0.0,
             follow_ct_typing=bool(follow_ct_typing),
         )
+        if follow_ct_typing:
+            _advance_follow_ct_search_navigation_generation("query_submitted")
         _follow_ct_prewarm_serp_band_cache(d)
         return True
 
@@ -4264,6 +4645,7 @@ def type_search(
             typing_confirm_ms=0.0,
             follow_ct_typing=bool(follow_ct_typing),
         )
+        _advance_follow_ct_search_navigation_generation("query_submitted")
         _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
         _follow_ct_prewarm_serp_band_cache(d)
         return True
@@ -4324,6 +4706,8 @@ def type_search(
         st_log["fast_ime_broadcast_ok"] = bool(fast_ime_broadcast_ok)
     log("info", "search_typed", **st_log)
     if ok:
+        if follow_ct_typing:
+            _advance_follow_ct_search_navigation_generation("query_submitted")
         _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
         if follow_ct_typing:
             _follow_ct_prewarm_serp_band_cache(d)
@@ -4786,6 +5170,7 @@ def tap_account_result(
         )
     row_detect_trace_state: dict[str, Any] = {"first_raw_seen": False}
     row_detect_poll_index = 0
+    selected_exact_row_proof: ExactSearchRowProof | None = None
     try:
         log(
             "info",
@@ -4809,6 +5194,11 @@ def tap_account_result(
     ) -> tuple[int, float, dict[str, Any]]:
         nonlocal row_detect_poll_index
         row_detect_poll_index += 1
+        hierarchy_generation = (
+            _advance_follow_ct_search_hierarchy_generation()
+            if follow_ct_active
+            else _FOLLOW_CT_SEARCH_HIERARCHY_GENERATION
+        )
         poll_started = time.perf_counter()
         trace_context = {
             "username": username,
@@ -4820,6 +5210,10 @@ def tap_account_result(
             "trace_state": row_detect_trace_state,
             "candidate_count": 0,
             "exact_match_found": False,
+            "hierarchy_generation": hierarchy_generation,
+            "navigation_generation": _FOLLOW_CT_SEARCH_NAVIGATION_GENERATION,
+            "search_surface_generation": _FOLLOW_CT_SEARCH_SURFACE_GENERATION,
+            "search_context_generation": _FOLLOW_CT_SEARCH_CONTEXT_GENERATION,
         }
         if follow_ct_active:
             try:
@@ -4888,12 +5282,14 @@ def tap_account_result(
         )
 
     def scan_once_hot(trace_context: dict[str, Any] | None = None):
+        nonlocal selected_exact_row_proof
         if not (follow_ct_active or outreach_active):
             return None
-        hot = find_first_row_search_username_hot(
+        hot, proof = find_first_row_search_username_hot(
             d,
             username,
             trace_context=trace_context,
+            return_exact_proof=True,
         )
         if hot is None:
             return None
@@ -4915,8 +5311,10 @@ def tap_account_result(
             mixed_results=True,
             follow_ct_search_context=True,
             resource_id_hint=ROW_SEARCH_USERNAME_EXACT_RES,
+            exact_row_proof=proof,
         )
         if ev_hot.get("accept"):
+            selected_exact_row_proof = proof
             return hot
         return None
 
@@ -5075,11 +5473,7 @@ def tap_account_result(
                 poll_source="fused_hot_row",
                 fast_accept=False,
             )
-            hot_probe = find_first_row_search_username_hot(
-                d,
-                username,
-                trace_context=trace_context,
-            )
+            hot_probe = scan_once_hot(trace_context=trace_context)
             _complete_ct_row_detect_poll(
                 poll_index=poll_index,
                 poll_started=poll_started,
@@ -5279,6 +5673,49 @@ def tap_account_result(
             cx = (b["left"] + b["right"]) // 2
             cy = (b["top"] + b["bottom"]) // 2
             tap_mode = "unfollow_direct_preverified_exact_bounds"
+        else:
+            exact_proof_ok, exact_proof_reason = _exact_search_row_proof_valid(
+                selected_exact_row_proof,
+                username=username,
+                expected_package=str(config.INSTAGRAM_PACKAGE or ""),
+            )
+            if exact_proof_ok and selected_exact_row_proof is not None:
+                left, top, right, bottom = selected_exact_row_proof.bounds
+                b = {"left": left, "top": top, "right": right, "bottom": bottom}
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+                tap_mode = "follow_ct_immutable_exact_row_proof"
+                try:
+                    log(
+                        "info",
+                        "follow_ct_immutable_exact_row_proof_tap_used",
+                        username=username,
+                        bounds=b,
+                        hierarchy_generation=selected_exact_row_proof.hierarchy_generation,
+                        navigation_generation=selected_exact_row_proof.navigation_generation,
+                        search_surface_generation=(
+                            selected_exact_row_proof.search_surface_generation
+                        ),
+                        duplicate_element_reads_removed=True,
+                    )
+                except Exception:
+                    pass
+            elif selected_exact_row_proof is not None:
+                try:
+                    log(
+                        "info",
+                        "follow_ct_immutable_exact_row_proof_tap_fallback",
+                        username=username,
+                        reason=exact_proof_reason,
+                    )
+                except Exception:
+                    pass
+                selected_exact_row_proof = None
+
+        if preverified_exact_used:
+            pass
+        elif selected_exact_row_proof is not None:
+            pass
         elif hot_el_found:
             cx, cy, b = _tap_hot_username_center_jitter(d, el)
             tap_mode = "hot_center_jitter"

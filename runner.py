@@ -9153,7 +9153,7 @@ def fast_rotate_to_next_target_from_followers(
             fallback_used=False,
         )
 
-    enter_follow_ct_search_context()
+    enter_follow_ct_search_context(account_scope=account_id)
     try:
         _log_fast_target_rotation(
             "follow_target_switcher_type_next_target_started",
@@ -11928,7 +11928,7 @@ def _reenter_ct_followers_list_after_canonical_reset(
     so the followers engine can continue in the same process.
     """
     pkg = config.INSTAGRAM_PACKAGE
-    enter_follow_ct_search_context()
+    enter_follow_ct_search_context(account_scope=account_id)
     try:
         gsurf = ensure_global_search_surface(
             d,
@@ -13689,7 +13689,7 @@ def _run_followers_list_engine_session(
                 },
             )
     else:
-        enter_follow_ct_search_context()
+        enter_follow_ct_search_context(account_scope=account_id)
         try:
             gsurf = ensure_global_search_surface(
                 d,
