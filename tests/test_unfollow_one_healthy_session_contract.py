@@ -132,8 +132,8 @@ class UnfollowOneHealthySessionContractTests(unittest.TestCase):
         terminal = source.split(
             'if classification == "username_not_found_confirmed":', 1
         )[1].split("direct_search_retryable_failures += 1", 1)[0]
-        self.assertIn("record_unfollow_candidate_not_found", terminal)
-        self.assertIn("max_attempts=2", terminal)
+        self.assertIn("record_unfollow_candidate_availability_v2", terminal)
+        self.assertIn("classification=classification", terminal)
         self.assertIn("terminal_not_found", terminal)
         self.assertIn("mark_candidate_unavailable", terminal)
         self.assertIn("backlog_actionable=False", terminal)

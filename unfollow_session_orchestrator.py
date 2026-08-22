@@ -2583,13 +2583,13 @@ def _run_real_unfollow_multi_loop(
                     if classification == "username_not_found_confirmed":
                         try:
                             availability_state = (
-                                supabase_client.record_unfollow_candidate_not_found(
+                                supabase_client.record_unfollow_candidate_availability_v2(
                                     aid,
                                     target_key,
                                     source_run_id=run_id,
+                                    classification=classification,
                                     reason=stable_failure_reason,
-                                    cooldown_hours=24,
-                                    max_attempts=2,
+                                    technical_cooldown_minutes=30,
                                 )
                             )
                         except Exception as exc:

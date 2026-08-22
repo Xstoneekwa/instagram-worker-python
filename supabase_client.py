@@ -4212,7 +4212,7 @@ def record_unfollow_candidate_availability_v2(
     reason: str,
     technical_cooldown_minutes: int = 30,
 ) -> dict[str, Any]:
-    """Persist a terminal exact absence or a retryable technical hold."""
+    """Persist staged healthy-absence evidence or a retryable technical hold."""
 
     aid = str(account_id or "").strip()
     username = _canonical_interaction_username(normalized_username)

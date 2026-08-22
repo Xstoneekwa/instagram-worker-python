@@ -109,14 +109,15 @@ class UnfollowCandidateAvailabilityTests(unittest.TestCase):
         self.assertNotIn("unfollowed", rpc.call_args.args[1])
         self.assertNotIn("success", rpc.call_args.args[1])
 
-    def test_v2_confirmed_not_found_is_terminal_classification(self) -> None:
+    def test_v2_confirmed_not_found_is_staged_as_retryable_first_proof(self) -> None:
         with patch.object(
             supabase_client,
             "_call_rpc",
             return_value={
                 "ok": True,
-                "status": "username_not_found_confirmed",
-                "terminal_at": "2026-07-29T18:00:00Z",
+                "status": "temporary_unavailable",
+                "not_found_attempt_count": 1,
+                "next_retry_at": "2026-07-30T18:00:00Z",
             },
         ) as rpc:
             out = supabase_client.record_unfollow_candidate_availability_v2(
@@ -126,7 +127,7 @@ class UnfollowCandidateAvailabilityTests(unittest.TestCase):
                 classification="username_not_found_confirmed",
                 reason="username_not_found_confirmed",
             )
-        self.assertEqual(out["status"], "username_not_found_confirmed")
+        self.assertEqual(out["status"], "temporary_unavailable")
         self.assertEqual(
             rpc.call_args.args[0],
             "record_unfollow_candidate_availability_v2",
