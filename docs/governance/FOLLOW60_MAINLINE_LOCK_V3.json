@@ -1,11 +1,11 @@
 {
   "approval": {
-    "base_sha": "9c66b7f1f9dcc64a52514d3fd0b2fed0e8deac00",
-    "change_id": "follow60-exit97-authoritative-handoff-v1-20260822",
-    "diff_sha256": "22bf69365c8f2b0d6c26b9e01e33ae35e59568613f4037adf416702aef1288fc",
-    "expires_at": "2026-08-22T01:48:59+00:00",
-    "head_sha": "25e0be5fd666314bd3e7e810ec52698f49ca1123",
-    "request_sha256": "ac01a93ea59e2a710c938d751ff7d4fc3c925aabe2445125aed5580f2dfab1d1",
+    "base_sha": "2a027854c43874490f949abf199920b9beee0553",
+    "change_id": "ct-resume-cplus-residual-optimization-v1-20260822",
+    "diff_sha256": "474cd9bb6a462cfd99b91387be4c7784ceed19188e081aef1abcd611d8a6a85e",
+    "expires_at": "2026-08-22T13:35:35.528120+00:00",
+    "head_sha": "a847c6024a9cd948fef1f91f93bed415b1de35f8",
+    "request_sha256": "59d79c9c0ee869384fa9f33f7bc86a99c347a60743f0b0375e4361071ffafba2",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -543,6 +543,22 @@
       ],
       "head_sha": "25e0be5fd666314bd3e7e810ec52698f49ca1123",
       "requested_scope": "exit97_authoritative_immutable_handoff,exact_scope_binding,legacy_merge_suppression,stale_follow_outcome_elimination",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "2a027854c43874490f949abf199920b9beee0553",
+      "change_id": "ct-resume-cplus-residual-optimization-v1-20260822",
+      "consumed_at": "2026-08-22T10:41:50.260224+00:00",
+      "diff_sha256": "474cd9bb6a462cfd99b91387be4c7784ceed19188e081aef1abcd611d8a6a85e",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "instagram_navigation.py",
+        "runner.py",
+        "tests/test_ct_resume_cplus_residual_optimization_v1.py"
+      ],
+      "head_sha": "a847c6024a9cd948fef1f91f93bed415b1de35f8",
+      "requested_scope": "ct_resume_cplus_residual_optimization;generation_scoped_exact_search_row_proof;single_use_search_surface_token;option_c_not_implemented",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1775,13 +1791,13 @@
       "size": 44882
     },
     "instagram_navigation.py": {
-      "git_blob_oid": "1cdb5ca7a9710df128af11797a351e56093658fa",
+      "git_blob_oid": "f3c237132b98124e0bd6a03310f7d8f1f8cee8d9",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_navigation.py",
       "role": "followers_navigation",
-      "sha256": "fd070c1b9bfe8f829e28b218f515adf5f95b310ded01df376854e45cac80636e",
-      "size": 2474238
+      "sha256": "2eed76538cd213b1bc0f61c3031feab06791fa61458f608fc0eba6d9c601c167",
+      "size": 2491298
     },
     "instagram_post_verification_completion.py": {
       "git_blob_oid": "b59dd42cc086b502578ac02cb1e6c281b4b9cd18",
@@ -1892,13 +1908,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "e64e88a720351c29f1926fe8a771873837b2f360",
+      "git_blob_oid": "c3613ceecbd40c097bc42b4b7f4cbc2e84d40f56",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "831a828eded73717657d7b4ef5a926f6bff3478aefefd942a11b18593b8831c1",
-      "size": 1274145
+      "sha256": "557e13cce5abd3de7681d9be281408fbbed27d67a96e0647192b357dc7b616c8",
+      "size": 1274217
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2441,7 +2457,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "256017caeef6716c1509c2b2c7065bc20947ab8dc13622fd164ba303a744d881",
+  "protected_scope_sha256": "88caf37d9004da74ee924bc03c9919dd545a483d2689719c876568c7ed44657f",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
