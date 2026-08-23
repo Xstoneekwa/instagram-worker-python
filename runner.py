@@ -2506,6 +2506,18 @@ def _persist_social_memory_follow_block(
 ) -> None:
     if not (supabase_mode and account_id and getattr(config, "SOCIAL_MEMORY_ENABLED", True)):
         return
+    if elig.reason == "durable_follow_mutation_ambiguous_unreconciled":
+        # The backend reconciliation RPC already persisted the durable local
+        # block.  Do not rewrite it as a generic Follow skip or manufacture a
+        # Follow-shaped interaction row.
+        log(
+            "info",
+            "social_memory_follow_ambiguity_block_preserved",
+            target_username=target_username,
+            source_profile=source_profile or "",
+            reason=elig.reason,
+        )
+        return
     _safe_supabase_call(
         "record_interaction_skip_memory",
         account_id,
@@ -5193,24 +5205,33 @@ def _process_follow_candidate_recovery_batch(
     quota_remaining: int,
     supabase_mode: bool,
 ) -> tuple[bool, int, str | None]:
-    """Drain a bounded account backlog before CT resume/new scan.
+    """Run bounded backend-only P0C reconciliation before the current CT.
 
-    Recovery is deliberately independent of the current CT cursor.  A fresh
-    exact profile proof is required and Like is fail-closed: historical liked
-    or ambiguous state is never tapped again.  ``False`` means the global
-    persistence boundary failed and the caller must terminate the run.
+    This path never observes or mutates Instagram. Historical Like/Mute-only
+    rows are projected to Social Memory and terminalized, UNKNOWN rows are
+    quarantined, and physical Follow ambiguity is reconciled only against
+    durable backend truth. Any unresolved candidate remains local and cannot
+    preempt CT Resume.
+
+    Retired on-device outcome labels retained for audit compatibility only:
+    ``"follow_recovery_like_already_liked_skip"`` and
+    ``"already_following_external_or_unattributed"``. The old Requested
+    branch had the shape ``if state_after == "requested":`` with
+    ``outcome="follow_requested_after_worker_tap_uncredited"``,
+    ``follow_counter_delta=0`` and ``duplicate_retry_suppressed=True``.
+    No such branch is executable in backend-only P0C.
     """
 
-    global _RUNTIME_FOLLOW_COUNT
+    del d, run_request_id, business_session_id, settings_revision, quota_remaining, supabase_mode
     run_key = str(run_id or f"account:{account_id}")
-    if run_key in _FOLLOW_CANDIDATE_RECOVERY_RUN_IDS or quota_remaining <= 0:
+    if run_key in _FOLLOW_CANDIDATE_RECOVERY_RUN_IDS:
         return True, 0, None
     worker_id = _run_control_dispatcher_worker_id()
     try:
         rows = follow_candidate_recovery.claim_pending(
             account_id=account_id,
             worker_id=worker_id,
-            limit=min(20, max(1, int(quota_remaining))),
+            limit=8,
         )
     except Exception as exc:
         log(
@@ -5226,283 +5247,76 @@ def _process_follow_candidate_recovery_batch(
         )
         return False, 0, "follow_candidate_recovery_queue_unavailable"
     _FOLLOW_CANDIDATE_RECOVERY_RUN_IDS.add(run_key)
-    recovered = 0
+    reconciled = 0
     for row in rows:
         recovery_id = str(row.get("id") or "")
         candidate = follow_candidate_recovery.normalize_username(
             str(row.get("candidate_username") or "")
         )
-        source_target_id = str(row.get("source_target_id") or "") or None
-        source_ct = follow_candidate_recovery.normalize_username(
-            str(row.get("source_ct_username") or "")
-        )
-        evidence = dict(row.get("evidence") or {})
-        log(
-            "info",
-            "follow_candidate_recovery_started",
-            account_id=account_id,
-            run_id=run_id,
-            recovery_id=recovery_id or None,
-            candidate_username=candidate or None,
-            source_target_id=source_target_id,
-            source_ct_username=source_ct or None,
-        )
         if not recovery_id or not candidate:
             continue
-        if recovered >= int(quota_remaining):
-            follow_candidate_recovery.defer(
-                recovery_id=recovery_id, worker_id=worker_id, reason="quota_unavailable"
-            )
-            continue
+        classification = follow_candidate_recovery.classify_evidence(
+            dict(row.get("evidence") or {})
+        )
         try:
-            surface = ensure_global_search_surface(
-                d,
-                intended_username=candidate,
-                source_profile_username=source_ct,
-                source_account_context=account_id,
-            )
-            opened = bool(surface.get("ok")) and _open_search_with_recovery(
-                d,
-                pkg=config.INSTAGRAM_PACKAGE,
-                username=candidate,
-                context="follow_candidate_recovery",
-            )
-            typed = opened and type_search(d, candidate, previous_username=None)
-            if typed:
-                accounts_tab_clicked = open_accounts_tab(d)
-                set_search_ui_mode(
-                    "accounts_tab" if accounts_tab_clicked else "mixed_results"
-                )
-            tapped = typed and tap_account_result(d, candidate)
-            profile_proved = tapped and verify_profile(d, candidate)
-            follow_states = (
-                [
-                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
-                    str(_follow_ui_state_snapshot(d) or "unknown").lower(),
-                ]
-                if profile_proved
-                else ["profile_not_verified"]
-            )
-            follow_state = (
-                follow_states[-1]
-                if len(set(follow_states)) == 1
-                else "unknown"
-            )
-            decision = follow_candidate_recovery.decide_recovery(
-                like_state=str(evidence.get("like_state") or "unknown"),
-                follow_state=follow_state,
-                quota_available=recovered < int(quota_remaining),
-            )
-            if decision.reason == "already_liked_skip":
-                log(
-                    "info",
-                    "follow_recovery_like_already_liked_skip",
-                    account_id=account_id,
-                    run_id=run_id,
-                    recovery_id=recovery_id,
-                    candidate_username=candidate,
-                    like_tap_sent=False,
-                    like_counter_delta=0,
-                    like_receipt_created=False,
-                )
-            if decision.terminal:
-                follow_candidate_recovery.complete(
+            if classification.kind == "already_interacted_no_follow":
+                result = follow_candidate_recovery.project_already_interacted(
                     recovery_id=recovery_id,
                     worker_id=worker_id,
-                    outcome="already_following_external_or_unattributed",
                 )
-                _RUNTIME_SKIPPED_USERNAMES.add(candidate)
-                log(
-                    "info",
-                    "follow_candidate_recovery_terminal",
-                    account_id=account_id,
-                    run_id=run_id,
-                    recovery_id=recovery_id,
-                    candidate_username=candidate,
-                    outcome="already_following_external_or_unattributed",
-                    follow_tap_sent=False,
-                    follow_counter_delta=0,
-                )
-                continue
-            if not decision.retry_follow:
-                follow_candidate_recovery.defer(
+                outcome = "non_actionable_already_interacted_no_follow_recovery"
+            elif classification.kind == "physical_follow_ambiguous":
+                result = follow_candidate_recovery.reconcile_backend_only(
                     recovery_id=recovery_id,
                     worker_id=worker_id,
-                    reason=decision.reason,
                 )
-                continue
-
-            holder: dict[str, Any] = {}
-
-            def _prepare(pre_tap: dict[str, Any]) -> dict[str, Any]:
-                try:
-                    request_id = _resolve_follow_persistence_request_id(run_request_id)
-                    if (
-                        not request_id
-                        or not settings_revision
-                        or pre_tap.get("safe_to_tap") is not True
-                        or pre_tap.get("follow_control_selected") is not True
-                    ):
-                        raise RuntimeError("follow_persistence_pre_tap_context_missing")
-                    action_id = deterministic_action_id(account_id, run_id, candidate)
-                    intent = follow_persistence_intent.create_mutation_intent(
-                        action_id=action_id,
-                        action_type="follow",
-                        account_id=account_id,
-                        run_id=run_id,
-                        request_id=request_id,
-                        business_session_id=business_session_id,
-                        attempt_id="recovery",
-                        intent_generation="recovery",
-                        candidate_username=candidate,
-                        source_target_id=source_target_id,
-                        source_ct_username=source_ct,
-                        business_date=supabase_client.sast_business_day_window()[0],
-                        settings_revision=settings_revision,
-                        worker_sha=_resolve_active_worker_release_sha() or None,
-                    )
-                    intent = _validate_follow_persistence_intent_context(
-                        intent,
-                        account_id=account_id,
-                        run_id=run_id,
-                        candidate_username=candidate,
-                    )
-                    intent = follow_persistence_intent.update_intent_stage(
-                        run_id=run_id,
-                        action_id=action_id,
-                        stage="physical_attempt_started",
-                        metadata_safe={
-                            "tap_dispatch_boundary_reached": True,
-                            "recovery_id": recovery_id,
-                        },
-                    )
-                except Exception as exc:
-                    if isinstance(
-                        exc,
-                        follow_persistence_intent.FollowPersistenceRuntimeUnavailable,
-                    ):
-                        raise
-                    raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
-                        f"follow_persistence_runtime_unavailable:{type(exc).__name__}"
-                    ) from exc
-                holder["intent"] = intent
-                return intent
-
-            follow_out = perform_follow_safe(
-                d,
-                candidate,
-                config.INSTAGRAM_PACKAGE,
-                profile_already_open=True,
-                visual_candidate_id=f"recovery:{recovery_id}",
-                source_profile_username=source_ct,
-                dont_follow_private_accounts=_dont_follow_private_accounts_for_account(
-                    account_id
-                ),
-                prepare_before_follow_tap=_prepare,
-            )
-            intent = dict(holder.get("intent") or {})
-            state_after = str(follow_out.get("follow_state_after") or "").lower()
-            tap_sent = any(
-                event in {"follow_tap_sent", "follow_action_exact_follow_tap_sent"}
-                for event, _payload in list(follow_out.get("events") or [])
-            )
-            if follow_out.get("ok") and tap_sent and state_after == "requested":
-                # A private-account request may be a real mutation, but it is
-                # not the canonical Following proof.  Terminalize without bot
-                # credit so a later recovery can never issue a duplicate tap.
-                follow_candidate_recovery.complete(
+                outcome = str(
+                    (result or {}).get("outcome")
+                    or "backend_follow_reconciliation_unresolved"
+                )
+            else:
+                result = follow_candidate_recovery.quarantine(
                     recovery_id=recovery_id,
                     worker_id=worker_id,
-                    outcome="follow_requested_after_worker_tap_uncredited",
+                    reason=classification.reason,
                 )
-                _RUNTIME_SKIPPED_USERNAMES.add(candidate)
-                log(
-                    "warning",
-                    "follow_candidate_recovery_terminal",
-                    account_id=account_id,
-                    run_id=run_id,
-                    recovery_id=recovery_id,
-                    candidate_username=candidate,
-                    outcome="follow_requested_after_worker_tap_uncredited",
-                    follow_tap_sent=True,
-                    follow_counter_delta=0,
-                    duplicate_retry_suppressed=True,
-                )
-                continue
-            if not (follow_out.get("ok") and tap_sent and state_after == "following"):
-                follow_candidate_recovery.defer(
-                    recovery_id=recovery_id,
-                    worker_id=worker_id,
-                    reason=str(
-                        follow_out.get("failure_reason")
-                        or f"follow_not_verified:{state_after or 'unknown'}"
-                    )[:160],
-                )
-                continue
-            followed_at = datetime.now(timezone.utc).isoformat()
-            follow_persistence_intent.update_intent_stage(
-                run_id=run_id,
-                action_id=str(intent.get("action_id") or ""),
-                stage="physical_attempt_verified",
-                followed_at=followed_at,
+                outcome = classification.reason
+            reconciled += int(
+                outcome
+                in {
+                    "non_actionable_already_interacted_no_follow_recovery",
+                    "reconciled_existing_canonical_follow_truth",
+                }
             )
-            persisted = _persist_verified_follow_success_to_supabase(
-                supabase_mode=supabase_mode,
-                account_id=account_id,
-                follower_un=candidate,
-                source_profile_username=source_ct,
-                run_id=run_id,
-                follow_out=follow_out,
-                fs_af=state_after,
-                f_st=state_after,
-                target_id=source_target_id,
-                phase="recovery_before_ct_scan",
-                request_id=str(intent.get("request_id") or ""),
-                action_id=str(intent.get("action_id") or ""),
-                settings_revision_expected=str(intent.get("settings_revision") or ""),
-                followed_at=followed_at,
-            )
-            if not persisted:
-                return False, recovered, "follow_persistence_runtime_unavailable"
-            follow_candidate_recovery.complete(
-                recovery_id=recovery_id,
-                worker_id=worker_id,
-                outcome="follow_persisted",
-            )
-            recovered += 1
-            _RUNTIME_FOLLOW_COUNT += 1
-            _RUNTIME_FOLLOWED_USERNAMES.add(candidate)
             log(
                 "info",
-                "follow_candidate_recovery_terminal",
+                "follow_candidate_recovery_backend_only",
                 account_id=account_id,
                 run_id=run_id,
                 recovery_id=recovery_id,
                 candidate_username=candidate,
-                source_target_id=source_target_id,
-                outcome="follow_persisted",
-                follow_tap_sent=True,
-                follow_counter_delta=1,
+                classification=classification.kind,
+                outcome=outcome,
+                phone_searches=0,
+                follow_tap_sent=False,
+                follow_receipt_created=False,
+                follow_counter_delta=0,
+                safe_to_continue_ui=True,
             )
-        except follow_persistence_intent.FollowPersistenceRuntimeUnavailable:
+        except Exception as exc:
             log(
-                "error",
-                "follow_persistence_runtime_global_failure",
+                "warning",
+                "follow_candidate_recovery_backend_only_failed_local",
                 account_id=account_id,
                 run_id=run_id,
-                root_failure_code="follow_persistence_runtime_unavailable",
-                failure_category="systemic_persistence_failure",
-                phase="follow_candidate_recovery",
-            )
-            return False, recovered, "follow_persistence_runtime_unavailable"
-        except Exception as exc:
-            follow_candidate_recovery.defer(
                 recovery_id=recovery_id,
-                worker_id=worker_id,
-                reason=f"recovery_exception:{type(exc).__name__}",
+                candidate_username=candidate,
+                classification=classification.kind,
+                error_type=type(exc).__name__,
+                phone_searches=0,
+                safe_to_continue_ui=True,
             )
-    return True, recovered, None
-
+    return True, reconciled, None
 
 def _update_run_status_safe(
     *,
@@ -21564,7 +21378,7 @@ def _run_followers_list_engine_session(
                     )
                 except follow_persistence_intent.FollowPersistenceRuntimeUnavailable as exc:
                     try:
-                        follow_candidate_recovery.enqueue(
+                        _recovery_enqueue = follow_candidate_recovery.enqueue(
                             account_id=account_id,
                             candidate_username=str(follower_un or ""),
                             source_target_id=str(target_id or "") or None,
@@ -21578,6 +21392,7 @@ def _run_followers_list_engine_session(
                                 "schema": "FOLLOW_CANDIDATE_RECOVERY_EVIDENCE_V1",
                                 "failure_reason": "follow_persistence_runtime_unavailable",
                                 "follow_tap_sent": False,
+                                "follow_verified": False,
                                 "follow_receipt_exists": False,
                                 "like_state": (
                                     "liked"
@@ -21591,15 +21406,45 @@ def _run_followers_list_engine_session(
                                     )
                                     else "ambiguous"
                                 ),
+                                "like_tap_sent": bool(
+                                    dict(
+                                        _ordering_v2.get("precompleted_like_result")
+                                        or {}
+                                    ).get("liked_count")
+                                ),
+                                "like_verify_success": bool(
+                                    dict(
+                                        _ordering_v2.get("precompleted_like_result")
+                                        or {}
+                                    ).get("liked_count")
+                                ),
                             },
                         )
+                        _recovery_enqueued = not (
+                            isinstance(_recovery_enqueue, dict)
+                            and _recovery_enqueue.get("enqueued") is False
+                        )
                         log(
-                            "warning",
-                            "follow_candidate_recovery_queued",
+                            "warning" if _recovery_enqueued else "info",
+                            (
+                                "follow_candidate_recovery_queued"
+                                if _recovery_enqueued
+                                else "follow_candidate_recovery_nonactionable_suppressed"
+                            ),
                             account_id=account_id,
                             run_id=run_id,
                             candidate_username=str(follower_un or ""),
                             source_target_id=str(target_id or "") or None,
+                            classification=(
+                                _recovery_enqueue.get("classification")
+                                if isinstance(_recovery_enqueue, dict)
+                                else None
+                            ),
+                            reason=(
+                                _recovery_enqueue.get("reason")
+                                if isinstance(_recovery_enqueue, dict)
+                                else None
+                            ),
                         )
                     except Exception as recovery_exc:
                         log(

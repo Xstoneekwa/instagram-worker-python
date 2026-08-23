@@ -2584,6 +2584,11 @@ def record_mute_interaction_success(
         return {"ok": False, "error": "skipped_invalid_interacted_username"}
     now = _utc_now_iso()
     mute_delta: dict[str, Any] = {
+        "already_interacted_mute": {
+            "durable": True,
+            "evidence_source": "mute_success",
+            "run_id": str(run_id or "") or None,
+        },
         "last_mute": {
             "mute_partial": bool(mute_partial),
             "muted_posts": bool(muted_posts),
@@ -2687,7 +2692,14 @@ def record_post_like_interaction_success(
     patch: dict[str, Any] = {
         "last_interaction_at": now,
         "posts_liked_count": posts_prev + liked_n,
-        "payload": {"last_post_likes": last_post_likes},
+        "payload": {
+            "already_interacted_like": {
+                "durable": True,
+                "evidence_source": "post_like_success",
+                "run_id": str(run_id or "") or None,
+            },
+            "last_post_likes": last_post_likes,
+        },
     }
     if run_id:
         patch["run_id"] = str(run_id)
@@ -3196,6 +3208,37 @@ def complete_follow_candidate_recovery_v1(
             "p_worker_id": str(worker_id),
             "p_outcome": str(outcome),
             "p_receipt_id": str(receipt_id) if receipt_id else None,
+        },
+    )
+
+
+def project_follow_recovery_already_interacted_v1(
+    *, recovery_id: str, worker_id: str
+) -> Any:
+    return call_rpc(
+        "project_follow_recovery_already_interacted_v1",
+        {"p_recovery_id": str(recovery_id), "p_worker_id": str(worker_id)},
+    )
+
+
+def reconcile_follow_candidate_recovery_backend_only_v1(
+    *, recovery_id: str, worker_id: str
+) -> Any:
+    return call_rpc(
+        "reconcile_follow_candidate_recovery_backend_only_v1",
+        {"p_recovery_id": str(recovery_id), "p_worker_id": str(worker_id)},
+    )
+
+
+def quarantine_follow_candidate_recovery_v1(
+    *, recovery_id: str, worker_id: str, reason: str
+) -> Any:
+    return call_rpc(
+        "quarantine_follow_candidate_recovery_v1",
+        {
+            "p_recovery_id": str(recovery_id),
+            "p_worker_id": str(worker_id),
+            "p_reason": str(reason),
         },
     )
 

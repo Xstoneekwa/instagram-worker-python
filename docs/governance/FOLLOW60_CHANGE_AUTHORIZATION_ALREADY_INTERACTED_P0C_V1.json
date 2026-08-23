@@ -1,0 +1,35 @@
+{
+  "approval_status": "PENDING_LIAM_SIGNATURE_1",
+  "authorized_dependency_scope": [
+    "follow60_v2_transaction",
+    "p0c_recovery_queue",
+    "social_memory",
+    "supabase_rpc",
+    "unfollow_backlog_admission"
+  ],
+  "authorized_paths": [
+    "docs/follow-action-engine.md",
+    "docs/governance/FOLLOW60_CHANGE_AUTHORIZATION_ALREADY_INTERACTED_P0C_V1.json",
+    "docs/governance/FOLLOW60_CHANGE_AUTHORIZATION_ALREADY_INTERACTED_P0C_V1.sig",
+    "docs/recovery-engine.md",
+    "follow_candidate_recovery.py",
+    "runner.py",
+    "social_memory.py",
+    "supabase/migrations/20260823004413_already_interacted_p0c_no_search_v1.sql",
+    "supabase_client.py",
+    "tests/test_follow60_v2_mainline_32a8394_behavioral_contract.py",
+    "tests/test_follow_candidate_recovery_v1.py",
+    "tests/test_social_memory_already_interacted_follow_exclusion_v1.py",
+    "tests/test_unfollow_consolidation_v1.py"
+  ],
+  "base_sha": "60b92915c1d8e8e81b6f01bf8e82c30323ac17e8",
+  "change_id": "already-interacted-p0c-no-search-v1-20260823",
+  "expires_at": "2026-08-23T04:44:37.591227+00:00",
+  "issued_at": "2026-08-23T00:44:37.591227+00:00",
+  "nonce": "already-interacted-p0c-no-search-v1-20260823",
+  "one_task_only": true,
+  "permits_final_promotion": false,
+  "permits_intermediate_edits_within_scope": true,
+  "permits_runtime_activation": false,
+  "schema": "FOLLOW60_CHANGE_AUTHORIZATION_REQUEST_V1"
+}

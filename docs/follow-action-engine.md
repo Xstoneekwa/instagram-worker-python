@@ -10,11 +10,24 @@ permettant de passer au candidat suivant. La valeur canonique du SHA est
 `WorkerRuntimeIdentity.worker_sha`, résolue par le helper de release ;
 `full_sha` n'appartient pas à ce contrat.
 
-Les candidats interrompus entre Like et Follow sont placés dans une queue
-durable, isolée par compte et indépendante du curseur CT. La récupération ne
-retape jamais Like lorsque l'état est `liked` ou ambigu. Elle ne crée reçu et
-compteur Follow qu'après une mutation Follow fraîche et vérifiée ; un profil
-déjà `following/requested` est terminalisé comme externe/non attribué.
+La queue P0C n'accepte désormais que la preuve d'un tap Follow physique dont
+le résultat demeure ambigu (`follow_tap_sent=true`, sans vérification ni reçu).
+Like-only, Mute-only et `prepare_failed` avant tap Follow sont non-actionnables
+et ne créent aucune ligne de recovery. La récupération est exclusivement
+backend/idempotente : `P0C_PHONE_SEARCHES=0`, aucun Global Search et aucun
+nouveau tap.
+
+Toute preuve durable Like ou Mute dans Social Memory bloque les admissions
+Follow futures pour la clé `account_id + normalized_username`, indépendamment
+du CT. Cette règle est évaluée une fois à l'admission : elle ne peut pas
+auto-bloquer la transaction V2 déjà admise qui produit elle-même son Like.
+L'ordre physique reste strictement `LIKE → FOLLOW → MUTE → RETURN_CT`.
+Like/Mute-only ne fabrique jamais de vérité Follow et ne peut donc jamais
+alimenter le backlog Unfollow.
+
+Limitation connue : un renommage Instagram n'est pas réconcilié par ce patch.
+L'Identity Recovery reste un chantier séparé ; aucun rapprochement heuristique
+de usernames n'est autorisé ici.
 
 ## Vue d’ensemble (V2 / V3)
 

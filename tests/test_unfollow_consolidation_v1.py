@@ -107,6 +107,40 @@ class UnfollowConsolidationExecutionContextTests(unittest.TestCase):
 
 
 class UnfollowConsolidationAdmissionTests(unittest.TestCase):
+    def test_like_or_mute_only_social_memory_never_enters_unfollow_backlog(self) -> None:
+        row = _eligible_row(receipt=False)
+        row.update({
+            "posts_liked_count": 3,
+            "muted_posts": True,
+            "payload": {
+                "already_interacted_like": {"durable": True},
+                "already_interacted_mute": {"durable": True},
+            },
+        })
+        metadata = {
+            "canonical_follow_receipt_enforced": True,
+            "candidate_scan_exhaustive": True,
+            "source_rows_loaded": 1,
+        }
+        with (
+            patch.object(
+                unfollow_eligibility_engine.supabase_client,
+                "fetch_unfollow_candidate_availability",
+                return_value={},
+            ),
+            patch.object(
+                unfollow_eligibility_engine.supabase_client,
+                "fetch_unfollow_strict_candidate_rows",
+                return_value=([row], metadata),
+            ),
+        ):
+            plan = unfollow_eligibility_engine.plan_unfollow_targets(
+                "account-1", settings=_settings(), limit=10,
+                as_of=datetime(2026, 8, 22, tzinfo=timezone.utc),
+            )
+        self.assertEqual(plan["candidates"], [])
+        self.assertEqual(plan["skipped_counts"]["missing_canonical_follow_receipt"], 1)
+
     def test_production_scan_rejects_legacy_row_without_canonical_follow_receipt(self) -> None:
         metadata = {
             "canonical_follow_receipt_enforced": True,

@@ -2,19 +2,29 @@
 
 ## Récupération P0C des mutations interrompues
 
-La queue `follow_candidate_recovery_queue` conserve le compte, le candidat,
-le CT source et la lineage d'origine. Le claim est atomique (`SKIP LOCKED`),
-scopé au compte, loué cinq minutes et idempotent via `recovery_key`.
+La queue `follow_candidate_recovery_queue` conserve uniquement les mutations
+Follow physiques ambiguës. Le claim est atomique (`SKIP LOCKED`), scopé au
+compte, limité à huit intentions actuelles, loué cinq minutes et idempotent via
+`recovery_key`.
 
-- quota indisponible ou surface Follow non prouvée : defer borné ;
-- Like déjà vérifié ou ambigu : zéro nouveau tap Like ;
-- CTA Follow fraîchement prouvée : seul Follow peut être retenté ;
-- état Following/Requested préexistant : terminal externe, aucun reçu ni delta ;
-- état Requested après un tap Worker : terminal sans crédit et sans nouveau retry ;
-- succès frais vérifié : receipt canonique puis compteur, exactement une fois.
+- Follow tap physique ambigu : reconciliation backend contre la vérité
+  canonique existante, sans observation Instagram ni duplicate tap ;
+- Like-only ou Mute-only durable historique : projection Social Memory puis
+  terminalisation `non_actionable_already_interacted_no_follow_recovery` ;
+- UNKNOWN : quarantaine fail-closed, candidat-local, sans préemption CT ;
+- reçu Follow et état `following` ne sont jamais fabriqués par la recovery.
 
-Une indisponibilité de la queue est globale et fail-closed : le scan CT normal
-ne démarre pas tant que l'ordre recovery-first ne peut pas être prouvé.
+Le chemin normal est `bounded backend P0C reconciliation → CT Resume/CT
+courant → Followers → Follow60 V2`. P0C n'utilise jamais Instagram Global
+Search (`P0C_PHONE_SEARCHES=0`) et une ligne historique arbitraire ne peut plus
+consommer le budget avant le travail courant. Une panne locale d'une ligne de
+recovery reste locale et ne préempte pas le CT ; l'indisponibilité globale de
+la queue reste fail-closed avant la phase.
+
+Like/Mute-only ne vaut jamais Follow : ces projections sont exclues des futures
+admissions Follow mais restent inéligibles au backlog Unfollow, lequel exige
+toujours un reçu Follow canonique durable. Les renommages Instagram ne sont pas
+traités ici et restent du ressort d'une future Identity Recovery.
 
 Une panne systémique de persistance bloque aussi l'Auto Restart sur la même
 release. Le dispatcher renouvelle séparément la lease exacte

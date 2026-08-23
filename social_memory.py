@@ -17,6 +17,9 @@ KNOWN_PROCESSED = "KNOWN_PROCESSED"
 KNOWN_NOT_PROCESSED = "KNOWN_NOT_PROCESSED"
 UNKNOWN = "UNKNOWN"
 SOCIAL_MEMORY_NORMALIZATION_VERSION = "ig_handle_lower_v1"
+ALREADY_INTERACTED_LIKE = "already_interacted_like"
+ALREADY_INTERACTED_MUTE = "already_interacted_mute"
+FOLLOW_MUTATION_AMBIGUOUS = "follow_mutation_ambiguous"
 
 
 def normalize_social_username(u: str) -> str:
@@ -100,6 +103,48 @@ def _db_row_effective_unfollowed(db_row: Mapping[str, Any]) -> bool:
     if "unfollowed" in db_row and db_row.get("unfollowed") is not None:
         return bool(db_row.get("unfollowed"))
     return bool(db_row.get("unfollowed_at"))
+
+
+def durable_already_interacted_evidence(
+    db_row: Mapping[str, Any] | None,
+) -> tuple[bool, bool, dict[str, Any]]:
+    """Return durable Like/Mute truth only; transient UI observations never qualify."""
+    if not db_row:
+        return False, False, {"memory_status": "no_row"}
+    payload = db_row.get("payload") if isinstance(db_row.get("payload"), Mapping) else {}
+    like_marker = payload.get(ALREADY_INTERACTED_LIKE)
+    mute_marker = payload.get(ALREADY_INTERACTED_MUTE)
+    last_likes = payload.get("last_post_likes")
+    if not isinstance(last_likes, Mapping):
+        last_likes = {}
+    try:
+        posts_liked_count = int(db_row.get("posts_liked_count") or 0)
+    except (TypeError, ValueError):
+        posts_liked_count = 0
+    try:
+        last_liked_count = int(last_likes.get("liked_count") or 0)
+    except (TypeError, ValueError):
+        last_liked_count = 0
+    like_durable = bool(
+        posts_liked_count > 0
+        or last_liked_count > 0
+        or like_marker is True
+        or (isinstance(like_marker, Mapping) and like_marker.get("durable") is True)
+    )
+    mute_durable = bool(
+        db_row.get("last_muted_at")
+        and (db_row.get("muted_posts") is True or db_row.get("muted_stories") is True)
+    ) or bool(
+        mute_marker is True
+        or (isinstance(mute_marker, Mapping) and mute_marker.get("durable") is True)
+    )
+    return like_durable, mute_durable, {
+        "already_interacted_like": like_durable,
+        "already_interacted_mute": mute_durable,
+        "posts_liked_count": posts_liked_count,
+        "last_liked_count": last_liked_count,
+        "last_muted_at": db_row.get("last_muted_at"),
+    }
 
 
 # Follow statuses that indicate an ongoing follow relationship (localized column + payload variants).
@@ -258,6 +303,40 @@ def evaluate_follow_eligibility(
         detail["db_followed"] = followed
         detail["db_unfollowed"] = unfollowed
         detail["interaction_lifecycle_state"] = _row_pick(db_row, "interaction_lifecycle_state")
+
+        interacted_like, interacted_mute, interacted_detail = (
+            durable_already_interacted_evidence(db_row)
+        )
+        detail.update(interacted_detail)
+        payload = db_row.get("payload") if isinstance(db_row.get("payload"), Mapping) else {}
+        ambiguous_follow = payload.get(FOLLOW_MUTATION_AMBIGUOUS)
+        if ambiguous_follow is True or (
+            isinstance(ambiguous_follow, Mapping)
+            and ambiguous_follow.get("durable") is True
+            and ambiguous_follow.get("resolved") is not True
+        ):
+            return FollowEligibility(
+                False,
+                "durable_follow_mutation_ambiguous_unreconciled",
+                "social_memory_follow_ambiguity_blocked",
+                FAILED,
+                {**detail, "follow_mutation_ambiguous": True},
+            )
+        if interacted_like or interacted_mute:
+            reason = (
+                "durable_already_interacted_like_and_mute"
+                if interacted_like and interacted_mute
+                else "durable_already_interacted_like"
+                if interacted_like
+                else "durable_already_interacted_mute"
+            )
+            return FollowEligibility(
+                False,
+                reason,
+                "social_memory_already_interacted_follow_excluded",
+                SKIPPED,
+                detail,
+            )
 
         if followed and unfollowed:
             return FollowEligibility(
