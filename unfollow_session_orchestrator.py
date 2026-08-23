@@ -4111,14 +4111,17 @@ def _run_real_unfollow_multi_loop(
                 package_activity_ok=bool(recovery_out.get("package_activity_ok")),
                 account_identity_ok=bool(recovery_out.get("account_identity_ok")),
                 unsafe_markers_present=bool(recovery_out.get("unsafe_markers")),
-                persistence_ok=persist_ok,
+                ambiguity_journaled=bool(persist_out.get("ambiguous") is True),
                 previous_failure_class=recoverable_verify_failure_streak_class,
                 previous_consecutive_count=recoverable_verify_failure_streak_count,
                 max_consecutive_failures=max_recoverable_action_failures,
             )
             recoverable_verify_failure_streak_class = decision.recovery_class.value
             recoverable_verify_failure_streak_count = decision.next_consecutive_count
-            if decision.recovery_class == UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE:
+            if decision.recovery_class in {
+                UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY,
+                UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE,
+            }:
                 recoverable_verify_failures_count += 1
                 if target_username not in recoverable_verify_failure_usernames:
                     recoverable_verify_failure_usernames.append(target_username)
@@ -4135,6 +4138,9 @@ def _run_real_unfollow_multi_loop(
                 "unfollow_results_persisted_count": persisted,
                 "unfollow_action_verify_ok": False,
                 "unfollow_persistence_ok": persist_ok,
+                "unfollow_ambiguity_journaled": bool(
+                    persist_out.get("ambiguous") is True
+                ),
                 "return_to_following_list_ok": bool(
                     recovery_out.get("return_to_following_list_ok")
                 ),
@@ -4161,6 +4167,7 @@ def _run_real_unfollow_multi_loop(
                 recovery_class=decision.recovery_class.value,
                 stable_reason=decision.stable_reason,
                 persistence_ok=persist_ok,
+                ambiguity_journaled=bool(persist_out.get("ambiguous") is True),
                 exact_following_list_restored=bool(
                     recovery_out.get("exact_following_list_restored")
                 ),

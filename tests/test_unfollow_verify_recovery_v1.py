@@ -24,7 +24,7 @@ def _decision(
     package_activity_ok: bool = True,
     account_identity_ok: bool = True,
     unsafe: bool = False,
-    persistence_ok: bool = True,
+    ambiguity_journaled: bool = True,
     previous_class: str = "",
     previous_count: int = 0,
     maximum: int = 2,
@@ -37,7 +37,7 @@ def _decision(
         package_activity_ok=package_activity_ok,
         account_identity_ok=account_identity_ok,
         unsafe_markers_present=unsafe,
-        persistence_ok=persistence_ok,
+        ambiguity_journaled=ambiguity_journaled,
         previous_failure_class=previous_class,
         previous_consecutive_count=previous_count,
         max_consecutive_failures=maximum,
@@ -54,7 +54,7 @@ class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
             package_activity_ok=True,
             account_identity_ok=True,
             unsafe_markers_present=False,
-            persistence_ok=True,
+            ambiguity_journaled=True,
             previous_failure_class="",
             previous_consecutive_count=0,
             max_consecutive_failures=2,
@@ -65,14 +65,14 @@ class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
         )
         self.assertEqual(
             out.recovery_class,
-            UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE,
+            UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY,
         )
         self.assertTrue(out.should_continue)
 
     def test_verified_unfollow_resets_failure_streak(self) -> None:
         out = _decision(
             verification_ok=True,
-            previous_class=UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE.value,
+            previous_class=UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY.value,
             previous_count=2,
         )
         self.assertEqual(
@@ -90,7 +90,7 @@ class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
         )
         self.assertEqual(
             out.recovery_class,
-            UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE,
+            UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY,
         )
         self.assertTrue(out.should_continue)
         self.assertFalse(out.circuit_breaker_open)
@@ -114,12 +114,16 @@ class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
             UnfollowActionOutcomeClass.VERIFY_FAILED_UNSAFE_STATE,
         )
 
-    def test_persistence_failure_is_never_recoverable(self) -> None:
-        out = _decision(persistence_ok=False)
+    def test_ambiguity_journal_failure_is_never_recoverable(self) -> None:
+        out = _decision(ambiguity_journaled=False)
         self.assertFalse(out.should_continue)
         self.assertEqual(
             out.candidate_outcome_class,
             UnfollowActionOutcomeClass.ACTION_ATTEMPTED_AMBIGUOUS,
+        )
+        self.assertEqual(
+            out.recovery_class,
+            UnfollowActionOutcomeClass.VERIFY_FAILED_UNSAFE_STATE,
         )
 
     def test_wrong_account_is_security_block(self) -> None:
@@ -188,8 +192,82 @@ class UnfollowVerifyRecoveryPolicyTest(unittest.TestCase):
             UnfollowActionOutcomeClass.VERIFIED_UNFOLLOW,
         )
 
+    def test_rex_s1_candidate_20_ambiguity_holds_and_selects_candidate_21(self) -> None:
+        fixture = {
+            "verified_before_ambiguity": 19,
+            "receipts_before_ambiguity": 19,
+            "quota_before_ambiguity": 19,
+            "candidate_20": "rex_candidate_20",
+            "candidate_21": "rex_candidate_21",
+        }
+        out = _decision(
+            restored=True,
+            package_activity_ok=True,
+            account_identity_ok=True,
+            unsafe=False,
+            ambiguity_journaled=True,
+        )
+
+        held_candidates = set()
+        next_candidate = None
+        verified = fixture["verified_before_ambiguity"]
+        receipts = fixture["receipts_before_ambiguity"]
+        quota = fixture["quota_before_ambiguity"]
+        if out.should_continue:
+            held_candidates.add(fixture["candidate_20"])
+            next_candidate = fixture["candidate_21"]
+
+        self.assertEqual(
+            out.candidate_outcome_class,
+            UnfollowActionOutcomeClass.ACTION_ATTEMPTED_AMBIGUOUS,
+        )
+        self.assertEqual(
+            out.recovery_class,
+            UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY,
+        )
+        self.assertTrue(out.should_continue)
+        self.assertEqual(verified, 19)
+        self.assertEqual(receipts, 19)
+        self.assertEqual(quota, 19)
+        self.assertIn(fixture["candidate_20"], held_candidates)
+        self.assertEqual(next_candidate, fixture["candidate_21"])
+        self.assertNotEqual(next_candidate, fixture["candidate_20"])
+
 
 class UnfollowAmbiguousDurabilityTest(unittest.TestCase):
+    def test_ambiguous_persistence_only_journals_and_never_calls_success_rpc(self) -> None:
+        intent = {
+            "action_id": "rex-action-20",
+            "run_id": "rex-s1-run",
+            "business_session_id": "rex-root-session",
+        }
+        settings = SimpleNamespace(mode="unfollow")
+        with patch.object(
+            orchestrator.follow_persistence_intent,
+            "update_intent_stage",
+        ) as update_stage, patch.object(
+            orchestrator.supabase_client,
+            "persist_verified_unfollow_success_rpc",
+        ) as success_rpc:
+            result = orchestrator._persist_unfollow_outcome_for_session(
+                "rex-account",
+                "rex_candidate_20",
+                run_id="rex-s1-run",
+                settings=settings,
+                verify_ok=False,
+                interaction_row_id="rex-row-20",
+                failure_reason="unfollow_verify_conditions_not_met",
+                mutation_intent=intent,
+                request_id="rex-request",
+                business_date_sast="2026-08-22",
+            )
+
+        self.assertEqual(result.get("ok"), False)
+        self.assertEqual(result.get("ambiguous"), True)
+        update_stage.assert_called_once()
+        self.assertEqual(update_stage.call_args.kwargs["stage"], "ambiguous")
+        success_rpc.assert_not_called()
+
     def _row(self, *, now: datetime, attempted_at: datetime) -> dict:
         return {
             "id": "redacted-row",

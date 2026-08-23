@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "60b92915c1d8e8e81b6f01bf8e82c30323ac17e8",
-    "change_id": "already-interacted-p0c-no-search-v1-20260823",
-    "final_diff_hash": "1db840ba79f3ef63a89e9f7c8867911392bc7f3d191c72407dc9b1b9de183cb3",
-    "final_manifest_hash": "fdc7311e97b092ece926dd6f3b94f409b43532bd6185119ae67ceec27182b6de",
-    "final_protected_scope_hash": "594e85e74068066507dbab1a8ca4abb3f4eb9e3d40c664b80c97fec62c645a07",
+    "base_sha": "0c28b97982ebe7a3774bd20da8384a7ab51938ed",
+    "change_id": "unfollow-s1-candidate-local-ambiguity-v1-20260823",
+    "final_diff_hash": "42706ea8b6b0c5a94d5445d0b981c3f73ab5cd4d4cb59478439435f219a74e3e",
+    "final_manifest_hash": "d005c1953735a6dd0ca290a7bac5531f9ca124d960ce343c10a95e5e2e093391",
+    "final_protected_scope_hash": "143fe518bec6a36fcd1422bdc2d7d5a4d1d729d29c2969008843f0921e88ec79",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -595,6 +595,21 @@
       ],
       "final_diff_hash": "1db840ba79f3ef63a89e9f7c8867911392bc7f3d191c72407dc9b1b9de183cb3",
       "recorded_at": "2026-08-23T01:50:21.537626+00:00",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "0c28b97982ebe7a3774bd20da8384a7ab51938ed",
+      "change_id": "unfollow-s1-candidate-local-ambiguity-v1-20260823",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "docs/unfollow-one-healthy-session-contract.md",
+        "tests/test_unfollow_verify_recovery_v1.py",
+        "unfollow_action_outcome.py",
+        "unfollow_session_orchestrator.py"
+      ],
+      "final_diff_hash": "42706ea8b6b0c5a94d5445d0b981c3f73ab5cd4d4cb59478439435f219a74e3e",
+      "recorded_at": "2026-08-23T02:55:23.297159+00:00",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -2313,13 +2328,13 @@
       "size": 81943
     },
     "unfollow_action_outcome.py": {
-      "git_blob_oid": "946b233ccff95857ac322fe6ef23e977195c2157",
+      "git_blob_oid": "7d1fb436b8877498541b55ef4b44354ad0afc926",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_action_outcome.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "9dfeb0cd78b31ae27c6ffba72855bc3824e53f007a1f9d52cadc94ebf44ff406",
-      "size": 11336
+      "sha256": "e163d2d025d8d5a8db30509d413fd655591ce18dbb9ad4cd4f57c2584c98de54",
+      "size": 11653
     },
     "unfollow_daily_plan.py": {
       "git_blob_oid": "2b7f1c63d16bf079d2f80705bf1e8621f169dafb",
@@ -2394,13 +2409,13 @@
       "size": 6911
     },
     "unfollow_session_orchestrator.py": {
-      "git_blob_oid": "4155393502227c7684e5be68720cf28e68a89f6c",
+      "git_blob_oid": "19d008601a800728a06ca2c431068ae8a92c671e",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "ba1964fdff41885de15644052a206d9a68dba8ef2f008156d0633cd6bde837c1",
-      "size": 236265
+      "sha256": "1e620d9ed8b9cc567ce4e0cc6ad017aee6cd0f1aa6be09996b52274356cea75e",
+      "size": 236620
     },
     "unfollow_settings.py": {
       "git_blob_oid": "60eda86a5e6779fbd199a47b4b7fd8de65093eeb",
@@ -2493,7 +2508,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "594e85e74068066507dbab1a8ca4abb3f4eb9e3d40c664b80c97fec62c645a07",
+  "protected_scope_sha256": "143fe518bec6a36fcd1422bdc2d7d5a4d1d729d29c2969008843f0921e88ec79",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

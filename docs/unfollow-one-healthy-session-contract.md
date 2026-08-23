@@ -18,9 +18,14 @@ session; it is not a normal terminal boundary.
   no-result resets that Search streak.
 
 An ambiguous post-tap outcome is never replayed in the same session.  It keeps
-the existing durable hold and strict recovery contract.  A pre-tap transient
-CTA/Search failure may use the candidate-local retry because no destructive
-action has occurred.
+the existing durable hold and strict recovery contract.  When the ambiguity
+has been durably journaled, the exact owner Following list has been restored,
+the package/activity/account identity remains proved, and no unsafe marker is
+present, its recovery class is `SAFE_CANDIDATE_LOCAL_AMBIGUITY`: no success
+receipt or quota delta is created and the session proceeds to the next
+candidate.  Failure of any one of those safety proofs remains a global
+fail-closed boundary.  A pre-tap transient CTA/Search failure may use the
+candidate-local retry because no destructive action has occurred.
 
 ## Stable reasons and telemetry
 

@@ -120,6 +120,7 @@ class UnfollowExecutionContext:
 class UnfollowActionOutcomeClass(str, Enum):
     VERIFIED_UNFOLLOW = "VERIFIED_UNFOLLOW"
     ALREADY_NOT_FOLLOWING_CONFIRMED = "ALREADY_NOT_FOLLOWING_CONFIRMED"
+    SAFE_CANDIDATE_LOCAL_AMBIGUITY = "SAFE_CANDIDATE_LOCAL_AMBIGUITY"
     VERIFY_FAILED_RECOVERABLE = "VERIFY_FAILED_RECOVERABLE"
     VERIFY_FAILED_UNSAFE_STATE = "VERIFY_FAILED_UNSAFE_STATE"
     ACTION_ATTEMPTED_AMBIGUOUS = "ACTION_ATTEMPTED_AMBIGUOUS"
@@ -227,15 +228,18 @@ def decide_verify_failure_after_recovery(
     package_activity_ok: bool,
     account_identity_ok: bool,
     unsafe_markers_present: bool,
-    persistence_ok: bool,
+    ambiguity_journaled: bool,
     previous_failure_class: str,
     previous_consecutive_count: int,
     max_consecutive_failures: int,
 ) -> VerifyRecoveryDecision:
     """Classify one post-action result without weakening verification.
 
-    ``should_continue`` is possible only after the failed audit outcome was
-    persisted and the exact owner Following list was positively restored.
+    ``should_continue`` is possible only after the ambiguous action truth was
+    durably journaled and the exact owner Following list was positively
+    restored.  Canonical success persistence is deliberately not part of
+    navigation recovery safety: an unverified action must never fabricate a
+    success receipt merely to let the session continue.
     """
 
     if verification_ok:
@@ -259,14 +263,14 @@ def decide_verify_failure_after_recovery(
             stable_reason=stable_reason,
         )
 
-    safe_state_restored = bool(
-        exact_following_list_restored
+    safe_candidate_local_ambiguity = bool(
+        ambiguity_journaled
+        and exact_following_list_restored
         and package_activity_ok
         and account_identity_ok
         and not unsafe_markers_present
-        and persistence_ok
     )
-    if not safe_state_restored:
+    if not safe_candidate_local_ambiguity:
         recovery_class = (
             UnfollowActionOutcomeClass.SECURITY_BLOCK
             if unsafe_markers_present or not account_identity_ok
@@ -281,7 +285,7 @@ def decide_verify_failure_after_recovery(
             stable_reason=stable_reason,
         )
 
-    failure_class = UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE.value
+    failure_class = UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY.value
     next_count = (
         max(0, int(previous_consecutive_count)) + 1
         if str(previous_failure_class or "") == failure_class
@@ -291,7 +295,7 @@ def decide_verify_failure_after_recovery(
     circuit_open = next_count > bounded_max
     return VerifyRecoveryDecision(
         candidate_outcome_class=UnfollowActionOutcomeClass.ACTION_ATTEMPTED_AMBIGUOUS,
-        recovery_class=UnfollowActionOutcomeClass.VERIFY_FAILED_RECOVERABLE,
+        recovery_class=UnfollowActionOutcomeClass.SAFE_CANDIDATE_LOCAL_AMBIGUITY,
         should_continue=not circuit_open,
         circuit_breaker_open=circuit_open,
         next_consecutive_count=next_count,
