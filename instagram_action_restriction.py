@@ -375,10 +375,15 @@ def guard_instagram_action_rate_limit(
     # the consent CTA.
     from instagram_ads_data_consent_popup import guard_instagram_ads_data_consent_popup
 
+    # Both classifiers run synchronously inside this exact guard invocation.
+    # Nothing between them navigates or mutates the device, so one fresh
+    # package read is sufficient and remains bounded to this verification
+    # boundary.  A later guard invocation always performs a new read.
+    current_package = _current_package(d)
     guard_instagram_ads_data_consent_popup(
         d,
         hierarchy_xml=xml,
-        package_name=_current_package(d),
+        package_name=current_package,
         context=_RUNTIME_CONTEXT,
         phase=phase,
         preceding_action=preceding_action,
@@ -387,7 +392,7 @@ def guard_instagram_action_rate_limit(
     result = classify_instagram_action_rate_limit(
         xml,
         visual_text=visual_text,
-        package_name=_current_package(d),
+        package_name=current_package,
     )
     if not result.detected:
         return result

@@ -156,6 +156,55 @@ class RestrictionRuntimeGuardTests(unittest.TestCase):
         self.assertIsNone(raised.exception.summary["incident_id"])
         self.assertTrue(raised.exception.summary["account_pause_required"])
 
+    def test_package_read_is_shared_only_within_one_guard_invocation(self) -> None:
+        class Device:
+            app_current_calls = 0
+
+            def app_current(self):
+                self.app_current_calls += 1
+                return {"package": f"com.instagram.clone{self.app_current_calls}"}
+
+        device = Device()
+        hierarchy = xml("ordinary profile")
+
+        with (
+            patch(
+                "instagram_ads_data_consent_popup.guard_instagram_ads_data_consent_popup"
+            ) as consent_guard,
+            patch(
+                "instagram_action_restriction.classify_instagram_action_rate_limit",
+                wraps=classify_instagram_action_rate_limit,
+            ) as restriction_classifier,
+        ):
+            guard_instagram_action_rate_limit(
+                device,
+                phase="unfollow",
+                preceding_action="after_unfollow_tap",
+                hierarchy_xml=hierarchy,
+            )
+
+            self.assertEqual(device.app_current_calls, 1)
+            first_consent_package = consent_guard.call_args.kwargs["package_name"]
+            first_restriction_package = restriction_classifier.call_args.kwargs["package_name"]
+            self.assertEqual(first_consent_package, "com.instagram.clone1")
+            self.assertEqual(first_restriction_package, first_consent_package)
+
+            consent_guard.reset_mock()
+            restriction_classifier.reset_mock()
+            guard_instagram_action_rate_limit(
+                device,
+                phase="unfollow",
+                preceding_action="after_unfollow_tap",
+                hierarchy_xml=hierarchy,
+            )
+
+            self.assertEqual(device.app_current_calls, 2)
+            second_consent_package = consent_guard.call_args.kwargs["package_name"]
+            second_restriction_package = restriction_classifier.call_args.kwargs["package_name"]
+            self.assertEqual(second_consent_package, "com.instagram.clone2")
+            self.assertEqual(second_restriction_package, second_consent_package)
+            self.assertNotEqual(second_consent_package, first_consent_package)
+
     def test_evidence_xml_redacts_unrelated_account_text_and_secrets(self) -> None:
         hierarchy = (
             '<hierarchy><node package="com.instagram.android" class="android.app.Dialog" '

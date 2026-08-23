@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "5c2aa475949e38b3307303cd147e4b9b328e7a2e",
-    "change_id": "exit97-late-cooperative-handoff-v1-20260823",
-    "final_diff_hash": "9b5207abe0cfc6997049c3f164ded1556e99adc25a5d316a6b5d9a75c6d93d02",
-    "final_manifest_hash": "c8c766ed95f46addf48e769746c796d68d2c6b4cbd6a22e9d149fdffd00efcbf",
-    "final_protected_scope_hash": "a22a51bd4b2bd4f7d8743188ed9440850e8ffca0d21a636fbbd560a6d301a29a",
+    "base_sha": "6e7f02c720dd8a7c8c7900dd325f888eb81d21ed",
+    "change_id": "unfollow-posttap-rpc-dedup-v1-20260823",
+    "final_diff_hash": "a0626514c37c6701b5c6f713a6294b13de0f018f5b5880419e4c8fb46cc70650",
+    "final_manifest_hash": "a51cbc6bba97dc6d299f4af2464abd7fc98f2aefc438b1b10befaadd05a6b2cf",
+    "final_protected_scope_hash": "0050b5b2b610e7cebba9a139cad03bbb58f65b83c8a6e600197d72ec9e560617",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -627,9 +627,25 @@
       ],
       "requested_scope": "Exit-97 late cooperative Follow-to-Unfollow handoff producer ordering only",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "2e4ee02c2d9c7ebe1be24dcffd4d67336c738563194a1071575f2e4c6674df78",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "6e7f02c720dd8a7c8c7900dd325f888eb81d21ed",
+      "candidate_tree_sha": "238727f390d3ba7c4d926451a91f31ae8eb4f957",
+      "change_id": "unfollow-posttap-rpc-dedup-v1-20260823",
+      "consumed_at": "2026-08-23T10:10:08.555305+00:00",
+      "diff_sha256": "a0626514c37c6701b5c6f713a6294b13de0f018f5b5880419e4c8fb46cc70650",
+      "field_status": "PENDING_NEXT_NATURAL_UNFOLLOW",
+      "files": [
+        "instagram_action_restriction.py",
+        "tests/test_instagram_action_restriction.py"
+      ],
+      "requested_scope": "Unfollow post-tap action restriction package-read deduplication within one guard invocation only",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
-  "field_certification": "PENDING_NEXT_NATURAL_RUNS",
+  "field_certification": "PENDING_NEXT_NATURAL_UNFOLLOW",
   "import_graph": {
     "account_commercial_policy.py": [
       "assignment_dispatch_resolver.py",
@@ -1813,13 +1829,13 @@
       "size": 18138
     },
     "instagram_action_restriction.py": {
-      "git_blob_oid": "8f7bf10cd4cde35fb7aac59933ab7bd87412bdf0",
+      "git_blob_oid": "059365f7238ccb96093654656f6ddc55c7f7b6c6",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "instagram_action_restriction.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "dbdff395335c6007fcde484d11f5b65150363d0a99bf22229bef4ebc90e5b920",
-      "size": 18742
+      "sha256": "c161d7e8f7ac8a86163230b1d42581188698de52da04cc28ad8675f3412236ae",
+      "size": 19070
     },
     "instagram_ads_data_consent_popup.py": {
       "git_blob_oid": "0c80d46da6725c3175210b180fd262e7ce0d97b9",
@@ -2524,7 +2540,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "a22a51bd4b2bd4f7d8743188ed9440850e8ffca0d21a636fbbd560a6d301a29a",
+  "protected_scope_sha256": "0050b5b2b610e7cebba9a139cad03bbb58f65b83c8a6e600197d72ec9e560617",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
