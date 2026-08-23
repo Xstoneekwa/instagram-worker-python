@@ -295,6 +295,167 @@ class FollowPartialUnfollowHandoffPointDTests(unittest.TestCase):
         self.assertEqual(request_id, outcome["scope_binding"]["request_id"])
         self.assertFalse(result["summary"]["target_rotation_allowed"])
 
+    def test_bmy_late_cooperative_exit_97_rebuilds_before_validation(self) -> None:
+        request_id = "b0f1073e-beda-42bf-90f2-b7ace79ab6f4"
+        run_id = "2924ee6f-7ea9-4a8c-8a72-9d20155e9fe4"
+        business_session_id = "52695b4d-b82d-449d-825c-6d646aa48970"
+        summary = {
+            "follow_session_outcome": "partial_not_resumable",
+            "follow_stop_reason": "",
+            "follows_completed_count": 8,
+            "global_follows_completed": 68,
+            "global_follows_goal_effective": 120,
+            "target_id": "52391c47-b6fb-4340-ac00-0f8549927bf0",
+            "source_profile_username": "aubergedelamadone",
+            "follow_outcome": {
+                "contract_version": "follow_outcome_v1",
+                "phase_status": "partial_not_resumable",
+                "scope": "current_ct",
+                "safe_boundary": False,
+                "safe_next_step": "end_session",
+            },
+        }
+
+        finalized = orchestrator._finalize_late_cooperative_follow_handoff_summary(
+            exit_code=97,
+            summary=summary,
+            cooperative_reason="follow_to_unfollow_time_handoff",
+            account_id=self.fixture["account_id"],
+            request_id=request_id,
+            run_id=run_id,
+            business_session_id=business_session_id,
+            attempt_id="1",
+            generation="1",
+        )
+
+        self.assertTrue(finalized["created"])
+        self.assertTrue(finalized["accepted"])
+        self.assertEqual(
+            "FOLLOW_TERMINATION_DECISION_V1",
+            summary["follow_outcome"]["schema"],
+        )
+        self.assertEqual(68, summary["follow_outcome"]["verified_actions"])
+        self.assertEqual(
+            "follow_to_unfollow_time_handoff",
+            summary["follow_outcome"]["first_causal_reason"],
+        )
+
+        gate = orchestrator._evaluate_h3_follow_exit_code_gate(
+            account_id=self.fixture["account_id"],
+            account_username=self.fixture["account_username"],
+            follow_exit_code=97,
+            diagnostic={
+                "run_id": run_id,
+                "follow_outcome": summary["follow_outcome"],
+                "handoff_would_run": True,
+                "unfollow_enabled": True,
+                "unfollow_mode": self.fixture["unfollow_mode"],
+                "pending_unfollow_count": 169,
+                "canonical_global_blockers": [],
+            },
+            real_max_actions_effective=self.fixture["real_max_actions_effective"],
+            business_action_deadline=(self.now + timedelta(hours=1)).isoformat(),
+            business_session_id=business_session_id,
+            request_id=request_id,
+            session_attempt=1,
+            generation="1",
+            now=self.now,
+        )
+        self.assertTrue(gate["follow_exit_code_allowed"])
+        self.assertEqual(
+            "enter_unfollow",
+            gate["follow_partial_handoff"]["decision"],
+        )
+
+    def test_exit_97_finalizer_preserves_valid_final_envelope(self) -> None:
+        request_id = "00000000-0000-4000-8000-000000000005"
+        existing = self._time_handoff_outcome()
+        summary = {
+            "follow_termination_decision": existing,
+            "global_follows_completed": 999,
+        }
+        finalized = orchestrator._finalize_late_cooperative_follow_handoff_summary(
+            exit_code=97,
+            summary=summary,
+            cooperative_reason="follow_to_unfollow_time_handoff",
+            account_id=self.fixture["account_id"],
+            request_id=request_id,
+            run_id=self.fixture["run_id"],
+            business_session_id=self.fixture["business_session_id"],
+            attempt_id="2",
+            generation="2",
+        )
+        self.assertFalse(finalized["created"])
+        self.assertTrue(finalized["preserved"])
+        self.assertTrue(finalized["accepted"])
+        self.assertEqual(existing, summary["follow_termination_decision"])
+        self.assertEqual(39, summary["follow_outcome"]["verified_actions"])
+
+    def test_exit_97_finalizer_never_overwrites_invalid_nonempty_envelope(self) -> None:
+        summary = {
+            "follow_termination_decision": {"phase_status": "partial_resumable"},
+            "global_follows_completed": 68,
+        }
+        finalized = orchestrator._finalize_late_cooperative_follow_handoff_summary(
+            exit_code=97,
+            summary=summary,
+            cooperative_reason="follow_to_unfollow_time_handoff",
+            account_id=self.fixture["account_id"],
+            request_id="request",
+            run_id=self.fixture["run_id"],
+            business_session_id=self.fixture["business_session_id"],
+            attempt_id="1",
+            generation="1",
+        )
+        self.assertFalse(finalized["created"])
+        self.assertFalse(finalized["accepted"])
+        self.assertEqual(
+            {"phase_status": "partial_resumable"},
+            summary["follow_termination_decision"],
+        )
+
+    def test_exit_97_late_reason_preserves_global_blocker(self) -> None:
+        summary = {
+            "global_follows_completed": 68,
+            "canonical_global_blockers": ["challenge"],
+        }
+        finalized = orchestrator._finalize_late_cooperative_follow_handoff_summary(
+            exit_code=97,
+            summary=summary,
+            cooperative_reason="follow_to_unfollow_time_handoff",
+            account_id=self.fixture["account_id"],
+            request_id="request",
+            run_id=self.fixture["run_id"],
+            business_session_id=self.fixture["business_session_id"],
+            attempt_id="1",
+            generation="1",
+        )
+        self.assertFalse(finalized["created"])
+        self.assertFalse(finalized["accepted"])
+        self.assertNotIn("follow_termination_decision", summary)
+
+    def test_non_exit97_and_manual_stop_are_never_reclassified(self) -> None:
+        for exit_code, reason in (
+            (0, "follow_target_reached"),
+            (97, "operator_stop_requested"),
+            (97, ""),
+        ):
+            with self.subTest(exit_code=exit_code, reason=reason):
+                summary = {"global_follows_completed": 68}
+                finalized = orchestrator._finalize_late_cooperative_follow_handoff_summary(
+                    exit_code=exit_code,
+                    summary=summary,
+                    cooperative_reason=reason,
+                    account_id=self.fixture["account_id"],
+                    request_id="request",
+                    run_id=self.fixture["run_id"],
+                    business_session_id=self.fixture["business_session_id"],
+                    attempt_id="1",
+                    generation="1",
+                )
+                self.assertFalse(finalized["accepted"])
+                self.assertNotIn("follow_termination_decision", summary)
+
     def test_scheduled_deadline_exit_97_keeps_existing_non_handoff_contract(self) -> None:
         def runner(_device: object, **_kwargs: object) -> int:
             runner.calls += 1

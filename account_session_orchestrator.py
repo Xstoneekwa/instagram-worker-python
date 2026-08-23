@@ -888,6 +888,157 @@ def _authoritative_follow_termination_decision(
     }
 
 
+def _finalize_follow_time_handoff_termination_decision(
+    *,
+    exit_code: int,
+    summary: dict[str, Any],
+    final_causal_reason: str,
+    follows_completed_count: int,
+    target_follow_budget_effective: int | None,
+    target_attribution: dict[str, Any],
+    account_id: str,
+    request_id: str,
+    run_id: str,
+    business_session_id: str,
+    attempt_id: str,
+    generation: str,
+) -> dict[str, Any]:
+    """Finalize the exit-97 envelope after the causal state is known.
+
+    A valid runner-owned envelope is immutable. A missing envelope may be
+    constructed only for the exact cooperative Follow-to-Unfollow handoff and
+    only when no structured global blocker is present. Invalid non-empty
+    envelopes are preserved so the existing validator still fails closed.
+    """
+
+    existing = dict(summary.get("follow_termination_decision") or {})
+    if existing:
+        valid, validation_reason = validate_follow_termination_decision(
+            existing,
+            expected_exit_code=int(exit_code),
+            expected_account_id=account_id,
+            expected_request_id=request_id,
+            expected_run_id=run_id,
+            expected_business_session_id=business_session_id,
+            expected_attempt_id=attempt_id,
+            expected_generation=generation,
+        )
+        return {
+            "decision": existing,
+            "created": False,
+            "preserved": bool(valid),
+            "validation_reason": validation_reason,
+        }
+
+    reason = str(final_causal_reason or "").strip()
+    if int(exit_code) != 97 or reason != "follow_to_unfollow_time_handoff":
+        return {
+            "decision": {},
+            "created": False,
+            "preserved": False,
+            "validation_reason": "not_applicable",
+        }
+
+    blockers = _canonical_global_unfollow_handoff_blockers(summary)
+    if blockers:
+        return {
+            "decision": {},
+            "created": False,
+            "preserved": False,
+            "validation_reason": f"global_blocker:{blockers[0]}",
+        }
+
+    decision = build_follow_time_handoff_termination_decision(
+        follows_completed_count=follows_completed_count,
+        target_follow_budget_effective=target_follow_budget_effective,
+        target_attribution=target_attribution,
+        account_id=account_id,
+        request_id=request_id,
+        run_id=run_id,
+        business_session_id=business_session_id,
+        attempt_id=attempt_id,
+        generation=generation,
+    )
+    return {
+        "decision": decision,
+        "created": True,
+        "preserved": False,
+        "validation_reason": "follow_time_handoff_decision_created",
+    }
+
+
+def _finalize_late_cooperative_follow_handoff_summary(
+    *,
+    exit_code: int,
+    summary: dict[str, Any],
+    cooperative_reason: str,
+    account_id: str,
+    request_id: str,
+    run_id: str,
+    business_session_id: str,
+    attempt_id: str,
+    generation: str,
+) -> dict[str, Any]:
+    """Apply a late cooperative reason before the authoritative validation."""
+
+    reason = str(cooperative_reason or "").strip()
+    if reason != "follow_to_unfollow_time_handoff":
+        return {
+            "created": False,
+            "preserved": False,
+            "accepted": False,
+            "validation_reason": "not_applicable",
+        }
+
+    summary["follow_session_outcome"] = "partial_resumable"
+    summary["follow_stop_reason"] = reason
+    finalized = _finalize_follow_time_handoff_termination_decision(
+        exit_code=exit_code,
+        summary=summary,
+        final_causal_reason=reason,
+        follows_completed_count=int(
+            summary.get("global_follows_completed")
+            or summary.get("follows_completed_count")
+            or 0
+        ),
+        target_follow_budget_effective=_as_optional_int(
+            summary.get("global_follows_goal_effective")
+        ),
+        target_attribution={
+            "target_id": str(summary.get("target_id") or ""),
+            "source_profile_username": str(
+                summary.get("source_profile_username") or ""
+            ),
+        },
+        account_id=account_id,
+        request_id=request_id,
+        run_id=run_id,
+        business_session_id=business_session_id,
+        attempt_id=attempt_id,
+        generation=generation,
+    )
+    if finalized["decision"]:
+        summary["follow_termination_decision"] = dict(finalized["decision"])
+    authoritative = _authoritative_follow_termination_decision(
+        exit_code=exit_code,
+        summary=summary,
+        account_id=account_id,
+        request_id=request_id,
+        run_id=run_id,
+        business_session_id=business_session_id,
+        attempt_id=attempt_id,
+        generation=generation,
+    )
+    if authoritative["accepted"]:
+        summary["follow_outcome"] = dict(authoritative["follow_outcome"])
+    return {
+        "created": bool(finalized["created"]),
+        "preserved": bool(finalized["preserved"]),
+        "accepted": bool(authoritative["accepted"]),
+        "validation_reason": str(authoritative["validation_detail"]),
+    }
+
+
 def _follow_target_rotation_contract(
     summary: dict[str, Any],
     *,
@@ -1291,25 +1442,29 @@ def _run_follow_target_rotation(
             or summary.get("follow_session_outcome")
             or ""
         )
-        if exit_code == 97 and predecision_reason == "follow_to_unfollow_time_handoff":
-            prospective_completed = global_follows_completed + (
-                _as_optional_int(summary.get("follows_completed_count")) or 0
-            )
-            summary["follow_termination_decision"] = (
-                build_follow_time_handoff_termination_decision(
-                    follows_completed_count=prospective_completed,
-                    target_follow_budget_effective=global_follow_goal,
-                    target_attribution={
-                        "target_id": target_id or "",
-                        "source_profile_username": source_profile,
-                    },
-                    account_id=account_id,
-                    request_id=str(run_request_id or ""),
-                    run_id=str(run_id or ""),
-                    business_session_id=str(business_session_id or ""),
-                    attempt_id=str(follow60_attempt_id or 1),
-                    generation=str(follow60_attempt_id or 1),
-                )
+        prospective_completed = global_follows_completed + (
+            _as_optional_int(summary.get("follows_completed_count")) or 0
+        )
+        finalized_handoff = _finalize_follow_time_handoff_termination_decision(
+            exit_code=exit_code,
+            summary=summary,
+            final_causal_reason=predecision_reason,
+            follows_completed_count=prospective_completed,
+            target_follow_budget_effective=global_follow_goal,
+            target_attribution={
+                "target_id": target_id or "",
+                "source_profile_username": source_profile,
+            },
+            account_id=account_id,
+            request_id=str(run_request_id or ""),
+            run_id=str(run_id or ""),
+            business_session_id=str(business_session_id or ""),
+            attempt_id=str(follow60_attempt_id or 1),
+            generation=str(follow60_attempt_id or 1),
+        )
+        if finalized_handoff["decision"]:
+            summary["follow_termination_decision"] = dict(
+                finalized_handoff["decision"]
             )
         termination_decision = _authoritative_follow_termination_decision(
             exit_code=exit_code,
@@ -5299,8 +5454,17 @@ def run_account_session(
                 return 0
             if cooperative_reason == "follow_to_unfollow_time_handoff" and cooperative_context is not None:
                 clear_intent_and_ack(cooperative_context)
-                follow_engine_summary["follow_session_outcome"] = "partial_resumable"
-                follow_engine_summary["follow_stop_reason"] = cooperative_reason
+                finalized_handoff = _finalize_late_cooperative_follow_handoff_summary(
+                    exit_code=follow_exit_code,
+                    summary=follow_engine_summary,
+                    cooperative_reason=cooperative_reason,
+                    account_id=aid,
+                    request_id=str(run_request_id or ""),
+                    run_id=str(run_id or ""),
+                    business_session_id=str(business_session_id or ""),
+                    attempt_id=str(follow60_attempt_id or 1),
+                    generation=str(follow60_attempt_id or 1),
+                )
                 log(
                     "info",
                     "account_session_follow_time_handoff_consumed",
@@ -5309,6 +5473,18 @@ def run_account_session(
                     originating_stop_reason=cooperative_reason,
                     session_termination_class="phase_handoff_safe_pause",
                     follow_remaining_preserved=True,
+                    authoritative_decision_created=bool(
+                        finalized_handoff["created"]
+                    ),
+                    authoritative_decision_preserved=bool(
+                        finalized_handoff["preserved"]
+                    ),
+                    authoritative_decision_accepted=bool(
+                        finalized_handoff["accepted"]
+                    ),
+                    authoritative_decision_validation_reason=str(
+                        finalized_handoff["validation_reason"]
+                    ),
                 )
             # Consume the immutable rotation result after cooperative intent
             # handling.  Never keep a pre-handoff local projection alive.

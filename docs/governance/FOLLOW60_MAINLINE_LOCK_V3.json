@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "0c28b97982ebe7a3774bd20da8384a7ab51938ed",
-    "change_id": "unfollow-s1-candidate-local-ambiguity-v1-20260823",
-    "final_diff_hash": "42706ea8b6b0c5a94d5445d0b981c3f73ab5cd4d4cb59478439435f219a74e3e",
-    "final_manifest_hash": "d005c1953735a6dd0ca290a7bac5531f9ca124d960ce343c10a95e5e2e093391",
-    "final_protected_scope_hash": "143fe518bec6a36fcd1422bdc2d7d5a4d1d729d29c2969008843f0921e88ec79",
+    "base_sha": "5c2aa475949e38b3307303cd147e4b9b328e7a2e",
+    "change_id": "exit97-late-cooperative-handoff-v1-20260823",
+    "final_diff_hash": "9b5207abe0cfc6997049c3f164ded1556e99adc25a5d316a6b5d9a75c6d93d02",
+    "final_manifest_hash": "c8c766ed95f46addf48e769746c796d68d2c6b4cbd6a22e9d149fdffd00efcbf",
+    "final_protected_scope_hash": "a22a51bd4b2bd4f7d8743188ed9440850e8ffca0d21a636fbbd560a6d301a29a",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -610,6 +610,22 @@
       ],
       "final_diff_hash": "42706ea8b6b0c5a94d5445d0b981c3f73ab5cd4d4cb59478439435f219a74e3e",
       "recorded_at": "2026-08-23T02:55:23.297159+00:00",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "0267f4ca53f562d505bb731a093fb810c89d35b8cb33a8aa9154d7beeeb48716",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "5c2aa475949e38b3307303cd147e4b9b328e7a2e",
+      "candidate_tree_sha": "1a07c6f45490733938599fd97abeb4950269e6ff",
+      "change_id": "exit97-late-cooperative-handoff-v1-20260823",
+      "consumed_at": "2026-08-23T08:05:08.079272+00:00",
+      "diff_sha256": "9b5207abe0cfc6997049c3f164ded1556e99adc25a5d316a6b5d9a75c6d93d02",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_session_orchestrator.py",
+        "tests/test_follow_partial_unfollow_handoff_point_d.py"
+      ],
+      "requested_scope": "Exit-97 late cooperative Follow-to-Unfollow handoff producer ordering only",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
@@ -1356,13 +1372,13 @@
       "size": 9317
     },
     "account_session_orchestrator.py": {
-      "git_blob_oid": "ee49a90c61fe7865ce6122f7f066e64d41f619f5",
+      "git_blob_oid": "8cc522bdbb7dc83a11ad151378bc8a07b592a280",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "720727fd11931612c4c55b21b31f10f7ef954ea1839f3d20adcfeab6bc0a1b76",
-      "size": 268238
+      "sha256": "635ca7d9b2cad520209268d1e4a81cf2ed2a25c33adf640c932c956a958bc4c5",
+      "size": 274319
     },
     "account_session_phase_notification.py": {
       "git_blob_oid": "c5bac646636bf02bd8f92d06aabfd2fae9a44117",
@@ -2508,7 +2524,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "143fe518bec6a36fcd1422bdc2d7d5a4d1d729d29c2969008843f0921e88ec79",
+  "protected_scope_sha256": "a22a51bd4b2bd4f7d8743188ed9440850e8ffca0d21a636fbbd560a6d301a29a",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
