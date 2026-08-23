@@ -109,3 +109,25 @@ global provient désormais du minimum entre cap configuré, maximum package,
 palier warmup par journées actives SAST, hard caps ops et quota journalier
 restant. Le warmup ne modifie jamais les settings persistés. Une action qui
 ferait dépasser la limite effective doit être refusée avant le tap.
+
+## Never Follow Twice V1 — admission future uniquement
+
+Une réussite `follow_verified_persisted_v1/success` est une vérité canonique
+permanente pour `account_id + normalized_username`. La projection monotone
+`ever_followed_canonical_at` / `ever_followed_action_id` est produite
+uniquement depuis cet événement et n'est jamais effacée par Unfollow.
+
+Le batch Social Memory existant exclut les admissions futures avec
+`already_followed_canonical_once`. Le RPC de persistance est protégé au niveau
+de la table canonique : le replay du même `action_id` reste idempotent, tandis
+qu'un nouvel `action_id` après une réussite historique est rejeté. Une preuve
+UI, Like, Mute, Requested ou ambiguë ne fabrique jamais cette vérité.
+
+Cette garde est évaluée avant l'admission. La transaction V2 déjà admise reste
+strictement `LIKE → FOLLOW → MUTE → RETURN_CT`; la projection créée pendant la
+persistance Follow ne peut pas auto-bloquer Mute ou Return CT. Les exclusions
+Like/Mute Already Interacted et la reconciliation P0C fail-closed restent
+inchangées.
+
+Limite connue : la clé demeure le username normalisé. La récupération
+d'identité après rename n'appartient pas à ce chantier.

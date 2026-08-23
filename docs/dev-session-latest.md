@@ -660,3 +660,18 @@ remain historical evidence.
   déploiement ou activation n'est ajouté par ce chantier.
 - Validation ciblée dans l'interpréteur Python réel du Worker : `63/63 PASS`;
   matrice historique/lock finale à geler avant la demande Approval 2.
+
+## Never Follow Twice V1 — candidat avant Approval 2 (2026-08-23)
+
+- Base production exacte : `3faa28edd82c1415ff9c6ddb0d64533c46cd8683`.
+- Migration forward : `20260823130933_never_follow_twice_v1.sql`.
+- Autorité : événements `follow_verified_persisted_v1/success`; projection
+  Social Memory monotone seulement.
+- Terrain read-only avant backfill : `3639` événements, `3639` paires
+  account/username et `3639` lignes de projection existantes correspondantes.
+- PostgreSQL local : migration et replay idempotent PASS; même action replayée
+  une fois, nouvel action id rejeté, projection conservée après Unfollow,
+  effacement/falsification/suppression interdits.
+- Call graph 32a8394 : `LIKE → FOLLOW → MUTE → RETURN_CT` PASS, sans nouvel
+  appel appareil/XML/screenshot/Vision/sleep.
+- Activation et migration production interdites avant Approval 2.

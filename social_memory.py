@@ -20,6 +20,8 @@ SOCIAL_MEMORY_NORMALIZATION_VERSION = "ig_handle_lower_v1"
 ALREADY_INTERACTED_LIKE = "already_interacted_like"
 ALREADY_INTERACTED_MUTE = "already_interacted_mute"
 FOLLOW_MUTATION_AMBIGUOUS = "follow_mutation_ambiguous"
+EVER_FOLLOWED_CANONICAL_AT = "ever_followed_canonical_at"
+EVER_FOLLOWED_ACTION_ID = "ever_followed_action_id"
 
 
 def normalize_social_username(u: str) -> str:
@@ -144,6 +146,29 @@ def durable_already_interacted_evidence(
         "posts_liked_count": posts_liked_count,
         "last_liked_count": last_liked_count,
         "last_muted_at": db_row.get("last_muted_at"),
+    }
+
+
+def durable_ever_followed_canonical_projection(
+    db_row: Mapping[str, Any] | None,
+) -> tuple[bool, bool, dict[str, Any]]:
+    """Read the monotone canonical Follow projection without inventing truth.
+
+    Both fields are written from one successful canonical event.  A partial
+    projection is contradictory/unknown and therefore fail-closed, but is not
+    promoted to permanent Follow-once truth by the Worker.
+    """
+    if not db_row:
+        return False, False, {"ever_followed_canonical": False}
+    canonical_at = _row_pick(db_row, EVER_FOLLOWED_CANONICAL_AT)
+    action_id = _row_pick(db_row, EVER_FOLLOWED_ACTION_ID)
+    complete = bool(canonical_at and action_id)
+    incomplete = bool(canonical_at) != bool(action_id)
+    return complete, incomplete, {
+        "ever_followed_canonical": complete,
+        "ever_followed_canonical_projection_incomplete": incomplete,
+        "ever_followed_canonical_at": canonical_at,
+        "ever_followed_action_id": action_id,
     }
 
 
@@ -321,6 +346,26 @@ def evaluate_follow_eligibility(
                 "social_memory_follow_ambiguity_blocked",
                 FAILED,
                 {**detail, "follow_mutation_ambiguous": True},
+            )
+        ever_followed, ever_followed_incomplete, ever_followed_detail = (
+            durable_ever_followed_canonical_projection(db_row)
+        )
+        detail.update(ever_followed_detail)
+        if ever_followed_incomplete:
+            return FollowEligibility(
+                False,
+                "canonical_follow_projection_incomplete",
+                "social_memory_follow_blocked",
+                FAILED,
+                detail,
+            )
+        if ever_followed:
+            return FollowEligibility(
+                False,
+                "already_followed_canonical_once",
+                "social_memory_follow_blocked",
+                BLOCKED_FUTURE_FOLLOW,
+                detail,
             )
         if interacted_like or interacted_mute:
             reason = (

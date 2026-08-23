@@ -1,10 +1,10 @@
 {
   "approval": {
-    "base_sha": "6e7f02c720dd8a7c8c7900dd325f888eb81d21ed",
-    "change_id": "unfollow-posttap-rpc-dedup-v1-20260823",
-    "final_diff_hash": "a0626514c37c6701b5c6f713a6294b13de0f018f5b5880419e4c8fb46cc70650",
-    "final_manifest_hash": "a51cbc6bba97dc6d299f4af2464abd7fc98f2aefc438b1b10befaadd05a6b2cf",
-    "final_protected_scope_hash": "0050b5b2b610e7cebba9a139cad03bbb58f65b83c8a6e600197d72ec9e560617",
+    "base_sha": "3faa28edd82c1415ff9c6ddb0d64533c46cd8683",
+    "change_id": "never-follow-twice-v1-20260823",
+    "final_diff_hash": "e73f13530f0510a7b64dc0e234eaa7f05d2e8cb25832db3d6a0b1d36674ded4f",
+    "final_manifest_hash": "17e94c3fb5fdff87f3c7025743ff025c04bcdb85928f2c7d7c873e5c203c77db",
+    "final_protected_scope_hash": "5f739f73654bde4dd2a0ff7ef45f3f256ecd38620e070c5a0af8cd193fef329a",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -643,9 +643,28 @@
       ],
       "requested_scope": "Unfollow post-tap action restriction package-read deduplication within one guard invocation only",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_1_payload_sha256": "d94a99da7efdff97e56f7a8b72adce2eba5766c0c1c6bcc28425f1b57474af06",
+      "approval_token_status": "consumed_once_by_final_manifest_signature",
+      "base_sha": "3faa28edd82c1415ff9c6ddb0d64533c46cd8683",
+      "candidate_tree_sha": "88fdb6a2a60cb6bc6c7a73ea8c77105b1ef02b46",
+      "change_id": "never-follow-twice-v1-20260823",
+      "consumed_at": "2026-08-23T13:44:05.404521+00:00",
+      "diff_sha256": "e73f13530f0510a7b64dc0e234eaa7f05d2e8cb25832db3d6a0b1d36674ded4f",
+      "field_status": "PENDING_NEXT_NATURAL_FOLLOW",
+      "files": [
+        "docs/dev-session-latest.md",
+        "docs/follow-action-engine.md",
+        "social_memory.py",
+        "supabase/migrations/20260823130933_never_follow_twice_v1.sql",
+        "tests/test_never_follow_twice_v1.py"
+      ],
+      "requested_scope": "Never Follow Twice V1 canonical sticky follow projection and future-admission exclusion only",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
-  "field_certification": "PENDING_NEXT_NATURAL_UNFOLLOW",
+  "field_certification": "PENDING_NEXT_NATURAL_FOLLOW",
   "import_graph": {
     "account_commercial_policy.py": [
       "assignment_dispatch_resolver.py",
@@ -2162,13 +2181,13 @@
       "size": 2892
     },
     "social_memory.py": {
-      "git_blob_oid": "87a4283c0d62f2e515659524599e54581f4b08e5",
+      "git_blob_oid": "3fe6c62468e41494a20e806f14e2e27a422c9096",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "social_memory.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "a476d14c010f65acbee32eb9c94c91769427524fcc6c09ee9b6f684560148e23",
-      "size": 16710
+      "sha256": "e4352b7bb6cd17289db57a0f989c4a11e7e0eee6835ad06d931d0c438e0fbcaf",
+      "size": 18531
     },
     "storage_health.py": {
       "git_blob_oid": "70d190691edb3e1139e6e27d795cc0d74aad7f39",
@@ -2540,7 +2559,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "0050b5b2b610e7cebba9a139cad03bbb58f65b83c8a6e600197d72ec9e560617",
+  "protected_scope_sha256": "5f739f73654bde4dd2a0ff7ef45f3f256ecd38620e070c5a0af8cd193fef329a",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",
