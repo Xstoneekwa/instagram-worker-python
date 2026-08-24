@@ -25,6 +25,7 @@ CLIENT_SAFE_MESSAGE = (
 
 
 AUTO_LOGIN_REASON_PHASES = {
+    "instagram_wrong_password": "submit_credentials",
     "auto_login_not_ready": "request",
     "active_request_exists": "request",
     "credentials_missing": "login_form",
@@ -92,6 +93,10 @@ AUTO_LOGIN_REASON_PHASES = {
 # notification boundary.  Synonyms intentionally collapse to one canonical
 # code per operator condition.
 SENSITIVE_REASON_OVERRIDES = {
+    # The internal detector may name the rejected input surface.  Persist a
+    # precise but secret-safe authentication result that satisfies the DB
+    # constraint forbidding credential-material vocabulary.
+    "instagram_wrong_password": "instagram_credentials_rejected",
     "password_field_not_found": "credential_input_field_unavailable",
     "password_input_missing_or_not_accepted": "credential_input_not_confirmed",
     "password_input_not_confirmed": "credential_input_not_confirmed",
@@ -124,6 +129,7 @@ SENSITIVE_REASON_OVERRIDES = {
 PERSISTED_PHASES = {
     **AUTO_LOGIN_REASON_PHASES,
     "credential_input_field_unavailable": "login_form",
+    "instagram_credentials_rejected": "submit_credentials",
     "credential_input_not_confirmed": "submit_credentials",
     "credential_input_failed": "submit_credentials",
     "credential_input_unavailable": "login_form",
@@ -202,7 +208,15 @@ def normalize_auto_login_failure(
     if not resolved_phase:
         resolved_phase = AUTO_LOGIN_REASON_PHASES.get(raw_internal) or PERSISTED_PHASES.get(mapped, "unknown")
 
-    if mapped == "assigned_instagram_app_instance_mismatch":
+    if mapped == "instagram_credentials_rejected":
+        operator_message = (
+            "Instagram rejected the active credential revision for this account."
+        )
+        recommended_action = (
+            "Submit a corrected credential through the secure writer, then explicitly resume Auto Login."
+        )
+        retryable = False
+    elif mapped == "assigned_instagram_app_instance_mismatch":
         operator_message = (
             "L’application Instagram assignée n’a pas été ouverte. "
             "Aucune donnée de connexion n’a été saisie."

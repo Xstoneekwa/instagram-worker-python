@@ -10,6 +10,17 @@ from logs import log
 from supabase_client import call_rpc
 
 LOGIN_CHALLENGE_ACTIONS = {
+    "update_instagram_password": {
+        "title": "Mot de passe Instagram à mettre à jour",
+        "safe_client_message": (
+            "Instagram a refusé les identifiants de ce compte. "
+            "Mettez à jour le mot de passe pour reprendre la connexion en toute sécurité."
+        ),
+        "action_label": "Mettre à jour le mot de passe",
+        "audience": "client",
+        "requires_client_action": True,
+        "severity": "warning",
+    },
     "enter_email_verification_code": {
         "title": "Code de vérification Instagram requis",
         "safe_client_message": "Instagram demande un code de vérification pour continuer la connexion.",
@@ -167,7 +178,11 @@ def upsert_login_challenge_dashboard_action(
         if ads_data_consent_popup
         else f"account:{aid}:dashboard_action:{atype}"
     )
-    deep_link = f"/instagram-dashboard/credentials-actions?account_id={aid}"
+    deep_link = (
+        "/instagram-client?view=account"
+        if atype == "update_instagram_password"
+        else f"/instagram-dashboard/credentials-actions?account_id={aid}"
+    )
 
     try:
         row = call_rpc(

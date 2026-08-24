@@ -1407,6 +1407,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.post_submit_outcome, "login_failed")
+        self.assertEqual(result.post_submit_probe_reason, "instagram_wrong_password")
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
         self.assertEqual(login.click_calls, 1)
 
@@ -1696,6 +1697,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         result = self._execute_with_post_xml(LOGIN_FAILED_XML)
 
         self.assertEqual(result.post_submit_outcome, "login_failed")
+        self.assertEqual(result.post_submit_probe_reason, "instagram_wrong_password")
 
     def test_post_submit_password_required_dialog_detected_without_retry(self) -> None:
         device, _username, _password_selector, _login = configured_device(PASSWORD_REQUIRED_XML)

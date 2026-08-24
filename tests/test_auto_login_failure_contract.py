@@ -60,6 +60,15 @@ class AutoLoginFailureContractTest(unittest.TestCase):
         )
         self.assertEqual(contract.phase, "identity_verification")
 
+    def test_instagram_wrong_password_maps_to_specific_secret_safe_terminal_code(self) -> None:
+        contract = normalize_auto_login_failure("instagram_wrong_password")
+
+        self.assertEqual(contract.persisted_error_code, "instagram_credentials_rejected")
+        self.assertEqual(contract.phase, "submit_credentials")
+        self.assertFalse(contract.retryable)
+        self.assertIn("secure writer", contract.recommended_action)
+        self.assertNotIn("password", str(contract.incident_metadata()).lower())
+
     def test_app_instance_mismatch_notification_states_no_credentials_entered(self) -> None:
         contract = normalize_auto_login_failure("assigned_instagram_app_instance_mismatch")
 
