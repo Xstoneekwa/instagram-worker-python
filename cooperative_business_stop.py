@@ -268,6 +268,7 @@ def follow_handoff_deadline(
     estimated_seconds_per_unfollow: int,
     navigation_reserve_seconds: int = 30,
     recovery_reserve_seconds: int = 75,
+    rare_path_uncertainty_seconds: int = 0,
 ) -> str | None:
     deadline = parse_utc(business_deadline)
     actions = min(max(0, int(eligible_unfollows)), max(0, int(unfollow_quota_remaining)))
@@ -277,5 +278,6 @@ def follow_handoff_deadline(
         actions * max(1, int(estimated_seconds_per_unfollow))
         + max(0, int(navigation_reserve_seconds))
         + max(0, int(recovery_reserve_seconds))
+        + max(0, int(rare_path_uncertainty_seconds))
     )
     return iso_utc(datetime.fromtimestamp(deadline.timestamp() - reserve, tz=timezone.utc))

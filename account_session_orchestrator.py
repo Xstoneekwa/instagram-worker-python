@@ -48,7 +48,12 @@ from unfollow_session_orchestrator import (
 )
 from unfollow_eligibility_engine import plan_unfollow_targets
 from unfollow_settings import UNFOLLOW_MODE_ANY, UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
-from unfollow_ui_coverage_policy import HISTORICAL_ACTION_P90_SECONDS
+from unfollow_ui_coverage_policy import (
+    BUSINESS_DEADLINE_NAVIGATION_RECOVERY_SECONDS,
+    BUSINESS_DEADLINE_RARE_PATH_UNCERTAINTY_SECONDS,
+    BUSINESS_DEADLINE_UNFOLLOW_ACTION_SECONDS,
+    HISTORICAL_ACTION_P90_SECONDS,
+)
 from cooperative_business_stop import (
     StopContext,
     acknowledge_stop,
@@ -3552,7 +3557,7 @@ def _resolve_follow_time_handoff(
         "follow_new_work_deadline": None,
         "eligible_unfollows": 0,
         "unfollow_quota_remaining": 0,
-        "estimated_seconds_per_unfollow": HISTORICAL_ACTION_P90_SECONDS,
+        "estimated_seconds_per_unfollow": BUSINESS_DEADLINE_UNFOLLOW_ACTION_SECONDS,
         "source": "canonical_unfollow_plan",
     }
     if not business_action_deadline or not _follow_to_unfollow_real_enabled(account_id):
@@ -3585,7 +3590,10 @@ def _resolve_follow_time_handoff(
                     business_deadline=business_action_deadline,
                     eligible_unfollows=eligible,
                     unfollow_quota_remaining=quota,
-                    estimated_seconds_per_unfollow=HISTORICAL_ACTION_P90_SECONDS,
+                    estimated_seconds_per_unfollow=BUSINESS_DEADLINE_UNFOLLOW_ACTION_SECONDS,
+                    navigation_reserve_seconds=BUSINESS_DEADLINE_NAVIGATION_RECOVERY_SECONDS,
+                    recovery_reserve_seconds=0,
+                    rare_path_uncertainty_seconds=BUSINESS_DEADLINE_RARE_PATH_UNCERTAINTY_SECONDS,
                 ),
             }
         )
@@ -3603,7 +3611,10 @@ def _resolve_follow_time_handoff(
                     business_deadline=business_action_deadline,
                     eligible_unfollows=1,
                     unfollow_quota_remaining=1,
-                    estimated_seconds_per_unfollow=HISTORICAL_ACTION_P90_SECONDS,
+                    estimated_seconds_per_unfollow=BUSINESS_DEADLINE_UNFOLLOW_ACTION_SECONDS,
+                    navigation_reserve_seconds=BUSINESS_DEADLINE_NAVIGATION_RECOVERY_SECONDS,
+                    recovery_reserve_seconds=0,
+                    rare_path_uncertainty_seconds=BUSINESS_DEADLINE_RARE_PATH_UNCERTAINTY_SECONDS,
                 ),
             }
         )

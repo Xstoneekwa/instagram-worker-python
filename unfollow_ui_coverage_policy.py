@@ -23,6 +23,12 @@ HISTORICAL_ROWS_PER_VIEWPORT = 7
 HISTORICAL_ACTION_SAMPLE_COUNT = 25
 HISTORICAL_VIEWPORT_SAMPLE_COUNT = 4
 
+# Business Deadline 2D uses the field-observed end-to-end Unfollow cost.
+# Keep it independent from the runtime coverage policy's historical P90.
+BUSINESS_DEADLINE_UNFOLLOW_ACTION_SECONDS = 29
+BUSINESS_DEADLINE_NAVIGATION_RECOVERY_SECONDS = 105
+BUSINESS_DEADLINE_RARE_PATH_UNCERTAINTY_SECONDS = 8 * 60
+
 # The scheduler already defines business_action_deadline=session_end-10 minutes.
 SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS = 10 * 60
 UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT = 3

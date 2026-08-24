@@ -102,6 +102,69 @@ class CooperativeBusinessStopTests(unittest.TestCase):
             "2026-08-18T15:57:45Z",
         )
 
+    def test_business_deadline_2d_reserves_80_actions(self) -> None:
+        self.assertEqual(
+            follow_handoff_deadline(
+                business_deadline="2026-08-20T18:00:00Z",
+                eligible_unfollows=80,
+                unfollow_quota_remaining=80,
+                estimated_seconds_per_unfollow=29,
+                navigation_reserve_seconds=105,
+                recovery_reserve_seconds=0,
+                rare_path_uncertainty_seconds=480,
+            ),
+            "2026-08-20T17:11:35Z",
+        )
+
+    def test_business_deadline_2d_reserves_120_actions(self) -> None:
+        self.assertEqual(
+            follow_handoff_deadline(
+                business_deadline="2026-08-20T18:00:00Z",
+                eligible_unfollows=120,
+                unfollow_quota_remaining=120,
+                estimated_seconds_per_unfollow=29,
+                navigation_reserve_seconds=105,
+                recovery_reserve_seconds=0,
+                rare_path_uncertainty_seconds=480,
+            ),
+            "2026-08-20T16:52:15Z",
+        )
+
+    def test_business_deadline_2d_zero_actionable_adds_no_reserve(self) -> None:
+        self.assertIsNone(
+            follow_handoff_deadline(
+                business_deadline="2026-08-20T18:00:00Z",
+                eligible_unfollows=0,
+                unfollow_quota_remaining=120,
+                estimated_seconds_per_unfollow=29,
+                navigation_reserve_seconds=105,
+                recovery_reserve_seconds=0,
+                rare_path_uncertainty_seconds=480,
+            )
+        )
+
+    def test_business_deadline_2d_rare_buffer_is_added_once(self) -> None:
+        without_rare = follow_handoff_deadline(
+            business_deadline="2026-08-20T18:00:00Z",
+            eligible_unfollows=3,
+            unfollow_quota_remaining=3,
+            estimated_seconds_per_unfollow=29,
+            navigation_reserve_seconds=105,
+            recovery_reserve_seconds=0,
+            rare_path_uncertainty_seconds=0,
+        )
+        with_rare = follow_handoff_deadline(
+            business_deadline="2026-08-20T18:00:00Z",
+            eligible_unfollows=3,
+            unfollow_quota_remaining=3,
+            estimated_seconds_per_unfollow=29,
+            navigation_reserve_seconds=105,
+            recovery_reserve_seconds=0,
+            rare_path_uncertainty_seconds=480,
+        )
+        self.assertEqual(without_rare, "2026-08-20T17:56:48Z")
+        self.assertEqual(with_rare, "2026-08-20T17:48:48Z")
+
     def test_scheduled_session_is_not_killed_by_fixed_7200_seconds(self) -> None:
         proc = mock.Mock()
         proc.poll.side_effect = [None, 0]
