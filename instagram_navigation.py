@@ -33187,6 +33187,63 @@ def _post_open_context_v1_bridge_contract(
     return True, ""
 
 
+def _post_open_context_v1_fresh_reacquisition_contract(
+    context: dict[str, Any] | None,
+    *,
+    expected_package: str,
+    expected_follower_username: str,
+    expected_stage_binding: dict[str, Any],
+    current_package: str,
+    current_activity: str,
+    canonical_generation: int,
+) -> tuple[bool, str]:
+    """Keep durable stage identity while fresh XML replaces stale UI proof.
+
+    The immutable context hash and transaction bindings remain authoritative.
+    Viewer/profile/Like semantics are intentionally absent here: after the
+    transported snapshot expires, those UI-derived claims must be rebuilt
+    coherently from the one bounded fresh hierarchy.
+    """
+    ctx = dict(context or {})
+    if str(ctx.get("version") or "") != "PostOpenContextV1":
+        return False, "liketapcontext_post_open_version_missing"
+    if not hmac.compare_digest(
+        str(ctx.get("proof_hash") or ""),
+        _post_open_context_v1_proof_hash(ctx),
+    ):
+        return False, "liketapcontext_post_open_hash_mismatch"
+    if _normalize_handle(str(ctx.get("candidate_username") or "")) != _normalize_handle(
+        expected_follower_username
+    ):
+        return False, "liketapcontext_post_open_candidate_mismatch"
+    for key in (
+        "account_id", "run_id", "request_id", "action_id", "attempt_id",
+        "business_session_id", "control_id", "worker_sha",
+    ):
+        expected = str((expected_stage_binding or {}).get(key) or "")
+        if expected and str(ctx.get(key) or "") != expected:
+            return False, "liketapcontext_post_open_binding_mismatch"
+    if str(ctx.get("package") or "") != str(expected_package or ""):
+        return False, "liketapcontext_post_open_package_mismatch"
+    if str(current_package or "") != str(ctx.get("package") or ""):
+        return False, "liketapcontext_post_open_live_package_mismatch"
+    if str(current_activity or "") != str(ctx.get("activity") or ""):
+        return False, "liketapcontext_post_open_live_activity_mismatch"
+    if "instagram" not in str(current_activity or "").lower() or "mainactivity" not in str(
+        current_activity or ""
+    ).lower():
+        return False, "liketapcontext_post_open_viewer_mismatch"
+    if not str(ctx.get("stage_nonce") or ""):
+        return False, "liketapcontext_post_open_stage_nonce_missing"
+    if not str(ctx.get("source_cell_fingerprint") or ""):
+        return False, "liketapcontext_post_open_source_fingerprint_missing"
+    if not str(ctx.get("navigation_generation") or ""):
+        return False, "liketapcontext_post_open_navigation_generation_missing"
+    if int(ctx.get("post_open_ui_generation") or 0) != int(canonical_generation or 0):
+        return False, "liketapcontext_generation_changed"
+    return True, ""
+
+
 def _authoritative_stage_binding_v2(
     binding: dict[str, Any] | None,
     *,
@@ -33240,9 +33297,11 @@ def _like_tap_context_v2_proof_hash(context: dict[str, Any] | None) -> str:
             "candidate_username", "candidate_profile_id", "source_target_id",
             "viewer_type", "package", "activity", "xml_hash",
             "like_bounds_hash", "exact_like_source", "xml_fingerprint",
-            "canonical_generation",
+            "canonical_generation", "source_navigation_generation",
+            "source_post_open_ui_generation",
             "v5_positive", "story_or_highlight_detected",
             "already_liked", "one_shot_nonce", "consumed",
+            "fresh_ui_authority", "stale_ui_authority_discarded",
             "created_at_monotonic",
         )
     )
@@ -33288,6 +33347,7 @@ def _create_like_tap_context_v2(
         return None, "liketapcontext_a2_v5_snapshot_missing"
     if not xml:
         return None, "liketapcontext_fresh_xml_missing"
+    fresh_ui_authority = bool(snapshot_source == "single_reacquisition")
     meta = _followers_current_pkg_activity(d)
     package = str(meta.get("current_package") or "")
     activity = str(meta.get("current_activity") or "")
@@ -33310,7 +33370,12 @@ def _create_like_tap_context_v2(
     bridge_valid = False
     bridge_reason = ""
     if stage_context:
-        bridge_valid, bridge_reason = _post_open_context_v1_bridge_contract(
+        bridge_validator = (
+            _post_open_context_v1_fresh_reacquisition_contract
+            if fresh_ui_authority
+            else _post_open_context_v1_bridge_contract
+        )
+        bridge_valid, bridge_reason = bridge_validator(
             stage_context,
             expected_package=expected_package,
             expected_follower_username=expected_follower_username,
@@ -33320,7 +33385,7 @@ def _create_like_tap_context_v2(
             canonical_generation=canonical_generation,
         )
     transported_proof_valid = False
-    if transported_exact_proof:
+    if transported_exact_proof and not fresh_ui_authority:
         if not hmac.compare_digest(
             str(stage_context.get("proof_hash") or ""),
             _post_open_context_v1_proof_hash(stage_context),
@@ -33391,6 +33456,16 @@ def _create_like_tap_context_v2(
         ]
         if story_detected:
             return None, "liketapcontext_story_or_highlight_detected"
+        if fresh_ui_authority and not bool(identity.get("snapshot_valid")):
+            return None, "liketapcontext_fresh_xml_invalid"
+        if fresh_ui_authority and not bool(
+            identity.get("candidate_username_exact_in_snapshot")
+        ):
+            return None, "liketapcontext_fresh_candidate_identity_missing"
+        if fresh_ui_authority and not bool(
+            identity.get("posts_action_bar_in_snapshot")
+        ):
+            return None, "liketapcontext_fresh_posts_viewer_missing"
         if any(
             _ui_proof_a2_v5_exact_like_control(
                 node, d, expected_state="action_button_liked"
@@ -33437,23 +33512,37 @@ def _create_like_tap_context_v2(
             snapshot_captured_at_monotonic=time.perf_counter(),
         )
         candidate_continuity = bool(
-            bridge_valid
-            or identity.get("candidate_username_exact_in_snapshot")
-            or provenance.get("stage_provenance_confirmed")
+            identity.get("candidate_username_exact_in_snapshot")
+            if fresh_ui_authority
+            else (
+                bridge_valid
+                or identity.get("candidate_username_exact_in_snapshot")
+                or provenance.get("stage_provenance_confirmed")
+            )
         )
         if stage_context and not bridge_valid:
             return None, bridge_reason or "liketapcontext_post_open_bridge_rejected"
-        v5_positive = bool(
-            package == str(expected_package or "")
-            and "instagram" in activity.lower()
-            and "mainactivity" in activity.lower()
-            and (
-                bridge_valid
-                or bool(identity.get("posts_action_bar_in_snapshot"))
+        if fresh_ui_authority:
+            v5_positive = bool(
+                package == str(expected_package or "")
+                and "instagram" in activity.lower()
+                and "mainactivity" in activity.lower()
+                and bool(identity.get("posts_action_bar_in_snapshot"))
+                and candidate_continuity
+                and not story_detected
             )
-            and candidate_continuity
-            and not story_detected
-        )
+        else:
+            v5_positive = bool(
+                package == str(expected_package or "")
+                and "instagram" in activity.lower()
+                and "mainactivity" in activity.lower()
+                and (
+                    bridge_valid
+                    or bool(identity.get("posts_action_bar_in_snapshot"))
+                )
+                and candidate_continuity
+                and not story_detected
+            )
     if not v5_positive:
         return None, "liketapcontext_v5_positive_contract_missing"
     binding = dict(expected_stage_binding or {})
@@ -33506,6 +33595,12 @@ def _create_like_tap_context_v2(
         ).hexdigest(),
         "canonical_generation": canonical_generation,
         "navigation_generation": canonical_generation,
+        "source_navigation_generation": str(
+            stage_context.get("navigation_generation") or ""
+        ),
+        "source_post_open_ui_generation": int(
+            stage_context.get("post_open_ui_generation") or canonical_generation
+        ),
         "v5_positive": True,
         "story_or_highlight_detected": False,
         "already_liked": False,
@@ -33513,6 +33608,8 @@ def _create_like_tap_context_v2(
         "exact_like_bounds": dict(like_bounds),
         "like_bounds_rejection_reason": "",
         "exact_like_transport_used": bool(transported_proof_valid),
+        "fresh_ui_authority": bool(fresh_ui_authority),
+        "stale_ui_authority_discarded": bool(fresh_ui_authority),
         "candidate_identity_source": (
             "post_open_context_v1"
             if transported_proof_valid
@@ -33525,12 +33622,15 @@ def _create_like_tap_context_v2(
         "snapshot_age_ms_at_creation": round(float(snapshot_age_ms), 2),
         "snapshot_source": snapshot_source,
         "like_context_source": (
-            "A2/V5" if transported_proof_valid else "PostOpenContextV1/V5"
+            "A2/V5" if transported_proof_valid else "FreshXMLSemanticV2"
+            if fresh_ui_authority else "PostOpenContextV1/V5"
             if bridge_valid else "reacquired"
         ),
         "like_context_transport": (
             "PostOpenContextV1_immutable"
             if transported_proof_valid
+            else "single_reacquisition_authority_reset"
+            if fresh_ui_authority
             else "PostOpenContextV1_single_xml_bridge"
             if bridge_valid
             else "single_reacquisition"
@@ -34644,6 +34744,12 @@ def visual_like_open_post(
                 ),
                 exact_like_transport_used=bool(
                     like_tap_context_v2.get("exact_like_transport_used")
+                ),
+                fresh_ui_authority=bool(
+                    like_tap_context_v2.get("fresh_ui_authority")
+                ),
+                stale_ui_authority_discarded=bool(
+                    like_tap_context_v2.get("stale_ui_authority_discarded")
                 ),
                 like_bounds_rejection_reason=str(
                     like_tap_context_v2.get("like_bounds_rejection_reason")
