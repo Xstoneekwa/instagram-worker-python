@@ -18,14 +18,38 @@ from logs import log
 
 LOGIN_UI_PROBE_VERSION = "v1"
 
-LOGIN_FAILED_PATTERNS = (
+WRONG_PASSWORD_PATTERNS = (
     "incorrect password",
     "wrong password",
+    "the password you entered is incorrect",
+    "your password was incorrect",
+    "sorry, your password was incorrect",
+)
+SECURITY_RECOVERY_REQUIRED_PATTERNS = (
+    "choose a way to recover",
+    "we locked your account",
+    "possible hack",
+    "take a video selfie",
+)
+LOGIN_INFO_RECOVERY_REQUIRED_PATTERNS = (
+    "recover your account",
+    "login info is no longer connected to an account",
+    "secure process to help you get back in",
+)
+ACCOUNT_CONFIRMATION_REQUIRED_PATTERNS = (
+    "choose a way to confirm your account",
+    "get code via email",
+    "get code via whatsapp",
+    "get code via phone",
+)
+PHONE_CALL_CONFIRMATION_PATTERNS = (
+    "we'll call to confirm your mobile number",
+    "you don't need to answer",
+)
+LOGIN_FAILED_PATTERNS = (
     "couldn't log in",
     "could not log in",
     "invalid username",
-    "your password was incorrect",
-    "sorry, your password was incorrect",
 )
 NEEDS_2FA_PATTERNS = (
     "two-factor",
@@ -672,6 +696,38 @@ def probe_login_ui_from_hierarchy(
             },
         )
 
+    recovery_surface_type = _recovery_surface_type(text)
+
+    # Recovery and confirmation surfaces are not proof that the credential is
+    # wrong.  They require bounded human recovery and must never open the
+    # password-correction action unless an explicit rejection phrase is also
+    # present on the same fresh hierarchy.
+    if recovery_surface_type and not _contains_any(text, WRONG_PASSWORD_PATTERNS):
+        reason = {
+            "account_security_recovery": "instagram_account_security_recovery_required",
+            "login_info_recovery": "instagram_login_info_recovery_required",
+            "account_confirmation": "instagram_account_confirmation_required",
+            "phone_call_confirmation": "instagram_account_confirmation_required",
+        }[recovery_surface_type]
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE,
+            ok=False,
+            reason=reason,
+            metadata={
+                **metadata,
+                "detection_reason": reason,
+                "screen_type": recovery_surface_type,
+                "challenge_type": "account_recovery",
+                "recovery_required": recovery_surface_type != "account_confirmation",
+                "confirmation_required": recovery_surface_type in {
+                    "account_confirmation",
+                    "phone_call_confirmation",
+                },
+                "recovery_surface_type": recovery_surface_type,
+                "human_review_required": True,
+            },
+        )
+
     if _is_unsupported_post_submit_challenge_text(text):
         return LoginUiProbeResult(
             outcome=LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE,
@@ -683,6 +739,26 @@ def probe_login_ui_from_hierarchy(
                 "screen_type": "unsupported_post_submit_challenge",
                 "challenge_type": "unknown",
                 "human_review_required": True,
+            },
+        )
+
+    # A credential rejection is an operator-correctable terminal condition,
+    # not an undifferentiated login failure.  Keep the public outcome stable
+    # while preserving a precise internal reason for the safe persistence
+    # boundary and dashboard action pipeline.
+    if _contains_any(text, WRONG_PASSWORD_PATTERNS):
+        recovery_surface_type = _recovery_surface_type(text)
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.LOGIN_FAILED,
+            ok=False,
+            reason="instagram_wrong_password",
+            metadata={
+                **metadata,
+                "detection_reason": "instagram_wrong_password",
+                "authentication_result": "credentials_rejected",
+                "recovery_required": bool(recovery_surface_type),
+                "recovery_surface_type": recovery_surface_type or None,
+                "human_review_required": bool(recovery_surface_type),
             },
         )
 
@@ -984,11 +1060,23 @@ def _is_unsupported_post_submit_challenge_text(text: str) -> bool:
         return False
     if _contains_any(text, CHECKPOINT_PATTERNS):
         return False
-    if _contains_any(text, LOGIN_FAILED_PATTERNS):
+    if _contains_any(text, WRONG_PASSWORD_PATTERNS + LOGIN_FAILED_PATTERNS):
         return False
     if _contains_any(text, LOGGED_OUT_PATTERNS) and _has_phrase(text, "log in"):
         return False
     return _contains_any(text, UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS)
+
+
+def _recovery_surface_type(text: str) -> str:
+    if _contains_any(text, SECURITY_RECOVERY_REQUIRED_PATTERNS):
+        return "account_security_recovery"
+    if _contains_any(text, LOGIN_INFO_RECOVERY_REQUIRED_PATTERNS):
+        return "login_info_recovery"
+    if _contains_any(text, ACCOUNT_CONFIRMATION_REQUIRED_PATTERNS):
+        return "account_confirmation"
+    if _contains_any(text, PHONE_CALL_CONFIRMATION_PATTERNS):
+        return "phone_call_confirmation"
+    return ""
 
 
 def _is_post_login_location_services_prompt_text(text: str) -> bool:

@@ -5214,6 +5214,8 @@ def _dashboard_action_for_outcome(
 
 def _final_reason_for_password_outcome(outcome: str, password_result: Any, classification_reason: str) -> str:
     probe_reason = str(getattr(password_result, "post_submit_probe_reason", "") or "")
+    if outcome == "login_failed" and probe_reason == "instagram_wrong_password":
+        return "instagram_wrong_password"
     if outcome == "logged_out" and probe_reason in {"session_expired_after_settling", "unknown_logged_out_return"}:
         return probe_reason
     if outcome == "unknown" and probe_reason == "post_submit_unknown_after_settling":
@@ -5958,7 +5960,11 @@ def _sync_login_challenge_side_effects(
     extra_metadata: dict[str, Any],
     publish_warnings: list[str],
 ) -> dict[str, Any]:
-    if dashboard_action_type not in {"enter_email_verification_code", "review_login_challenge"}:
+    if dashboard_action_type not in {
+        "enter_email_verification_code",
+        "review_login_challenge",
+        "update_instagram_password",
+    }:
         return {}
 
     challenge_meta = _extract_challenge_metadata(extra_metadata)
@@ -6001,29 +6007,30 @@ def _sync_login_challenge_side_effects(
         warnings.append("dashboard_action_sync_failed_safe")
         dashboard_action_sync = {"published": False, "reason": "dashboard_action_sync_failed_safe"}
 
-    try:
-        login_challenge_incident = publish_login_challenge_pending_incident(
-            account_id=account_id,
-            expected_username=expected_username,
-            run_id=run_id,
-            challenge_type=str(challenge_meta.get("challenge_type") or ""),
-            screen_type=str(
-                ADS_DATA_CONSENT_POPUP_TYPE
-                if extra_metadata.get("instagram_ads_data_consent_popup_detected")
-                else challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""
-            ),
-            reason=reason or final_outcome,
-            dashboard_action_type=dashboard_action_type,
-            masked_email_present=bool(challenge_meta.get("masked_email_present")),
-            request_id=str(extra_metadata.get("request_id") or "").strip() or None,
-            device_id=str(extra_metadata.get("device_id") or "").strip() or None,
-            app_instance_id=str(extra_metadata.get("expected_app_instance_id") or "").strip() or None,
-            clone=str(extra_metadata.get("clone") or "").strip() or None,
-            detected_at=str(extra_metadata.get("popup_detected_at") or "").strip() or None,
-        )
-    except Exception:
-        warnings.append("login_challenge_incident_failed_safe")
-        login_challenge_incident = {"published": False, "reason": "login_challenge_incident_failed_safe"}
+    if dashboard_action_type != "update_instagram_password":
+        try:
+            login_challenge_incident = publish_login_challenge_pending_incident(
+                account_id=account_id,
+                expected_username=expected_username,
+                run_id=run_id,
+                challenge_type=str(challenge_meta.get("challenge_type") or ""),
+                screen_type=str(
+                    ADS_DATA_CONSENT_POPUP_TYPE
+                    if extra_metadata.get("instagram_ads_data_consent_popup_detected")
+                    else challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""
+                ),
+                reason=reason or final_outcome,
+                dashboard_action_type=dashboard_action_type,
+                masked_email_present=bool(challenge_meta.get("masked_email_present")),
+                request_id=str(extra_metadata.get("request_id") or "").strip() or None,
+                device_id=str(extra_metadata.get("device_id") or "").strip() or None,
+                app_instance_id=str(extra_metadata.get("expected_app_instance_id") or "").strip() or None,
+                clone=str(extra_metadata.get("clone") or "").strip() or None,
+                detected_at=str(extra_metadata.get("popup_detected_at") or "").strip() or None,
+            )
+        except Exception:
+            warnings.append("login_challenge_incident_failed_safe")
+            login_challenge_incident = {"published": False, "reason": "login_challenge_incident_failed_safe"}
 
     if dashboard_action_sync and not dashboard_action_sync.get("published"):
         warnings.append("dashboard_action_sync_not_published")

@@ -134,9 +134,72 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
     def test_detects_login_failed_wrong_password(self) -> None:
         xml = '<node text="Sorry, your password was incorrect. Please try again." />'
 
-        outcome = detect_login_probe_outcome_from_hierarchy(xml)
+        result = probe_login_ui_from_hierarchy(xml)
 
-        self.assertEqual(outcome, LoginProbeOutcome.LOGIN_FAILED)
+        self.assertEqual(result.outcome, LoginProbeOutcome.LOGIN_FAILED)
+        self.assertEqual(result.reason, "instagram_wrong_password")
+        self.assertEqual(result.metadata["authentication_result"], "credentials_rejected")
+
+    def test_real_direct_incorrect_password_dialog_is_exact_rejection(self) -> None:
+        xml = (
+            '<node text="Incorrect password" />'
+            '<node text="The password you entered is incorrect. Please try again." />'
+            '<node text="OK" clickable="true" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        self.assertEqual(result.reason, "instagram_wrong_password")
+        self.assertEqual(result.metadata["authentication_result"], "credentials_rejected")
+        self.assertFalse(result.metadata["recovery_required"])
+
+    def test_wrong_password_with_phone_confirmation_preserves_root_cause(self) -> None:
+        xml = (
+            '<node text="The password you entered is incorrect." />'
+            '<node text="We&apos;ll call to confirm your mobile number. You don&apos;t need to answer." />'
+            '<node text="Continue" /><node text="Try another way" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        self.assertEqual(result.reason, "instagram_wrong_password")
+        self.assertTrue(result.metadata["recovery_required"])
+        self.assertEqual(result.metadata["recovery_surface_type"], "phone_call_confirmation")
+
+    def test_security_lock_recovery_is_not_wrong_password(self) -> None:
+        xml = (
+            '<node text="Choose a way to recover" />'
+            '<node text="We locked your account to protect you from a possible hack." />'
+            '<node text="Get code via email" /><node text="Take a video selfie" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        self.assertEqual(result.reason, "instagram_account_security_recovery_required")
+        self.assertNotEqual(result.reason, "instagram_wrong_password")
+        self.assertEqual(result.metadata["recovery_surface_type"], "account_security_recovery")
+
+    def test_disconnected_login_info_recovery_is_not_wrong_password(self) -> None:
+        xml = (
+            '<node text="Recover your account" />'
+            '<node text="It looks like that login info is no longer connected to an account." />'
+            '<node text="We&apos;ll use a secure process to help you get back in." />'
+            '<node text="Cancel" /><node text="Continue" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        self.assertEqual(result.reason, "instagram_login_info_recovery_required")
+        self.assertNotEqual(result.reason, "instagram_wrong_password")
+
+    def test_account_confirmation_options_do_not_imply_wrong_password(self) -> None:
+        xml = (
+            '<node text="Choose a way to confirm your account" />'
+            '<node text="Email" /><node text="Password" />'
+            '<node text="SMS" /><node text="Continue" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        self.assertEqual(result.reason, "instagram_account_confirmation_required")
+        self.assertNotEqual(result.reason, "instagram_wrong_password")
+        self.assertTrue(result.metadata["confirmation_required"])
+
+    def test_generic_login_failure_remains_distinct_from_wrong_password(self) -> None:
+        result = probe_login_ui_from_hierarchy('<node text="Could not log in" />')
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.LOGIN_FAILED)
+        self.assertEqual(result.reason, "login_failed_signal")
 
     def test_detects_password_required_dialog_signals(self) -> None:
         xml = (

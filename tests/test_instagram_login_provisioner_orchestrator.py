@@ -1758,6 +1758,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         result = self._run_login_form(LOGIN_FAILED_XML)
 
         self.assertEqual(result.final_outcome, "login_failed")
+        self.assertEqual(result.reason, "instagram_wrong_password")
         self.assertEqual(result.final_login_status, "failed")
         self.assertEqual(result.final_provisioning_status, "failed")
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
@@ -2282,6 +2283,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         result = self._run_continue_password_only(LOGIN_FAILED_XML)
 
         self.assertEqual(result.final_outcome, "login_failed")
+        self.assertEqual(result.reason, "instagram_wrong_password")
         self.assertEqual(result.final_login_status, "failed")
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
         self.assertFalse(result.retry_attempted)

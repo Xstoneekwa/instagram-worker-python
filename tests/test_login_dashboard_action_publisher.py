@@ -83,3 +83,28 @@ class LoginDashboardActionPublisherTests(unittest.TestCase):
         self.assertEqual(metadata["actual_foreground_package"], "com.instagram.android")
         self.assertNotIn("password", metadata)
         self.assertNotIn("secret_ref", metadata)
+
+    def test_wrong_password_action_is_account_scoped_client_safe_and_opaque(self) -> None:
+        captured: dict = {}
+
+        def _call_rpc(name: str, params: dict) -> dict:
+            captured["name"] = name
+            captured["params"] = params
+            return {"id": "action-password"}
+
+        with patch.object(publisher, "call_rpc", side_effect=_call_rpc):
+            out = publisher.upsert_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                action_type="update_instagram_password",
+                run_id="run-1",
+                metadata={"reason_code": "instagram_credentials_rejected", "password": "never"},
+            )
+
+        self.assertTrue(out["published"])
+        params = captured["params"]
+        self.assertEqual(params["p_action_type"], "update_instagram_password")
+        self.assertEqual(params["p_audience"], "client")
+        self.assertTrue(params["p_requires_client_action"])
+        self.assertTrue(params["p_blocking_campaign"])
+        self.assertEqual(params["p_action_deep_link"], "/instagram-client?view=account")
+        self.assertNotIn("password", params["p_metadata"])

@@ -43,6 +43,28 @@ class FakeDevice:
         return {"package": self.foreground_package} if self.foreground_package is not None else {}
 
 
+class ActiveCredentialSelectionContractTest(unittest.TestCase):
+    def test_lookup_selects_only_latest_active_revision(self) -> None:
+        with patch.object(cli, "_request_json", return_value=[{
+            "credentials_version": 2,
+            "status": "active",
+            "secret_ref": SECRET_REF,
+        }]) as request:
+            selected = cli._lookup_active_instagram_credentials(ACCOUNT_ID, "instagram")
+
+        self.assertEqual(selected["credentials_version"], 2)
+        query = request.call_args.kwargs["query"]
+        self.assertEqual(query["status"], "eq.active")
+        self.assertEqual(query["order"], "credentials_version.desc")
+        self.assertEqual(query["limit"], "1")
+
+    def test_superseded_revision_cannot_be_returned_by_active_lookup(self) -> None:
+        with patch.object(cli, "_request_json", return_value=[]):
+            selected = cli._lookup_active_instagram_credentials(ACCOUNT_ID, "instagram")
+
+        self.assertIsNone(selected)
+
+
 def _args(*items: str) -> argparse.Namespace:
     return cli.build_parser().parse_args(
         [

@@ -320,6 +320,7 @@ def _classify_auto_login_failure(
     identity = phase == "identity_verification"
     device = phase == "device_lock" or code in DEVICE_UNAVAILABLE_REASONS
     expired = code == "request_expired"
+    credentials_rejected = code == "instagram_credentials_rejected"
     incident_type = (
         "auto_login_verification_required"
         if challenge
@@ -332,7 +333,9 @@ def _classify_auto_login_failure(
         else "auto_login_failed"
     )
     operator_label = (
-        "Auto Login verification required"
+        "Instagram credentials rejected"
+        if credentials_rejected
+        else "Auto Login verification required"
         if challenge
         else "Auto Login identity mismatch"
         if identity
@@ -344,7 +347,9 @@ def _classify_auto_login_failure(
     )
     retryable = contract.retryable
     action = (
-        "Enter the Instagram verification code, then resume Auto Login once."
+        "Submit a corrected credential securely, then explicitly resume Auto Login once."
+        if credentials_rejected
+        else "Enter the Instagram verification code, then resume Auto Login once."
         if challenge
         else "Verify the expected Instagram identity before retrying Auto Login."
         if identity
@@ -355,7 +360,9 @@ def _classify_auto_login_failure(
         else contract.recommended_action
     )
     client_message = (
-        "Un code de vérification Instagram est nécessaire pour terminer la connexion."
+        "Instagram a refusé les identifiants enregistrés. Mettez à jour le mot de passe pour reprendre la connexion."
+        if credentials_rejected
+        else "Un code de vérification Instagram est nécessaire pour terminer la connexion."
         if challenge
         else "La connexion Instagram n’a pas pu être finalisée. Notre équipe technique a été informée."
     )
