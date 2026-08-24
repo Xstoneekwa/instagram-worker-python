@@ -32,6 +32,21 @@ _IDENTITY_PREFLIGHT_SAFE_META_KEYS = frozenset(
         "transition_loading",
         "unlock_attempted",
         "unlock_result",
+        "reason_code",
+        "restriction_family",
+        "restriction_scope",
+        "restriction_action",
+        "restriction_state",
+        "restriction_start_date",
+        "restriction_end_date",
+        "restriction_title_raw",
+        "restriction_detail_raw",
+        "restriction_start_raw",
+        "restriction_end_raw",
+        "identity_proof",
+        "safety_scope",
+        "fail_closed",
+        "business_actions_allowed",
     }
 )
 

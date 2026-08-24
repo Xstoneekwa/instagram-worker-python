@@ -149,6 +149,17 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+def _operator_date(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return f"{parsed.day:02d} {parsed.strftime('%b')} {parsed.year}"
+
+
 def _redact_payload(value: Any) -> Any:
     redacted = redact_metadata(value, visibility="admin_only")
     if isinstance(redacted, dict):
@@ -231,6 +242,49 @@ def build_incident_notification_payload(incident: dict) -> dict:
         "Run interrupted — operator action required. Resolve the incident, "
         "then explicitly set the account to Active to allow the next natural run."
     )
+
+    if incident_type == "instagram_account_restriction":
+        scope = _safe_text(metadata.get("restriction_scope"), max_len=80) or "unknown"
+        action = _safe_text(metadata.get("restriction_action"), max_len=80) or "unknown"
+        start_date = _operator_date(metadata.get("restriction_start_date"))
+        end_date = _operator_date(metadata.get("restriction_end_date"))
+        specific = reason_code == "instagram_account_restriction_messages_disabled"
+        restriction_label = "Cannot send messages" if specific else "Scope not identified"
+        title = f"[{severity.upper()}] Instagram account restriction"
+        message_parts = [
+            title,
+            f"Account: @{account_username or 'unknown'}",
+            f"Restriction: {restriction_label}",
+        ]
+        if start_date:
+            message_parts.append(f"Start: {start_date}")
+        if end_date:
+            message_parts.append(f"Ends: {end_date}")
+        message_parts.extend(
+            [
+                "Safety: Phone Farm stopped before any Follow/Unfollow action.",
+                "Action: Account paused / operator review required. Retry only after an authorized "
+                "resolution; Identity Guard will verify the Instagram surface again.",
+            ]
+        )
+        if run_id:
+            message_parts.append(f"Run: {_short_id(run_id) or run_id}")
+        payload = {
+            "title": title,
+            "text": "\n".join(message_parts),
+            "severity": severity,
+            "incident_type": incident_type,
+            "reason_code": reason_code,
+            "account_username": account_username,
+            "restriction_scope": scope,
+            "restriction_action": action,
+            "restriction_start_date": metadata.get("restriction_start_date"),
+            "restriction_end_date": metadata.get("restriction_end_date"),
+            "status": status,
+            "run_id": run_id,
+            "dashboard_url": _incident_dashboard_url(incident),
+        }
+        return _redact_payload({key: value for key, value in payload.items() if value is not None})
 
     if str(metadata.get("domain") or "").strip().lower() == "auto_login":
         phase = _safe_text(metadata.get("phase"), max_len=80) or "unknown"

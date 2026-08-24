@@ -55,6 +55,13 @@ IDENTITY_NOT_PROVEN_REASONS = frozenset(
     }
 )
 
+ACCOUNT_RESTRICTION_REASONS = frozenset(
+    {
+        "instagram_account_restriction_messages_disabled",
+        "instagram_account_restriction_unknown_scope",
+    }
+)
+
 # Reasons proving the assigned package/clone could not be used at all.
 PACKAGE_UNAVAILABLE_REASONS = frozenset(
     {
@@ -481,6 +488,20 @@ _SAFE_METADATA_KEYS = (
     "language",
     "confidence",
     "physical_preflight_required",
+    "restriction_family",
+    "restriction_scope",
+    "restriction_action",
+    "restriction_state",
+    "restriction_start_date",
+    "restriction_end_date",
+    "restriction_title_raw",
+    "restriction_detail_raw",
+    "restriction_start_raw",
+    "restriction_end_raw",
+    "identity_proof",
+    "safety_scope",
+    "fail_closed",
+    "business_actions_allowed",
 )
 
 
@@ -570,6 +591,38 @@ def classify_terminal_run_failure(
             exit_code=exit_code,
             run_type=normalized_run_type,
             summary=summary,
+            metadata_safe=metadata_safe,
+        )
+
+    restriction_reason = identity_reason if identity_reason in ACCOUNT_RESTRICTION_REASONS else reason
+    if restriction_reason in ACCOUNT_RESTRICTION_REASONS:
+        specific = restriction_reason == "instagram_account_restriction_messages_disabled"
+        end_date = str(summary.get("restriction_end_date") or "").strip()
+        return IncidentDecision(
+            should_publish=True,
+            incident_type="instagram_account_restriction",
+            reason_code=restriction_reason,
+            severity="critical",
+            operator_label="Instagram restriction: messaging disabled"
+            if specific
+            else "Instagram account restriction detected",
+            action_required=(
+                "Keep the account paused. Review the Instagram restriction and retry only after "
+                "an authorized incident resolution; Identity Guard must freshly verify the surface."
+            ),
+            requires_operator_review=True,
+            blocking_campaign=True,
+            admin_message=(
+                "Instagram restricted this account from sending messages"
+                + (f" until {end_date}." if end_date else ".")
+                + " The run stopped before any Follow/Unfollow action."
+                if specific
+                else (
+                    "Instagram displayed an account restriction whose exact scope could not be parsed. "
+                    "The run stopped before any business action."
+                )
+            ),
+            notify_channels=True,
             metadata_safe=metadata_safe,
         )
 
@@ -808,9 +861,17 @@ def build_run_failure_incident_payload(
     if app_instance_id:
         metadata.setdefault("app_instance_id", str(app_instance_id))
     is_auto_login = metadata.get("domain") == "auto_login"
+    restriction_dedupe_key = ""
+    if decision.incident_type == "instagram_account_restriction" and decision.reason_code in ACCOUNT_RESTRICTION_REASONS:
+        aid = str(account_id or "").strip() or "unknown"
+        end_date = str(metadata.get("restriction_end_date") or "unknown").strip() or "unknown"
+        restriction_dedupe_key = (
+            f"account:{aid}:instagram_restriction:{decision.reason_code}:{end_date}"
+        )
     return {
         "incident_type": decision.incident_type,
-        "dedupe_key": str(metadata.get("incident_dedupe_key") or "").strip()
+        "dedupe_key": restriction_dedupe_key
+        or str(metadata.get("incident_dedupe_key") or "").strip()
         or build_incident_dedupe_key(
             account_id=account_id,
             run_ref=run_ref,

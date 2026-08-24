@@ -1,10 +1,11 @@
 {
   "approval": {
-    "base_sha": "3faa28edd82c1415ff9c6ddb0d64533c46cd8683",
-    "change_id": "never-follow-twice-v1-20260823",
-    "final_diff_hash": "e73f13530f0510a7b64dc0e234eaa7f05d2e8cb25832db3d6a0b1d36674ded4f",
-    "final_manifest_hash": "17e94c3fb5fdff87f3c7025743ff025c04bcdb85928f2c7d7c873e5c203c77db",
-    "final_protected_scope_hash": "5f739f73654bde4dd2a0ff7ef45f3f256ecd38620e070c5a0af8cd193fef329a",
+    "base_sha": "5e55ccdb302d6981ee7c607abd472999618fa007",
+    "change_id": "instagram-account-restriction-classification-v1-20260824",
+    "diff_sha256": "923684a6b55306f6df229aa3eed4db8507c214860629edc6b4f418d4d176c266",
+    "expires_at": "2026-08-24T12:00:00+00:00",
+    "head_sha": "d97b3bd1eea29ee0db889ab4468b376d5994aa55",
+    "request_sha256": "0080a5b0d674269bd55189c7fa1cff28a39c0720a55b403d19840707e0d4b8ff",
     "token_status": "consumed_once"
   },
   "audit_history": [
@@ -662,9 +663,31 @@
       ],
       "requested_scope": "Never Follow Twice V1 canonical sticky follow projection and future-admission exclusion only",
       "schema": "FOLLOW60_LOCK_AUDIT_V1"
+    },
+    {
+      "approval_token_status": "consumed_once",
+      "base_sha": "5e55ccdb302d6981ee7c607abd472999618fa007",
+      "change_id": "instagram-account-restriction-classification-v1-20260824",
+      "consumed_at": "2026-08-24T09:56:48.633491+00:00",
+      "diff_sha256": "923684a6b55306f6df229aa3eed4db8507c214860629edc6b4f418d4d176c266",
+      "field_status": "PENDING_NEXT_NATURAL_RUNS",
+      "files": [
+        "account_identity_guard.py",
+        "incident_notifications.py",
+        "runner.py",
+        "runtime_incident_matrix.py",
+        "runtime_incidents.py",
+        "scheduled_session_preflight_runner.py",
+        "tests/fixtures/nab_account_restriction_messages_disabled.xml",
+        "tests/test_instagram_account_restriction_classification.py",
+        "unfollow_session_orchestrator.py"
+      ],
+      "head_sha": "d97b3bd1eea29ee0db889ab4468b376d5994aa55",
+      "requested_scope": "Account Identity Guard classification of explicit Instagram messaging restrictions and structured incident/notifier propagation; no Follow60 ordering or device action change",
+      "schema": "FOLLOW60_LOCK_AUDIT_V1"
     }
   ],
-  "field_certification": "PENDING_NEXT_NATURAL_FOLLOW",
+  "field_certification": "PENDING_NEXT_NATURAL_RUNS",
   "import_graph": {
     "account_commercial_policy.py": [
       "assignment_dispatch_resolver.py",
@@ -1362,13 +1385,13 @@
       "size": 8845
     },
     "account_identity_guard.py": {
-      "git_blob_oid": "88a3e0f560323fcc4cbe5363872c3a6dbabd454c",
+      "git_blob_oid": "3c7656ab8ed8c43b537562706729994d94aa5c53",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "account_identity_guard.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "151f31a64b51336945ad8a374740c76490c562242992f37e2e1e088dbaea586a",
-      "size": 42554
+      "sha256": "c31dd2ca6abc2d1a4395a5ac989134ef9fa48489fda7cdc3c99df7f6da4297ce",
+      "size": 52306
     },
     "account_protection_lists.py": {
       "git_blob_oid": "698f1364e1c0e1b4cf3f682c64b55b0a270f44bf",
@@ -1830,13 +1853,13 @@
       "size": 5952
     },
     "incident_notifications.py": {
-      "git_blob_oid": "8d82c20e1fb4febea8b75a91b5e6c6111a5be4a1",
+      "git_blob_oid": "337c12bcbfae8882333a4ead3f0de3974f312204",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "incident_notifications.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "90bdc7488c38e1106cf78df181b9af88c9f851dac90a9860a14ef95ef30e36fc",
-      "size": 41477
+      "sha256": "4f88719961bf825fed38e447851cef2e652b3bdbd42e09e8392b59cc822619c2",
+      "size": 43871
     },
     "instagram_account_status_publisher.py": {
       "git_blob_oid": "9655ead726b5089e0365e31a1f445290a27358d0",
@@ -2010,13 +2033,13 @@
       "size": 7860
     },
     "runner.py": {
-      "git_blob_oid": "7b11cfef24f3300f692c711801d7b6daebee8333",
+      "git_blob_oid": "f0119b62e16f811b6fca070e416dc9b6a437bee1",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runner.py",
       "role": "runtime_entrypoint",
-      "sha256": "dc13eabeb5e5b4f2d4080da9f27444987827c13fe4a9b34f544282923177506a",
-      "size": 1267442
+      "sha256": "95f506480aa69c10fa92a69deffb5f8645ab24cb33a36f875f80a17ada5da499",
+      "size": 1268497
     },
     "runtime_caps.py": {
       "git_blob_oid": "4bb9bfb44f9463c0c6d4614f30b49f00b201f1d6",
@@ -2046,22 +2069,22 @@
       "size": 5868
     },
     "runtime_incident_matrix.py": {
-      "git_blob_oid": "26a975cd5a0defefa3b7924e4408465bc0cf39e7",
+      "git_blob_oid": "3040733fe1c984d436902972b8761ea2f41fceb5",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runtime_incident_matrix.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "8ab3083d30011190784733c8476a10d16cd2d4b70148225a21781254483cedbe",
-      "size": 30369
+      "sha256": "46ae0e21a1ae4dd41568716249284853b0ee6f7d60d355fa3b49141e1c8026c8",
+      "size": 32960
     },
     "runtime_incidents.py": {
-      "git_blob_oid": "b9c7eeb8b6c163db0df9773d4ddea4db66a039c7",
+      "git_blob_oid": "79341194e729c33fd9105f755b4ffe91bf4e8604",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "runtime_incidents.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "e7505e2e641d539daa9bb44d3b6eb187e512f4faec5bd3446891135babebe251",
-      "size": 11578
+      "sha256": "269bca9d1add90185ed9c24da497e2c540639514146e0b9ea08531093ddc8260",
+      "size": 14872
     },
     "scheduled_session_preflight_control.py": {
       "git_blob_oid": "1e27960eb7e631d140a984055f03ee82257911d0",
@@ -2460,13 +2483,13 @@
       "size": 6911
     },
     "unfollow_session_orchestrator.py": {
-      "git_blob_oid": "19d008601a800728a06ca2c431068ae8a92c671e",
+      "git_blob_oid": "272aff42213451ba8f49bced6e564efa30bba2b0",
       "lock_version": "3.1.0",
       "mode": "100644",
       "path": "unfollow_session_orchestrator.py",
       "role": "follow60_transitive_dependency",
-      "sha256": "1e620d9ed8b9cc567ce4e0cc6ad017aee6cd0f1aa6be09996b52274356cea75e",
-      "size": 236620
+      "sha256": "4aa641634c9f35fac9228cdc22a429b6e268ef12dde0e6678a25b6c958e6ccee",
+      "size": 237423
     },
     "unfollow_settings.py": {
       "git_blob_oid": "60eda86a5e6779fbd199a47b4b7fd8de65093eeb",
@@ -2559,7 +2582,7 @@
       "size": 14534
     }
   },
-  "protected_scope_sha256": "5f739f73654bde4dd2a0ff7ef45f3f256ecd38620e070c5a0af8cd193fef329a",
+  "protected_scope_sha256": "f62c5acad97b02495f189609fd926f8cf25057b725e2c7bdb602f9e85bbb2f8f",
   "protected_transitive_dependency_count": 111,
   "runtime_contract": {
     "binding_kind": "mainline",

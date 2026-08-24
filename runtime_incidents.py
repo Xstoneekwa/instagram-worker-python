@@ -13,6 +13,86 @@ VALID_SEVERITIES = {"info", "warning", "error", "critical"}
 VALID_STATUSES = {"open", "acknowledged", "resolved", "ignored"}
 
 
+def build_instagram_account_restriction_incident(
+    *,
+    account_id: str | None,
+    account_username: str,
+    restriction: dict[str, Any],
+    run_id: str | None = None,
+    run_type: str | None = None,
+    stage: str | None = None,
+    verification_method: str | None = None,
+) -> dict[str, Any]:
+    """Build a deduplicated account-global incident from proved UI semantics."""
+    aid = str(account_id or "").strip() or "unknown"
+    username = str(account_username or "").strip().lstrip("@")
+    meta = {
+        key: value
+        for key, value in {
+            **dict(restriction or {}),
+            "run_type": run_type,
+            "run_id": run_id,
+            "stage": stage,
+            "verification_method": verification_method,
+            "identity_proof": "unavailable_due_to_restriction_surface",
+            "safety_scope": "account_global",
+            "fail_closed": True,
+            "business_actions_allowed": False,
+            "operator_action_required": True,
+            "automatic_dismiss_allowed": False,
+        }.items()
+        if value is not None and value != ""
+    }
+    reason = str(meta.get("reason_code") or "instagram_account_restriction_unknown_scope")
+    end_date = str(meta.get("restriction_end_date") or "unknown")
+    specific = reason == "instagram_account_restriction_messages_disabled"
+    action = (
+        "Messaging is disabled by Instagram"
+        + (f" until {end_date}" if specific and end_date != "unknown" else "")
+        + ". Keep the account paused; operator review and a fresh Identity Guard are required."
+        if specific
+        else (
+            "Instagram restricted this account with an unknown scope. Keep the account paused; "
+            "operator review and a fresh Identity Guard are required."
+        )
+    )
+    meta["operator_label"] = (
+        "Instagram restriction: messaging disabled"
+        if specific
+        else "Instagram account restriction detected"
+    )
+    return {
+        "incident_type": "instagram_account_restriction",
+        "dedupe_key": f"account:{aid}:instagram_restriction:{reason}:{end_date}",
+        "severity": "critical",
+        "status": "open",
+        "account_id": aid or None,
+        "account_username": username or None,
+        "run_id": run_id,
+        "source": "account_identity_guard",
+        "reason": reason,
+        "failure_reason": reason,
+        "action_required": action,
+        "safe_client_message": "Instagram has temporarily restricted messaging on this account."
+        if specific
+        else "Instagram has temporarily restricted this account.",
+        "assistant_message": "Instagram restriction: messaging disabled"
+        if specific
+        else "Instagram account restriction detected",
+        "admin_message": (
+            f"Instagram restricted @{username or 'unknown'} from sending messages"
+            + (f" until {end_date}." if end_date != "unknown" else ".")
+            + " Phone Farm stopped before any Follow/Unfollow action."
+            if specific
+            else (
+                f"Instagram displayed an account restriction for @{username or 'unknown'}; "
+                "the exact scope could not be parsed. Phone Farm stopped before business actions."
+            )
+        ),
+        "metadata": meta,
+    }
+
+
 def build_host_storage_critical_incident(
     *,
     account_id: str | None = None,

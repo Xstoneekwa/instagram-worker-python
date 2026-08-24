@@ -10,12 +10,15 @@ ready to distinguish a wrong active account from a possible username rename.
 
 from __future__ import annotations
 
+import html
 import re
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import uiautomator2 as u2
 
@@ -51,6 +54,30 @@ _HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 _LOGS_ROOT = Path(__file__).resolve().parent / "logs"
 _IDENTITY_GUARD_ARTIFACTS_DIR = _LOGS_ROOT / "identity_guard"
 _LOADING_RETRY_SECONDS = 2.5
+
+RESTRICTION_FAMILY = "instagram_account_restriction"
+MESSAGES_DISABLED_REASON = "instagram_account_restriction_messages_disabled"
+UNKNOWN_RESTRICTION_SCOPE_REASON = "instagram_account_restriction_unknown_scope"
+_RESTRICTION_TITLE_NORMALIZED = "we added a restriction to your account"
+_MESSAGES_DISABLED_DETAILS = frozenset(
+    {
+        "you can't send messages",
+        "you cannot send messages",
+    }
+)
+_RESTRICTION_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7,
+    "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
+    "december": 12,
+}
+_RESTRICTION_DATE_RE = re.compile(
+    r"\b(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)\s+(?P<day>\d{1,2}),\s+(?P<year>\d{4})\b",
+    re.IGNORECASE,
+)
 
 # Screens that may proceed to bottom-nav profile open (no dismiss / no bypass).
 _PRE_PROFILE_CONTINUE_SCREEN_TYPES = frozenset(
@@ -105,6 +132,129 @@ class AccountIdentityCheckResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class InstagramAccountRestriction:
+    """Structured semantics parsed from one already-fresh XML surface."""
+
+    detected: bool
+    reason_code: str = ""
+    restriction_family: str = ""
+    restriction_scope: str = ""
+    restriction_action: str = ""
+    restriction_state: str = ""
+    restriction_start_date: str | None = None
+    restriction_end_date: str | None = None
+    restriction_title_raw: str = ""
+    restriction_detail_raw: str = ""
+    restriction_start_raw: str = ""
+    restriction_end_raw: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _normalize_restriction_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", html.unescape(str(value or "")))
+    text = text.replace("’", "'").replace("‘", "'")
+    return " ".join(text.casefold().split())
+
+
+def _restriction_xml_strings(hierarchy_xml: str) -> list[str]:
+    raw = str(hierarchy_xml or "").strip()
+    if not raw:
+        return []
+    try:
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{raw}</wrap>")
+    except Exception:
+        return []
+    values: list[str] = []
+    for element in root.iter():
+        for attribute in ("text", "content-desc"):
+            value = html.unescape(str(element.get(attribute) or "")).strip()
+            if value and value not in values:
+                values.append(value)
+    return values
+
+
+def _first_restriction_value(values: Iterable[str], predicate) -> str:
+    for value in values:
+        if predicate(value):
+            return value
+    return ""
+
+
+def _parse_restriction_date_only(raw: str) -> str | None:
+    match = _RESTRICTION_DATE_RE.search(str(raw or ""))
+    if not match:
+        return None
+    month = _RESTRICTION_MONTHS.get(match.group("month").casefold())
+    if month is None:
+        return None
+    try:
+        return date(int(match.group("year")), month, int(match.group("day"))).isoformat()
+    except ValueError:
+        return None
+
+
+def classify_instagram_account_restriction(
+    hierarchy_xml: str,
+) -> InstagramAccountRestriction:
+    """Classify explicit restrictions without acquiring any new device evidence."""
+    values = _restriction_xml_strings(hierarchy_xml)
+    title = _first_restriction_value(
+        values,
+        lambda value: _normalize_restriction_text(value) == _RESTRICTION_TITLE_NORMALIZED,
+    )
+    if not title:
+        return InstagramAccountRestriction(detected=False)
+
+    detail = _first_restriction_value(
+        values,
+        lambda value: _normalize_restriction_text(value) in _MESSAGES_DISABLED_DETAILS,
+    )
+    start_raw = _first_restriction_value(
+        values,
+        lambda value: bool(_RESTRICTION_DATE_RE.search(value))
+        and not _normalize_restriction_text(value).startswith("ends on "),
+    )
+    end_raw = _first_restriction_value(
+        values,
+        lambda value: _normalize_restriction_text(value).startswith("ends on ")
+        and bool(_RESTRICTION_DATE_RE.search(value)),
+    )
+    if detail:
+        return InstagramAccountRestriction(
+            detected=True,
+            reason_code=MESSAGES_DISABLED_REASON,
+            restriction_family=RESTRICTION_FAMILY,
+            restriction_scope="messaging",
+            restriction_action="send_messages",
+            restriction_state="disabled",
+            restriction_start_date=_parse_restriction_date_only(start_raw),
+            restriction_end_date=_parse_restriction_date_only(end_raw),
+            restriction_title_raw=title,
+            restriction_detail_raw=detail,
+            restriction_start_raw=start_raw,
+            restriction_end_raw=end_raw,
+        )
+    return InstagramAccountRestriction(
+        detected=True,
+        reason_code=UNKNOWN_RESTRICTION_SCOPE_REASON,
+        restriction_family=RESTRICTION_FAMILY,
+        restriction_scope="unknown",
+        restriction_action="unknown",
+        restriction_state="restricted",
+        restriction_start_date=_parse_restriction_date_only(start_raw),
+        restriction_end_date=_parse_restriction_date_only(end_raw),
+        restriction_title_raw=title,
+        restriction_start_raw=start_raw,
+        restriction_end_raw=end_raw,
+    )
 
 
 def normalize_account_username(username: str) -> str:
@@ -549,6 +699,7 @@ def _identity_failure_result(
     verification_method: str,
     meta: dict[str, Any] | None = None,
     actual_raw: str = "",
+    identity_evidence: str = "username_only",
 ) -> AccountIdentityCheckResult:
     return AccountIdentityCheckResult(
         ok=False,
@@ -556,6 +707,7 @@ def _identity_failure_result(
         actual_logged_in_username=actual_raw,
         expected_instagram_user_id=expected_stable_id,
         failure_reason=failure_reason,
+        identity_evidence=identity_evidence,
         verification_method=verification_method,
         meta=dict(meta or {}),
     )
@@ -623,6 +775,13 @@ def _pre_classify_screen_before_profile_open(
                 verification_method="pre_profile_screen_classification",
                 meta=meta,
             )
+
+    # Preserve the already-fresh hierarchy for the structured restriction
+    # boundary in the caller.  A generic screen classifier must never replace
+    # explicit Instagram restriction semantics with ui_not_recognized or an
+    # identity-username fallback.
+    if classify_instagram_account_restriction(hierarchy).detected:
+        return signals, probe_outcome, hierarchy
 
     blocked = _pre_profile_blocking_reason(signals, probe_outcome)
     meta = _screen_classification_meta(
@@ -817,6 +976,73 @@ def verify_active_instagram_account_matches_expected(
 
     post_verification_metadata: dict[str, Any] = {}
 
+    def _account_restriction_identity_boundary(
+        hierarchy: str,
+    ) -> AccountIdentityCheckResult | None:
+        restriction = classify_instagram_account_restriction(hierarchy)
+        if not restriction.detected:
+            return None
+        restriction_meta = {
+            **restriction.to_dict(),
+            **post_verification_metadata,
+            "screen_type": "instagram_account_restriction",
+            "detection_reason": restriction.reason_code,
+            "identity_guard_stage": "account_restriction_surface",
+            "identity_proof": "unavailable_due_to_restriction_surface",
+            "safety_scope": "account_global",
+            "fail_closed": True,
+            "business_actions_allowed": False,
+            "operator_action_required": True,
+            "automatic_dismiss_allowed": False,
+            "hierarchy_xml_len": len(str(hierarchy or "")),
+        }
+        result = _identity_failure_result(
+            expected_raw=expected_raw,
+            expected_stable_id=expected_stable_id,
+            failure_reason=restriction.reason_code,
+            verification_method="instagram_account_restriction_surface",
+            identity_evidence="unavailable_due_to_restriction_surface",
+            meta=restriction_meta,
+        )
+        try:
+            import runtime_incidents
+
+            payload = runtime_incidents.build_instagram_account_restriction_incident(
+                account_id=account_id,
+                account_username=expected_raw,
+                restriction=restriction.to_dict(),
+                run_id=run_id,
+                run_type=run_type,
+                stage=stage,
+                verification_method=result.verification_method,
+            )
+            runtime_incidents.publish_account_incident(**payload)
+        except Exception as exc:
+            log(
+                "warning",
+                "account_restriction_incident_publish_failed",
+                account_id=account_id,
+                run_id=run_id,
+                reason=restriction.reason_code,
+                error=str(exc)[:500],
+            )
+        log(
+            "error",
+            "instagram_account_restriction_detected",
+            account_id=account_id,
+            run_id=run_id,
+            reason=restriction.reason_code,
+            restriction_family=restriction.restriction_family,
+            restriction_scope=restriction.restriction_scope,
+            restriction_action=restriction.restriction_action,
+            restriction_state=restriction.restriction_state,
+            restriction_start_date=restriction.restriction_start_date,
+            restriction_end_date=restriction.restriction_end_date,
+            identity_proof="unavailable_due_to_restriction_surface",
+            business_actions_allowed=False,
+        )
+        return result
+
     def _ads_data_consent_identity_boundary(hierarchy: str) -> AccountIdentityCheckResult | None:
         classification = classify_instagram_ads_data_consent_popup(
             hierarchy,
@@ -915,6 +1141,16 @@ def verify_active_instagram_account_matches_expected(
             # The completion gate has already proved that no gesture was sent.
             # Reuse its exact observation instead of performing another dump.
             post_verification_metadata.pop("observed_hierarchy", None)
+            restriction_identity = _account_restriction_identity_boundary(popup_hierarchy)
+            if restriction_identity is not None:
+                _log_identity_failure(
+                    restriction_identity,
+                    account_id=account_id,
+                    run_type=run_type,
+                    run_id=run_id,
+                    stage=stage,
+                )
+                return restriction_identity
             popup_identity = _ads_data_consent_identity_boundary(popup_hierarchy)
             if popup_identity is not None:
                 if not popup_identity.ok:
@@ -980,6 +1216,16 @@ def verify_active_instagram_account_matches_expected(
         return pre_profile
 
     _, _, pre_hierarchy = pre_profile
+    restriction_identity = _account_restriction_identity_boundary(pre_hierarchy)
+    if restriction_identity is not None:
+        _log_identity_failure(
+            restriction_identity,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
+        return restriction_identity
     popup_identity = _ads_data_consent_identity_boundary(pre_hierarchy)
     if popup_identity is not None:
         if not popup_identity.ok:
@@ -1031,6 +1277,16 @@ def verify_active_instagram_account_matches_expected(
         return result
 
     hierarchy = _dump_hierarchy(d)
+    restriction_identity = _account_restriction_identity_boundary(hierarchy)
+    if restriction_identity is not None:
+        _log_identity_failure(
+            restriction_identity,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
+        return restriction_identity
     popup_identity = _ads_data_consent_identity_boundary(hierarchy)
     if popup_identity is not None:
         if not popup_identity.ok:

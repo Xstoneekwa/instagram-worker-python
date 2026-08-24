@@ -4774,6 +4774,27 @@ def run_unfollow_session(
             "actual_logged_in_username": identity.actual_logged_in_username,
             "account_identity_failure_reason": identity.failure_reason,
             "account_identity_verification_method": identity.verification_method,
+            **{
+                key: identity.meta.get(key)
+                for key in (
+                    "reason_code",
+                    "restriction_family",
+                    "restriction_scope",
+                    "restriction_action",
+                    "restriction_state",
+                    "restriction_start_date",
+                    "restriction_end_date",
+                    "restriction_title_raw",
+                    "restriction_detail_raw",
+                    "restriction_start_raw",
+                    "restriction_end_raw",
+                    "identity_proof",
+                    "safety_scope",
+                    "fail_closed",
+                    "business_actions_allowed",
+                )
+                if identity.meta.get(key) is not None
+            },
             "following_surface_ok": False,
             "visible_rows_count": 0,
             "visible_plan_matches_count": 0,
