@@ -214,8 +214,24 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertEqual(decision.reason_code, "instagram_credentials_rejected")
         self.assertEqual(decision.metadata_safe["phase"], "submit_credentials")
         self.assertTrue(decision.blocking_campaign)
-        self.assertIn("corrected credential", decision.action_required)
-        self.assertNotIn("password", str(decision.metadata_safe).lower())
+        self.assertEqual(decision.action_required, "update_instagram_password")
+        self.assertEqual(decision.metadata_safe["action_type"], "update_instagram_password")
+        self.assertNotIn("credential_value", decision.metadata_safe)
+        self.assertNotIn("secret_ref", decision.metadata_safe)
+
+    def test_persisted_wrong_password_reason_remains_specific_in_incident(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={
+                "reason_code": "instagram_credentials_rejected",
+                "phase": "submit_credentials",
+            },
+        )
+
+        self.assertEqual(decision.reason_code, "instagram_credentials_rejected")
+        self.assertEqual(decision.action_required, "update_instagram_password")
+        self.assertFalse(decision.metadata_safe["retryable"])
 
     def test_auto_login_fallback_is_domain_specific_only_when_reason_absent(self) -> None:
         decision = classify_terminal_run_failure(

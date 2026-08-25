@@ -369,7 +369,7 @@ def _classify_auto_login_failure(
     )
     retryable = contract.retryable
     action = (
-        "Submit a corrected credential securely, then explicitly resume Auto Login once."
+        "update_instagram_password"
         if credentials_rejected
         else "Enter the Instagram verification code, then resume Auto Login once."
         if challenge
@@ -396,6 +396,7 @@ def _classify_auto_login_failure(
             "reason_code": code,
             "retryable": retryable,
             "operator_action_required": True,
+            "action_type": action if credentials_rejected else None,
             "client_safe_message": client_message,
             "operator_message": contract.operator_message,
         }

@@ -194,7 +194,10 @@ def normalize_auto_login_failure(
         else FALLBACK_ERROR_CODE
     )
     mapped = SENSITIVE_REASON_OVERRIDES.get(raw_internal)
-    if mapped is None and raw_internal in AUTO_LOGIN_REASON_PHASES:
+    if mapped is None and raw_internal in PERSISTED_PHASES:
+        # Canonical persisted outputs are valid inputs too.  Incident and
+        # notification consumers may receive a reason that already crossed
+        # this boundary, so normalization must be stable when repeated.
         mapped = raw_internal
     if not persisted_error_code_is_safe(mapped or ""):
         mapped = FALLBACK_ERROR_CODE

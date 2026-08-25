@@ -350,6 +350,35 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertNotIn("must-not-leak", discord)
         self.assertNotIn("123456", discord)
 
+    def test_wrong_password_notification_consumes_specific_incident_without_notifier_change(self) -> None:
+        incident = _incident("incident-wrong-password")
+        incident.update(
+            {
+                "severity": "error",
+                "incident_type": "auto_login_failed",
+                "account_username": "autom_atism",
+                "reason": "instagram_credentials_rejected",
+                "failure_reason": "instagram_credentials_rejected",
+                "action_required": "update_instagram_password",
+                "admin_message": "Instagram rejected the active credential revision for this account.",
+                "metadata": {
+                    "domain": "auto_login",
+                    "phase": "submit_credentials",
+                    "reason_code": "instagram_credentials_rejected",
+                    "operator_label": "Instagram credentials rejected",
+                    "retryable": False,
+                },
+            }
+        )
+
+        payload = incident_notifications.build_incident_notification_payload(incident)
+        text = payload["text"]
+        self.assertIn("Account: autom_atism", text)
+        self.assertIn("Phase: submit_credentials", text)
+        self.assertIn("Reason: instagram_credentials_rejected", text)
+        self.assertIn("Action: update_instagram_password", text)
+        self.assertIn("Retry: no", text)
+
     def test_all_consultable_runtime_incidents_use_the_shared_cta_builder(self) -> None:
         for incident_type in (
             "welcome_surface_unstable",

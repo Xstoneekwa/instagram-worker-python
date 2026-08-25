@@ -69,6 +69,30 @@ class AutoLoginFailureContractTest(unittest.TestCase):
         self.assertIn("secure writer", contract.recommended_action)
         self.assertNotIn("password", str(contract.incident_metadata()).lower())
 
+    def test_every_canonical_output_is_an_idempotent_input(self) -> None:
+        internal_reasons = set(AUTO_LOGIN_REASON_PHASES) | set(SENSITIVE_REASON_OVERRIDES)
+        canonical_outputs = {
+            normalize_auto_login_failure(reason).persisted_error_code
+            for reason in internal_reasons
+        } | {FALLBACK_ERROR_CODE}
+
+        for canonical in sorted(canonical_outputs):
+            with self.subTest(canonical=canonical):
+                first = normalize_auto_login_failure(canonical)
+                second = normalize_auto_login_failure(first.persisted_error_code)
+                self.assertEqual(first.persisted_error_code, canonical)
+                self.assertEqual(second.persisted_error_code, canonical)
+
+    def test_field_unknowns_do_not_become_credentials_rejected(self) -> None:
+        for reason in (
+            "login_submit_username_not_exact",
+            "screen_preparation_failed_after_startup_settling",
+        ):
+            with self.subTest(reason=reason):
+                contract = normalize_auto_login_failure(reason)
+                self.assertEqual(contract.persisted_error_code, FALLBACK_ERROR_CODE)
+                self.assertNotEqual(contract.persisted_error_code, "instagram_credentials_rejected")
+
     def test_app_instance_mismatch_notification_states_no_credentials_entered(self) -> None:
         contract = normalize_auto_login_failure("assigned_instagram_app_instance_mismatch")
 
