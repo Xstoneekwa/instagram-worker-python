@@ -44,6 +44,20 @@ class FollowOutcomeContractTests(unittest.TestCase):
         self.assertEqual(outcome["phase_status"], "partial_resumable")
         self.assertEqual(outcome["safe_next_step"], "schedule_resume")
 
+    def test_bounded_see_more_exhaustion_is_local_resumable(self) -> None:
+        outcome = build_follow_outcome(
+            stable_reason="see_more_click_exhausted_after_bounded_recovery",
+            verified_actions=119,
+            target_actions=120,
+            current_target_id="ct-final",
+            remaining_target_ids=[],
+            safe_boundary=True,
+        )
+        self.assertEqual(outcome["phase_status"], "partial_resumable")
+        self.assertEqual(outcome["scope"], "current_ct")
+        self.assertTrue(outcome["resumable"])
+        self.assertEqual(outcome["safe_next_step"], "schedule_resume")
+
 
 if __name__ == "__main__":
     unittest.main()

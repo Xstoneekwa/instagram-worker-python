@@ -8,7 +8,12 @@ from typing import Any, Iterable
 FOLLOW_OUTCOME_CONTRACT_VERSION = "follow_outcome_v1"
 FOLLOW_TERMINATION_DECISION_SCHEMA = "FOLLOW_TERMINATION_DECISION_V1"
 FOLLOW_TERMINATION_DECISION_VERSION = "follow_termination_decision_v1"
-LOCAL_ROTATABLE_REASONS = frozenset({"visible_window_exhausted_scroll_failed"})
+LOCAL_ROTATABLE_REASONS = frozenset(
+    {
+        "visible_window_exhausted_scroll_failed",
+        "see_more_click_exhausted_after_bounded_recovery",
+    }
+)
 GLOBAL_COMPLETION_REASONS = frozenset(
     {
         "global_follow_cap_reached",

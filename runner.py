@@ -2245,6 +2245,28 @@ def _followers_pre_scroll_contract_decision(
     return "stop_ambiguous_surface"
 
 
+def _followers_resume_pre_scroll_see_more_veto(
+    continuation: dict[str, Any],
+    *,
+    followers_list_proved: bool,
+    visual_evidence: dict[str, Any] | None = None,
+) -> bool:
+    """Use the normal pre-scroll policy as the CT Resume swipe veto.
+
+    Resume positioning still owns depth/anchor/cursor continuity.  This helper
+    only prevents its next physical swipe when the already-fresh coherent
+    hierarchy proves that the shared See-more handler must run first.
+    """
+    return (
+        _followers_pre_scroll_contract_decision(
+            continuation,
+            followers_list_proved=followers_list_proved,
+            visual_evidence=visual_evidence,
+        )
+        == "expand_primary_list"
+    )
+
+
 def _new_candidate_follow_decision(
     *,
     follower_username: str = "",
@@ -16323,6 +16345,134 @@ def _run_followers_list_engine_session(
             ):
                 _resume_plan = target_followers_resume_controller.plan
                 if target_followers_resume_controller.reached_depth < _resume_plan.planned_depth:
+                    # Candidate collection has already populated the hierarchy
+                    # cache from the current fresh surface.  Reuse that exact
+                    # authority here: CT Resume must not dispatch its next
+                    # checkpoint-depth swipe while the normal pre-scroll
+                    # contract says an actionable See-more continuation wins.
+                    _ff_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
+                    _ff_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                    _ff_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
+                    _ff_continuation: dict[str, Any] = {}
+                    try:
+                        _ff_continuation = (
+                            followers_suggestions_boundary_from_cached_hierarchy(
+                                previously_valid_followers_rows=True,
+                                processed_primary_row_ids=_ff_processed_rows,
+                                continuation_probe_count=1,
+                            )
+                        )
+                    except Exception as _ff_continuation_exc:
+                        log(
+                            "warning",
+                            "ct_resume_pre_scroll_continuation_unavailable",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            source_profile_username=source_profile_username,
+                            error_type=type(_ff_continuation_exc).__name__,
+                            next_action="preserve_existing_checkpoint_scroll_policy",
+                            new_xml_dump_count=0,
+                        )
+                    _ff_continuation_state = str(
+                        _ff_continuation.get("state") or ""
+                    )
+                    _ff_followers_list_proved = bool(
+                        _ff_continuation.get("selected_followers_tab")
+                        or str(
+                            _ff_continuation.get("surface_verification_source")
+                            or ""
+                        )
+                        in {
+                            "selected_followers_tab",
+                            "committed_rows_and_visible_followers_title",
+                        }
+                    )
+                    _ff_visual_evidence = (
+                        visual_loop_state.get("session_vf_detail")
+                        if isinstance(
+                            visual_loop_state.get("session_vf_detail"), dict
+                        )
+                        else {}
+                    )
+                    _ff_see_more_veto = _followers_resume_pre_scroll_see_more_veto(
+                        _ff_continuation,
+                        followers_list_proved=_ff_followers_list_proved,
+                        visual_evidence=_ff_visual_evidence,
+                    )
+                    log(
+                        "info",
+                        "ct_resume_pre_scroll_boundary_check",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        source_profile_username=source_profile_username,
+                        state=_ff_continuation_state,
+                        followers_list_proved=_ff_followers_list_proved,
+                        see_more_visible=bool(
+                            _ff_continuation.get("see_more_visible")
+                        ),
+                        visible_primary_row_count=int(
+                            _ff_continuation.get("primary_row_count") or 0
+                        ),
+                        decision=(
+                            "expand_primary_list"
+                            if _ff_see_more_veto
+                            else "allow_checkpoint_scroll"
+                        ),
+                        decision_source="existing_fresh_hierarchy_cache",
+                        new_xml_dump_count=0,
+                        screenshot_count=0,
+                        vision_call_count=0,
+                    )
+                    if _ff_see_more_veto:
+                        see_more_status = "see_more_clicking"
+                        _ff_expansion = followers_try_expand_primary_list(
+                            d,
+                            expected_source_profile=source_profile_username,
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            processed_primary_row_ids=_ff_processed_rows,
+                            max_attempts=2,
+                        )
+                        if bool(_ff_expansion.get("expanded")):
+                            see_more_status = "see_more_expanded"
+                            log(
+                                "info",
+                                "ct_resume_pre_scroll_see_more_veto_applied",
+                                flow="follow",
+                                account_id=str(account_id or ""),
+                                target_id=str(target_id or ""),
+                                run_id=str(run_id or ""),
+                                source_profile_username=source_profile_username,
+                                action="shared_handler_expanded_before_swipe",
+                                physical_swipe_attempted=False,
+                            )
+                            continue
+                        see_more_status = str(
+                            _ff_expansion.get("see_more_status")
+                            or "see_more_failed_terminal"
+                        )
+                        _followers_loop_finally_status = "see_more_no_progress"
+                        _followers_loop_finally_stop = str(
+                            _ff_expansion.get("reason") or "see_more_no_progress"
+                        )
+                        log(
+                            "warning",
+                            "ct_resume_pre_scroll_see_more_bounded_failure",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            source_profile_username=source_profile_username,
+                            reason=_followers_loop_finally_stop,
+                            action="stop_current_ct_before_swipe",
+                            physical_swipe_attempted=False,
+                        )
+                        break
                     _ff_surface, _ff_target = _target_followers_resume_v2_surface_proof(det)
                     _ff_diag: dict[str, Any] = {}
                     _ff_scroll_index = int(scroll_used) + 1
