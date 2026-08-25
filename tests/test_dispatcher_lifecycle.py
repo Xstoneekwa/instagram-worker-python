@@ -63,6 +63,22 @@ def _make_harness(tmp_path: Path) -> dict[str, Path]:
     shutil.copy2(WRAPPER_SOURCE, scripts / "run_control_dispatcher_service.sh")
     (scripts / "run_control_dispatcher_service.sh").chmod(0o755)
 
+    # The production wrapper now fails closed through the exact-candidate
+    # certification gate before it performs any lifecycle operation.  This
+    # isolated harness has no real signed release material, so provide the
+    # smallest explicit gate double instead of silently bypassing that call.
+    deployment_verifier = scripts / "verify-follow60-deployment-candidate-v1.py"
+    deployment_verifier.write_text(
+        """
+import os
+import sys
+
+raise SystemExit(2 if os.environ.get("DUMMY_CERTIFICATION_GATE_ACTIVE") == "1" else 0)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    deployment_verifier.chmod(0o755)
+
     dummy_consumer = root / "account_run_request_consumer.py"
     dummy_consumer.write_text(
         """
