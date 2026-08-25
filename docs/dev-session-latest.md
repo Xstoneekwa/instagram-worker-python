@@ -1,5 +1,18 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## 2026-08-25 — Instagram human confirmation challenge V1 (Approval 1)
+
+- Base production : `4b692c1a03d4c604692918daa6f2df2adc9ae602`.
+- Ajout d'un classifieur pur partagé pour la surface Instagram terrain
+  “Confirm you're human”.
+- Correction de la perte causale BMY : le premier XML frais de récupération
+  gagne désormais avant les erreurs génériques d'activité/profondeur.
+- Ajout de la terminalisation compte-global, de la déduplication incident, du
+  texte opérateur Slack/Discord et du hard-stop Auto Restart.
+- Conservation des actions déjà terminées ; aucun RPC appareil, XML,
+  screenshot, Vision, sleep ou geste de challenge ajouté.
+- Activation interdite jusqu'à Approval 2.
+
 ## Handover TODO — CT_RESUME_ANCHOR_FOUND_PREFIX_HANDLING
 
 Statut : **TODO séparé, hors Bloc A Follow60**.

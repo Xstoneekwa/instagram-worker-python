@@ -98,7 +98,14 @@ def _unsafe_markers(summary: dict[str, Any]) -> list[str]:
     markers: list[str] = []
     marker_patterns = (
         ("account_mismatch", ("active_instagram_account_mismatch", "account_mismatch")),
-        ("challenge", ("challenge", "checkpoint")),
+        (
+            "challenge",
+            (
+                "challenge",
+                "checkpoint",
+                "instagram_human_confirmation_required",
+            ),
+        ),
         ("restriction", ("restriction", "restricted")),
         ("action_block", ("action_block", "action block", "action-block", "feedback_required")),
     )

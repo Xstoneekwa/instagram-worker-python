@@ -13,6 +13,52 @@ VALID_SEVERITIES = {"info", "warning", "error", "critical"}
 VALID_STATUSES = {"open", "acknowledged", "resolved", "ignored"}
 
 
+def build_instagram_human_confirmation_incident(
+    *,
+    account_id: str | None,
+    account_username: str,
+    run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the deduplicated account-global human-confirmation incident."""
+    aid = str(account_id or "").strip() or "unknown"
+    username = str(account_username or "").strip().lstrip("@")
+    meta = {
+        **dict(metadata or {}),
+        "reason_code": "instagram_human_confirmation_required",
+        "challenge_family": "instagram_human_confirmation",
+        "source": "instagram_ui",
+        "operator_action_required": True,
+        "auto_restart_allowed": False,
+        "safety_scope": "account_global",
+        "business_actions_allowed": False,
+    }
+    return {
+        "incident_type": "instagram_human_confirmation_required",
+        "dedupe_key": f"account:{aid}:instagram_human_confirmation",
+        "severity": "critical",
+        "status": "open",
+        "account_id": aid if aid != "unknown" else None,
+        "account_username": username or None,
+        "run_id": run_id,
+        "source": "instagram_ui",
+        "reason": "instagram_human_confirmation_required",
+        "failure_reason": "instagram_human_confirmation_required",
+        "action_required": (
+            "Open Instagram manually and complete the human confirmation. "
+            "Resolve the incident only after operator review; the next authorized "
+            "attempt must freshly prove the account identity surface."
+        ),
+        "safe_client_message": "Instagram requires a manual account verification.",
+        "assistant_message": "Instagram human confirmation required",
+        "admin_message": (
+            f"Instagram requires human confirmation for @{username or 'unknown'}. "
+            "Phone Farm stopped without clicking Continue and blocked all account actions."
+        ),
+        "metadata": meta,
+    }
+
+
 def build_instagram_account_restriction_incident(
     *,
     account_id: str | None,

@@ -25933,6 +25933,15 @@ def _main_impl() -> int:
                             key: identity.meta.get(key)
                             for key in (
                                 "reason_code",
+                                "challenge_family",
+                                "title_raw",
+                                "detail_raw",
+                                "cta_raw",
+                                "semantic_signals",
+                                "structural_signals",
+                                "auto_restart_allowed",
+                                "operator_action_required",
+                                "fresh_identity_required_on_resume",
                                 "restriction_family",
                                 "restriction_scope",
                                 "restriction_action",
@@ -27718,6 +27727,36 @@ def main() -> int:
             InstagramAdsDataConsentPopupDetected,
         )
         from instagram_action_restriction import InstagramActionRestrictionDetected
+        from instagram_human_confirmation_challenge import (
+            EXIT_CODE as HUMAN_CONFIRMATION_EXIT_CODE,
+            InstagramHumanConfirmationRequired,
+        )
+
+        if isinstance(exc, InstagramHumanConfirmationRequired):
+            summary = dict(exc.summary)
+            run_id = str(summary.get("run_id") or "")
+            if run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="failed",
+                    totals={
+                        "total": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "success": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "failed": 0,
+                    },
+                    performance_summary=summary,
+                )
+            log(
+                "error",
+                "instagram_human_confirmation_session_terminalized",
+                run_id=run_id or None,
+                request_id=summary.get("request_id"),
+                reason=summary.get("reason"),
+                completed_actions_preserved=True,
+                no_false_action_receipt=True,
+                continue_tapped=False,
+            )
+            return _return_with_cleanup(exc.device, HUMAN_CONFIRMATION_EXIT_CODE)
 
         if isinstance(exc, InstagramAdsDataConsentPopupDetected):
             summary = dict(exc.summary)

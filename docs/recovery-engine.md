@@ -1,5 +1,22 @@
 # Recovery Engine
 
+## Human confirmation is not a navigation recovery
+
+`instagram_human_confirmation_required` is a hard, account-global safety
+boundary, not a candidate-local recovery error. It must remain the first
+causal reason through Worker outcome, orchestration, incident projection,
+restart eligibility, Admin/BotApp, and Slack/Discord. It must never be
+relabelled as `profile_identity_activity_unproven`,
+`followers_recovery_surface_unproved`, or a generic checkpoint when the
+specific fresh surface proof exists.
+
+No automatic Continue tap, dismissal, back navigation, retry loop, or ADB
+action is allowed. Repeated observations deduplicate on account + challenge
+family while the incident is unresolved. Resolving the backend incident does
+not prove the physical challenge disappeared: the next explicitly authorized
+attempt must run a fresh Identity Guard and is admitted only after the exact
+expected account surface is freshly proved.
+
 ## Récupération P0C des mutations interrompues
 
 La queue `follow_candidate_recovery_queue` conserve uniquement les mutations

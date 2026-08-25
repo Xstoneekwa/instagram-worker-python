@@ -35,6 +35,11 @@ from instagram_ads_data_consent_popup import (
     publish_ads_data_consent_operator_alert,
 )
 from instagram_post_verification_completion import prepare_post_verification_identity_surface
+from instagram_human_confirmation_challenge import (
+    CHALLENGE_FAMILY as HUMAN_CONFIRMATION_FAMILY,
+    STABLE_REASON as HUMAN_CONFIRMATION_REASON,
+    classify_instagram_human_confirmation,
+)
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav
 
@@ -776,10 +781,17 @@ def _pre_classify_screen_before_profile_open(
                 meta=meta,
             )
 
-    # Preserve the already-fresh hierarchy for the structured restriction
-    # boundary in the caller.  A generic screen classifier must never replace
-    # explicit Instagram restriction semantics with ui_not_recognized or an
-    # identity-username fallback.
+    # Preserve the already-fresh hierarchy for specific account-global
+    # boundaries in the caller.  Generic checkpoint/identity fallbacks must
+    # never replace explicit Instagram semantics.
+    if classify_instagram_human_confirmation(
+        hierarchy,
+        package_name=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        activity_name="ChallengeActivity"
+        if "challengeactivity" in str(hierarchy or "").casefold()
+        else "",
+    ).detected:
+        return signals, probe_outcome, hierarchy
     if classify_instagram_account_restriction(hierarchy).detected:
         return signals, probe_outcome, hierarchy
 
@@ -976,6 +988,79 @@ def verify_active_instagram_account_matches_expected(
 
     post_verification_metadata: dict[str, Any] = {}
 
+    def _human_confirmation_identity_boundary(
+        hierarchy: str,
+    ) -> AccountIdentityCheckResult | None:
+        package_name = str(
+            expected_package_name
+            or getattr(config, "INSTAGRAM_PACKAGE", "")
+            or ""
+        )
+        challenge = classify_instagram_human_confirmation(
+            hierarchy,
+            package_name=package_name,
+            activity_name="",
+        )
+        if not challenge.detected:
+            return None
+        challenge_meta = {
+            **challenge.to_dict(),
+            **post_verification_metadata,
+            "reason_code": HUMAN_CONFIRMATION_REASON,
+            "challenge_family": HUMAN_CONFIRMATION_FAMILY,
+            "source": "instagram_ui",
+            "screen_type": "instagram_human_confirmation",
+            "detection_reason": HUMAN_CONFIRMATION_REASON,
+            "identity_guard_stage": "human_confirmation_surface",
+            "identity_proof": "unavailable_due_to_human_confirmation_surface",
+            "safety_scope": "account_global",
+            "fail_closed": True,
+            "business_actions_allowed": False,
+            "operator_action_required": True,
+            "auto_restart_allowed": False,
+            "automatic_challenge_action_allowed": False,
+            "fresh_identity_required_on_resume": True,
+            "hierarchy_xml_len": len(str(hierarchy or "")),
+        }
+        result = _identity_failure_result(
+            expected_raw=expected_raw,
+            expected_stable_id=expected_stable_id,
+            failure_reason=HUMAN_CONFIRMATION_REASON,
+            verification_method="instagram_human_confirmation_surface",
+            identity_evidence="unavailable_due_to_human_confirmation_surface",
+            meta=challenge_meta,
+        )
+        try:
+            import runtime_incidents
+
+            payload = runtime_incidents.build_instagram_human_confirmation_incident(
+                account_id=account_id,
+                account_username=expected_raw,
+                run_id=run_id,
+                metadata=challenge_meta,
+            )
+            runtime_incidents.publish_account_incident(**payload)
+        except Exception as exc:
+            log(
+                "warning",
+                "instagram_human_confirmation_incident_publish_failed",
+                account_id=account_id,
+                run_id=run_id,
+                error_type=type(exc).__name__,
+            )
+        log(
+            "error",
+            "instagram_human_confirmation_identity_blocked",
+            account_id=account_id,
+            run_id=run_id,
+            reason=HUMAN_CONFIRMATION_REASON,
+            challenge_family=HUMAN_CONFIRMATION_FAMILY,
+            identity_proof="unavailable_due_to_human_confirmation_surface",
+            business_actions_allowed=False,
+            continue_tapped=False,
+        )
+        return result
+
     def _account_restriction_identity_boundary(
         hierarchy: str,
     ) -> AccountIdentityCheckResult | None:
@@ -1141,6 +1226,16 @@ def verify_active_instagram_account_matches_expected(
             # The completion gate has already proved that no gesture was sent.
             # Reuse its exact observation instead of performing another dump.
             post_verification_metadata.pop("observed_hierarchy", None)
+            challenge_identity = _human_confirmation_identity_boundary(popup_hierarchy)
+            if challenge_identity is not None:
+                _log_identity_failure(
+                    challenge_identity,
+                    account_id=account_id,
+                    run_type=run_type,
+                    run_id=run_id,
+                    stage=stage,
+                )
+                return challenge_identity
             restriction_identity = _account_restriction_identity_boundary(popup_hierarchy)
             if restriction_identity is not None:
                 _log_identity_failure(
@@ -1216,6 +1311,16 @@ def verify_active_instagram_account_matches_expected(
         return pre_profile
 
     _, _, pre_hierarchy = pre_profile
+    challenge_identity = _human_confirmation_identity_boundary(pre_hierarchy)
+    if challenge_identity is not None:
+        _log_identity_failure(
+            challenge_identity,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
+        return challenge_identity
     restriction_identity = _account_restriction_identity_boundary(pre_hierarchy)
     if restriction_identity is not None:
         _log_identity_failure(
@@ -1277,6 +1382,16 @@ def verify_active_instagram_account_matches_expected(
         return result
 
     hierarchy = _dump_hierarchy(d)
+    challenge_identity = _human_confirmation_identity_boundary(hierarchy)
+    if challenge_identity is not None:
+        _log_identity_failure(
+            challenge_identity,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
+        return challenge_identity
     restriction_identity = _account_restriction_identity_boundary(hierarchy)
     if restriction_identity is not None:
         _log_identity_failure(

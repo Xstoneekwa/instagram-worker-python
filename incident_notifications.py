@@ -243,6 +243,33 @@ def build_incident_notification_payload(incident: dict) -> dict:
         "then explicitly set the account to Active to allow the next natural run."
     )
 
+    if incident_type == "instagram_human_confirmation_required":
+        title = f"[{severity.upper()}] Instagram human confirmation required"
+        message_parts = [
+            title,
+            f"Account: @{account_username or 'unknown'}",
+            "Challenge: Confirm you're human",
+            "Safety: Phone Farm stopped without clicking Continue; Follow, Unfollow, Like, "
+            "Mute, DM and Outreach remain blocked.",
+            "Action: Open Instagram manually and complete the human confirmation. Resolve the "
+            "incident only after operator review; a fresh Identity Guard proof is required.",
+        ]
+        if run_id:
+            message_parts.append(f"Run: {_short_id(run_id) or run_id}")
+        payload = {
+            "title": title,
+            "text": "\n".join(message_parts),
+            "severity": severity,
+            "incident_type": incident_type,
+            "reason_code": "instagram_human_confirmation_required",
+            "challenge_family": metadata.get("challenge_family"),
+            "account_username": account_username,
+            "status": status,
+            "run_id": run_id,
+            "dashboard_url": _incident_dashboard_url(incident),
+        }
+        return _redact_payload({key: value for key, value in payload.items() if value is not None})
+
     if incident_type == "instagram_account_restriction":
         scope = _safe_text(metadata.get("restriction_scope"), max_len=80) or "unknown"
         action = _safe_text(metadata.get("restriction_action"), max_len=80) or "unknown"

@@ -62,6 +62,8 @@ ACCOUNT_RESTRICTION_REASONS = frozenset(
     }
 )
 
+HUMAN_CONFIRMATION_REASONS = frozenset({"instagram_human_confirmation_required"})
+
 # Reasons proving the assigned package/clone could not be used at all.
 PACKAGE_UNAVAILABLE_REASONS = frozenset(
     {
@@ -499,6 +501,17 @@ _SAFE_METADATA_KEYS = (
     "restriction_start_raw",
     "restriction_end_raw",
     "identity_proof",
+    "challenge_family",
+    "title_raw",
+    "detail_raw",
+    "account_username_raw",
+    "cta_raw",
+    "semantic_signals",
+    "structural_signals",
+    "detection_method",
+    "source",
+    "auto_restart_allowed",
+    "fresh_identity_required_on_resume",
     "safety_scope",
     "fail_closed",
     "business_actions_allowed",
@@ -582,6 +595,33 @@ def classify_terminal_run_failure(
     metadata_safe["exit_code"] = int(exit_code)
     if timed_out:
         metadata_safe["timed_out"] = True
+
+    human_confirmation_reason = (
+        identity_reason
+        if identity_reason in HUMAN_CONFIRMATION_REASONS
+        else reason
+    )
+    if human_confirmation_reason in HUMAN_CONFIRMATION_REASONS:
+        return IncidentDecision(
+            should_publish=True,
+            incident_type="instagram_human_confirmation_required",
+            reason_code="instagram_human_confirmation_required",
+            severity="critical",
+            operator_label="Instagram human confirmation required",
+            action_required=(
+                "Open Instagram manually and complete the human confirmation. Resolve the "
+                "incident only after operator review; the next authorized attempt must freshly "
+                "prove account identity."
+            ),
+            requires_operator_review=True,
+            blocking_campaign=True,
+            admin_message=(
+                "Instagram displayed a human-confirmation challenge. Phone Farm stopped without "
+                "clicking Continue and blocked all account actions."
+            ),
+            notify_channels=True,
+            metadata_safe=metadata_safe,
+        )
 
     if normalized_run_type in AUTO_LOGIN_RUN_TYPES:
         if timed_out and not reason:
@@ -868,9 +908,16 @@ def build_run_failure_incident_payload(
         restriction_dedupe_key = (
             f"account:{aid}:instagram_restriction:{decision.reason_code}:{end_date}"
         )
+    human_confirmation_dedupe_key = ""
+    if decision.incident_type == "instagram_human_confirmation_required":
+        aid = str(account_id or "").strip() or "unknown"
+        human_confirmation_dedupe_key = (
+            f"account:{aid}:instagram_human_confirmation"
+        )
     return {
         "incident_type": decision.incident_type,
-        "dedupe_key": restriction_dedupe_key
+        "dedupe_key": human_confirmation_dedupe_key
+        or restriction_dedupe_key
         or str(metadata.get("incident_dedupe_key") or "").strip()
         or build_incident_dedupe_key(
             account_id=account_id,

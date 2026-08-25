@@ -132,6 +132,12 @@ def classify_login_probe_outcome(
         )
 
     if normalized == LoginProbeOutcome.CHECKPOINT:
+        specific_reason = str(safe_metadata.get("reason_code") or "").strip()
+        reason = (
+            "instagram_human_confirmation_required"
+            if specific_reason == "instagram_human_confirmation_required"
+            else "checkpoint_required"
+        )
         return LoginStatusClassification(
             ok=False,
             outcome=normalized,
@@ -140,7 +146,7 @@ def classify_login_probe_outcome(
             onboarding_status="verification_pending",
             reauth_required=None,
             reauth_reason=None,
-            reason="checkpoint_required",
+            reason=reason,
             should_publish=True,
             metadata=safe_metadata,
         )

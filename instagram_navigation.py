@@ -61974,6 +61974,22 @@ def classify_followers_recovery_surface(
         "proof_source": str(det.get("followers_detect_hierarchy_source") or ""),
         "action_bar_title": str(det.get("action_bar_title") or "").strip(),
     }
+    if hierarchy_xml:
+        # This is the first already-fresh surface after a failed profile open.
+        # Classify account-global blockers before generic depth recovery so a
+        # ChallengeActivity can never collapse into surface_unproved.
+        from instagram_action_restriction import get_restriction_runtime_context
+        from instagram_human_confirmation_challenge import guard_instagram_human_confirmation
+
+        guard_instagram_human_confirmation(
+            d,
+            hierarchy_xml=hierarchy_xml,
+            package_name=pkg,
+            activity_name=str(det.get("current_activity") or ""),
+            phase="follow_candidate_acquisition",
+            preceding_action="candidate_profile_open_verification",
+            runtime_context=get_restriction_runtime_context(),
+        )
     if bool(det.get("is_followers_list")):
         meta["surface"] = FollowersRecoverySurface.FOLLOWERS_LIST.value
         meta["reason"] = "fresh_followers_surface_proved"

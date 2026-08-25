@@ -247,6 +247,11 @@ def configure_restriction_runtime_context(**values: Any) -> None:
             setattr(_RUNTIME_CONTEXT, key, value)
 
 
+def get_restriction_runtime_context() -> RestrictionRuntimeContext:
+    """Return the shared account/run binding used by account-global guards."""
+    return _RUNTIME_CONTEXT
+
+
 def validate_restriction_preflight_policy(
     policy: dict[str, Any] | None,
 ) -> tuple[bool, str, str | None]:
@@ -369,6 +374,21 @@ def guard_instagram_action_rate_limit(
 ) -> RestrictionClassification:
     """Raise after atomically pausing/publishing a confirmed restriction."""
     xml = _dump_hierarchy(d) if hierarchy_xml is None else str(hierarchy_xml or "")
+    # Human confirmation is an account-global boundary.  Reuse this exact XML
+    # and package observation; the classifier never clicks Continue.
+    from instagram_human_confirmation_challenge import guard_instagram_human_confirmation
+
+    current_package = _current_package(d)
+    guard_instagram_human_confirmation(
+        d,
+        hierarchy_xml=xml,
+        package_name=current_package,
+        activity_name="",
+        phase=phase,
+        preceding_action=preceding_action,
+        runtime_context=_RUNTIME_CONTEXT,
+    )
+
     # Privacy consent is a global interaction boundary, not an action-rate
     # restriction.  Check it first so no caller can tap through the overlay or
     # count a business receipt.  The shared detector deliberately never clicks
@@ -379,7 +399,6 @@ def guard_instagram_action_rate_limit(
     # Nothing between them navigates or mutates the device, so one fresh
     # package read is sufficient and remains bounded to this verification
     # boundary.  A later guard invocation always performs a new read.
-    current_package = _current_package(d)
     guard_instagram_ads_data_consent_popup(
         d,
         hierarchy_xml=xml,

@@ -16,6 +16,7 @@ from typing import Any
 
 import uiautomator2 as u2
 
+import config
 from logs import log
 from instagram_action_restriction import guard_instagram_action_rate_limit
 from own_following_navigation import detect_own_following_list_screen
@@ -791,6 +792,18 @@ def verify_unfollow_target_profile_strict(
     last_meta: dict[str, Any] = {}
     while time.monotonic() < deadline:
         hierarchy = _dump_hierarchy(d)
+        from instagram_action_restriction import get_restriction_runtime_context
+        from instagram_human_confirmation_challenge import guard_instagram_human_confirmation
+
+        guard_instagram_human_confirmation(
+            d,
+            hierarchy_xml=hierarchy,
+            package_name=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+            activity_name="",
+            phase="unfollow_candidate_acquisition",
+            preceding_action="target_profile_identity_verification",
+            runtime_context=get_restriction_runtime_context(),
+        )
         actual_raw, method, meta = _extract_profile_username_from_hierarchy(hierarchy)
         actual = normalize_unfollow_username(actual_raw)
         last_actual = actual_raw

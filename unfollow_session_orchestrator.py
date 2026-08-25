@@ -537,9 +537,22 @@ _UNFOLLOW_UNSAFE_MARKER_TEXT = {
 
 def _detect_unfollow_unsafe_markers(d: u2.Device) -> list[str]:
     try:
-        hierarchy = str(d.dump_hierarchy(compressed=False) or "").lower()
+        hierarchy_raw = str(d.dump_hierarchy(compressed=False) or "")
     except Exception:
         return []
+    from instagram_action_restriction import get_restriction_runtime_context
+    from instagram_human_confirmation_challenge import guard_instagram_human_confirmation
+
+    guard_instagram_human_confirmation(
+        d,
+        hierarchy_xml=hierarchy_raw,
+        package_name=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        activity_name="",
+        phase="unfollow_navigation",
+        preceding_action="unfollow_surface_safety_check",
+        runtime_context=get_restriction_runtime_context(),
+    )
+    hierarchy = hierarchy_raw.lower()
     return sorted(
         {
             marker

@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
+from instagram_human_confirmation_challenge import (
+    STABLE_REASON as HUMAN_CONFIRMATION_REASON,
+    classify_instagram_human_confirmation,
+)
 from logs import log
 
 
@@ -228,6 +232,11 @@ def extract_login_screen_signals_from_hierarchy(
 ) -> dict[str, Any]:
     raw_hierarchy = str(hierarchy_xml or "")
     text = _normalize_hierarchy_text(hierarchy_xml)
+    human_confirmation = classify_instagram_human_confirmation(
+        raw_hierarchy,
+        package_name="com.instagram.android",
+        activity_name="ChallengeActivity" if "challengeactivity" in raw_hierarchy.casefold() else "",
+    )
     has_continue_button = _has_phrase(text, "continue")
     has_use_another_profile = _has_phrase(text, "use another profile")
     has_create_new_account = _has_phrase(text, "create new account")
@@ -355,7 +364,9 @@ def extract_login_screen_signals_from_hierarchy(
     username_prefilled_present = bool(prefilled_username)
     username_field_editable_present = has_username_field or bool(edit_text_values)
 
-    if has_verification_code_challenge:
+    if human_confirmation.detected:
+        screen_type = "instagram_human_confirmation"
+    elif has_verification_code_challenge:
         screen_type = VERIFICATION_CODE_SCREEN_TYPES[verification_channel]
     elif has_samsung_save_password_prompt:
         screen_type = "samsung_pass_save_password_prompt"
@@ -412,6 +423,8 @@ def extract_login_screen_signals_from_hierarchy(
 
     return {
         "screen_type": screen_type,
+        "instagram_human_confirmation_required": bool(human_confirmation.detected),
+        "human_confirmation": human_confirmation.to_dict() if human_confirmation.detected else {},
         "continue_as_candidate": screen_type == "continue_as_candidate",
         "suggested_username": suggested_username,
         "available_usernames": available_usernames,
@@ -548,6 +561,27 @@ def probe_login_ui_from_hierarchy(
             ok=False,
             reason="empty_hierarchy",
             metadata=metadata,
+        )
+
+    human_confirmation = classify_instagram_human_confirmation(
+        str(hierarchy_xml or ""),
+        package_name="com.instagram.android",
+        activity_name="ChallengeActivity" if "challengeactivity" in str(hierarchy_xml or "").casefold() else "",
+    )
+    if human_confirmation.detected:
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.CHECKPOINT,
+            ok=False,
+            reason=HUMAN_CONFIRMATION_REASON,
+            metadata={
+                **metadata,
+                **human_confirmation.to_dict(),
+                "detection_reason": HUMAN_CONFIRMATION_REASON,
+                "screen_type": "instagram_human_confirmation",
+                "challenge_type": "human_confirmation",
+                "operator_action_required": True,
+                "auto_restart_allowed": False,
+            },
         )
 
     if _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS):

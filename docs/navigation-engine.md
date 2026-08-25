@@ -1,5 +1,26 @@
 # Navigation Engine
 
+## Instagram human-confirmation boundary
+
+`instagram_human_confirmation_challenge.py` is the shared, account-global
+classifier for the Instagram surface whose semantic contract is “Confirm
+you're human” + “to use your account” + a structural Continue CTA on an
+Instagram surface. It consumes only the already-fresh XML owned by the current
+navigation/identity boundary. It adds no XML dump, selector probe, screenshot,
+Vision call, sleep, or device gesture.
+
+The classifier is checked before generic identity/depth errors at login,
+Identity Guard, Follow candidate recovery, CT recovery, and Unfollow
+navigation/profile verification. Once proved, the stable reason is
+`instagram_human_confirmation_required`. The boundary is account-global:
+Follow, Unfollow, Like, Mute, DM, and Outreach are not admitted after the
+proof. The Continue CTA is never clicked by automation. Completed canonical
+actions remain unchanged.
+
+The detector is not account-specific. Username text is evidence only and is
+never required to be `bmybusinesses`. A generic support page, a bare Continue
+button, or a generic checkpoint token is insufficient.
+
 ## Rôle
 
 Le **Navigation Engine** fournit une **couche de décision** sur l’écran Instagram courant : il agrège des signaux (XML / accessibilité, indices visuels, contexte métier) et expose un **état de navigation** exploitable par le runner et les modules de navigation (`instagram_navigation`, flows followers, post-follow, etc.).

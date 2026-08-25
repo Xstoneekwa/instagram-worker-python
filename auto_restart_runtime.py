@@ -30,6 +30,7 @@ HARD_STOP_REASONS = frozenset(
         "restriction",
         "account_mismatch",
         "action_block",
+        "instagram_human_confirmation_required",
     }
 )
 
@@ -39,6 +40,7 @@ _REASON_ALIASES = {
     "account_mismatch": "account_mismatch_blocked",
     "action_block": "restriction_blocked",
     "resume_runtime_not_supported": "resume_plan_invalid",
+    "instagram_human_confirmation_required": "challenge_blocked",
 }
 
 
