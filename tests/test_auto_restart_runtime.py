@@ -5,6 +5,7 @@ from account_session_manual_resume import build_manual_resume_command
 from account_session_reliability_schema import build_admin_reliability_snapshot
 from account_session_resume_engine import build_account_session_resume_plan
 from auto_restart_runtime import (
+    _canonical_request_attempt_context,
     is_auto_restart_request,
     phase_enabled,
     validate_auto_restart_request_at_claim,
@@ -12,6 +13,23 @@ from auto_restart_runtime import (
 
 
 class AutoRestartRuntimeTests(unittest.TestCase):
+    def test_attempt_four_is_rejected_by_claim_defense_in_depth(self) -> None:
+        self.assertIsNone(
+            _canonical_request_attempt_context(
+                {"attempt_id": 4, "retry_index": 3},
+                {"attempt_id": 4, "retry_index": 3},
+            )
+        )
+
+    def test_attempt_three_remains_valid(self) -> None:
+        self.assertEqual(
+            _canonical_request_attempt_context(
+                {"attempt_id": 3, "retry_index": 2},
+                {"attempt_id": 3, "retry_index": 2},
+            ),
+            {"attempt_id": 3, "retry_index": 2},
+        )
+
     def test_is_auto_restart_request(self) -> None:
         self.assertTrue(
             is_auto_restart_request({"auto_restart": True, "source": "auto_restart_tick"})
@@ -413,6 +431,33 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+        load_summary.assert_not_called()
+
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_explicit_invalid_source_lineage_fails_before_prior_run_load(self, load_summary) -> None:
+        prior_run_id = "22222222-2222-4222-8222-222222222222"
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id="11111111-1111-4111-8111-111111111111",
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "source_lineage_valid": False,
+                "attempt_id": 2,
+                "retry_index": 1,
+                "resume_plan_version": 1,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                "prior_run_id": prior_run_id,
+                "resume_plan": {
+                    "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "attempt_id": 2,
+                    "retry_index": 1,
+                    "restart_allowed": True,
+                },
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_source_lineage_invalid")
         self.assertIsNone(policy)
         load_summary.assert_not_called()
 

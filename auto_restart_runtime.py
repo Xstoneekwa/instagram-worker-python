@@ -135,7 +135,7 @@ def _canonical_request_attempt_context(
     if len(set(retry_indexes)) > 1:
         return None
     retry_index = retry_indexes[0] if retry_indexes else attempt_id - 1
-    if attempt_id != retry_index + 1:
+    if attempt_id != retry_index + 1 or attempt_id > 3 or retry_index > 2:
         return None
     return {"attempt_id": attempt_id, "retry_index": retry_index}
 
@@ -391,6 +391,8 @@ def validate_auto_restart_request_at_claim(
         return False, "resume_plan_invalid", None
     attempt_id = request_attempt_context["attempt_id"]
     retry_index = request_attempt_context["retry_index"]
+    if meta.get("source_lineage_valid") is False:
+        return False, "resume_source_lineage_invalid", None
 
     recoverable_python_retry = (
         str(meta.get("failure_category") or embedded.get("failure_category") or "")
@@ -398,12 +400,23 @@ def validate_auto_restart_request_at_claim(
     )
     retry_context: dict[str, Any] = dict(request_attempt_context)
     if recoverable_python_retry:
-        business_session_id = str(meta.get("business_session_id") or "").strip()
+        business_session_id = str(
+            meta.get("root_business_session_id")
+            or meta.get("business_session_id")
+            or ""
+        ).strip()
+        embedded_business_session_id = str(
+            embedded.get("root_business_session_id")
+            or embedded.get("business_session_id")
+            or ""
+        ).strip()
         previous_run_id = str(
             meta.get("previous_run_id") or meta.get("prior_run_id") or ""
         ).strip()
         if (
             not business_session_id
+            or not embedded_business_session_id
+            or embedded_business_session_id != business_session_id
             or previous_run_id != prior_run_id
             or retry_index not in {1, 2}
             or attempt_id != retry_index + 1
@@ -417,6 +430,7 @@ def validate_auto_restart_request_at_claim(
             return False, "resume_plan_invalid", None
         retry_context = {
             "business_session_id": business_session_id,
+            "root_business_session_id": business_session_id,
             "attempt_id": attempt_id,
             "retry_index": retry_index,
             "previous_run_id": previous_run_id,

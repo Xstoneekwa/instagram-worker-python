@@ -9,6 +9,120 @@ import outreach_session_orchestrator
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
+    def test_exception_summary_preserves_s3_canonical_actions_and_lineage(self) -> None:
+        receipts = [
+            {"action_id": f"action-{index}", "username": f"user-{index}"}
+            for index in range(16)
+        ]
+        summary = account_session._exception_summary_preserving_unfollow_progress(
+            progress={
+                "run_id": "run-s3",
+                "root_business_session_id": "root-s1",
+                "attempt_ordinal": 3,
+                "previous_run_id": "run-s2",
+                "unfollow_actions_sent": 16,
+                "unfollow_actions_verified": 16,
+                "unfollow_results_persisted_count": 16,
+                "attempted": 16,
+                "verified": 16,
+                "persisted": 16,
+                "unfollow_observed_success_count": 16,
+                "unfollow_observed_successes": receipts,
+                "counter_delta": 16,
+                "last_successful_action": receipts[-1],
+                "plan_cursor_progress": {
+                    "plan_id": "plan-root-s1",
+                    "completed_usernames": [item["username"] for item in receipts],
+                    "remaining_usernames": ["remaining-user"],
+                },
+                "first_causal_reason": "candidate_local_technical_hold",
+            },
+            error=ConnectionResetError("supabase_queue_read_failed"),
+            real_max_actions_requested=120,
+            real_max_actions_effective=120,
+            real_hard_max=120,
+        )
+        self.assertEqual(summary["unfollow_actions_verified"], 16)
+        self.assertEqual(summary["unfollow_results_persisted_count"], 16)
+        self.assertEqual(summary["persisted"], 16)
+        self.assertEqual(summary["root_business_session_id"], "root-s1")
+        self.assertEqual(summary["attempt_ordinal"], 3)
+        self.assertEqual(summary["previous_run_id"], "run-s2")
+        self.assertEqual(summary["counter_delta"], 16)
+        self.assertEqual(summary["last_successful_action"]["action_id"], "action-15")
+        self.assertEqual(summary["plan_cursor_progress"]["remaining_usernames"], ["remaining-user"])
+        self.assertEqual(summary["canonical_reason_before_exception"], "candidate_local_technical_hold")
+        self.assertEqual(summary["termination_reason"], "supabase_queue_read_failed")
+        self.assertEqual(len(summary["unfollow_observed_successes"]), 16)
+        self.assertEqual(summary["final_exception"]["type"], "ConnectionResetError")
+        self.assertIn("supabase_queue_read_failed", summary["final_exception"]["reason"])
+
+    def test_zero_action_exception_stays_zero_without_fabrication(self) -> None:
+        summary = account_session._exception_summary_preserving_unfollow_progress(
+            progress={"run_id": "run-s1"},
+            error=RuntimeError("before_first_action"),
+            real_max_actions_requested=80,
+            real_max_actions_effective=80,
+            real_hard_max=80,
+        )
+        self.assertEqual(summary["unfollow_actions_verified"], 0)
+        self.assertEqual(summary["unfollow_results_persisted_count"], 0)
+        self.assertEqual(summary["final_exception"]["reason"], "before_first_action")
+
+    def test_partial_candidate_local_progress_is_preserved_before_exception(self) -> None:
+        receipts = [
+            {"action_id": f"partial-action-{index}", "username": f"partial-{index}"}
+            for index in range(5)
+        ]
+        summary = account_session._exception_summary_preserving_unfollow_progress(
+            progress={
+                "run_id": "run-s2",
+                "root_business_session_id": "root-s1",
+                "attempt_ordinal": 2,
+                "previous_run_id": "run-s1",
+                "unfollow_actions_sent": 6,
+                "unfollow_actions_verified": 5,
+                "unfollow_results_persisted_count": 5,
+                "attempted": 6,
+                "verified": 5,
+                "persisted": 5,
+                "unfollow_observed_success_count": 5,
+                "unfollow_observed_successes": receipts,
+                "counter_delta": 5,
+                "last_successful_action": receipts[-1],
+                "plan_cursor_progress": {
+                    "plan_id": "plan-root-s1",
+                    "completed_usernames": [item["username"] for item in receipts],
+                    "remaining_usernames": ["retryable-target"],
+                },
+                "candidate_local_retryable_count": 1,
+                "failed_candidates": [
+                    {
+                        "username": "retryable-target",
+                        "reason": "target_profile_open_failed",
+                        "outcome": "technical_hold",
+                    }
+                ],
+            },
+            error=RuntimeError("supabase_queue_read_failed"),
+            real_max_actions_requested=80,
+            real_max_actions_effective=80,
+            real_hard_max=80,
+        )
+
+        self.assertEqual(summary["unfollow_actions_sent"], 6)
+        self.assertEqual(summary["unfollow_actions_verified"], 5)
+        self.assertEqual(summary["unfollow_results_persisted_count"], 5)
+        self.assertEqual(summary["unfollow_observed_successes"], receipts)
+        self.assertEqual(summary["candidate_local_retryable_count"], 1)
+        self.assertEqual(summary["failed_candidates"][0]["outcome"], "technical_hold")
+        self.assertEqual(summary["root_business_session_id"], "root-s1")
+        self.assertEqual(summary["attempt_ordinal"], 2)
+        self.assertEqual(summary["previous_run_id"], "run-s1")
+        self.assertEqual(summary["counter_delta"], 5)
+        self.assertEqual(summary["last_successful_action"]["action_id"], "partial-action-4")
+        self.assertEqual(summary["final_exception"]["reason"], "supabase_queue_read_failed")
+
     def test_authoritative_zero_follow_quota_hands_off_to_unfollow_only(self) -> None:
         out = account_session._resolve_auto_restart_follow_phase_gate(
             default_run_follow=True,

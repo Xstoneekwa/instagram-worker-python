@@ -3954,6 +3954,43 @@ def _real_summary_from_unfollow_summary(
         "unfollow_results_persisted_count": int(
             unfollow_summary.get("unfollow_results_persisted_count") or 0
         ),
+        "attempted": int(
+            unfollow_summary.get("attempted")
+            or unfollow_summary.get("unfollow_actions_sent")
+            or 0
+        ),
+        "verified": int(
+            unfollow_summary.get("verified")
+            or unfollow_summary.get("unfollow_actions_verified")
+            or 0
+        ),
+        "persisted": int(
+            unfollow_summary.get("persisted")
+            or unfollow_summary.get("unfollow_results_persisted_count")
+            or 0
+        ),
+        "unfollow_observed_success_count": int(
+            unfollow_summary.get("unfollow_observed_success_count") or 0
+        ),
+        "unfollow_observed_success_usernames": list(
+            unfollow_summary.get("unfollow_observed_success_usernames") or []
+        ),
+        "unfollow_observed_successes": list(
+            unfollow_summary.get("unfollow_observed_successes") or []
+        ),
+        "counter_delta": int(unfollow_summary.get("counter_delta") or 0),
+        "last_successful_action": unfollow_summary.get("last_successful_action"),
+        "plan_cursor_progress": unfollow_summary.get("plan_cursor_progress"),
+        "unfollow_execution_context": unfollow_summary.get("unfollow_execution_context"),
+        "run_id": unfollow_summary.get("run_id"),
+        "root_business_session_id": unfollow_summary.get("root_business_session_id"),
+        "attempt_ordinal": unfollow_summary.get("attempt_ordinal"),
+        "previous_run_id": unfollow_summary.get("previous_run_id"),
+        "candidate_local_retryable_count": int(
+            unfollow_summary.get("candidate_local_retryable_count") or 0
+        ),
+        "failed_candidates": list(unfollow_summary.get("failed_candidates") or []),
+        "final_exception": unfollow_summary.get("final_exception"),
         "unfollow_effective_limit": resolved_real_max_actions_effective,
         "last_run_eligible_at_start": int(
             unfollow_summary.get("last_run_eligible_at_start")
@@ -3995,6 +4032,47 @@ def _real_summary_from_unfollow_summary(
         "follow_exit_code_block_reason": str(gate.get("follow_exit_code_block_reason") or ""),
         "allowed_follow_exit_codes": list(gate.get("allowed_follow_exit_codes") or [0, 97]),
         "safe_partial_follow_exit_code": int(gate.get("safe_partial_follow_exit_code") or 97),
+    }
+
+
+def _exception_summary_preserving_unfollow_progress(
+    *,
+    progress: dict[str, Any],
+    error: Exception,
+    real_max_actions_requested: int,
+    real_max_actions_effective: int,
+    real_hard_max: int,
+    follow_exit_gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append the terminal exception without erasing canonical action truth."""
+    preserved = _real_summary_from_unfollow_summary(
+        enabled=True,
+        executed=True,
+        exit_code=1,
+        unfollow_summary=progress,
+        real_max_actions_requested=real_max_actions_requested,
+        real_max_actions_effective=real_max_actions_effective,
+        real_hard_max=real_hard_max,
+        follow_exit_gate=follow_exit_gate,
+    )
+    canonical_reason_before_exception = str(
+        progress.get("first_causal_reason")
+        or progress.get("failure_reason")
+        or ""
+    ).strip() or None
+    return {
+        **preserved,
+        "status": "failed_exception",
+        "exit_code": 1,
+        "failure_reason": str(error),
+        "first_causal_reason": str(error),
+        "canonical_reason_before_exception": canonical_reason_before_exception,
+        "termination_reason": str(error),
+        "final_exception": {
+            "type": type(error).__name__,
+            "reason": str(error)[:500],
+        },
+        "exception_summary_preserved": True,
     }
 
 
@@ -4385,6 +4463,7 @@ def _run_follow_to_unfollow_real(
     request_id: str | None = None,
     business_session_id: str | None = None,
     session_attempt: int = 1,
+    previous_run_id: str | None = None,
     worker_sha: str | None = None,
 ) -> dict[str, Any]:
     """H3 only: explicit real Unfollow handoff with a hard low cap."""
@@ -4612,7 +4691,25 @@ def _run_follow_to_unfollow_real(
         )
         return out
     except Exception as e:
+        progress = get_last_unfollow_session_probe_summary()
+        progress_is_current_run = (
+            str(progress.get("run_id") or "").strip() == str(run_id or "").strip()
+        )
+        if progress_is_current_run:
+            progress = {
+                **progress,
+                "previous_run_id": str(previous_run_id or "").strip() or None,
+            }
+        preserved = _exception_summary_preserving_unfollow_progress(
+            progress=progress if progress_is_current_run else {},
+            error=e,
+            real_max_actions_requested=real_max_requested,
+            real_max_actions_effective=real_max_effective,
+            real_hard_max=real_hard_max,
+            follow_exit_gate=follow_exit_gate,
+        )
         out = {
+            **preserved,
             "enabled": True,
             "executed": True,
             "probe_only": False,
@@ -4627,14 +4724,11 @@ def _run_follow_to_unfollow_real(
             "follow_exit_code_block_reason": str(follow_exit_gate.get("follow_exit_code_block_reason") or ""),
             "allowed_follow_exit_codes": list(follow_exit_gate.get("allowed_follow_exit_codes") or [0, 97]),
             "safe_partial_follow_exit_code": int(follow_exit_gate.get("safe_partial_follow_exit_code") or 97),
-            "following_surface_ok": False,
-            "visible_rows_count": 0,
-            "visible_plan_matches_count": 0,
-            "unfollow_actions_sent": 0,
-            "unfollow_actions_verified": 0,
-            "unfollow_actions_failed": 0,
-            "unfollow_results_persisted_count": 0,
+            "unfollow_actions_failed": int(preserved.get("unfollow_actions_failed") or 0),
             "failure_reason": str(e),
+            "first_causal_reason": str(e),
+            "final_exception": preserved.get("final_exception"),
+            "exception_summary_preserved": progress_is_current_run,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
             **surface_prep,
         }
@@ -4646,7 +4740,10 @@ def _run_follow_to_unfollow_real(
             run_id=run_id,
             status=out["status"],
             failure_reason=out["failure_reason"],
-            unfollow_actions_sent=0,
+            unfollow_actions_sent=out.get("unfollow_actions_sent"),
+            unfollow_actions_verified=out.get("unfollow_actions_verified"),
+            unfollow_results_persisted_count=out.get("unfollow_results_persisted_count"),
+            exception_summary_preserved=out.get("exception_summary_preserved"),
             real_max_actions=int(real_max_effective),
             surface_prep_attempted=out.get("surface_prep_attempted"),
             surface_prep_ok=out.get("surface_prep_ok"),
@@ -5599,6 +5696,11 @@ def run_account_session(
                         request_id=run_request_id,
                         business_session_id=business_session_id,
                         session_attempt=follow60_attempt_id,
+                        previous_run_id=str(
+                            (auto_restart_resume_policy or {}).get("previous_run_id")
+                            or (auto_restart_resume_policy or {}).get("prior_run_id")
+                            or ""
+                        ).strip() or None,
                         worker_sha=(
                             worker_runtime_identity.worker_sha
                             if worker_runtime_identity is not None
@@ -5740,6 +5842,11 @@ def run_account_session(
                 request_id=run_request_id,
                 business_session_id=business_session_id,
                 session_attempt=follow60_attempt_id,
+                previous_run_id=str(
+                    (auto_restart_resume_policy or {}).get("previous_run_id")
+                    or (auto_restart_resume_policy or {}).get("prior_run_id")
+                    or ""
+                ).strip() or None,
                 worker_sha=(
                     worker_runtime_identity.worker_sha
                     if worker_runtime_identity is not None

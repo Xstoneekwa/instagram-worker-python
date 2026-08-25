@@ -209,7 +209,9 @@ def classify_recoverable_python_retry(
     except (TypeError, ValueError):
         retry_index = max(0, attempt_id - 1)
     business_session_id = str(
-        metadata.get("business_session_id")
+        metadata.get("root_business_session_id")
+        or metadata.get("business_session_id")
+        or summary.get("root_business_session_id")
         or summary.get("business_session_id")
         or run_id
         or ""
@@ -257,7 +259,25 @@ def classify_recoverable_python_retry(
             failure_signature=signature,
             failure_category=category,
         )
-    if not business_session_id or attempt_id != retry_index + 1 or retry_index < 0:
+    if metadata.get("source_lineage_valid") is False:
+        return RecoverablePythonRetryDecision(
+            applies=True,
+            block_reason="source_lineage_invalid",
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            retry_index=retry_index,
+            previous_run_id=previous_run_id,
+            root_failure_code=root_code,
+            failure_signature=signature,
+            failure_category=category,
+        )
+    if (
+        not business_session_id
+        or attempt_id != retry_index + 1
+        or retry_index < 0
+        or attempt_id > AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE + 1
+        or retry_index > AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE
+    ):
         return RecoverablePythonRetryDecision(
             applies=True,
             block_reason="retry_identity_invalid",

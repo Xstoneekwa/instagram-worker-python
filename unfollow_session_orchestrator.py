@@ -107,6 +107,12 @@ def _emit_summary(summary: dict[str, Any]) -> None:
     log("info", "unfollow_session_probe_summary", **summary)
 
 
+def _checkpoint_summary(summary: dict[str, Any]) -> None:
+    """Keep monotone in-process progress without publishing a terminal event."""
+    global _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY
+    _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY = dict(summary)
+
+
 def _return_after_unfollow_profile(
     d: u2.Device,
     *,
@@ -1742,6 +1748,8 @@ def _log_unfollow_success_observed(
             interaction_row_id or persist_out.get("interaction_row_id") or ""
         ).strip() or None,
         "unfollowed_at": persist_out.get("unfollowed_at"),
+        "action_id": str(persist_out.get("action_id") or "").strip() or None,
+        "counter_delta": int(persist_out.get("counter_delta") or 0),
         "reason": "unfollow_verified_and_persisted",
     }
     log("info", "unfollow_success_observed", **observed)
@@ -1788,6 +1796,7 @@ def _run_real_unfollow_multi_loop(
     action_verified_usernames: set[str] = set()
     action_persisted_usernames: set[str] = set()
     unfollow_observed_successes: list[dict[str, Any]] = []
+    canonical_counter_delta = 0
     recoverable_action_failure_usernames: list[str] = []
     recoverable_action_failure_reasons: dict[str, str] = {}
     recoverable_action_failures_count = 0
@@ -2442,6 +2451,60 @@ def _run_real_unfollow_multi_loop(
         )
         _emit_summary(summary)
         return 0 if not status.startswith("failed_") else 1
+
+    def checkpoint_canonical_progress() -> None:
+        """Preserve completed physical/canonical truth across a later exception."""
+        _checkpoint_summary(
+            {
+                **base_summary,
+                **last_fields,
+                "status": "unfollow_in_progress",
+                "failure_reason": "",
+                "first_causal_reason": "",
+                "unfollow_actions_sent": sent,
+                "unfollow_actions_verified": verified,
+                "unfollow_results_persisted_count": persisted,
+                "unfollow_outcomes_persisted_count": persisted_outcomes,
+                "attempted": sent,
+                "verified": verified,
+                "persisted": persisted,
+                "unfollow_observed_success_count": len(unfollow_observed_successes),
+                "unfollow_observed_success_usernames": [
+                    str(item.get("username") or "")
+                    for item in unfollow_observed_successes[:50]
+                    if str(item.get("username") or "").strip()
+                ],
+                "unfollow_observed_successes": unfollow_observed_successes[:50],
+                "counter_delta": canonical_counter_delta,
+                "last_successful_action": (
+                    dict(unfollow_observed_successes[-1])
+                    if unfollow_observed_successes
+                    else None
+                ),
+                "plan_cursor_progress": {
+                    "plan_id": str(daily_plan_context.get("plan_id") or "") or None,
+                    "plan_generation": str(
+                        daily_plan_context.get("generation")
+                        or daily_plan_context.get("revision")
+                        or daily_plan_context.get("created_at")
+                        or ""
+                    ) or None,
+                    "completed_usernames": sorted(completed_usernames),
+                    "remaining_usernames": sorted(
+                        coverage_tracker.remaining_planned_usernames
+                        if coverage_tracker is not None
+                        else set()
+                    ),
+                },
+                "unfollow_execution_context": execution_context.as_safe_dict(),
+                "root_business_session_id": execution_context.root_business_session_id,
+                "attempt_ordinal": execution_context.attempt_ordinal,
+                "run_id": execution_context.run_id,
+                "request_id": execution_context.request_id,
+                "performance_boundary_telemetry": performance_boundaries[:250],
+                "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
+        )
 
     log(
         "info",
@@ -4058,6 +4121,7 @@ def _run_real_unfollow_multi_loop(
             if verify_ok and coverage_tracker is not None:
                 coverage_tracker.mark_action_persisted(target_key)
             if verify_ok:
+                canonical_counter_delta += int(persist_out.get("counter_delta") or 0)
                 interaction_row_id = str(persist_out.get("interaction_row_id") or "").strip() or None
                 unfollow_observed_successes.append(
                     _log_unfollow_success_observed(
@@ -4076,6 +4140,7 @@ def _run_real_unfollow_multi_loop(
                 username=target_username,
                 reason=str(persist_out.get("error") or "persist_failed"),
             )
+        checkpoint_canonical_progress()
         log(
             "info",
             "unfollow_candidate_lineage_v1",
@@ -4123,6 +4188,7 @@ def _run_real_unfollow_multi_loop(
             refresh_recoverable_action_summary_totals()
             verified += 1
             completed_usernames.add(target_key)
+            checkpoint_canonical_progress()
             visible_eligibility_row_cache[target_key] = None
             effective_unfollows_done = (
                 max(0, int(effective_unfollows_done_at_start)) + int(verified)

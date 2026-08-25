@@ -329,6 +329,7 @@ def record_automatic_retry_terminal_state(
     plan.update(
         {
             "business_session_id": retry_decision.business_session_id,
+            "root_business_session_id": retry_decision.business_session_id,
             "attempt_id": retry_decision.attempt_id,
             "current_attempt_id": retry_decision.attempt_id,
             "retry_index": retry_decision.retry_index,
