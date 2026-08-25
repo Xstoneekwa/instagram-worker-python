@@ -151,6 +151,7 @@ class Follow60ChangeProtocolTests(unittest.TestCase):
             graph = transitive_import_graph(root, entries)
             manifest = {
                 "schema": "FOLLOW60_MAINLINE_LOCK_V3_1", "lock_version": "3.1.0", "lock_state": "LOCKED",
+                "certified_candidate_sha": tree,
                 "protected_entries": entries, "protected_scope_sha256": sha256_bytes(canonical_json(entries)),
                 "protected_transitive_dependency_count": 0, "import_graph": graph,
                 "import_graph_sha256": sha256_bytes(canonical_json(graph)),

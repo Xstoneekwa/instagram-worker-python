@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from follow60_deployment_gate_v1 import verify_deployment_candidate
+
 
 DEFAULT_CURRENT_LINK = Path("/Users/admin/phonefarm-worker-current")
 DEFAULT_RELEASES_DIR = Path("/Users/admin/phonefarm-worker-releases")
@@ -747,6 +749,19 @@ def scheduler_status() -> dict[str, Any]:
 
 def switch_release(target: str) -> dict[str, Any]:
     paths = runtime_paths()
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        target_path = paths.releases_dir / target
+    validation = resolve_runtime_root(RuntimePaths(target_path, paths.releases_dir, paths.runtime_home, paths.legacy_root))
+    if not validation.ok:
+        return _runtime_root_payload(validation, command="switch-release")
+    integrity = verify_deployment_candidate(Path(validation.resolved_root))
+    if not integrity.get("ok"):
+        return {
+            **integrity,
+            "command": "switch-release",
+            "message": "Release switch refused: exact-candidate Follow60 deployment gate failed.",
+        }
     gate = deployment_zero_gate(paths)
     if not gate.get("ok"):
         return {
@@ -754,12 +769,6 @@ def switch_release(target: str) -> dict[str, Any]:
             "command": "switch-release",
             "message": "Release switch refused: production deployment gate is not zero.",
         }
-    target_path = Path(target)
-    if not target_path.is_absolute():
-        target_path = paths.releases_dir / target
-    validation = resolve_runtime_root(RuntimePaths(target_path, paths.releases_dir, paths.runtime_home, paths.legacy_root))
-    if not validation.ok:
-        return _runtime_root_payload(validation, command="switch-release")
     previous = _safe_resolve(paths.current_link) if (paths.current_link.exists() or paths.current_link.is_symlink()) else None
     tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
     if tmp.exists() or tmp.is_symlink():

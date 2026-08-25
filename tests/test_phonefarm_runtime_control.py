@@ -132,7 +132,7 @@ class PhoneFarmRuntimeControlTest(TestCase):
             current.symlink_to(old)
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
                 with mock.patch.object(ctl, "_git_commit", return_value="newsha"):
-                    with mock.patch.object(
+                    with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
                         ctl, "deployment_zero_gate", return_value={"ok": True}
                     ):
                         result = ctl.switch_release("new")
@@ -157,7 +157,7 @@ class PhoneFarmRuntimeControlTest(TestCase):
             with mock.patch.dict(
                 os.environ, self._env(tmp, current, releases, legacy), clear=False
             ):
-                with mock.patch.object(
+                with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
                     ctl,
                     "deployment_zero_gate",
                     return_value={

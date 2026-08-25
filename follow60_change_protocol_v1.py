@@ -309,6 +309,7 @@ def verify_staged_final_approval(
         revision=tree_revision,
         signature_path=signature_path,
         public_key_path=public_key_path,
+        enforce_exact_candidate=False,
     )
     if not repository.get("ok"):
         return {"ok": False, "reason": "final_approval_candidate_tree_invalid", "detail": repository}

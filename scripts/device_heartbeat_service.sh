@@ -68,6 +68,7 @@ _resolve_python_path() {
 }
 
 PYTHON_BIN="$(_resolve_python_path)"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT_DIR" >/dev/null
 
 _resolve_host_label() {
   if [[ -n "${RUN_CONTROL_DISPATCHER_HOST_MACHINE:-}" ]]; then

@@ -9,8 +9,10 @@ jobs:
           fetch-depth: 0
       - name: Exact HEAD protected-scope verification
         run: python3 scripts/verify-follow60-mainline-lock-v3.py
+      - name: Exact-candidate deployment admission
+        run: python3 scripts/verify-follow60-deployment-candidate-v1.py
       - name: Lock self-tests
-        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3
+        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3 tests.test_follow60_deployment_gate_v1
   follow60-promotion-matrix:
     runs-on: ubuntu-latest
     steps:

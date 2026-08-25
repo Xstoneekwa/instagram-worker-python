@@ -197,6 +197,9 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
             "schema": "FOLLOW60_MAINLINE_LOCK_V3_1",
             "lock_version": "3.1.0",
             "lock_state": "LOCKED",
+            "certified_candidate_sha": subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+            ).strip(),
             "protected_entries": entries,
             "protected_scope_sha256": sha256_bytes(canonical_json(entries)),
             "import_graph": graph,

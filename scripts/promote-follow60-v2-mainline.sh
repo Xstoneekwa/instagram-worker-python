@@ -3,6 +3,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 python3 "$ROOT/scripts/verify-follow60-mainline-lock-v3.py"
+python3 "$ROOT/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT"
 
 if test "${1:-}" = "--execute"; then
   python3 "$ROOT/scripts/verify-follow60-physical-write-lock-v3-1.py" --target-root "$ROOT"

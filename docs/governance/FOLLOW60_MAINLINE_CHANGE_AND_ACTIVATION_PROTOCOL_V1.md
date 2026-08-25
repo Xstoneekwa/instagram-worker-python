@@ -33,6 +33,46 @@ local edit, commit, push, CI, package, release, runtime switch and Follow60 run
 start. Existing lock verification, detached signature verification and the
 physical lock are mandatory evidence for `LOCKED_CERTIFIED` and later states.
 
+## Follow60 protected delta rule
+
+Any byte or import-graph change to a path covered by Follow60 V3.1
+automatically invalidates the previous certification.  The final candidate
+must receive a newly generated manifest, the full historical regression
+recertification and a detached Liam signature.  The signed manifest carries
+`certified_candidate_sha`; it must equal both the candidate Git SHA and the
+release Git SHA.  A manifest certified for SHA A can never authorize a later
+commit B or C.
+
+`follow60_deployment_gate_v1.verify_deployment_candidate` is the mandatory,
+fail-closed decision used before release creation and runtime switch and at
+dispatcher, heartbeat and notifier boot.  It verifies the future release with
+the same protected-byte/import/signature check used at runtime.  There is no
+environment variable, command flag or Codex bypass.  A protected tree change
+with a stale manifest, or a regenerated manifest without PASS recertification
+and signature, is a hard NO-GO.
+
+Because a Git-tracked file cannot contain the SHA of the commit that contains
+it without a self-reference, the exact final manifest and detached signature
+are generated after the clean candidate commit and installed as immutable
+release certification material by
+`scripts/create-certified-phonefarm-release-v1.py`.  The source candidate
+stays clean, while the release gate proves that the signed manifest binds its
+exact HEAD before the release can be created or selected.
+
+Canonical order:
+
+`final candidate → protected diff scan → manifest regeneration → full
+recertification → signature → remote parity → clean worktree → certified
+release creation → zero gate → runtime switch → aligned services → one shared
+startup-tick skip → post-activation gate`.
+
+Incident example: release `563f7e6` changed protected login-classification
+dependencies but retained the `8f9bc99` manifest.  The dispatcher correctly
+refused startup with `FOLLOW60_MAINLINE_INTEGRITY_MISMATCH`; the 06:00 session
+was never scheduled and no device/business mutation occurred.  This was a
+deployment-governance failure detected correctly by the runtime integrity
+guard, not a dispatcher defect.
+
 ## Quick runbook
 
 1. From a certified locked base, generate approval request 1 with exact paths.

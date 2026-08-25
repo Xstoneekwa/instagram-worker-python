@@ -208,6 +208,7 @@ def verify_repository(
     approval_path: Path | None = None,
     signature_path: Path | None = None,
     public_key_path: Path | None = None,
+    enforce_exact_candidate: bool = True,
 ) -> dict[str, Any]:
     root = Path(root).resolve()
     try:
@@ -231,6 +232,8 @@ def verify_repository(
     )
     if not signed:
         return {"ok": False, "reason": signature_reason}
+    revision_sha = git(root, "rev-parse", revision).decode().strip()
+    certified_candidate_sha = str(manifest.get("certified_candidate_sha") or "").strip()
     entries = manifest.get("protected_entries") or {}
     if not isinstance(entries, dict) or not entries:
         return {"ok": False, "reason": "protected_scope_empty"}
@@ -272,11 +275,21 @@ def verify_repository(
         "entrypoint": "runner.py",
     }:
         return {"ok": False, "reason": "runtime_contract_mismatch"}
+    if enforce_exact_candidate and not certified_candidate_sha:
+        return {"ok": False, "reason": "manifest_exact_candidate_binding_missing"}
+    if enforce_exact_candidate and certified_candidate_sha != revision_sha:
+        return {
+            "ok": False,
+            "reason": "manifest_certified_sha_mismatch",
+            "manifest_certified_sha": certified_candidate_sha,
+            "revision": revision_sha,
+        }
     return {
         "ok": True,
         "status": "FOLLOW60_MAINLINE_LOCK_V3_1_OK",
         "lock_version": manifest.get("lock_version"),
-        "revision": git(root, "rev-parse", revision).decode().strip(),
+        "revision": revision_sha,
+        "manifest_certified_sha": certified_candidate_sha,
         "protected_file_count": len(entries),
         "protected_scope_sha256": scope_hash,
         "import_graph_sha256": graph_hash,

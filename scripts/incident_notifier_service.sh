@@ -37,6 +37,7 @@ _resolve_python_path() {
 }
 
 PYTHON_BIN="$(_resolve_python_path)"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT_DIR" >/dev/null
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 _pid_alive() {
