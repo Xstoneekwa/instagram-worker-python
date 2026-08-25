@@ -3553,22 +3553,103 @@ def _run_real_unfollow_multi_loop(
         )
         if not profile_det.get("ok"):
             failed += 1
-            stop_reason = "target_profile_open_failed"
+            profile_failure_reason = str(
+                profile_det.get("failure_reason") or "target_profile_open_failed"
+            )
             ret = _return_after_unfollow_profile(
                 d,
                 account_username=uname,
                 direct_exact_search=target_opened_directly,
             )
+            return_ok = bool(ret.get("ok"))
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": False,
-                "return_to_following_list_ok": bool(ret.get("ok")),
+                "target_profile_open_failure_scope": (
+                    "candidate_local" if return_ok else "global"
+                ),
+                "return_to_following_list_ok": return_ok,
                 "unfollow_actions_failed": failed,
             }
-            return emit_final(
-                "failed_unfollow_multi_action",
-                str(profile_det.get("failure_reason") or "target_profile_open_failed"),
+            candidate_decision = session_completion_policy.record_candidate_failure(
+                target_key,
+                safe_state_restored=return_ok,
+                failure_scope=("candidate_local" if return_ok else "global"),
             )
+            if return_ok:
+                recoverable_action_failures_count += 1
+                if target_username not in recoverable_action_failure_usernames:
+                    recoverable_action_failure_usernames.append(target_username)
+                recoverable_action_failure_reasons[target_username] = profile_failure_reason
+                if coverage_tracker is not None:
+                    coverage_tracker.mark_candidate_retryable(target_key)
+                    refresh_coverage_summary_totals()
+                refresh_recoverable_action_summary_totals()
+            log(
+                "info" if return_ok else "error",
+                "unfollow_target_profile_open_failure_classified",
+                account_id=aid,
+                run_id=run_id,
+                username=target_username,
+                username_normalized=target_key,
+                failure_reason=profile_failure_reason,
+                failure_scope=("candidate_local" if return_ok else "global"),
+                return_to_following_list_ok=return_ok,
+                retry_in_same_session=candidate_decision.retry_in_same_session,
+                candidate_recovery_exhausted=(
+                    candidate_decision.candidate_recovery_exhausted
+                ),
+                global_circuit_open=candidate_decision.global_circuit_open,
+                should_continue=candidate_decision.continue_session,
+                no_unfollow_tap=True,
+                no_success_persistence=True,
+            )
+            if not candidate_decision.continue_session:
+                stop_reason = str(
+                    ret.get("failure_reason")
+                    or candidate_decision.stable_reason
+                    or profile_failure_reason
+                )
+                return emit_final("failed_unfollow_multi_action", stop_reason)
+
+            session_continued_after_recoverable_failure = True
+            failed_usernames_this_run.add(target_key)
+            if candidate_decision.candidate_recovery_exhausted:
+                completed_usernames.add(target_key)
+                if coverage_tracker is not None:
+                    coverage_tracker.mark_candidate_technical_hold(target_key)
+                    refresh_coverage_summary_totals()
+            else:
+                session_completion_policy.retry_pending.add(target_key)
+            visible_eligibility_row_cache[target_key] = None
+            if not bool(ret.get("search_session_reused")):
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
+                last_fields = {
+                    **last_fields,
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                }
+            log(
+                "info",
+                "unfollow_target_profile_open_failure_continue",
+                account_id=aid,
+                run_id=run_id,
+                username=target_username,
+                username_normalized=target_key,
+                failure_reason=profile_failure_reason,
+                candidate_state=(
+                    "technical_hold"
+                    if candidate_decision.candidate_recovery_exhausted
+                    else "retryable"
+                ),
+                unfollow_actions_verified_so_far=verified,
+                return_to_following_list_ok=True,
+                no_unfollow_tap=True,
+                no_success_persistence=True,
+            )
+            continue
 
         action_sheet_t0 = time.perf_counter()
         sheet = open_unfollow_actions_sheet_from_profile_probe(

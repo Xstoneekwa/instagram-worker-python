@@ -417,6 +417,264 @@ class UnfollowConsolidationRealCallGraphTests(unittest.TestCase):
         ):
             self.assertIn(boundary, telemetry)
 
+    def test_profile_open_mismatch_is_candidate_local_and_s1_continues(self) -> None:
+        for failed_username in ("manu.alfrks", "gaeldeloozottone"):
+            with self.subTest(failed_username=failed_username):
+                summaries: list[dict[str, object]] = []
+                events: list[str] = []
+                failed_candidate = {
+                    "id": f"interaction-{failed_username}",
+                    "interaction_row_id": f"interaction-{failed_username}",
+                    "username": failed_username,
+                    "username_normalized": failed_username,
+                }
+                next_candidate = {
+                    "id": "interaction-next",
+                    "interaction_row_id": "interaction-next",
+                    "username": "candidate_next",
+                    "username_normalized": "candidate_next",
+                }
+                failed_visible_row = {
+                    "username": failed_username,
+                    "username_normalized": failed_username,
+                    "row_index": 0,
+                    "row_cta_class": "following",
+                    "cta_text": "Following",
+                }
+                next_visible_row = {
+                    "username": "candidate_next",
+                    "username_normalized": "candidate_next",
+                    "row_index": 1,
+                    "row_cta_class": "following",
+                    "cta_text": "Following",
+                }
+                rows = [failed_visible_row, next_visible_row]
+                context = UnfollowExecutionContext.build(
+                    account_id="account-1",
+                    account_username="owner",
+                    request_id="request-1",
+                    run_id="run-1",
+                    root_business_session_id="root-session-1",
+                    attempt_ordinal=1,
+                    business_date_sast="2026-08-25",
+                    worker_sha="a" * 40,
+                    runtime_root="/runtime/release",
+                    daily_plan_context={
+                        "plan_id": "plan-1",
+                        "generation": "generation-1",
+                    },
+                )
+                budget = derive_adaptive_coverage_budget(
+                    quota_remaining=1,
+                    eligible_remaining=2,
+                    session_remaining_seconds=3600,
+                )
+
+                profile_results = iter(
+                    (
+                        {
+                            "ok": False,
+                            "failure_reason": "target_profile_username_mismatch",
+                        },
+                        {"ok": True, "method": "exact_profile"},
+                    )
+                )
+
+                def verify_profile(*_args, **_kwargs):
+                    out = next(profile_results)
+                    events.append(
+                        "profile_mismatch" if not out["ok"] else "profile_exact"
+                    )
+                    return out
+
+                def tap_unfollow(*_args, **_kwargs):
+                    events.append("physical_unfollow_tap")
+                    return {"ok": True}
+
+                patches = (
+                    patch.object(
+                        orchestrator.account_protection_lists,
+                        "is_unfollow_protected",
+                        return_value=False,
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "detect_own_following_list_screen",
+                        return_value={
+                            "is_following_list": True,
+                            "detected_reason": "exact",
+                        },
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_detect_unfollow_unsafe_markers",
+                        return_value=[],
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_evaluate_visible_unfollow_with_session_cache",
+                        return_value={
+                            "visible_eligible_matches": [
+                                failed_candidate,
+                                next_candidate,
+                            ],
+                            "visible_ineligible_rows": [],
+                            "performance": {},
+                        },
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "tap_following_list_username_row_for_unfollow_probe",
+                        return_value=(True, {"ok": True}),
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "verify_unfollow_target_profile_strict",
+                        side_effect=verify_profile,
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_return_after_unfollow_profile",
+                        return_value={
+                            "ok": True,
+                            "destination": "following",
+                            "search_session_reused": False,
+                        },
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "harvest_visible_following_rows_for_unfollow",
+                        return_value=(rows, {}),
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "open_unfollow_actions_sheet_from_profile_probe",
+                        return_value={
+                            "ok": True,
+                            "unfollow_option_visible": True,
+                            "sheet_context_signals": {"exact_target": True},
+                        },
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_prepare_unfollow_mutation_intent",
+                        return_value={"action_id": "action-next", "run_id": "run-1"},
+                    ),
+                    patch.object(
+                        orchestrator.follow_persistence_intent,
+                        "update_intent_stage",
+                        return_value={"action_id": "action-next", "run_id": "run-1"},
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "tap_unfollow_in_following_sheet",
+                        side_effect=tap_unfollow,
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "verify_unfollow_action_success_after_tap",
+                        return_value={"ok": True},
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_persist_unfollow_outcome_for_session",
+                        return_value={
+                            "ok": True,
+                            "interaction_row_id": "interaction-next",
+                            "status": "persisted",
+                        },
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_log_unfollow_success_observed",
+                        return_value={"username": "candidate_next"},
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "checkpoint_daily_plan",
+                        return_value={"status": "partial", "remaining_count": 1},
+                    ),
+                    patch.object(
+                        orchestrator,
+                        "_emit_summary",
+                        side_effect=lambda summary: summaries.append(summary),
+                    ),
+                )
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    rc = orchestrator._run_real_unfollow_multi_loop(
+                        MagicMock(),
+                        execution_context=context,
+                        settings=_settings(),
+                        base_summary={
+                            "source_rows_loaded": 2,
+                            "eligible_total": 2,
+                            "unplanned_eligible_count": 0,
+                            "candidate_scan_exhaustive": True,
+                            "candidate_funnel_reconciled": True,
+                        },
+                        planned_usernames={failed_username, "candidate_next"},
+                        planned_by_username={
+                            failed_username: failed_candidate,
+                            "candidate_next": next_candidate,
+                        },
+                        rows=rows,
+                        harvest_meta={},
+                        harvest_fields={},
+                        visible_eligibility_row_cache={},
+                        real_action_max=1,
+                        unfollow_day_limit=200,
+                        effective_unfollows_done_at_start=0,
+                        business_action_deadline=None,
+                        adaptive_coverage_budget=budget,
+                        resume_checkpoint=None,
+                        daily_plan_context={
+                            "plan_id": "plan-1",
+                            "generation": "generation-1",
+                        },
+                        diagnostic_session=None,
+                        t0=time.perf_counter(),
+                    )
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(summaries), 1)
+                summary = summaries[0]
+                self.assertEqual(summary["unfollow_actions_sent"], 1)
+                self.assertEqual(summary["unfollow_actions_verified"], 1)
+                self.assertEqual(summary["unfollow_results_persisted_count"], 1)
+                self.assertEqual(summary["recoverable_action_failures_count"], 1)
+                self.assertEqual(
+                    summary["recoverable_action_failure_reasons"][failed_username],
+                    "target_profile_username_mismatch",
+                )
+                self.assertTrue(summary["session_continued_after_recoverable_failure"])
+                self.assertEqual(events.count("physical_unfollow_tap"), 1)
+                self.assertLess(
+                    events.index("profile_mismatch"),
+                    events.index("physical_unfollow_tap"),
+                )
+
+    def test_profile_open_failure_stops_when_following_recovery_is_not_proved(self) -> None:
+        source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
+        profile_failure_block = source.split(
+            'if not profile_det.get("ok"):', 1
+        )[1].split("action_sheet_t0", 1)[0]
+        self.assertIn(
+            'failure_scope=("candidate_local" if return_ok else "global")',
+            profile_failure_block,
+        )
+        self.assertIn(
+            "if not candidate_decision.continue_session:",
+            profile_failure_block,
+        )
+        self.assertIn(
+            'return emit_final("failed_unfollow_multi_action", stop_reason)',
+            profile_failure_block,
+        )
+        self.assertIn("no_unfollow_tap=True", profile_failure_block)
+        self.assertIn("no_success_persistence=True", profile_failure_block)
+
 
 if __name__ == "__main__":
     unittest.main()
