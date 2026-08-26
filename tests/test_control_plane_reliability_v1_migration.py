@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 
-SQL = (Path(__file__).parents[1] / "supabase/migrations/20260826004546_control_plane_reliability_v1.sql").read_text()
+SQL = (Path(__file__).parents[1] / "supabase/migrations/20260826021814_control_plane_reliability_v1.sql").read_text()
 
 
 class ControlPlaneReliabilityV1MigrationTest(unittest.TestCase):
