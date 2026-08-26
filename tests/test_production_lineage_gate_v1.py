@@ -74,7 +74,7 @@ class ProductionLineageGateV1Test(unittest.TestCase):
     def test_canonical_registry_is_schema_valid(self) -> None:
         payload = json.loads(REGISTRY.read_text(encoding="utf-8"))
         self.gate._validate_registry(payload)
-        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "328b8fea900b9d41979bfb899aa634d6a9b75518")
+        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "b6601efdfe14b23866fb256b0cd3240a17aba54d")
         self.assertEqual(payload["components"]["backend"]["production"]["sha"], "530802780b2f3de6b0a1046c21ca4f6bde77bbb9")
         self.assertEqual(payload["components"]["botapp"]["production"]["verification_state"], "UNVERIFIED")
 

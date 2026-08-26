@@ -614,7 +614,7 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
                 runner._CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING,
                 active,
             )
-            get_request.assert_called_once_with(REQUEST_ID)
+            get_request.assert_called_once_with(REQUEST_ID, bounded_pre_device=True)
             get_run.assert_called_once_with(RUN_ID)
 
     def test_follow60_late_activation_fails_closed_without_link(self) -> None:

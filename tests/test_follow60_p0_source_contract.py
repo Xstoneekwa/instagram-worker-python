@@ -11,7 +11,7 @@ class Follow60P0SourceContractTest(unittest.TestCase):
     def test_armed_control_rejections_return_before_device_setup(self) -> None:
         source = (ROOT / "runner.py").read_text(encoding="utf-8")
         gate = source.index("follow_60s_armed_control_safe_stop_pre_device")
-        device = source.index("device_connected")
+        device = source.index("gate_result = supabase_client.begin_device_activity_v1(")
         self.assertLess(gate, device)
         block = source[gate : gate + 1300]
         self.assertIn("return 96", block)

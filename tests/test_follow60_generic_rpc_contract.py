@@ -26,7 +26,7 @@ class Follow60GenericRpcContractTests(unittest.TestCase):
         commit = source.index(
             "supabase_client.commit_follow_60s_canary_runtime_v3("
         )
-        device = source.index("device_connected")
+        device = source.index("gate_result = supabase_client.begin_device_activity_v1(")
         self.assertLess(prepare, commit)
         self.assertLess(commit, device)
         self.assertIn("**_binding_args", source[prepare : prepare + 180])
