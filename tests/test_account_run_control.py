@@ -66,7 +66,7 @@ class AccountRunControlTest(unittest.TestCase):
             )
 
     def test_reclaim_stale_account_run_requests_parses_int(self) -> None:
-        with patch.object(account_run_control.supabase_client, "call_rpc", return_value=3):
+        with patch.object(account_run_control.supabase_client, "call_rpc_once", return_value=3):
             self.assertEqual(account_run_control.reclaim_stale_account_run_requests("worker"), 3)
 
     def test_reconcile_linked_ig_run_no_run_id_is_noop(self) -> None:
