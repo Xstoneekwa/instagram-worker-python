@@ -5,8 +5,8 @@
     "worker": {
       "production": {
         "verification_state": "VERIFIED",
-        "sha": "328b8fea900b9d41979bfb899aa634d6a9b75518",
-        "runtime_root": "/Users/admin/phonefarm-worker-releases/328b8fe-control-plane-reliability-v1"
+        "sha": "b6601efdfe14b23866fb256b0cd3240a17aba54d",
+        "runtime_root": "/Users/admin/phonefarm-worker-releases/b6601ef-control-plane-protocol-repair-v1"
       },
       "artifact_provenance_required": false,
       "deltas": [
@@ -316,6 +316,27 @@
             "tests/test_production_lineage_gate_v1.py"
           ],
           "notes": "Canonical control-plane reliability runtime activated at 328b8fe; forward repair binds its deployed migration identity without replaying SQL."
+        },
+        {
+          "id": "worker_fast_control_plane_recovery_active_state_v1",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "2d09afc20ae422e3431e27353373e042b13a0518",
+          "scope": [
+            "fast_control_plane_recovery_active_state_v1"
+          ],
+          "activated_at": "2026-08-26T13:10:36Z",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260826123000"
+          ],
+          "tests": [
+            "tests/test_account_run_request_consumer.py",
+            "tests/test_fast_control_plane_recovery_active_state_v1.py",
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Fast PRE_DEVICE control-plane convergence and exact ACTIVE projection boundary certified from persisted device/Instagram foreground evidence."
         },
         {
           "id": "worker_legacy_transient_follow_surface_resume",
@@ -951,6 +972,20 @@
         "invalid_attempt_count",
         "orphan_reference_count",
         "invalid_v1_capsule_count"
+      ]
+    },
+    {
+      "id": "migration_fast_control_plane_recovery_active_state_v1",
+      "status": "ACTIVE",
+      "production_version": "20260826123000",
+      "repo": "worker",
+      "path": "supabase/migrations/20260826123000_fast_recovery_active_state_v1.sql",
+      "canonical_name": "fast_recovery_active_state_v1",
+      "sha256": "7801cbf8d522fe131584ea6ceb2b7031a51319b471edf166c6edb0a0a72bd835",
+      "content_attestation_required": true,
+      "require_schema_match": true,
+      "required_zero_invariants": [
+        "startup_order_violation_count"
       ]
     }
   ]
