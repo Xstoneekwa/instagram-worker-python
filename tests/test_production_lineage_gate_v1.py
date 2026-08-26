@@ -77,6 +77,15 @@ class ProductionLineageGateV1Test(unittest.TestCase):
         self.assertEqual(payload["components"]["worker"]["production"]["sha"], "3bb4d6bfc725139b8b7646bfc07f61c5ea41b6c9")
         self.assertEqual(payload["components"]["backend"]["production"]["sha"], "530802780b2f3de6b0a1046c21ca4f6bde77bbb9")
         self.assertEqual(payload["components"]["botapp"]["production"]["verification_state"], "UNVERIFIED")
+        resume_contract = next(
+            item for item in payload["migrations"]
+            if item["id"] == "migration_resume_plan_contract_v1"
+        )
+        self.assertEqual(resume_contract["production_version"], "20260826222059")
+        self.assertEqual(
+            resume_contract["sha256"],
+            "923355a384d4bf7dfd0f9a69bdaa63bc11987ddb12cbcef1a63b2b39478edaa0",
+        )
 
     def test_historical_stale_lineage_is_blocked_even_when_tests_pass(self) -> None:
         fixture = json.loads(HISTORICAL.read_text(encoding="utf-8"))

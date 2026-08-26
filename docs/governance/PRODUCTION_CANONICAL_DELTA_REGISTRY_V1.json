@@ -989,6 +989,18 @@
       "required_zero_invariants": [
         "startup_order_violation_count"
       ]
+    },
+    {
+      "id": "migration_resume_plan_contract_v1",
+      "status": "ACTIVE",
+      "production_version": "20260826222059",
+      "repo": "worker",
+      "path": "supabase/migrations/20260826222059_resume_plan_contract_v1.sql",
+      "canonical_name": "resume_plan_contract_v1",
+      "sha256": "923355a384d4bf7dfd0f9a69bdaa63bc11987ddb12cbcef1a63b2b39478edaa0",
+      "content_attestation_required": true,
+      "require_schema_match": true,
+      "required_zero_invariants": []
     }
   ]
 }
