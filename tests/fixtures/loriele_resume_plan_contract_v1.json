@@ -1,0 +1,36 @@
+{
+  "account_username": "lorielebras_autom",
+  "run_id": "5b57c1e2-a64c-4a8d-b641-cf0af1233bbe",
+  "run_request_id": "56d7f20d-298a-42b7-ad8d-9f118f5ed880",
+  "root_business_session_id": "56d7f20d-298a-42b7-ad8d-9f118f5ed880",
+  "execution_attempt_no": 1,
+  "session_status": "success",
+  "session_plan": {
+    "session_termination_class": "partial_resumable",
+    "restart_allowed": true,
+    "restart_block_reason": "",
+    "quota_done": {
+      "follow": 90,
+      "unfollow": 0
+    },
+    "quota_remaining": {
+      "total": 150,
+      "follow": 30,
+      "unfollow": 120
+    },
+    "phases_to_run": {
+      "welcome": false,
+      "follow": true,
+      "unfollow": true
+    },
+    "unsafe_markers": [],
+    "follow_outcome": {
+      "phase_status": "partial_resumable",
+      "verified_actions": 90,
+      "target_actions": 120,
+      "remaining_actions": 30,
+      "safe_boundary": true,
+      "safe_next_step": "schedule_resume"
+    }
+  }
+}

@@ -6203,24 +6203,52 @@ def run_account_session(
             error=auto_restart_resume_plan_error,
         )
 
-    # P3: persist the end-of-session restart verdict on the canonical
-    # per-run resume plan row (created early by the runner). Best-effort.
+    # Patch 3: the terminal resume verdict is authoritative. A missing or
+    # ambiguous write becomes a systemic persistence failure; the business
+    # outcome remains available in the run summary for bounded reconciliation.
+    resume_plan_persistence_status = "not_applicable"
+    resume_plan_persistence_error: str | None = None
     if run_id:
         try:
             from account_session_resume_plan_store import record_end_of_session
 
-            record_end_of_session(
+            resume_plan_persistence = record_end_of_session(
                 run_id=run_id,
                 session_plan=auto_restart_resume_plan,
                 session_status=session_status,
             )
+            if resume_plan_persistence.get("persisted") is True:
+                resume_plan_persistence_status = str(
+                    resume_plan_persistence.get("reason") or "confirmed"
+                )
+            else:
+                resume_plan_persistence_status = "reconciliation_required"
+                resume_plan_persistence_error = str(
+                    resume_plan_persistence.get("error")
+                    or resume_plan_persistence.get("reason")
+                    or "terminal_plan_unconfirmed"
+                )[:300]
         except Exception as e:
+            resume_plan_persistence_status = "reconciliation_required"
+            resume_plan_persistence_error = str(e)[:300]
+
+        if resume_plan_persistence_status == "reconciliation_required":
+            exit_code = 1
+            session_status = "failed"
+            root_failure_code = root_failure_code or "resume_plan_reconciliation_required"
+            failure_phase = failure_phase or "terminalization"
+            failure_category = failure_category or "systemic_persistence_failure"
+            specific_failure_reason = (
+                specific_failure_reason or "resume_plan_reconciliation_required"
+            )
             log(
-                "warning",
+                "error",
                 "resume_plan_end_of_session_persist_failed",
                 account_id=aid,
                 run_id=run_id,
-                error=str(e)[:300],
+                reason="resume_plan_reconciliation_required",
+                error=resume_plan_persistence_error,
+                retry_mutation_allowed=False,
             )
 
     reliability_v1d_enabled = True
@@ -6234,6 +6262,14 @@ def run_account_session(
     escalation_severity: str | None = None
     escalation_reason: str | None = None
     escalation_action_required: str | None = None
+    failure_module = None
+    failure_function = None
+    if failure_phase == "terminalization":
+        failure_module = "account_session_resume_plan_store"
+        failure_function = "record_end_of_session"
+    elif failure_phase:
+        failure_module = "unfollow_session_orchestrator"
+        failure_function = "_run_real_unfollow_multi_loop"
     reliability_summary = {
         "account_id": aid,
         "account_username": uname,
@@ -6274,8 +6310,8 @@ def run_account_session(
         "unfollow_quota_target": unfollow_quota_target,
         "root_failure_code": root_failure_code or None,
         "failure_phase": failure_phase or None,
-        "failure_module": "unfollow_session_orchestrator" if failure_phase else None,
-        "failure_function": "_run_real_unfollow_multi_loop" if failure_phase else None,
+        "failure_module": failure_module,
+        "failure_function": failure_function,
         "specific_failure_reason": specific_failure_reason or None,
         "failure_category": failure_category,
         "failure_signature": failure_signature,
@@ -6293,6 +6329,8 @@ def run_account_session(
         "auto_restart_restart_block_reason": auto_restart_restart_block_reason,
         "auto_restart_resume_plan": auto_restart_resume_plan,
         "auto_restart_resume_plan_error": auto_restart_resume_plan_error,
+        "resume_plan_persistence_status": resume_plan_persistence_status,
+        "resume_plan_persistence_error": resume_plan_persistence_error,
     }
     _LAST_ACCOUNT_SESSION_SUMMARY = {
         "session_status": session_status,
@@ -6318,8 +6356,8 @@ def run_account_session(
         "phase_terminal_contract": phase_terminal_contract,
         "root_failure_code": root_failure_code or None,
         "failure_phase": failure_phase or None,
-        "failure_module": "unfollow_session_orchestrator" if failure_phase else None,
-        "failure_function": "_run_real_unfollow_multi_loop" if failure_phase else None,
+        "failure_module": failure_module,
+        "failure_function": failure_function,
         "specific_failure_reason": specific_failure_reason or None,
         "failure_category": failure_category,
         "failure_signature": failure_signature,
@@ -6340,6 +6378,8 @@ def run_account_session(
         "unfollow_resume_recommended": follow_to_unfollow_real.get("unfollow_resume_recommended"),
         "unfollow_outcome": follow_to_unfollow_real.get("unfollow_outcome"),
         "unfollow_checkpoint": follow_to_unfollow_real.get("unfollow_checkpoint"),
+        "resume_plan_persistence_status": resume_plan_persistence_status,
+        "resume_plan_persistence_error": resume_plan_persistence_error,
         **_auto_restart_performance_projection(
             auto_restart_resume_plan,
             error=auto_restart_resume_plan_error,
@@ -6515,8 +6555,8 @@ def run_account_session(
         unfollow_quota_target=unfollow_quota_target,
         root_failure_code=root_failure_code or None,
         failure_phase=failure_phase or None,
-        failure_module="unfollow_session_orchestrator" if failure_phase else None,
-        failure_function="_run_real_unfollow_multi_loop" if failure_phase else None,
+        failure_module=failure_module,
+        failure_function=failure_function,
         specific_failure_reason=specific_failure_reason or None,
         failure_category=failure_category,
         failure_signature=failure_signature,
@@ -6529,6 +6569,8 @@ def run_account_session(
         auto_restart_v1b_dry_run=auto_restart_v1b_dry_run,
         auto_restart_resume_plan=auto_restart_resume_plan,
         auto_restart_resume_plan_error=auto_restart_resume_plan_error,
+        resume_plan_persistence_status=resume_plan_persistence_status,
+        resume_plan_persistence_error=resume_plan_persistence_error,
         auto_restart_restart_allowed=auto_restart_restart_allowed,
         auto_restart_restart_block_reason=auto_restart_restart_block_reason,
         auto_restart_phases_to_run=auto_restart_phases_to_run,

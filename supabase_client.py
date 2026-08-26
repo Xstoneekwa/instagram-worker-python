@@ -3234,6 +3234,43 @@ def load_zero_work_capsule_v1(*, run_id: str) -> dict[str, Any] | None:
     return dict(rows[0]) if rows else None
 
 
+def persist_account_session_resume_plan_v1(
+    *,
+    run_id: str,
+    request_id: str,
+    root_business_session_id: str,
+    execution_attempt_no: int,
+    resume_stage: str,
+    resume_state: str,
+    restart_allowed: bool,
+    restart_block_reason: str,
+    terminal_reason_code: str | None,
+    plan: dict[str, Any],
+    terminal_plan_digest: str,
+) -> dict[str, Any]:
+    """Commit one terminal plan mutation; reconcile ambiguity by caller read."""
+    out = call_rpc_once(
+        "persist_account_session_resume_plan_v1",
+        {
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_root_business_session_id": str(root_business_session_id),
+            "p_execution_attempt_no": int(execution_attempt_no),
+            "p_resume_stage": str(resume_stage),
+            "p_resume_state": str(resume_state),
+            "p_restart_allowed": bool(restart_allowed),
+            "p_restart_block_reason": str(restart_block_reason or ""),
+            "p_terminal_reason_code": (
+                str(terminal_reason_code)[:120] if terminal_reason_code else None
+            ),
+            "p_plan": dict(plan),
+            "p_terminal_plan_digest": str(terminal_plan_digest),
+        },
+        timeout_seconds=5.0,
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def begin_device_activity_v1(
     *, run_id: str, request_id: str, worker_id: str
 ) -> dict[str, Any]:

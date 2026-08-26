@@ -12,15 +12,23 @@ Contract:
     ``incident_resume_authorizations``, consumed atomically by the backend
     Auto Restart tick).
 
-Every write here is best-effort: failures are logged with a stable reason and
-never break the run. Reads used for claim validation raise on transport errors
-so the dispatcher can refuse an unverifiable resume.
+Early/progress writes remain best-effort.  The end-of-session verdict is an
+authoritative control-plane boundary: it is written once through an idempotent
+RPC and confirmed by a canonical reread after both success and ambiguous
+transport failure.  An unconfirmed terminal verdict is surfaced as
+``resume_plan_reconciliation_required`` and must fail closed.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
+from account_session_resume_state_contract import (
+    CONTRACT_VERSION,
+    resolve_end_of_session_transition,
+)
 from logs import log
 
 # Incident types eligible for the human-confirmed resume flow (P3).
@@ -37,9 +45,7 @@ RECOVERY_ELIGIBLE_INCIDENT_TYPES = frozenset(
 )
 
 RESUME_STATE_RUN_ACTIVE = "run_active"
-RESUME_STATE_PARTIAL_RESUMABLE = "partial_resumable"
 RESUME_STATE_AWAITING_HUMAN = "awaiting_human_resume_authorization"
-RESUME_STATE_RESUME_REQUESTED = "resume_requested"
 RESUME_STATE_RESUME_SUCCEEDED = "resume_succeeded"
 RESUME_STATE_NOT_RECOVERABLE = "not_recoverable"
 RESUME_STATE_COMPLETED = "completed"
@@ -274,34 +280,136 @@ def record_end_of_session(
     session_plan: dict[str, Any] | None,
     session_status: str | None,
 ) -> dict[str, Any]:
-    """Orchestrator hook: persist the V1A restart verdict at end of session."""
+    """Persist and confirm the terminal lifecycle transition exactly once."""
     plan = dict(session_plan or {})
     try:
         existing = load_resume_plan(run_id=run_id) or {}
         existing_plan = existing.get("plan")
         if isinstance(existing_plan, dict):
             plan = {**existing_plan, **plan}
-    except Exception:
-        pass
-    attempt_succeeded = str(session_status or "").strip().lower() == "success"
-    restart_allowed = bool(plan.get("restart_allowed"))
-    # A cleanly terminal attempt can still be incomplete for the business
-    # quota.  In that case the resumable phase plan must remain active instead
-    # of being collapsed into a globally completed session.
-    completed = attempt_succeeded and not restart_allowed
-    patch: dict[str, Any] = {
-        "resume_stage": "completed" if completed else "phases",
-        "resume_state": (
-            RESUME_STATE_COMPLETED if completed else RESUME_STATE_PARTIAL_RESUMABLE
-        ),
-        "restart_allowed": restart_allowed,
-        "restart_block_reason": str(
-            plan.get("restart_block_reason")
-            or ("session_completed" if completed else "")
-        ),
-        "plan": plan,
+    except Exception as exc:
+        return {
+            "persisted": False,
+            "reason": "resume_plan_reconciliation_required",
+            "error": str(exc)[:300],
+        }
+
+    request_id = _clean(existing.get("run_request_id"))
+    existing_plan = existing.get("plan") if isinstance(existing.get("plan"), dict) else {}
+    root_business_session_id = _clean(existing_plan.get("root_business_session_id"))
+    execution_attempt_no = int(
+        existing_plan.get("execution_attempt_no")
+        or existing_plan.get("attempt_id")
+        or plan.get("execution_attempt_no")
+        or plan.get("attempt_id")
+        or 0
+    )
+    if not request_id or not root_business_session_id or execution_attempt_no < 1:
+        return {
+            "persisted": False,
+            "reason": "resume_plan_reconciliation_required",
+            "error": "resume_plan_lineage_incomplete",
+        }
+
+    # The atomic admission capsule owns lineage.  A later business summary may
+    # carry legacy run-scoped aliases, but it cannot rewrite the request root.
+    plan["root_business_session_id"] = root_business_session_id
+    plan["execution_attempt_no"] = execution_attempt_no
+    plan["attempt_id"] = execution_attempt_no
+    plan["retry_index"] = execution_attempt_no - 1
+    # Derived idempotency metadata from an earlier confirmed invocation must
+    # never feed the next digest; replaying the same terminalization must keep
+    # the same key and content hash.
+    plan.pop("resume_contract_key", None)
+    plan.pop("terminal_plan_digest", None)
+    plan.pop("resume_state_contract_version", None)
+    transition = resolve_end_of_session_transition(
+        session_plan=plan,
+        session_status=session_status,
+    )
+    plan.update(
+        {
+            "resume_state_contract_version": CONTRACT_VERSION,
+            "business_outcome": transition.outcome,
+            "auto_restart_decision": transition.auto_restart_decision,
+        }
+    )
+    digest = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    contract_key = ":".join(
+        (str(run_id), request_id, root_business_session_id, str(execution_attempt_no))
+    )
+    plan["resume_contract_key"] = contract_key
+    plan["terminal_plan_digest"] = digest
+
+    def _confirmed(row: dict[str, Any] | None) -> bool:
+        if not isinstance(row, dict):
+            return False
+        stored_plan = row.get("plan")
+        return (
+            str(row.get("run_id") or "") == str(run_id)
+            and str(row.get("run_request_id") or "") == request_id
+            and str(row.get("resume_state") or "") == transition.resume_state
+            and row.get("restart_allowed") is transition.restart_allowed
+            and isinstance(stored_plan, dict)
+            and stored_plan.get("resume_contract_key") == contract_key
+            and stored_plan.get("terminal_plan_digest") == digest
+        )
+
+    rpc_error: str | None = None
+    try:
+        import supabase_client
+
+        result = supabase_client.persist_account_session_resume_plan_v1(
+            run_id=str(run_id),
+            request_id=request_id,
+            root_business_session_id=root_business_session_id,
+            execution_attempt_no=execution_attempt_no,
+            resume_stage=transition.resume_stage,
+            resume_state=transition.resume_state,
+            restart_allowed=transition.restart_allowed,
+            restart_block_reason=transition.restart_block_reason,
+            terminal_reason_code=_clean(plan.get("terminal_reason_code")),
+            plan=plan,
+            terminal_plan_digest=digest,
+        )
+        if not bool(result.get("ok")):
+            rpc_error = str(result.get("reason") or "resume_plan_rpc_rejected")[:300]
+    except Exception as exc:
+        # The mutation is never replayed.  A lost response is resolved only by
+        # reading the exact lineage key and terminal digest.
+        rpc_error = str(exc)[:300]
+
+    try:
+        persisted = load_resume_plan(run_id=run_id)
+    except Exception as exc:
+        persisted = None
+        rpc_error = rpc_error or str(exc)[:300]
+    if _confirmed(persisted):
+        return {
+            "persisted": True,
+            "reason": "confirmed_after_write" if not rpc_error else "confirmed_after_ambiguous_response",
+            "row": persisted,
+            "transition": transition,
+        }
+
+    log(
+        "error",
+        "resume_plan_reconciliation_required",
+        run_id=run_id,
+        run_request_id=request_id,
+        root_business_session_id=root_business_session_id,
+        execution_attempt_no=execution_attempt_no,
+        intended_resume_state=transition.resume_state,
+        error=rpc_error,
+    )
+    return {
+        "persisted": False,
+        "reason": "resume_plan_reconciliation_required",
+        "error": rpc_error or "terminal_plan_readback_mismatch",
+        "transition": transition,
     }
-    return _patch_plan_by_run_id(run_id, patch)
 
 
 def record_automatic_retry_terminal_state(
@@ -354,20 +462,17 @@ def record_automatic_retry_terminal_state(
             "total_attempts_allowed": 3,
         }
     )
-    patch = {
-        "resume_stage": "phases",
-        "resume_state": (
-            RESUME_STATE_PARTIAL_RESUMABLE
-            if retry_decision.restart_allowed
-            else RESUME_STATE_NOT_RECOVERABLE
-        ),
-        "restart_allowed": bool(retry_decision.restart_allowed),
-        "restart_block_reason": retry_decision.block_reason,
-        "terminal_reason_code": retry_decision.root_failure_code,
-        "attempts_in_window": max(0, int(retry_decision.retry_index or 0)),
-        "plan": plan,
-    }
-    return _patch_plan_by_run_id(run_id, patch)
+    plan["session_termination_class"] = (
+        "partial_resumable"
+        if retry_decision.restart_allowed
+        else str(plan.get("session_termination_class") or "not_recoverable")
+    )
+    plan["unsafe_markers"] = list(plan.get("unsafe_markers") or [])
+    return record_end_of_session(
+        run_id=run_id,
+        session_plan=plan,
+        session_status="failed",
+    )
 
 
 def mark_automatic_retry_success(

@@ -1920,26 +1920,38 @@ def _publish_run_failure_incident(
                 else {}
             )
             plan = dict(plan) if isinstance(plan, dict) else {}
-            from account_session_resume_plan_store import (
-                record_automatic_retry_terminal_state,
-            )
+            persistence_status = str(
+                (performance_summary or {}).get("resume_plan_persistence_status") or ""
+            ).strip()
+            if persistence_status in {
+                "confirmed_after_write",
+                "confirmed_after_ambiguous_response",
+            }:
+                persisted = {
+                    "persisted": True,
+                    "reason": "authoritative_worker_plan_confirmed",
+                }
+            else:
+                from account_session_resume_plan_store import (
+                    record_automatic_retry_terminal_state,
+                )
 
-            persisted = record_automatic_retry_terminal_state(
-                run_id=str(run_id or ""),
-                retry_decision=retry_decision,
-                cleanup_completed=cleanup_completed is True,
-                lock_released=lock_released is True,
-                quota_remaining=plan.get("quota_remaining")
-                if isinstance(plan.get("quota_remaining"), dict)
-                else {},
-                phases_to_run=plan.get("phases_to_run")
-                if isinstance(plan.get("phases_to_run"), dict)
-                else {},
-                scheduled_at=str(effective_request_metadata.get("scheduled_at") or "")
-                or None,
-                claimed_at=str(effective_request_metadata.get("claimed_at") or "")
-                or None,
-            )
+                persisted = record_automatic_retry_terminal_state(
+                    run_id=str(run_id or ""),
+                    retry_decision=retry_decision,
+                    cleanup_completed=cleanup_completed is True,
+                    lock_released=lock_released is True,
+                    quota_remaining=plan.get("quota_remaining")
+                    if isinstance(plan.get("quota_remaining"), dict)
+                    else {},
+                    phases_to_run=plan.get("phases_to_run")
+                    if isinstance(plan.get("phases_to_run"), dict)
+                    else {},
+                    scheduled_at=str(effective_request_metadata.get("scheduled_at") or "")
+                    or None,
+                    claimed_at=str(effective_request_metadata.get("claimed_at") or "")
+                    or None,
+                )
             if retry_decision.retries_exhausted:
                 try:
                     supabase_client.insert_runtime_event(

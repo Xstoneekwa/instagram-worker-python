@@ -156,6 +156,28 @@ Toute sortie d’échec ou d’abandon doit porter une **reason** lisible et sta
   nouvel échec enrichit l'incident original (« Nouvelle intervention
   requise ») sans boucle ni spam de notifications.
 
+## Contrat de reprise terminale Golden V1
+
+`partial_resumable` est une issue métier conservée dans le plan JSON, jamais
+un état de cycle SQL. Une fin de session partielle, sûre, avec quota positif,
+phase explicite et aucun marqueur unsafe devient `resume_requested`; la
+décision associée est `schedule_resume` et ne peut être évaluée que par le
+prochain tick naturel.
+
+La persistance terminale n'est plus best-effort. Elle est liée de façon
+idempotente à `run_id / run_request_id / root_business_session_id /
+execution_attempt_no`, écrite une seule fois par RPC et relue avec le digest
+exact après toute réponse ambiguë. Si la confirmation manque, le Worker sort
+en `resume_plan_reconciliation_required` tout en conservant le verdict métier
+dans le résumé du run.
+
+Au début du tick, une réconciliation bornée peut transformer un ancien
+`run_active` en `resume_requested` uniquement si run et request sont
+terminaux, qu'aucune exécution ni lease device n'est active, et que le plan
+final prouve quota, phases, frontière sûre et absence de marqueur unsafe. La
+réconciliation ne crée aucune request et ne consomme aucun essai. Les cas
+ambigus restent bloqués avec `STALE_RESUME_PLAN_STATE`.
+
 ## Barrière de déploiement du dispatcher
 
 Un switch de release ou un restart canonique échoue fermé tant que l'une des
