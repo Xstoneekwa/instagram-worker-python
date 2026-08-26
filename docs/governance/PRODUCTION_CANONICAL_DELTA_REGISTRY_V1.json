@@ -5,8 +5,10 @@
     "worker": {
       "production": {
         "verification_state": "VERIFIED",
-        "sha": "b6601efdfe14b23866fb256b0cd3240a17aba54d",
-        "runtime_root": "/Users/admin/phonefarm-worker-releases/b6601ef-control-plane-protocol-repair-v1"
+        "sha": "3bb4d6bfc725139b8b7646bfc07f61c5ea41b6c9",
+        "runtime_root": "/Users/admin/phonefarm-worker-releases/3bb4d6b-fast-active-state-v1",
+        "promotion_receipt": "/Users/admin/phonefarm-runtime/deployment-receipts/20260826T141427712322Z-3bb4d6bfc725.json",
+        "promotion_receipt_sha256": "c9813b8b4572e3629b1909713fba604c89d2a8b48bba8f60094fafbeef4a3156"
       },
       "artifact_provenance_required": false,
       "deltas": [

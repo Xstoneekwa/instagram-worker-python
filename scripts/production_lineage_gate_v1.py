@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -385,16 +387,100 @@ def evaluate_gate(
     }
 
 
+def evaluate_post_promotion_registry(
+    *,
+    registry: dict[str, Any],
+    component_name: str,
+    promotion_receipt: dict[str, Any],
+    pre_promotion_active_sha: str,
+    pre_promotion_registry_sha: str,
+    promoted_sha: str,
+    post_promotion_active_sha: str,
+) -> dict[str, Any]:
+    """Prove that promotion bookkeeping converged after the runtime switch.
+
+    This deliberately runs after the immutable runtime promotion receipt exists.
+    It avoids the Git self-reference problem by verifying the registry state as
+    governance evidence, rather than pretending the promoted commit contains its
+    own SHA.
+    """
+    _validate_registry(registry)
+    component = (registry.get("components") or {}).get(component_name)
+    if not isinstance(component, dict):
+        raise GateFailure(f"component_unknown:{component_name}")
+    production = component.get("production")
+    if not isinstance(production, dict) or production.get("verification_state") != "VERIFIED":
+        raise GateFailure(f"production_identity_unverified:{component_name}")
+
+    pre_active = _full_sha(pre_promotion_active_sha, field="pre_promotion_active_sha")
+    pre_registry = _full_sha(pre_promotion_registry_sha, field="pre_promotion_registry_sha")
+    promoted = _full_sha(promoted_sha, field="promoted_sha")
+    post_active = _full_sha(post_promotion_active_sha, field="post_promotion_active_sha")
+    post_registry = _full_sha(production.get("sha"), field="post_promotion_registry_sha")
+
+    if pre_active != pre_registry:
+        raise GateFailure("pre_promotion_registry_active_mismatch")
+    if promotion_receipt.get("schema") != "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1":
+        raise GateFailure("promotion_receipt_schema_mismatch")
+    if promotion_receipt.get("receipt_state") != "PROMOTED":
+        raise GateFailure("promotion_receipt_not_promoted")
+    if promotion_receipt.get("previous_release_sha") != pre_active:
+        raise GateFailure("promotion_receipt_previous_sha_mismatch")
+    for field in ("candidate_sha", "release_sha", "manifest_certified_sha"):
+        if promotion_receipt.get(field) != promoted:
+            raise GateFailure(f"promotion_receipt_promoted_sha_mismatch:{field}")
+    if post_active != promoted:
+        raise GateFailure("post_promotion_active_sha_mismatch")
+    if post_registry != promoted:
+        raise GateFailure("post_promotion_registry_sha_mismatch")
+
+    return {
+        "ok": True,
+        "status": "PRODUCTION_REGISTRY_POST_PROMOTION_FULL_PASS",
+        "component": component_name,
+        "pre_promotion_active_sha": pre_active,
+        "pre_promotion_registry_sha": pre_registry,
+        "promoted_sha": promoted,
+        "post_promotion_active_sha": post_active,
+        "post_promotion_registry_sha": post_registry,
+    }
+
+
+def _is_user_immutable(path: Path) -> bool:
+    immutable_flag = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+    return bool(path.stat().st_flags & immutable_flag)
+
+
+def _write_immutable_receipt(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(path, 0o444)
+    immutable_flag = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+    os.chflags(path, immutable_flag)
+    if not _is_user_immutable(path):
+        raise GateFailure("post_promotion_receipt_not_immutable")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("predeploy", "post-promotion"), default="predeploy")
     parser.add_argument("--registry", required=True, type=Path)
     parser.add_argument("--component", required=True, choices=("worker", "backend", "botapp"))
-    parser.add_argument("--repo-root", required=True, type=Path)
-    parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--actual-production-sha", required=True)
+    parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--candidate-sha")
+    parser.add_argument("--actual-production-sha")
     parser.add_argument("--applied-migrations", type=Path)
     parser.add_argument("--artifact-provenance", type=Path)
     parser.add_argument("--migration-attestation", type=Path)
+    parser.add_argument("--promotion-receipt", type=Path)
+    parser.add_argument("--pre-promotion-active-sha")
+    parser.add_argument("--pre-promotion-registry-sha")
+    parser.add_argument("--promoted-sha")
+    parser.add_argument("--post-promotion-active-sha")
     parser.add_argument("--receipt-out", type=Path)
     return parser.parse_args()
 
@@ -403,6 +489,33 @@ def main() -> int:
     args = _parse_args()
     try:
         registry = _load_json(args.registry)
+        if args.mode == "post-promotion":
+            if not args.promotion_receipt or not args.promotion_receipt.is_file():
+                raise GateFailure("promotion_receipt_required")
+            if not _is_user_immutable(args.promotion_receipt):
+                raise GateFailure("promotion_receipt_not_immutable")
+            promotion_receipt = _load_json(args.promotion_receipt)
+            result = evaluate_post_promotion_registry(
+                registry=registry,
+                component_name=args.component,
+                promotion_receipt=promotion_receipt,
+                pre_promotion_active_sha=args.pre_promotion_active_sha,
+                pre_promotion_registry_sha=args.pre_promotion_registry_sha,
+                promoted_sha=args.promoted_sha,
+                post_promotion_active_sha=args.post_promotion_active_sha,
+            )
+            result["promotion_receipt_sha256"] = hashlib.sha256(
+                args.promotion_receipt.read_bytes()
+            ).hexdigest()
+            if args.receipt_out:
+                _write_immutable_receipt(args.receipt_out, {
+                    **result,
+                    "receipt_schema": "PHONE_FARM_POST_PROMOTION_REGISTRY_RECEIPT_V1",
+                })
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if not args.repo_root or not args.candidate_sha or not args.actual_production_sha:
+            raise GateFailure("predeploy_arguments_required")
         migration_set: set[str] | None = None
         if args.applied_migrations:
             migration_payload = _load_json(args.applied_migrations)

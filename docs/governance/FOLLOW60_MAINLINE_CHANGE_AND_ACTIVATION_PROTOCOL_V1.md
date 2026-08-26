@@ -64,7 +64,19 @@ Canonical order:
 `final candidate → protected diff scan → manifest regeneration → full
 recertification → signature → remote parity → clean worktree → certified
 release creation → zero gate → runtime switch → aligned services → one shared
-startup-tick skip → post-activation gate`.
+startup-tick skip → immutable promotion receipt → canonical production registry
+update → post-promotion registry gate → post-activation gate`.
+
+The protocol must not declare `FULL_PASS` after a runtime switch until
+`scripts/production_lineage_gate_v1.py --mode post-promotion` verifies the
+immutable promotion receipt and proves all five identities recorded by the
+post-promotion receipt: `pre_promotion_active_sha`,
+`pre_promotion_registry_sha`, `promoted_sha`, `post_promotion_active_sha`, and
+`post_promotion_registry_sha`. The first two must match, and the final three
+must match. This post-promotion gate is separate from the deployable Git commit
+because a commit cannot contain its own SHA without a self-reference. A stale
+registry therefore blocks `FULL_PASS` even when the runtime switch itself was
+successful.
 
 Incident example: release `563f7e6` changed protected login-classification
 dependencies but retained the `8f9bc99` manifest.  The dispatcher correctly

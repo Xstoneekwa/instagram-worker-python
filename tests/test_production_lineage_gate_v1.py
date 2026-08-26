@@ -74,7 +74,7 @@ class ProductionLineageGateV1Test(unittest.TestCase):
     def test_canonical_registry_is_schema_valid(self) -> None:
         payload = json.loads(REGISTRY.read_text(encoding="utf-8"))
         self.gate._validate_registry(payload)
-        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "b6601efdfe14b23866fb256b0cd3240a17aba54d")
+        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "3bb4d6bfc725139b8b7646bfc07f61c5ea41b6c9")
         self.assertEqual(payload["components"]["backend"]["production"]["sha"], "530802780b2f3de6b0a1046c21ca4f6bde77bbb9")
         self.assertEqual(payload["components"]["botapp"]["production"]["verification_state"], "UNVERIFIED")
 
@@ -332,6 +332,42 @@ class ProductionLineageGateV1Test(unittest.TestCase):
                 candidate_sha="aed34d55cd583faeaac00c8b35b926ff1f4ff152",
                 actual_production_sha="aed34d55cd583faeaac00c8b35b926ff1f4ff152",
                 artifact_provenance={"source_sha": "aed34d55cd583faeaac00c8b35b926ff1f4ff152"},
+            )
+
+    def test_post_promotion_registry_requires_receipt_active_and_registry_convergence(self) -> None:
+        previous = "1" * 40
+        promoted = "2" * 40
+        registry = _registry("worker", promoted, [_delta("worker", "required", previous)])
+        receipt = {
+            "schema": "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1",
+            "receipt_state": "PROMOTED",
+            "previous_release_sha": previous,
+            "candidate_sha": promoted,
+            "release_sha": promoted,
+            "manifest_certified_sha": promoted,
+        }
+        result = self.gate.evaluate_post_promotion_registry(
+            registry=registry,
+            component_name="worker",
+            promotion_receipt=receipt,
+            pre_promotion_active_sha=previous,
+            pre_promotion_registry_sha=previous,
+            promoted_sha=promoted,
+            post_promotion_active_sha=promoted,
+        )
+        self.assertEqual(result["status"], "PRODUCTION_REGISTRY_POST_PROMOTION_FULL_PASS")
+        self.assertEqual(result["post_promotion_registry_sha"], promoted)
+
+        registry["components"]["worker"]["production"]["sha"] = previous
+        with self.assertRaisesRegex(self.gate.GateFailure, "post_promotion_registry_sha_mismatch"):
+            self.gate.evaluate_post_promotion_registry(
+                registry=registry,
+                component_name="worker",
+                promotion_receipt=receipt,
+                pre_promotion_active_sha=previous,
+                pre_promotion_registry_sha=previous,
+                promoted_sha=promoted,
+                post_promotion_active_sha=promoted,
             )
 
 
