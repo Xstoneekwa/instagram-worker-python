@@ -65,6 +65,7 @@ import deferred_projection_outbox
 import follow_persistence_receipt_replay
 import orphan_run_reconciliation
 import storage_health
+import control_plane_health
 from follow60_ordering_v2_behavioral_canary_v1 import (
     behavioral_runtime_scope_for_account,
 )
@@ -108,11 +109,16 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
+PRE_DEVICE_SAFE_STOP_EXIT_CODE = 91
 _last_integration_noop_proof: dict[str, Any] | None = None
 _CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
 _LAST_STORAGE_INCIDENT_AT = 0.0
 _LAST_STORAGE_WARNING_AT = 0.0
 _STORAGE_BLOCK_ACTIVE = False
+
+
+class AtomicAdmissionRejected(RuntimeError):
+    pass
 
 
 def _dispatcher_storage_gate(
@@ -233,6 +239,12 @@ def _follow60_control_applies(
 
 def _integration_mode_enabled() -> bool:
     return _env_bool("RUN_CONTROL_INTEGRATION_MODE", False)
+
+
+def _control_plane_reliability_v1_enabled() -> bool:
+    # Approval 1 installs the dormant contract only. Approval 2 is required
+    # before setting this true in any runtime environment.
+    return _env_bool("CONTROL_PLANE_RELIABILITY_V1_ENABLED", False)
 
 
 def _integration_noop_runner_enabled() -> bool:
@@ -917,6 +929,7 @@ def _build_runner_command(
     device_serial: str | None = None,
     package_name: str | None = None,
     app_instance_id: str | None = None,
+    admitted_run_id: str | None = None,
     metadata_safe: dict[str, Any] | None = None,
 ) -> list[str]:
     if _integration_noop_runner_enabled():
@@ -983,7 +996,82 @@ def _build_runner_command(
     app_instance = str(app_instance_id or "").strip()
     if app_instance:
         cmd.extend(["--expected-app-instance-id", app_instance])
+    admitted = str(admitted_run_id or "").strip()
+    if admitted and str(run_type or "").strip().lower() == "account_session":
+        cmd.extend(["--admitted-run-id", admitted])
     return cmd
+
+
+def _admit_account_session_v1(
+    *,
+    request_id: str,
+    worker_id: str,
+    dispatch_ctx: dict[str, Any],
+) -> str:
+    """Atomically create the run + PRE_DEVICE capsule before process spawn."""
+    expected_package = str(
+        dispatch_ctx.get("package_name")
+        or dispatch_ctx.get("app_package")
+        or dispatch_ctx.get("package")
+        or ""
+    ).strip()
+    payload = {
+        "p_request_id": request_id,
+        "p_worker_id": worker_id,
+        "p_assignment_id": str(dispatch_ctx.get("assignment_id") or "").strip()
+        or None,
+        "p_device_id": str(dispatch_ctx.get("device_id") or "").strip() or None,
+        "p_app_instance_id": str(dispatch_ctx.get("app_instance_id") or "").strip()
+        or None,
+        "p_expected_package": expected_package or None,
+        "p_scheduled_window_start": dispatch_ctx.get("starts_at"),
+        "p_scheduled_window_end": dispatch_ctx.get("ends_at"),
+        "p_lease_seconds": 300,
+    }
+    try:
+        result = supabase_client.call_rpc("admit_account_run_attempt_v1", payload)
+    except Exception:
+        # Admission is idempotent.  Reconcile a response lost after commit
+        # before surfacing the outage to the dispatcher breaker.
+        try:
+            canonical = get_account_run_request(request_id) or {}
+            canonical_run_id = str(canonical.get("run_id") or "").strip()
+            capsule = (
+                supabase_client.load_zero_work_capsule_v1(run_id=canonical_run_id)
+                if canonical_run_id
+                else None
+            ) or {}
+        except Exception:
+            canonical = {}
+            canonical_run_id = ""
+            capsule = {}
+        try:
+            canonical_lease = datetime.fromisoformat(
+                str(canonical.get("lease_expires_at") or "").replace("Z", "+00:00")
+            )
+            lease_valid = canonical_lease > datetime.now(timezone.utc)
+        except (TypeError, ValueError):
+            lease_valid = False
+        if (
+            canonical_run_id
+            and str(canonical.get("status") or "").strip().lower() == "running"
+            and str(canonical.get("claimed_by") or "").strip() == worker_id
+            and not canonical.get("cancel_requested_at")
+            and not canonical.get("cancel_reason")
+            and lease_valid
+            and capsule.get("zero_work_contract_version") == 1
+            and capsule.get("irreversible_work_state") == "PRE_DEVICE"
+            and str(capsule.get("run_request_id") or "") == request_id
+        ):
+            return canonical_run_id
+        raise
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        reason = str((result or {}).get("reason") or "atomic_admission_rejected")
+        raise AtomicAdmissionRejected(reason)
+    run_id = str(result.get("run_id") or "").strip()
+    if not run_id:
+        raise AtomicAdmissionRejected("atomic_admission_missing_run_id")
+    return run_id
 
 
 def _login_provisioner_env() -> dict[str, str]:
@@ -2075,6 +2163,32 @@ def _finalize_manual_run_after_subprocess(
     if latest.get("claimed_at"):
         request_metadata.setdefault("claimed_at", latest.get("claimed_at"))
 
+    if (
+        run_type == "account_session"
+        and int(exit_code) == PRE_DEVICE_SAFE_STOP_EXIT_CODE
+        and run_id
+    ):
+        result = supabase_client.mark_pre_device_safe_stop_v1(
+            run_id=run_id,
+            request_id=request_id,
+            worker_id=cfg.worker_id,
+            reason_code="control_plane_unavailable_pre_device",
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(
+                str(result.get("reason") or "pre_device_safe_stop_rejected")
+            )
+        log(
+            "warning",
+            "account_session_pre_device_safe_stop_committed",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            zero_work_certified=True,
+            generic_terminalization_used=False,
+        )
+        return
+
     stop_proof = dict(cooperative_stop or {})
     if stop_proof:
         request_metadata["cooperative_stop"] = stop_proof
@@ -2925,9 +3039,13 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
         return
 
-    starting = mark_account_run_request_starting(request_id, cfg.worker_id)
-    if not starting:
-        return
+    v1_atomic_account_session = (
+        run_type == "account_session" and _control_plane_reliability_v1_enabled()
+    )
+    if not v1_atomic_account_session:
+        starting = mark_account_run_request_starting(request_id, cfg.worker_id)
+        if not starting:
+            return
 
     ok_assignment, assignment_reason, dispatch_ctx = _validate_assignment(account_id, run_type, cfg)
     safe_dispatch = sensitive_log_fields(dispatch_ctx)
@@ -3326,6 +3444,49 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     error=str(exc)[:200],
                 )
 
+    admitted_run_id: str | None = None
+    if run_type == "account_session" and _control_plane_reliability_v1_enabled():
+        try:
+            admitted_run_id = _admit_account_session_v1(
+                request_id=request_id,
+                worker_id=cfg.worker_id,
+                dispatch_ctx=dispatch_ctx,
+            )
+        except AtomicAdmissionRejected as exc:
+            reason = str(exc)[:120] or "atomic_admission_rejected"
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "blocked",
+                error_code=reason,
+                error_message_safe="Account session atomic admission rejected before Worker spawn.",
+            )
+            if device_id and device_lock_active:
+                release_device_lock(
+                    device_id=device_id,
+                    worker_id=lock_owner_worker_id,
+                    request_id=request_id,
+                )
+            log(
+                "warning",
+                "account_session_atomic_admission_rejected",
+                account_id=account_id,
+                request_id=request_id,
+                reason=reason,
+                worker_spawned=False,
+                device_actions_started=False,
+            )
+            return
+        log(
+            "info",
+            "account_session_atomic_admission_completed",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=admitted_run_id,
+            irreversible_work_state="PRE_DEVICE",
+            device_actions_started=False,
+        )
+
     linked_login_run_id = None
     if _is_login_run_type(run_type):
         linked_login_run_id = _create_and_link_login_run(account_id, request_id, cfg.worker_id)
@@ -3342,6 +3503,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         app_instance_id=(login_binding or {}).get("app_instance_id")
         if _is_login_run_type(run_type)
         else dispatch_ctx.get("app_instance_id"),
+        admitted_run_id=admitted_run_id,
         metadata_safe={
             **request_metadata,
             "assignment_id": dispatch_ctx.get("assignment_id"),
@@ -3751,6 +3913,47 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
             storage_wait_logged = True
         time.sleep(min(cfg.poll_seconds, 5.0))
 
+    control_plane = (
+        control_plane_health.CircuitBreaker()
+        if _control_plane_reliability_v1_enabled()
+        else None
+    )
+    recovery_tick_monotonic = 0.0
+    while control_plane is not None and not control_plane.snapshot.dispatch_allowed:
+        if not control_plane.probe_due():
+            time.sleep(min(cfg.poll_seconds, 1.0))
+            continue
+        try:
+            supabase_client.probe_control_plane_v1(timeout_seconds=5.0)
+            health_snapshot, became_healthy = control_plane.record_probe_success()
+            if became_healthy:
+                recovery_tick_monotonic = time.monotonic()
+                run_auto_restart_dispatcher_tick(
+                    worker_id=cfg.worker_id,
+                    dispatcher_reliable=True,
+                )
+            log(
+                "info",
+                "control_plane_probe_succeeded",
+                worker_id=cfg.worker_id,
+                state=health_snapshot.state,
+                generation=health_snapshot.generation,
+                dispatch_allowed=health_snapshot.dispatch_allowed,
+            )
+        except Exception as exc:
+            reason_family = str(getattr(exc, "reason", "") or type(exc).__name__)
+            health_snapshot = control_plane.record_probe_failure(reason_family)
+            log(
+                "warning",
+                "control_plane_probe_failed",
+                worker_id=cfg.worker_id,
+                state=health_snapshot.state,
+                reason_family=health_snapshot.reason_family,
+                consecutive_failures=health_snapshot.consecutive_failures,
+                process_exit=False,
+                claims_allowed=False,
+            )
+
     # Recover subprocesses that exceeded the dispatcher's maximum lifetime and
     # have no live worker heartbeat or device lease. This is deliberately more
     # conservative than lease expiry alone because account request leases are
@@ -3846,7 +4049,9 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_heartbeat = 0.0
-    last_auto_restart_tick = initialize_auto_restart_tick_state(worker_id=cfg.worker_id)
+    last_auto_restart_tick = recovery_tick_monotonic or initialize_auto_restart_tick_state(
+        worker_id=cfg.worker_id
+    )
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
     consecutive_loop_errors = 0
@@ -3859,6 +4064,47 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         while not stop:
             try:
                 _collect_completed_dispatch_tasks(active_tasks)
+
+                if control_plane is not None and not control_plane.snapshot.dispatch_allowed:
+                    if control_plane.probe_due():
+                        try:
+                            supabase_client.probe_control_plane_v1(timeout_seconds=5.0)
+                            health_snapshot, became_healthy = (
+                                control_plane.record_probe_success()
+                            )
+                            if became_healthy:
+                                last_auto_restart_tick = time.monotonic()
+                                run_auto_restart_dispatcher_tick(
+                                    worker_id=cfg.worker_id,
+                                    dispatcher_reliable=True,
+                                )
+                            log(
+                                "info",
+                                "control_plane_probe_succeeded",
+                                worker_id=cfg.worker_id,
+                                state=health_snapshot.state,
+                                generation=health_snapshot.generation,
+                                immediate_auto_restart_tick=became_healthy,
+                            )
+                        except Exception as probe_exc:
+                            reason_family = str(
+                                getattr(probe_exc, "reason", "")
+                                or type(probe_exc).__name__
+                            )
+                            health_snapshot = control_plane.record_probe_failure(
+                                reason_family
+                            )
+                            log(
+                                "warning",
+                                "control_plane_probe_failed",
+                                worker_id=cfg.worker_id,
+                                state=health_snapshot.state,
+                                reason_family=health_snapshot.reason_family,
+                                process_exit=False,
+                                claims_allowed=False,
+                            )
+                    time.sleep(min(cfg.poll_seconds, 1.0))
+                    continue
 
                 storage_ok, _storage_snapshot = _dispatcher_storage_gate(
                     cfg,
@@ -3914,6 +4160,8 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                         )
                 last_loop_error_key = ""
                 consecutive_loop_errors = 0
+                if control_plane is not None:
+                    control_plane.record_operation_success()
             except Exception as exc:
                 if storage_health.is_storage_io_error(exc):
                     storage_health.mark_storage_pressure(
@@ -3926,6 +4174,26 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                     )
                     consecutive_loop_errors = 0
                     time.sleep(min(cfg.poll_seconds, 5.0))
+                    continue
+                if (
+                    control_plane is not None
+                    and supabase_client.is_transient_control_plane_exception(exc)
+                ):
+                    health_snapshot = control_plane.record_failure(
+                        str(getattr(exc, "reason", "") or type(exc).__name__)
+                    )
+                    log(
+                        "warning",
+                        "run_control_dispatcher_control_plane_transient",
+                        worker_id=cfg.worker_id,
+                        state=health_snapshot.state,
+                        reason_family=health_snapshot.reason_family,
+                        consecutive_failures=health_snapshot.consecutive_failures,
+                        process_exit=False,
+                        claims_allowed=health_snapshot.dispatch_allowed,
+                    )
+                    consecutive_loop_errors = 0
+                    time.sleep(min(cfg.poll_seconds, 1.0))
                     continue
                 consecutive_loop_errors += 1
                 err = str(exc)[:500]

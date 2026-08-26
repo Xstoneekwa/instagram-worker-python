@@ -66,6 +66,22 @@ from follow_outcome_contract import (
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
 
 _CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
+PRE_DEVICE_SAFE_STOP_EXIT_CODE = 91
+PRE_DEVICE_AMBIGUOUS_GATE_EXIT_CODE = 92
+PRE_DEVICE_GATE_REJECTED_EXIT_CODE = 93
+_V1_PRE_DEVICE_CONTROL_PLANE_REQUIRED = False
+
+
+class PreDeviceControlPlaneUnavailable(RuntimeError):
+    pass
+
+
+class PreDeviceGateAmbiguous(RuntimeError):
+    pass
+
+
+class PreDeviceGateRejected(RuntimeError):
+    pass
 from follow_persistence_rpc import (
     action_id_hash,
     deterministic_action_id,
@@ -1214,6 +1230,12 @@ def _safe_supabase_call(fn_name: str, *args, **kwargs):
         return fn(*args, **kwargs)
     except Exception as e:
         log("warning", "supabase_call_failed", fn=fn_name, error=str(e))
+        if (
+            _V1_PRE_DEVICE_CONTROL_PLANE_REQUIRED
+            and _CURRENT_DEVICE is None
+            and supabase_client.is_transient_control_plane_exception(e)
+        ):
+            raise PreDeviceControlPlaneUnavailable(str(e)[:240]) from e
         return None
 
 
@@ -24253,6 +24275,7 @@ def _main_impl() -> int:
     global _CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
+    global _V1_PRE_DEVICE_CONTROL_PLANE_REQUIRED
     _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = True
     _RUNNER_SESSION_CLEANUP_COMPLETE = False
     _PENDING_TERMINAL_RUN_STATUS = None
@@ -24301,7 +24324,15 @@ def _main_impl() -> int:
         default="",
         help="phone_app_instances.id resolved by the dispatcher (observability only).",
     )
+    parser.add_argument(
+        "--admitted-run-id",
+        type=str,
+        default="",
+        help="Atomic V1 admission ig_runs.id; account_session only.",
+    )
     args = parser.parse_args()
+    admitted_run_id = str(args.admitted_run_id or "").strip()
+    _V1_PRE_DEVICE_CONTROL_PLANE_REQUIRED = bool(admitted_run_id)
     runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
     _CERTIFIED_RUNTIME_IDENTITY = runtime_identity
     export_worker_runtime_identity(runtime_identity)
@@ -24443,11 +24474,19 @@ def _main_impl() -> int:
                 log("info", "run_no_pending_targets", account_id=account_id)
                 return 0
         _t_run_control = time.perf_counter()
-        run = _safe_supabase_call("create_run", account_id=account_id) or {}
+        run = (
+            {"id": admitted_run_id}
+            if admitted_run_id and account_session_run
+            else (_safe_supabase_call("create_run", account_id=account_id) or {})
+        )
         run_id = str(run.get("id") or "").strip()
         _CURRENT_RUN_ID = run_id or None
-        linked: dict[str, Any] | None = None
-        if run_request_id and run_id:
+        linked: dict[str, Any] | None = (
+            {"id": run_request_id, "run_id": run_id}
+            if admitted_run_id and account_session_run and run_request_id and run_id
+            else None
+        )
+        if run_request_id and run_id and not admitted_run_id:
             try:
                 from account_run_control import insert_manual_run_audit, link_account_run_request_run
 
@@ -25597,7 +25636,7 @@ def _main_impl() -> int:
     # P3: canonical resume plan created EARLY, before any device/UI action.
     # Covers every dispatched account_session regardless of trigger
     # (scheduler, manual Play, auto restart resume). Best-effort by contract.
-    if account_session_run and supabase_mode and run_id:
+    if account_session_run and supabase_mode and run_id and not admitted_run_id:
         try:
             from account_session_resume_plan_store import create_early_resume_plan
             from auto_restart_runtime import load_resume_policy_from_env
@@ -25659,6 +25698,45 @@ def _main_impl() -> int:
             target_username=targets[0] if targets else config.TARGET_USERNAME,
         )
         return 0
+
+    if account_session_run and admitted_run_id:
+        try:
+            gate_result = supabase_client.begin_device_activity_v1(
+                run_id=run_id,
+                request_id=run_request_id,
+                worker_id=_run_control_dispatcher_worker_id(),
+            )
+        except Exception as exc:
+            # Never replay the gate mutation.  A read after a lost response is
+            # the only permitted reconciliation and it still fails closed.
+            try:
+                capsule = supabase_client.load_zero_work_capsule_v1(run_id=run_id) or {}
+            except Exception:
+                capsule = {}
+            if str(capsule.get("irreversible_work_state") or "") == "STARTED_OR_AMBIGUOUS":
+                raise PreDeviceGateAmbiguous("device_gate_response_lost_after_commit") from exc
+            if not supabase_client.is_transient_control_plane_exception(exc):
+                raise PreDeviceGateRejected(
+                    "device_gate_definitive_control_plane_rejection"
+                ) from exc
+            raise PreDeviceControlPlaneUnavailable(
+                "device_gate_unavailable_before_commit"
+            ) from exc
+        if not bool(gate_result.get("ok")):
+            raise PreDeviceGateRejected(
+                str(gate_result.get("reason") or "device_gate_rejected")
+            )
+        if str(gate_result.get("irreversible_work_state") or "") != "STARTED_OR_AMBIGUOUS":
+            raise PreDeviceGateRejected("device_gate_state_not_committed")
+        log(
+            "info",
+            "account_session_device_activity_gate_committed",
+            account_id=account_id,
+            run_id=run_id,
+            request_id=run_request_id,
+            irreversible_work_state="STARTED_OR_AMBIGUOUS",
+            connect_device_allowed=True,
+        )
 
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
@@ -27842,6 +27920,42 @@ def main() -> int:
     try:
         return _main_impl()
     except Exception as exc:
+        if isinstance(exc, PreDeviceControlPlaneUnavailable):
+            log(
+                "error",
+                "account_session_pre_device_safe_stop_requested",
+                account_id=_CURRENT_ACCOUNT_ID,
+                run_id=_CURRENT_RUN_ID,
+                request_id=_CURRENT_RUN_REQUEST_ID,
+                reason=str(exc)[:240],
+                device_actions_started=False,
+                zero_work_recovery_eligible=True,
+            )
+            return PRE_DEVICE_SAFE_STOP_EXIT_CODE
+        if isinstance(exc, PreDeviceGateAmbiguous):
+            log(
+                "error",
+                "account_session_device_gate_ambiguous_safe_stop",
+                account_id=_CURRENT_ACCOUNT_ID,
+                run_id=_CURRENT_RUN_ID,
+                request_id=_CURRENT_RUN_REQUEST_ID,
+                reason=str(exc)[:240],
+                device_actions_started=False,
+                zero_work_recovery_eligible=False,
+            )
+            return PRE_DEVICE_AMBIGUOUS_GATE_EXIT_CODE
+        if isinstance(exc, PreDeviceGateRejected):
+            log(
+                "error",
+                "account_session_device_gate_rejected",
+                account_id=_CURRENT_ACCOUNT_ID,
+                run_id=_CURRENT_RUN_ID,
+                request_id=_CURRENT_RUN_REQUEST_ID,
+                reason=str(exc)[:240],
+                device_actions_started=False,
+                zero_work_recovery_eligible=False,
+            )
+            return PRE_DEVICE_GATE_REJECTED_EXIT_CODE
         if isinstance(exc, storage_health.HostStorageCriticalError):
             summary = {
                 "reason": storage_health.HOST_STORAGE_CRITICAL,

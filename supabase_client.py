@@ -3143,6 +3143,123 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
     )
 
 
+def call_rpc_once(
+    function_name: str,
+    params: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = 10.0,
+) -> Any:
+    """Invoke a non-retriable mutation once.
+
+    This is reserved for irreversible control-plane boundaries where a lost
+    response must be reconciled by reading canonical state, never by replaying
+    the POST automatically.
+    """
+    return _call_rpc(
+        function_name,
+        params,
+        timeout_seconds=max(1.0, float(timeout_seconds)),
+        max_retries=0,
+    )
+
+
+def is_transient_control_plane_exception(exc: BaseException) -> bool:
+    """Classify only transport/capacity failures as transient."""
+    reason = str(getattr(exc, "reason", "") or "").strip().lower()
+    if reason in {
+        "supabase_auth_401",
+        "supabase_auth_403",
+        "supabase_tls_failed",
+        "supabase_schema_payload_incompatible",
+        "supabase_rpc_not_available",
+        "supabase_rpc_business_rule_rejected",
+    }:
+        return False
+    status = getattr(exc, "status", None)
+    if status in {408, 429, 500, 502, 503, 504, 520, 522, 524}:
+        return True
+    if reason in {
+        "supabase_rest_timeout",
+        "supabase_network_timeout",
+        "supabase_dns_failed",
+        "supabase_queue_read_failed",
+    }:
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "timed out",
+            "timeout",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "connection reset",
+            "connection refused",
+            "remote end closed connection",
+        )
+    )
+
+
+def probe_control_plane_v1(*, timeout_seconds: float = 5.0) -> bool:
+    """Bounded read-only probe used only while the dispatcher is recovering."""
+    _request_json(
+        "GET",
+        "account_run_requests",
+        query={"select": "id", "limit": "1"},
+        request_timeout=max(1.0, float(timeout_seconds)),
+        max_retries=0,
+    )
+    return True
+
+
+def load_zero_work_capsule_v1(*, run_id: str) -> dict[str, Any] | None:
+    rows = _request_json(
+        "GET",
+        "account_session_resume_plans",
+        query={
+            "select": (
+                "run_id,run_request_id,account_id,resume_state,"
+                "zero_work_contract_version,irreversible_work_state,"
+                "zero_work_certified_at,last_updated_at"
+            ),
+            "run_id": f"eq.{str(run_id)}",
+            "limit": "1",
+        },
+        request_timeout=5.0,
+        max_retries=0,
+    ) or []
+    return dict(rows[0]) if rows else None
+
+
+def begin_device_activity_v1(
+    *, run_id: str, request_id: str, worker_id: str
+) -> dict[str, Any]:
+    out = call_rpc_once(
+        "begin_device_activity_v1",
+        {
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_worker_id": str(worker_id),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def mark_pre_device_safe_stop_v1(
+    *, run_id: str, request_id: str, worker_id: str, reason_code: str
+) -> dict[str, Any]:
+    out = call_rpc(
+        "mark_pre_device_safe_stop_v1",
+        {
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_worker_id": str(worker_id),
+            "p_reason_code": str(reason_code)[:120],
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def renew_account_run_request_lease_v1(
     *, request_id: str, worker_id: str, run_id: str, lease_seconds: int = 300
 ) -> Any:
