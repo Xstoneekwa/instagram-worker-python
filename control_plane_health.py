@@ -45,7 +45,9 @@ class Snapshot:
 
     @property
     def dispatch_allowed(self) -> bool:
-        return self.state in {HEALTHY, DEGRADED}
+        # DEGRADED is authoritative evidence that the hot path is no longer
+        # healthy. Pause claims immediately and recover through probes only.
+        return self.state == HEALTHY
 
 
 class CircuitBreaker:
@@ -136,7 +138,7 @@ class CircuitBreaker:
 
     def probe_due(self) -> bool:
         return (
-            self.snapshot.state in {UNAVAILABLE, RECOVERING}
+            self.snapshot.state in {DEGRADED, UNAVAILABLE, RECOVERING}
             and self._monotonic() >= self.snapshot.next_probe_at
         )
 
@@ -153,7 +155,7 @@ class CircuitBreaker:
     def record_probe_success(self) -> tuple[Snapshot, bool]:
         """Return snapshot and whether this is the one HEALTHY transition."""
         now = self._monotonic()
-        if self.snapshot.state not in {UNAVAILABLE, RECOVERING}:
+        if self.snapshot.state not in {DEGRADED, UNAVAILABLE, RECOVERING}:
             return self.snapshot, False
         first = self._first_positive_at
         if first is None:

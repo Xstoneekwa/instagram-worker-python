@@ -510,6 +510,8 @@ def reconcile_requests_with_terminal_runs(
                 "order": "created_at.asc",
                 "limit": str(max(1, int(limit))),
             },
+            request_timeout=5.0,
+            max_retries=0,
         ) or []
         run_ids = [
             str(row.get("run_id") or "").strip()
@@ -525,6 +527,8 @@ def reconcile_requests_with_terminal_runs(
                 "select": "id,status,finished_at,updated_at",
                 "id": f"in.({','.join(run_ids)})",
             },
+            request_timeout=5.0,
+            max_retries=0,
         ) or []
     except Exception as exc:
         log(
@@ -533,6 +537,8 @@ def reconcile_requests_with_terminal_runs(
             worker_id=cfg.worker_id,
             error=str(exc)[:200],
         )
+        if supabase_client.is_transient_control_plane_exception(exc):
+            raise
         return {"ok": False, "observed": 0, "terminalized": 0, "error": str(exc)[:200]}
 
     terminal_runs = {
@@ -573,6 +579,7 @@ def reconcile_requests_with_terminal_runs(
                     if request_status in {"completed", "canceled"}
                     else "Linked worker session reached a terminal failure state."
                 ),
+                bounded_control_plane=True,
             )
         except Exception as exc:
             log(
@@ -1029,12 +1036,14 @@ def _admit_account_session_v1(
         "p_lease_seconds": 300,
     }
     try:
-        result = supabase_client.call_rpc("admit_account_run_attempt_v1", payload)
+        result = supabase_client.call_rpc_once(
+            "admit_account_run_attempt_v1", payload, timeout_seconds=5.0
+        )
     except Exception:
         # Admission is idempotent.  Reconcile a response lost after commit
         # before surfacing the outage to the dispatcher breaker.
         try:
-            canonical = get_account_run_request(request_id) or {}
+            canonical = get_account_run_request(request_id, bounded_pre_device=True) or {}
             canonical_run_id = str(canonical.get("run_id") or "").strip()
             capsule = (
                 supabase_client.load_zero_work_capsule_v1(run_id=canonical_run_id)
@@ -1310,6 +1319,7 @@ def _safe_complete_account_run_request(
     *,
     error_code: str | None = None,
     error_message_safe: str | None = None,
+    bounded_control_plane: bool = False,
 ) -> dict[str, Any] | None:
     normalized_request_id = normalize_request_uuid(request_id)
     if not normalized_request_id:
@@ -1321,6 +1331,28 @@ def _safe_complete_account_run_request(
             worker_id=worker_id,
         )
         return None
+    if bounded_control_plane:
+        params: dict[str, Any] = {
+            "p_request_id": normalized_request_id,
+            "p_worker_id": worker_id,
+            "p_status": status,
+        }
+        if error_code:
+            params["p_error_code"] = error_code
+        if error_message_safe:
+            params["p_error_message_safe"] = error_message_safe
+        try:
+            value = supabase_client.call_rpc_once(
+                "complete_account_run_request", params, timeout_seconds=5.0
+            )
+            return dict(value) if isinstance(value, dict) else None
+        except Exception:
+            canonical = get_account_run_request(
+                normalized_request_id, bounded_pre_device=True
+            ) or {}
+            if str(canonical.get("status") or "").lower() == str(status).lower():
+                return {**canonical, "reconciled": True}
+            raise
     return complete_account_run_request(
         normalized_request_id,
         worker_id,
@@ -2147,7 +2179,10 @@ def _finalize_manual_run_after_subprocess(
     lock_released: bool | None = None,
     cooperative_stop: dict[str, Any] | None = None,
 ) -> None:
-    latest = get_account_run_request(request_id) or request_snapshot or {}
+    latest = get_account_run_request(
+        request_id,
+        bounded_pre_device=(int(exit_code) == PRE_DEVICE_SAFE_STOP_EXIT_CODE),
+    ) or request_snapshot or {}
     run_id = str(latest.get("run_id") or "").strip() or None
     run_type = str(
         latest.get("requested_run_type")
@@ -2186,6 +2221,12 @@ def _finalize_manual_run_after_subprocess(
             run_id=run_id,
             zero_work_certified=True,
             generic_terminalization_used=False,
+        )
+        # Recovery is evaluated immediately after the canonical zero-work
+        # certificate instead of waiting for the periodic Auto Restart cadence.
+        run_auto_restart_dispatcher_tick(
+            worker_id=cfg.worker_id,
+            dispatcher_reliable=True,
         )
         return
 
@@ -3647,6 +3688,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         exit_code = int(completed.returncode)
         timed_out = False
     else:
+        if str(run_type or "").strip().lower() == "account_session":
+            subprocess_env["ACCOUNT_RUN_WORKER_SPAWNED_AT"] = datetime.now(
+                timezone.utc
+            ).isoformat()
         proc = subprocess.Popen(
             cmd,
             cwd=os.path.dirname(os.path.abspath(__file__)),

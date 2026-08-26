@@ -3830,7 +3830,9 @@ def _establish_follow_persistence_run_binding(
     canonical_account_id = _normalize_required_uuid(account_id, "account_id")
     canonical_run_id = _normalize_required_uuid(run_id, "run_id")
     canonical_request_id = _normalize_required_uuid(request_id, "request_id")
-    request_row = get_account_run_request(canonical_request_id)
+    request_row = get_account_run_request(
+        canonical_request_id, bounded_pre_device=(_CURRENT_DEVICE is None)
+    )
     run_row = get_ig_run_by_id(canonical_run_id)
     if not isinstance(request_row, dict):
         raise RuntimeError("follow_persistence_request_not_found")
@@ -24331,6 +24333,16 @@ def _main_impl() -> int:
         help="Atomic V1 admission ig_runs.id; account_session only.",
     )
     args = parser.parse_args()
+    runner_started_at = datetime.now(timezone.utc).isoformat()
+    startup_evidence: dict[str, str | None] = {
+        "worker_spawned_at": str(os.getenv("ACCOUNT_RUN_WORKER_SPAWNED_AT") or "").strip() or None,
+        "runner_started_at": runner_started_at,
+        "device_activity_started_at": None,
+        "device_connected_at": None,
+        "instagram_launch_requested_at": None,
+        "instagram_foreground_verified_at": None,
+    }
+    log("info", "account_session_startup_boundary", boundary="runner_started_at", at=runner_started_at)
     admitted_run_id = str(args.admitted_run_id or "").strip()
     _V1_PRE_DEVICE_CONTROL_PLANE_REQUIRED = bool(admitted_run_id)
     runtime_identity = resolve_worker_runtime_identity(Path(__file__).resolve().parent)
@@ -25400,11 +25412,23 @@ def _main_impl() -> int:
                 return 96
 
         if supabase_mode and run_request_id and not _follow60_canary_active:
+            _integrity_started = time.perf_counter()
             _integrity = verify_runtime_integrity(
                 Path(__file__).resolve().parent,
                 runtime_mode="mainline",
                 binding_kind="mainline",
                 engine=DEFAULT_FOLLOW_ENGINE,
+            )
+            _integrity_duration_ms = (
+                time.perf_counter() - _integrity_started
+            ) * 1000.0
+            log(
+                "info",
+                "follow60_integrity_check_completed",
+                duration_ms=round(_integrity_duration_ms, 2),
+                file_count=len(_integrity.get("files") or _integrity.get("hashes") or {}),
+                ok=bool(_integrity.get("ok")),
+                device_actions_started=False,
             )
             if not bool(_integrity.get("ok")):
                 log(
@@ -25737,9 +25761,13 @@ def _main_impl() -> int:
             irreversible_work_state="STARTED_OR_AMBIGUOUS",
             connect_device_allowed=True,
         )
+        startup_evidence["device_activity_started_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
 
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
+    startup_evidence["device_connected_at"] = datetime.now(timezone.utc).isoformat()
     _CURRENT_DEVICE = d
     device_action_latch.configure(
         enabled=bool(_follow60_canary_active),
@@ -25952,6 +25980,9 @@ def _main_impl() -> int:
         t = _phase("force_stop", t)
 
         _t_app_start_cmd = time.perf_counter()
+        startup_evidence["instagram_launch_requested_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
         _package_before_app_start = _current_package_safe(d)
         app_start(d, config.INSTAGRAM_PACKAGE)
         app_start_command_ms = (time.perf_counter() - _t_app_start_cmd) * 1000.0
@@ -26080,6 +26111,48 @@ def _main_impl() -> int:
                 performance_summary={"reason": "instagram_not_foreground"},
             )
         return _return_with_cleanup(d, 3)
+    startup_evidence["instagram_foreground_verified_at"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    if account_session_run and admitted_run_id:
+        try:
+            active_evidence = supabase_client.certify_account_startup_foreground_v1(
+                run_id=run_id,
+                request_id=run_request_id,
+                worker_id=_run_control_dispatcher_worker_id(),
+                foreground_package=str(config.INSTAGRAM_PACKAGE or ""),
+                timestamps=startup_evidence,
+            )
+        except Exception as exc:
+            log(
+                "error",
+                "account_session_active_evidence_not_certified",
+                account_id=account_id,
+                run_id=run_id,
+                request_id=run_request_id,
+                error=str(exc)[:240],
+                business_actions_started=False,
+            )
+            return _return_with_cleanup(d, 94)
+        if not bool(active_evidence.get("ok")):
+            log(
+                "error",
+                "account_session_active_evidence_rejected",
+                account_id=account_id,
+                run_id=run_id,
+                request_id=run_request_id,
+                reason=str(active_evidence.get("reason") or "active_evidence_rejected"),
+                business_actions_started=False,
+            )
+            return _return_with_cleanup(d, 94)
+        log(
+            "info",
+            "account_session_active_evidence_certified",
+            account_id=account_id,
+            run_id=run_id,
+            request_id=run_request_id,
+            **startup_evidence,
+        )
     t = _phase("verify_app_running", t)
     _startup_timing_log(
         "startup_timing_app_readiness_completed",

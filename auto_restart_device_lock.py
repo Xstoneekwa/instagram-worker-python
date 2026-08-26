@@ -9,6 +9,21 @@ import supabase_client
 from logs import log
 
 
+def _load_device_lock(device_id: str) -> dict[str, Any] | None:
+    rows = supabase_client._request_json(
+        "GET",
+        "auto_restart_device_locks",
+        query={
+            "select": "device_id,worker_id,request_id,lease_expires_at",
+            "device_id": f"eq.{device_id}",
+            "limit": "1",
+        },
+        request_timeout=5.0,
+        max_retries=0,
+    ) or []
+    return dict(rows[0]) if rows else None
+
+
 def _lease_seconds() -> int:
     raw = os.environ.get("AUTO_RESTART_DEVICE_LOCK_SECONDS", "900")
     try:
@@ -63,15 +78,25 @@ def renew_device_lock(
     worker_id: str,
     request_id: str,
 ) -> dict[str, Any]:
-    payload = supabase_client.call_rpc(
-        "auto_restart_renew_device_lock",
-        {
+    params = {
             "p_device_id": device_id,
             "p_worker_id": worker_id,
             "p_request_id": request_id,
             "p_lease_seconds": _lease_seconds(),
-        },
-    )
+        }
+    try:
+        payload = supabase_client.call_rpc_once(
+            "auto_restart_renew_device_lock", params, timeout_seconds=5.0
+        )
+    except Exception:
+        canonical = _load_device_lock(device_id)
+        if (
+            canonical
+            and str(canonical.get("worker_id") or "") == worker_id
+            and str(canonical.get("request_id") or "") == request_id
+        ):
+            return {"ok": True, "renewed": True, "reconciled": True}
+        raise
     return payload if isinstance(payload, dict) else {"ok": False, "renewed": False, "reason": "renew_failed"}
 
 
@@ -105,7 +130,19 @@ def release_device_lock(
     }
     if request_id:
         params["p_request_id"] = request_id
-    payload = supabase_client.call_rpc("auto_restart_release_device_lock", params)
+    try:
+        payload = supabase_client.call_rpc_once(
+            "auto_restart_release_device_lock", params, timeout_seconds=5.0
+        )
+    except Exception:
+        canonical = _load_device_lock(device_id)
+        if canonical is None or (
+            request_id
+            and str(canonical.get("request_id") or "") != str(request_id)
+        ):
+            payload = {"ok": True, "released": True, "reconciled": True}
+        else:
+            raise
     result = payload if isinstance(payload, dict) else {"ok": True, "released": False}
     log(
         "info",

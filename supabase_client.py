@@ -3220,7 +3220,10 @@ def load_zero_work_capsule_v1(*, run_id: str) -> dict[str, Any] | None:
             "select": (
                 "run_id,run_request_id,account_id,resume_state,"
                 "zero_work_contract_version,irreversible_work_state,"
-                "zero_work_certified_at,last_updated_at"
+                "zero_work_certified_at,worker_spawned_at,runner_started_at,"
+                "device_activity_started_at,device_connected_at,"
+                "instagram_launch_requested_at,instagram_foreground_verified_at,"
+                "last_updated_at"
             ),
             "run_id": f"eq.{str(run_id)}",
             "limit": "1",
@@ -3248,15 +3251,69 @@ def begin_device_activity_v1(
 def mark_pre_device_safe_stop_v1(
     *, run_id: str, request_id: str, worker_id: str, reason_code: str
 ) -> dict[str, Any]:
-    out = call_rpc(
+    params = {
+        "p_run_id": str(run_id),
+        "p_request_id": str(request_id),
+        "p_worker_id": str(worker_id),
+        "p_reason_code": str(reason_code)[:120],
+    }
+    try:
+        out = call_rpc_once(
         "mark_pre_device_safe_stop_v1",
-        {
-            "p_run_id": str(run_id),
-            "p_request_id": str(request_id),
-            "p_worker_id": str(worker_id),
-            "p_reason_code": str(reason_code)[:120],
-        },
-    )
+            params,
+            timeout_seconds=5.0,
+        )
+    except Exception:
+        capsule = load_zero_work_capsule_v1(run_id=str(run_id)) or {}
+        if (
+            str(capsule.get("run_request_id") or "") == str(request_id)
+            and str(capsule.get("irreversible_work_state") or "") == "PRE_DEVICE"
+            and str(capsule.get("resume_state") or "")
+            in {"pre_device_stopped", "recovery_enqueued"}
+        ):
+            return {"ok": True, "idempotent": True, "reconciled": True}
+        raise
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def certify_account_startup_foreground_v1(
+    *,
+    run_id: str,
+    request_id: str,
+    worker_id: str,
+    foreground_package: str,
+    timestamps: dict[str, str | None],
+) -> dict[str, Any]:
+    """Commit the end-to-end ACTIVE boundary once, then reconcile ambiguity."""
+    params = {
+        "p_run_id": str(run_id),
+        "p_request_id": str(request_id),
+        "p_worker_id": str(worker_id),
+        "p_foreground_package": str(foreground_package),
+        "p_worker_spawned_at": timestamps.get("worker_spawned_at"),
+        "p_runner_started_at": timestamps.get("runner_started_at"),
+        "p_device_activity_started_at": timestamps.get("device_activity_started_at"),
+        "p_device_connected_at": timestamps.get("device_connected_at"),
+        "p_instagram_launch_requested_at": timestamps.get("instagram_launch_requested_at"),
+        "p_instagram_foreground_verified_at": timestamps.get("instagram_foreground_verified_at"),
+    }
+    try:
+        out = call_rpc_once(
+            "certify_account_startup_foreground_v1",
+            params,
+            timeout_seconds=5.0,
+        )
+    except Exception:
+        capsule = load_zero_work_capsule_v1(run_id=str(run_id)) or {}
+        if (
+            str(capsule.get("run_request_id") or "") == str(request_id)
+            and str(capsule.get("irreversible_work_state") or "")
+            == "STARTED_OR_AMBIGUOUS"
+            and bool(capsule.get("device_connected_at"))
+            and bool(capsule.get("instagram_foreground_verified_at"))
+        ):
+            return {"ok": True, "idempotent": True, "reconciled": True}
+        raise
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 

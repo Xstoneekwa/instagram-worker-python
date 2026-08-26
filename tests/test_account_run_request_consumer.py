@@ -642,6 +642,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "completed",
             error_code=None,
             error_message_safe=None,
+            bounded_control_plane=True,
         )
 
     def test_dispatcher_is_healthy_false_when_disabled(self) -> None:

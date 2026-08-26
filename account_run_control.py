@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import supabase_client
@@ -221,7 +222,31 @@ def reclaim_stale_account_run_requests(worker_id: str | None = None) -> int:
     params: dict[str, Any] = {}
     if worker_id:
         params["p_worker_id"] = worker_id
-    value = supabase_client.call_rpc("reclaim_stale_account_run_requests", params)
+    # This idempotent maintenance mutation is attempted once. A lost response
+    # is reconciled by the canonical queue read/claim that immediately follows;
+    # replaying a 30-90 second POST chain is unnecessary and obscures outages.
+    try:
+        value = supabase_client.call_rpc_once(
+            "reclaim_stale_account_run_requests", params, timeout_seconds=5.0
+        )
+    except Exception:
+        stale = supabase_client._request_json(
+            "GET",
+            "account_run_requests",
+            query={
+                "select": "id",
+                "status": "in.(claimed,starting,running)",
+                "run_id": "is.null",
+                "lease_expires_at": f"lte.{datetime.now(timezone.utc).isoformat()}",
+                "cancel_requested_at": "is.null",
+                "limit": "1",
+            },
+            request_timeout=5.0,
+            max_retries=0,
+        ) or []
+        if not stale:
+            return 0
+        raise
     try:
         return int(value or 0)
     except (TypeError, ValueError):
@@ -239,7 +264,11 @@ def is_account_run_request_cancel_requested(request_id: str) -> bool:
     return bool(value)
 
 
-def get_account_run_request(request_id: str) -> dict[str, Any] | None:
+def get_account_run_request(
+    request_id: str,
+    *,
+    bounded_pre_device: bool = False,
+) -> dict[str, Any] | None:
     normalized_request_id = normalize_request_uuid(request_id)
     if not normalized_request_id:
         return None
@@ -247,6 +276,8 @@ def get_account_run_request(request_id: str) -> dict[str, Any] | None:
         "GET",
         "account_run_requests",
         query={"select": "*", "id": f"eq.{normalized_request_id}", "limit": "1"},
+        request_timeout=5.0 if bounded_pre_device else None,
+        max_retries=0 if bounded_pre_device else None,
     ) or []
     if not rows:
         return None
