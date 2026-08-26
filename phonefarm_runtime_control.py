@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -202,6 +204,127 @@ def _git_commit(root: Path) -> str:
     except Exception:
         return ""
     return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _git_full_commit(root: Path) -> str:
+    try:
+        exact_root = Path(root).expanduser().resolve(strict=True)
+        proc = subprocess.run(
+            [
+                "git", "-c", f"safe.directory={exact_root}", "-C", str(exact_root),
+                "rev-parse", "HEAD",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _canonical_json_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"json_root_not_object:{path.name}")
+    return value
+
+
+def _is_user_immutable(path: Path) -> bool:
+    immutable_flag = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+    return bool(path.stat().st_flags & immutable_flag)
+
+
+def _validate_release_evidence(
+    release_root: Path, integrity: dict[str, Any]
+) -> dict[str, Any]:
+    evidence_dir = release_root / ".deployment"
+    paths = {
+        "build": evidence_dir / "candidate-build-receipt.json",
+        "migration": evidence_dir / "migration-attestation.json",
+        "lineage": evidence_dir / "lineage-gate-receipt.json",
+    }
+    try:
+        if any(not path.is_file() for path in paths.values()):
+            raise ValueError("promotion_evidence_missing")
+        if any(not _is_user_immutable(path) for path in paths.values()):
+            raise ValueError("promotion_evidence_not_immutable")
+        build = _read_json_object(paths["build"])
+        migration = _read_json_object(paths["migration"])
+        lineage = _read_json_object(paths["lineage"])
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:240] or type(exc).__name__}
+
+    candidate_sha = _git_full_commit(release_root)
+    if not candidate_sha or candidate_sha != integrity.get("candidate_sha"):
+        return {"ok": False, "reason": "release_evidence_candidate_unresolved"}
+    required_build = {
+        "candidate_sha": candidate_sha,
+        "release_sha": candidate_sha,
+        "manifest_certified_sha": candidate_sha,
+        "manifest_sha256": integrity.get("manifest_sha256"),
+        "candidate_worktree_clean": True,
+        "uncommitted_protected_diff": False,
+        "untracked_protected_file": False,
+        "protected_diff_status": "PASS",
+        "follow60_lock_result": "PASS",
+        "signature_result": "PASS",
+        "lineage_gate_result": "PASS",
+    }
+    for key, expected in required_build.items():
+        if build.get(key) != expected:
+            return {"ok": False, "reason": f"candidate_build_receipt_mismatch:{key}"}
+    if migration.get("schema") != "PHONE_FARM_MIGRATION_ATTESTATION_V1":
+        return {"ok": False, "reason": "migration_attestation_schema_mismatch"}
+    if build.get("migration_attestation_sha256") != _canonical_json_hash(migration):
+        return {"ok": False, "reason": "migration_attestation_hash_mismatch"}
+    if lineage.get("status") != "PRODUCTION_LINEAGE_GATE_V1_PASS":
+        return {"ok": False, "reason": "lineage_gate_receipt_not_pass"}
+    if lineage.get("candidate_sha") != candidate_sha or lineage.get("worktree_clean") is not True:
+        return {"ok": False, "reason": "lineage_gate_candidate_or_cleanliness_mismatch"}
+    if lineage.get("migration_gate") != "PASS":
+        return {"ok": False, "reason": "lineage_migration_gate_not_pass"}
+    if lineage.get("migration_attestation_sha256") != _canonical_json_hash(migration):
+        return {"ok": False, "reason": "lineage_migration_attestation_mismatch"}
+    applied = {str(item) for item in migration.get("applied_versions") or []}
+    validated = lineage.get("validated_migrations") or []
+    if not validated:
+        return {"ok": False, "reason": "validated_migration_set_empty"}
+    if any(str(item.get("version") or "") not in applied for item in validated if isinstance(item, dict)):
+        return {"ok": False, "reason": "validated_migration_not_applied"}
+    return {
+        "ok": True,
+        "candidate_sha": candidate_sha,
+        "build": build,
+        "migration": migration,
+        "lineage": lineage,
+    }
+
+
+def _stage_receipt(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_suffix(path.suffix + ".pending")
+    with staged.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return staged
+
+
+def _publish_immutable_receipt(staged: Path, final: Path) -> None:
+    os.replace(staged, final)
+    os.chmod(final, 0o444)
+    immutable_flag = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+    os.chflags(final, immutable_flag)
+    if not _is_user_immutable(final):
+        raise RuntimeError("promotion_receipt_not_immutable")
 
 
 def resolve_runtime_root(paths: RuntimePaths | None = None) -> RuntimeRoot:
@@ -762,6 +885,15 @@ def switch_release(target: str) -> dict[str, Any]:
             "command": "switch-release",
             "message": "Release switch refused: exact-candidate Follow60 deployment gate failed.",
         }
+    evidence = _validate_release_evidence(Path(validation.resolved_root), integrity)
+    if not evidence.get("ok"):
+        return {
+            **evidence,
+            "command": "switch-release",
+            "status": "promotion_evidence_blocked",
+            "message": "Release switch refused: immutable promotion evidence is incomplete.",
+        }
+    promotion_started_at = datetime.now(timezone.utc).isoformat()
     gate = deployment_zero_gate(paths)
     if not gate.get("ok"):
         return {
@@ -769,13 +901,98 @@ def switch_release(target: str) -> dict[str, Any]:
             "command": "switch-release",
             "message": "Release switch refused: production deployment gate is not zero.",
         }
+    counts = gate.get("counts") or {}
+    expected_zero_keys = {
+        "account_run_requests", "ig_runs", "auto_restart_device_locks", "auto_restart_tick_locks"
+    }
+    if set(counts) != expected_zero_keys or any(counts.get(key) != 0 for key in expected_zero_keys):
+        return {
+            "ok": False,
+            "status": "deployment_gate_blocked",
+            "reason": "zero_gate_counts_not_exact",
+            "counts": counts,
+            "command": "switch-release",
+        }
     previous = _safe_resolve(paths.current_link) if (paths.current_link.exists() or paths.current_link.is_symlink()) else None
+    previous_sha = _git_full_commit(previous) if previous else None
+    candidate_sha = str(evidence["candidate_sha"])
+    completed_at = datetime.now(timezone.utc).isoformat()
+    receipt_dir = paths.runtime_home / "deployment-receipts"
+    receipt_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{candidate_sha[:12]}.json"
+    receipt_path = receipt_dir / receipt_name
+    migration = dict(evidence["migration"])
+    lineage = dict(evidence["lineage"])
+    receipt = {
+        "schema": "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1",
+        "candidate_sha": candidate_sha,
+        "release_sha": candidate_sha,
+        "manifest_certified_sha": integrity.get("manifest_certified_sha"),
+        "manifest_sha256": integrity.get("manifest_sha256"),
+        "migration_versions_expected": [
+            item.get("version") for item in lineage.get("validated_migrations") or []
+            if isinstance(item, dict)
+        ],
+        "migration_versions_applied": migration.get("applied_versions"),
+        "migration_attestation": "PASS",
+        "migration_attestation_sha256": _canonical_json_hash(migration),
+        "candidate_worktree_clean": True,
+        "protected_diff_status": evidence["build"].get("protected_diff_status"),
+        "follow60_lock_result": "PASS",
+        "signature_result": "PASS",
+        "zero_gate_account_run_requests": counts["account_run_requests"],
+        "zero_gate_ig_runs": counts["ig_runs"],
+        "zero_gate_device_locks": counts["auto_restart_device_locks"],
+        "zero_gate_tick_locks": counts["auto_restart_tick_locks"],
+        "promotion_started_at": promotion_started_at,
+        "promotion_completed_at": completed_at,
+        "runtime_root": validation.resolved_root,
+        "previous_release_sha": previous_sha,
+        "previous_release_path": str(previous) if previous else None,
+        "receipt_state": "PROMOTED",
+    }
+    try:
+        staged_receipt = _stage_receipt(receipt_path, receipt)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "promotion_receipt_stage_failed",
+            "reason": type(exc).__name__,
+            "command": "switch-release",
+        }
     tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
     if tmp.exists() or tmp.is_symlink():
         tmp.unlink()
     tmp.symlink_to(validation.resolved_root)
     os.replace(tmp, paths.current_link)
-    return _with_root(validation, {"ok": True, "status": "switched", "previousRoot": str(previous) if previous else None})
+    try:
+        _publish_immutable_receipt(staged_receipt, receipt_path)
+    except Exception as exc:
+        rollback_tmp = paths.current_link.with_name(f"{paths.current_link.name}.rollback.tmp")
+        if rollback_tmp.exists() or rollback_tmp.is_symlink():
+            rollback_tmp.unlink()
+        if previous is not None:
+            rollback_tmp.symlink_to(previous)
+            os.replace(rollback_tmp, paths.current_link)
+        for leftover in (receipt_path, staged_receipt):
+            try:
+                if leftover.exists():
+                    os.chmod(leftover, 0o600)
+                    leftover.unlink()
+            except Exception:
+                pass
+        return {
+            "ok": False,
+            "status": "promotion_receipt_publish_failed_rolled_back",
+            "reason": type(exc).__name__,
+            "command": "switch-release",
+        }
+    return _with_root(validation, {
+        "ok": True,
+        "status": "switched",
+        "previousRoot": str(previous) if previous else None,
+        "promotionReceipt": str(receipt_path),
+        "zeroGate": counts,
+    })
 
 
 def _print(payload: dict[str, Any], json_mode: bool) -> int:

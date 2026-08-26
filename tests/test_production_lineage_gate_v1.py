@@ -74,7 +74,7 @@ class ProductionLineageGateV1Test(unittest.TestCase):
     def test_canonical_registry_is_schema_valid(self) -> None:
         payload = json.loads(REGISTRY.read_text(encoding="utf-8"))
         self.gate._validate_registry(payload)
-        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "a794da764c57a50187bd94c9411f6566519ad3ca")
+        self.assertEqual(payload["components"]["worker"]["production"]["sha"], "328b8fea900b9d41979bfb899aa634d6a9b75518")
         self.assertEqual(payload["components"]["backend"]["production"]["sha"], "530802780b2f3de6b0a1046c21ca4f6bde77bbb9")
         self.assertEqual(payload["components"]["botapp"]["production"]["verification_state"], "UNVERIFIED")
 
@@ -230,6 +230,72 @@ class ProductionLineageGateV1Test(unittest.TestCase):
                     candidate_sha=candidate,
                     actual_production_sha=production,
                     applied_migrations={"20260820000000"},
+                )
+
+    def test_strict_migration_requires_exact_hash_identity_and_schema_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _git(repo, "init")
+            production = _commit(repo, "production", "production")
+            migrations = repo / "supabase" / "migrations"
+            migrations.mkdir(parents=True)
+            sql = b"select 1;\n"
+            path = migrations / "20260826021814_control_plane_reliability_v1.sql"
+            path.write_bytes(sql)
+            _git(repo, "add", str(path.relative_to(repo)))
+            _git(repo, "-c", "user.name=Gate Fixture", "-c", "user.email=gate@example.invalid", "commit", "-m", "candidate migration")
+            candidate = _git(repo, "rev-parse", "HEAD")
+            import hashlib
+
+            migration = {
+                "id": "control_plane",
+                "status": "ACTIVE",
+                "production_version": "20260826021814",
+                "repo": "worker",
+                "path": str(path.relative_to(repo)),
+                "canonical_name": "control_plane_reliability_v1",
+                "sha256": hashlib.sha256(sql).hexdigest(),
+                "content_attestation_required": True,
+                "require_schema_match": True,
+                "required_zero_invariants": ["null_lineage_count"],
+            }
+            registry = _registry(
+                "worker", production, [_delta("worker", "required", production)], [migration]
+            )
+            attestation = {
+                "schema": "PHONE_FARM_MIGRATION_ATTESTATION_V1",
+                "migrations": {
+                    "20260826021814": {
+                        "name": "control_plane_reliability_v1",
+                        "sql_sha256": hashlib.sha256(sql).hexdigest(),
+                        "deployed_schema_matches": True,
+                    }
+                },
+                "invariants": {"null_lineage_count": 0},
+            }
+            result = self.gate.evaluate_gate(
+                registry=registry,
+                component_name="worker",
+                repo_root=repo,
+                candidate_sha=candidate,
+                actual_production_sha=production,
+                applied_migrations={"20260826021814"},
+                migration_attestation=attestation,
+            )
+            self.assertEqual(result["migration_gate"], "PASS")
+            self.assertEqual(result["validated_migrations"][0]["sha256"], hashlib.sha256(sql).hexdigest())
+
+            bad_attestation = json.loads(json.dumps(attestation))
+            bad_attestation["invariants"]["null_lineage_count"] = 1
+            with self.assertRaisesRegex(self.gate.GateFailure, "migration_schema_invariant_failed"):
+                self.gate.evaluate_gate(
+                    registry=registry,
+                    component_name="worker",
+                    repo_root=repo,
+                    candidate_sha=candidate,
+                    actual_production_sha=production,
+                    applied_migrations={"20260826021814"},
+                    migration_attestation=bad_attestation,
                 )
 
     def test_registry_unavailable_is_blocked_by_cli(self) -> None:

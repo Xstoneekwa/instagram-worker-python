@@ -102,6 +102,23 @@ def _candidate_contains_path(repo_root: Path, candidate_sha: str, path: str) -> 
     return proc.returncode == 0
 
 
+def _candidate_file_sha256(repo_root: Path, candidate_sha: str, path: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{candidate_sha}:{path}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise GateFailure(f"candidate_migration_unreadable:{path}")
+    return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def _candidate_paths(repo_root: Path, candidate_sha: str, prefix: str) -> list[str]:
+    output = _git(repo_root, "ls-tree", "-r", "--name-only", candidate_sha, "--", prefix)
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
 def _validate_registry(registry: dict[str, Any]) -> None:
     if registry.get("schema") != "PHONE_FARM_CANONICAL_DELTA_REGISTRY_V1":
         raise GateFailure("registry_schema_mismatch")
@@ -180,6 +197,18 @@ def _validate_registry(registry: dict[str, Any]) -> None:
             source_path = migration.get("path")
             if (source_repo is None) != (source_path is None):
                 raise GateFailure(f"migration_source_incomplete:{migration_id}")
+            if source_repo is not None and migration.get("content_attestation_required"):
+                digest = str(migration.get("sha256") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise GateFailure(f"migration_sha256_invalid:{migration_id}")
+                canonical_name = str(migration.get("canonical_name") or "").strip()
+                if not canonical_name:
+                    raise GateFailure(f"migration_canonical_name_missing:{migration_id}")
+                invariants = migration.get("required_zero_invariants", [])
+                if not isinstance(invariants, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in invariants
+                ):
+                    raise GateFailure(f"migration_required_zero_invariants_invalid:{migration_id}")
 
 
 def evaluate_gate(
@@ -190,6 +219,7 @@ def evaluate_gate(
     candidate_sha: str,
     actual_production_sha: str,
     applied_migrations: set[str] | None = None,
+    migration_attestation: dict[str, Any] | None = None,
     artifact_provenance: dict[str, Any] | None = None,
     require_clean_worktree: bool = True,
 ) -> dict[str, Any]:
@@ -259,12 +289,69 @@ def evaluate_gate(
             "candidate_migration_lineage_missing:" + ",".join(missing_candidate_migrations)
         )
 
+    strict_component_migrations = [
+        item for item in component_migrations if item.get("content_attestation_required")
+    ]
+    validated_migrations: list[dict[str, Any]] = []
+    for item in strict_component_migrations:
+        migration_id = str(item.get("id") or "")
+        expected_path = str(item.get("path") or "")
+        expected_hash = str(item.get("sha256") or "").lower()
+        actual_hash = _candidate_file_sha256(repo_root, candidate, expected_path)
+        if actual_hash != expected_hash:
+            raise GateFailure(f"candidate_migration_hash_mismatch:{migration_id}")
+        canonical_name = str(item.get("canonical_name") or "")
+        aliases = [
+            path for path in _candidate_paths(repo_root, candidate, "supabase/migrations")
+            if path.endswith(f"_{canonical_name}.sql")
+        ]
+        if aliases != [expected_path]:
+            raise GateFailure(f"unexpected_pending_canonical_migration:{migration_id}")
+        validated_migrations.append({
+            "id": migration_id,
+            "version": str(item.get("production_version") or ""),
+            "path": expected_path,
+            "sha256": actual_hash,
+        })
+
     if component_name in {"backend", "worker"} and required_migrations:
         if applied_migrations is None:
             raise GateFailure("applied_migrations_evidence_required")
         missing_migrations = sorted(required_migrations - applied_migrations)
         if missing_migrations:
             raise GateFailure("active_migrations_missing:" + ",".join(missing_migrations))
+
+    attestation_hash = None
+    required_attested = [
+        item for item in strict_component_migrations
+        if item.get("required_zero_invariants") or item.get("require_schema_match")
+    ]
+    if required_attested:
+        if not isinstance(migration_attestation, dict):
+            raise GateFailure("migration_attestation_required")
+        if migration_attestation.get("schema") != "PHONE_FARM_MIGRATION_ATTESTATION_V1":
+            raise GateFailure("migration_attestation_schema_mismatch")
+        attested = migration_attestation.get("migrations")
+        invariants = migration_attestation.get("invariants")
+        if not isinstance(attested, dict) or not isinstance(invariants, dict):
+            raise GateFailure("migration_attestation_malformed")
+        for item in required_attested:
+            version = str(item.get("production_version") or "")
+            evidence = attested.get(version)
+            if not isinstance(evidence, dict):
+                raise GateFailure(f"migration_schema_evidence_missing:{version}")
+            if evidence.get("name") != item.get("canonical_name"):
+                raise GateFailure(f"migration_schema_name_mismatch:{version}")
+            if str(evidence.get("sql_sha256") or "").lower() != str(item.get("sha256") or "").lower():
+                raise GateFailure(f"migration_schema_hash_mismatch:{version}")
+            if item.get("require_schema_match") and evidence.get("deployed_schema_matches") is not True:
+                raise GateFailure(f"migration_schema_drift:{version}")
+            for invariant in item.get("required_zero_invariants") or []:
+                if invariants.get(invariant) != 0:
+                    raise GateFailure(f"migration_schema_invariant_failed:{invariant}")
+        attestation_hash = hashlib.sha256(
+            json.dumps(migration_attestation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     if bool(component.get("artifact_provenance_required")):
         if not isinstance(artifact_provenance, dict):
@@ -287,6 +374,8 @@ def evaluate_gate(
         "registry_sha256": _registry_hash(registry),
         "missing_deltas": [],
         "migration_gate": "PASS",
+        "validated_migrations": validated_migrations,
+        "migration_attestation_sha256": attestation_hash,
         "active_delta_count": sum(
             1 for item in component.get("deltas") or [] if item.get("status") == "ACTIVE"
         ),
@@ -305,6 +394,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--actual-production-sha", required=True)
     parser.add_argument("--applied-migrations", type=Path)
     parser.add_argument("--artifact-provenance", type=Path)
+    parser.add_argument("--migration-attestation", type=Path)
     parser.add_argument("--receipt-out", type=Path)
     return parser.parse_args()
 
@@ -321,6 +411,7 @@ def main() -> int:
                 raise GateFailure("applied_migrations_list_missing")
             migration_set = {str(item).strip() for item in versions if str(item).strip()}
         provenance = _load_json(args.artifact_provenance) if args.artifact_provenance else None
+        migration_attestation = _load_json(args.migration_attestation) if args.migration_attestation else None
         result = evaluate_gate(
             registry=registry,
             component_name=args.component,
@@ -328,6 +419,7 @@ def main() -> int:
             candidate_sha=args.candidate_sha,
             actual_production_sha=args.actual_production_sha,
             applied_migrations=migration_set,
+            migration_attestation=migration_attestation,
             artifact_provenance=provenance,
             require_clean_worktree=True,
         )

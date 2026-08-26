@@ -5,8 +5,8 @@
     "worker": {
       "production": {
         "verification_state": "VERIFIED",
-        "sha": "a794da764c57a50187bd94c9411f6566519ad3ca",
-        "runtime_root": "/Users/admin/phonefarm-worker-releases/a794da7-follow60-production-stability-closure-v1"
+        "sha": "328b8fea900b9d41979bfb899aa634d6a9b75518",
+        "runtime_root": "/Users/admin/phonefarm-worker-releases/328b8fe-control-plane-reliability-v1"
       },
       "artifact_provenance_required": false,
       "deltas": [
@@ -294,6 +294,28 @@
             "tests/test_production_lineage_gate_v1.py"
           ],
           "notes": "Activation time is reconstructed from the introducing commit timestamp; durable deployment receipts are authoritative after registry v1."
+        },
+        {
+          "id": "worker_control_plane_reliability_v1",
+          "status": "ACTIVE",
+          "repo": "worker",
+          "introduced_by_sha": "328b8fea900b9d41979bfb899aa634d6a9b75518",
+          "scope": [
+            "control_plane_reliability_v1"
+          ],
+          "activated_at": "2026-08-26T02:29:44+00:00",
+          "required": true,
+          "superseded_by": null,
+          "migration_dependencies": [
+            "20260826021814"
+          ],
+          "tests": [
+            "tests/test_control_plane_reliability_v1.py",
+            "tests/test_control_plane_reliability_v1_chaos.py",
+            "tests/test_control_plane_reliability_v1_migration.py",
+            "tests/test_production_lineage_gate_v1.py"
+          ],
+          "notes": "Canonical control-plane reliability runtime activated at 328b8fe; forward repair binds its deployed migration identity without replaying SQL."
         },
         {
           "id": "worker_legacy_transient_follow_surface_resume",
@@ -913,6 +935,23 @@
       "production_version": "20260819204522",
       "repo": "backend",
       "path": "supabase/migrations/20260819203428_incident_resolution_generation_auto_restart_v1.sql"
+    },
+    {
+      "id": "migration_control_plane_reliability_v1",
+      "status": "ACTIVE",
+      "production_version": "20260826021814",
+      "repo": "worker",
+      "path": "supabase/migrations/20260826021814_control_plane_reliability_v1.sql",
+      "canonical_name": "control_plane_reliability_v1",
+      "sha256": "e836d38424074d58c40277dfd723ed4d7de32ba36e54a89f53e96530e656944b",
+      "content_attestation_required": true,
+      "require_schema_match": true,
+      "required_zero_invariants": [
+        "null_lineage_count",
+        "invalid_attempt_count",
+        "orphan_reference_count",
+        "invalid_v1_capsule_count"
+      ]
     }
   ]
 }

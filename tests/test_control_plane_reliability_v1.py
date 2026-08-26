@@ -117,7 +117,7 @@ class ControlPlaneReliabilityV1ChaosMatrix(unittest.TestCase):
         self.assertFalse(supabase_client.is_transient_control_plane_exception(contract))
 
     def test_13_sql_contract_has_bounded_idempotent_zero_work_recovery(self) -> None:
-        sql = (Path(__file__).parents[1] / "supabase/migrations/20260826004546_control_plane_reliability_v1.sql").read_text()
+        sql = (Path(__file__).parents[1] / "supabase/migrations/20260826021814_control_plane_reliability_v1.sql").read_text()
         self.assertIn("execution_attempt_no between 1 and 3", sql)
         self.assertIn("control-plane-zero-work:", sql)
         self.assertIn("irreversible_work_state <> 'PRE_DEVICE'", sql)

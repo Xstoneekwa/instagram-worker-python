@@ -133,8 +133,28 @@ class PhoneFarmRuntimeControlTest(TestCase):
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
                 with mock.patch.object(ctl, "_git_commit", return_value="newsha"):
                     with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
-                        ctl, "deployment_zero_gate", return_value={"ok": True}
-                    ):
+                        ctl, "deployment_zero_gate", return_value={
+                            "ok": True,
+                            "counts": {
+                                "account_run_requests": 0,
+                                "ig_runs": 0,
+                                "auto_restart_device_locks": 0,
+                                "auto_restart_tick_locks": 0,
+                            },
+                        }
+                    ), mock.patch.object(
+                        ctl,
+                        "_validate_release_evidence",
+                        return_value={
+                            "ok": True,
+                            "candidate_sha": "newsha",
+                            "build": {"protected_diff_status": "PASS"},
+                            "migration": {"applied_versions": ["v1"]},
+                            "lineage": {"validated_migrations": [{"version": "v1"}]},
+                        },
+                    ), mock.patch.object(ctl, "_git_full_commit", return_value="oldsha"), mock.patch.object(
+                        ctl, "_stage_receipt", return_value=tmp / "receipt.pending"
+                    ), mock.patch.object(ctl, "_publish_immutable_receipt"):
                         result = ctl.switch_release("new")
             self.assertTrue(result["ok"])
             self.assertEqual(current.resolve(), new.resolve())
@@ -159,6 +179,10 @@ class PhoneFarmRuntimeControlTest(TestCase):
             ):
                 with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
                     ctl,
+                    "_validate_release_evidence",
+                    return_value={"ok": True},
+                ), mock.patch.object(
+                    ctl,
                     "deployment_zero_gate",
                     return_value={
                         "ok": False,
@@ -169,6 +193,74 @@ class PhoneFarmRuntimeControlTest(TestCase):
                 ):
                     result = ctl.switch_release("new")
             self.assertFalse(result["ok"])
+            self.assertEqual(current.resolve(), old.resolve())
+
+    def test_switch_release_refuses_missing_immutable_promotion_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            releases = tmp / "releases"
+            old = releases / "old"
+            new = releases / "new"
+            legacy = tmp / "legacy"
+            current = tmp / "current"
+            _worker_release(old)
+            _worker_release(new)
+            legacy.mkdir()
+            current.symlink_to(old)
+            with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False), \
+                 mock.patch.object(ctl, "_git_commit", return_value="newsha"), \
+                 mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), \
+                 mock.patch.object(ctl, "_validate_release_evidence", return_value={"ok": False, "reason": "promotion_evidence_missing"}), \
+                 mock.patch.object(ctl, "deployment_zero_gate") as zero_gate:
+                result = ctl.switch_release("new")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "promotion_evidence_blocked")
+            self.assertEqual(current.resolve(), old.resolve())
+            zero_gate.assert_not_called()
+
+    def test_receipt_publish_failure_rolls_back_switch(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            releases = tmp / "releases"
+            old = releases / "old"
+            new = releases / "new"
+            legacy = tmp / "legacy"
+            current = tmp / "current"
+            _worker_release(old)
+            _worker_release(new)
+            legacy.mkdir()
+            current.symlink_to(old)
+            evidence = {
+                "ok": True,
+                "candidate_sha": "newsha",
+                "build": {"protected_diff_status": "PASS"},
+                "migration": {"applied_versions": ["v1"]},
+                "lineage": {"validated_migrations": [{"version": "v1"}]},
+            }
+            zero = {
+                "ok": True,
+                "counts": {
+                    "account_run_requests": 0,
+                    "ig_runs": 0,
+                    "auto_restart_device_locks": 0,
+                    "auto_restart_tick_locks": 0,
+                },
+            }
+            with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False), \
+                 mock.patch.object(ctl, "_git_commit", return_value="newsha"), \
+                 mock.patch.object(ctl, "_git_full_commit", return_value="oldsha"), \
+                 mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), \
+                 mock.patch.object(ctl, "_validate_release_evidence", return_value=evidence), \
+                 mock.patch.object(ctl, "deployment_zero_gate", return_value=zero), \
+                 mock.patch.object(ctl, "_stage_receipt", return_value=tmp / "receipt.pending"), \
+                 mock.patch.object(ctl, "_publish_immutable_receipt", side_effect=OSError("denied")):
+                result = ctl.switch_release("new")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "promotion_receipt_publish_failed_rolled_back")
             self.assertEqual(current.resolve(), old.resolve())
 
     def test_deployment_zero_gate_is_fail_closed_and_generic(self) -> None:
