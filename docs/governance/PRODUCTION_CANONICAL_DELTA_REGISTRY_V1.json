@@ -329,7 +329,7 @@
           "required": true,
           "superseded_by": null,
           "migration_dependencies": [
-            "20260826123000"
+            "20260826134332"
           ],
           "tests": [
             "tests/test_account_run_request_consumer.py",
@@ -977,9 +977,9 @@
     {
       "id": "migration_fast_control_plane_recovery_active_state_v1",
       "status": "ACTIVE",
-      "production_version": "20260826123000",
+      "production_version": "20260826134332",
       "repo": "worker",
-      "path": "supabase/migrations/20260826123000_fast_recovery_active_state_v1.sql",
+      "path": "supabase/migrations/20260826134332_fast_recovery_active_state_v1.sql",
       "canonical_name": "fast_recovery_active_state_v1",
       "sha256": "7801cbf8d522fe131584ea6ceb2b7031a51319b471edf166c6edb0a0a72bd835",
       "content_attestation_required": true,
