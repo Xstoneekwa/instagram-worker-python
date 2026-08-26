@@ -21,7 +21,7 @@ class Clock:
 
 class FastRecoveryPolicyTests(unittest.TestCase):
     def test_startup_evidence_migration_keeps_active_boundary_fail_closed(self) -> None:
-        sql = (Path(__file__).parents[1] / "supabase/migrations/20260826123000_fast_recovery_active_state_v1.sql").read_text()
+        sql = (Path(__file__).parents[1] / "supabase/migrations/20260826134332_fast_recovery_active_state_v1.sql").read_text()
         for column in (
             "worker_spawned_at", "runner_started_at", "device_activity_started_at",
             "device_connected_at", "instagram_launch_requested_at",
