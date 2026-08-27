@@ -61,6 +61,21 @@ def verify_physical_write_lock(
         admission = exact_admission(root)
     except Exception as exc:
         return {"ok": False, "reason": "physical_write_lock_state_unreadable", "error_type": type(exc).__name__}
+    return _verify_physical_metadata(
+        root, state_path, state, protected, admission,
+        require_root_owner=require_root_owner, require_immutable=require_immutable,
+    )
+
+
+def _verify_physical_metadata(root, state_path, state, protected, admission, *,
+                              require_root_owner=True, require_immutable=True):
+    """Shared OS checks, NOT standalone deployment admission.
+
+    The public activation verifier above still obtains full uncached admission.
+    Diagnostic cache consumers must independently prove the signed identity and
+    exact attested source before using this metadata-only portion.
+    """
+    from follow60_external_deployment_lock_v2 import PROTOCOL_VERSION
     if state.get("schema") != "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1" or state.get("lock_state") != "LOCKED":
         return {"ok": False, "reason": "physical_write_lock_state_invalid"}
     if tuple(state.get("protected_paths") or ()) != protected:

@@ -115,7 +115,11 @@ _resolve_python_path() {
 PYTHON_BIN="$(_resolve_python_path)"
 # Fail before scheduler/queue admission unless the active release, signed
 # manifest and exact Git SHA are the same certified candidate.
-"$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT_DIR" >/dev/null
+if [[ "${1:-start}" == "status" ]]; then
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-status-trust-v1.py" --target-root "$ROOT_DIR" >/dev/null
+else
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT_DIR" >/dev/null
+fi
 
 export RUN_CONTROL_DISPATCHER_ENABLED="${RUN_CONTROL_DISPATCHER_ENABLED:-true}"
 export RUNTIME_HEARTBEATS_ENABLED="${RUNTIME_HEARTBEATS_ENABLED:-true}"

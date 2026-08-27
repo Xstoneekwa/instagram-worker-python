@@ -79,7 +79,7 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def git(root: Path, *args: str) -> bytes:
+def git(root: Path, *args: str, stdin: bytes | None = None) -> bytes:
     exact_root = Path(root).expanduser().resolve(strict=True)
     environment = os.environ.copy()
     for key in tuple(environment):
@@ -96,24 +96,59 @@ def git(root: Path, *args: str) -> bytes:
             *args,
         ],
         env=environment,
+        input=stdin,
     )
 
 
 def git_file_entry(root: Path, relative: str, *, revision: str = "HEAD") -> dict[str, Any]:
-    line = git(root, "ls-tree", revision, "--", relative).decode("utf-8").strip()
-    if not line:
-        raise ValueError(f"protected_file_missing:{relative}")
-    metadata, listed_path = line.split("\t", 1)
-    mode, object_type, oid = metadata.split(" ", 2)
-    if listed_path != relative or object_type != "blob":
+    entry = git_file_entries(root, [relative], revision=revision).get(relative)
+    if entry is None:
         raise ValueError(f"protected_path_not_blob:{relative}")
-    payload = git(root, "show", f"{revision}:{relative}")
+    return entry
+
+
+def git_file_entries(root: Path, paths: Iterable[str], *, revision: str = "HEAD") -> dict[str, dict[str, Any]]:
+    """Read exact Git objects in two processes, without caching any trust.
+
+    NUL-delimited tree paths and length-delimited blob bodies preserve binary
+    bytes, symlinks and executable modes. Missing/non-blob paths stay absent so
+    the verifier fails closed. The caller pins the verified commit identity.
+    """
+    wanted = set(paths)
+    selected: dict[str, tuple[str, str]] = {}
+    for record in git(root, "ls-tree", "-r", "-z", "--full-tree", revision).split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        relative = raw_path.decode("utf-8")
+        mode, kind, oid = metadata.decode("ascii").split()
+        if relative in wanted and kind == "blob":
+            selected[relative] = (mode, oid)
+    oids = sorted({oid for _, oid in selected.values()})
+    if not oids:
+        return {}
+    stream = git(root, "cat-file", "--batch", stdin=("\n".join(oids) + "\n").encode("ascii"))
+    offset = 0
+    blobs: dict[str, bytes] = {}
+    for oid in oids:
+        end = stream.find(b"\n", offset)
+        if end < 0:
+            raise ValueError("protected_blob_header_missing")
+        fields = stream[offset:end].decode("ascii").split()
+        if len(fields) != 3 or fields[:2] != [oid, "blob"] or not fields[2].isdigit():
+            raise ValueError("protected_blob_identity_mismatch")
+        size = int(fields[2])
+        start = end + 1
+        offset = start + size + 1
+        if offset > len(stream) or stream[offset - 1:offset] != b"\n":
+            raise ValueError("protected_blob_body_truncated")
+        blobs[oid] = stream[start:start + size]
+    if offset != len(stream):
+        raise ValueError("protected_blob_unexpected_trailing_bytes")
     return {
-        "path": relative,
-        "git_blob_oid": oid,
-        "sha256": sha256_bytes(payload),
-        "size": len(payload),
-        "mode": mode,
+        relative: {"path": relative, "git_blob_oid": oid,
+                   "sha256": sha256_bytes(blobs[oid]), "size": len(blobs[oid]), "mode": mode}
+        for relative, (mode, oid) in selected.items()
     }
 
 
@@ -148,7 +183,16 @@ def direct_local_imports(root: Path, relative: str, payload: bytes | None = None
     except (SyntaxError, UnicodeDecodeError):
         return set()
     imports: set[str] = set()
-    for node in ast.walk(tree):
+    # Import statements cannot occur inside expressions. Visit all statement
+    # containers (including exception handlers and match cases), but do not walk
+    # their potentially enormous expression subtrees. Parsing remains complete.
+    containers = (ast.Module, ast.stmt, ast.ExceptHandler)
+    if hasattr(ast, "match_case"):
+        containers += (ast.match_case,)
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        pending.extend(child for child in ast.iter_child_nodes(node) if isinstance(child, containers))
         if isinstance(node, ast.Import):
             for alias in node.names:
                 resolved = _resolve_local_import(root, relative, alias.name, 0)
@@ -290,11 +334,12 @@ def verify_repository(
     if not isinstance(entries, dict) or not entries:
         return {"ok": False, "reason": "protected_scope_empty"}
     mismatches: dict[str, Any] = {}
+    try:
+        actual_entries = git_file_entries(root, entries, revision=revision_sha)
+    except (subprocess.CalledProcessError, ValueError):
+        actual_entries = {}
     for relative, expected in entries.items():
-        try:
-            actual = git_file_entry(root, relative, revision=revision)
-        except (subprocess.CalledProcessError, ValueError):
-            actual = None
+        actual = actual_entries.get(relative)
         comparable = dict(actual or {})
         if comparable:
             comparable["role"] = expected.get("role")
