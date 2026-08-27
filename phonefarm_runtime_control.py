@@ -871,6 +871,24 @@ def scheduler_status() -> dict[str, Any]:
 
 
 def switch_release(target: str) -> dict[str, Any]:
+    from follow60_external_deployment_lock_v2 import DeploymentTransaction
+    paths = runtime_paths()
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        target_path = paths.releases_dir / target
+    validation = resolve_runtime_root(RuntimePaths(target_path, paths.releases_dir, paths.runtime_home, paths.legacy_root))
+    if not validation.ok:
+        return _runtime_root_payload(validation, command='switch-release')
+    try:
+        with DeploymentTransaction(Path(validation.resolved_root)) as transaction:
+            return _switch_release_locked(target, transaction)
+    except Exception as exc:
+        return {'ok': False, 'status': 'external_deployment_lock_blocked',
+                'reason': str(exc), 'command': 'switch-release'}
+
+
+def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
+    transaction.recheck()
     paths = runtime_paths()
     target_path = Path(target)
     if not target_path.is_absolute():
@@ -959,6 +977,7 @@ def switch_release(target: str) -> dict[str, Any]:
             "reason": type(exc).__name__,
             "command": "switch-release",
         }
+    transaction.recheck()  # Same owner, exact identity, signature and physical seal AFTER zero-gate.
     tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
     if tmp.exists() or tmp.is_symlink():
         tmp.unlink()
@@ -986,11 +1005,20 @@ def switch_release(target: str) -> dict[str, Any]:
             "reason": type(exc).__name__,
             "command": "switch-release",
         }
+    try:
+        lock_archive = transaction.finish(receipt_path)
+    except Exception as exc:
+        return _with_root(validation, {
+            'ok': False, 'status': 'promotion_completed_lock_archive_failed',
+            'runtimeSwitched': True, 'promotionReceipt': str(receipt_path),
+            'reason': str(exc), 'requiresOperatorReview': True,
+        })
     return _with_root(validation, {
         "ok": True,
         "status": "switched",
         "previousRoot": str(previous) if previous else None,
         "promotionReceipt": str(receipt_path),
+        "deploymentLockArchive": str(lock_archive),
         "zeroGate": counts,
     })
 

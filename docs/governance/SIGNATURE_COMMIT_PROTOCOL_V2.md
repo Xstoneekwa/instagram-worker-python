@@ -95,6 +95,15 @@ binding. Candidate generation is stricter: it requires a fully clean checkout.
 No timestamp heuristic substitutes for commit existence. Early/previous manifests
 fail against a later final commit even when both commits have the same tree.
 
+## Physical deployment evidence
+
+Physical sealing and native promotion use the external record/transaction
+contract in [EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2.md](EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2.md).
+No physical lock artifact is written into the Git worktree. The existing
+source scanner and sidecar exceptions above remain unchanged. Candidate
+signature admission precedes sealing; final activation additionally requires
+the strict external physical seal and same-process transaction recheck.
+
 ## Regression proof
 
 `tests.test_follow60_signature_commit_protocol_v2` exercises A-I, the real

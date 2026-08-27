@@ -65,8 +65,11 @@ Canonical order:
 
 `final candidate → protected diff scan → manifest regeneration → full
 recertification → signature → remote parity → clean worktree → certified
-release creation → zero gate → runtime switch → aligned services → one shared
-startup-tick skip → immutable promotion receipt → canonical production registry
+release creation → external physical seal → acquire process-bound external
+deployment lock → exact identity recheck → zero gate → exact identity recheck
+→ runtime switch → immutable promotion receipt → archive deployment lock
+→ aligned services → one shared
+startup-tick skip → canonical production registry
 update → post-promotion registry gate → post-activation gate`.
 
 The protocol must not declare `FULL_PASS` after a runtime switch until
@@ -88,6 +91,11 @@ deployment-governance failure detected correctly by the runtime integrity
 guard, not a dispatcher defect.
 
 ## Quick runbook
+
+The authoritative physical-lock location, owner/stale-recovery model and native
+activation ordering are defined in
+[EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2.md](EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2.md).
+No physical-lock record may be written in the candidate worktree.
 
 1. From a certified locked base, generate approval request 1 with exact paths.
 2. Liam signs that JSON locally; verify with the repository public key.

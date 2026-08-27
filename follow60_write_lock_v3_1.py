@@ -28,7 +28,15 @@ def load_protected_paths(manifest_path: Path) -> tuple[str, ...]:
     entries = payload.get("protected_entries") or {}
     if payload.get("lock_version") != LOCK_VERSION or not isinstance(entries, dict) or not entries:
         raise ValueError("follow60_write_lock_manifest_invalid")
-    return tuple(sorted(str(path) for path in entries))
+    paths = tuple(sorted(str(path) for path in entries))
+    if any(Path(path).is_absolute() or '..' in Path(path).parts for path in paths):
+        raise ValueError('follow60_write_lock_path_invalid')
+    return paths
+
+
+def protected_directories(protected):
+    return sorted({str(parent) for path in protected for parent in Path(path).parents
+                   if str(parent) != '.'})
 
 
 def verify_physical_write_lock(
@@ -39,23 +47,37 @@ def verify_physical_write_lock(
     require_immutable: bool = True,
 ) -> dict[str, Any]:
     root = Path(root).resolve()
-    state_path = root / STATE_NAME
+    from follow60_external_deployment_lock_v2 import (
+        seal_path, read_record, exact_admission, _storage, PROTOCOL_VERSION,
+    )
+    state_path = seal_path(root)
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if require_root_owner or require_immutable:
+            _storage(root)
+            state = read_record(state_path)
+        else:
+            state = json.loads(state_path.read_text(encoding='utf-8'))
         protected = load_protected_paths(manifest_path)
+        admission = exact_admission(root)
     except Exception as exc:
         return {"ok": False, "reason": "physical_write_lock_state_unreadable", "error_type": type(exc).__name__}
     if state.get("schema") != "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1" or state.get("lock_state") != "LOCKED":
         return {"ok": False, "reason": "physical_write_lock_state_invalid"}
     if tuple(state.get("protected_paths") or ()) != protected:
         return {"ok": False, "reason": "physical_write_lock_scope_mismatch"}
+    if (state.get('protocol_version') != PROTOCOL_VERSION
+            or state.get('verified_revision') != admission['candidate_commit_sha']
+            or any(state.get(key) != value for key, value in admission.items())):
+        return {'ok': False, 'reason': 'physical_write_lock_candidate_or_manifest_mismatch'}
+    if state.get('protected_directories') != protected_directories(protected):
+        return {'ok': False, 'reason': 'physical_write_lock_directory_scope_mismatch'}
 
     failures: dict[str, str] = {}
     immutable = _immutable_flag()
     for relative in protected:
         candidate = root / relative
         try:
-            info = candidate.stat()
+            info = candidate.lstat()
         except OSError:
             failures[relative] = "missing"
             continue
@@ -71,11 +93,13 @@ def verify_physical_write_lock(
     for relative in tuple(state.get("protected_directories") or ()):
         directory = root / relative
         try:
-            info = directory.stat()
+            info = directory.lstat()
         except OSError:
             failures[f"dir:{relative}"] = "missing"
             continue
-        if info.st_mode & 0o222:
+        if not stat.S_ISDIR(info.st_mode):
+            failures[f'dir:{relative}'] = 'not_directory'
+        elif info.st_mode & 0o222:
             failures[f"dir:{relative}"] = "write_bit_present"
         elif require_root_owner and info.st_uid != 0:
             failures[f"dir:{relative}"] = "not_root_owned"
@@ -106,6 +130,8 @@ def verify_physical_write_lock(
         "ok": not failures,
         "status": "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1_OK" if not failures else "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1_FAILED",
         "lock_version": LOCK_VERSION,
+        "state_path": str(state_path),
+        "lock_outside_worktree": True,
         "protected_file_count": len(protected),
         "failures": failures,
         "write_lock_bypass_available_to_codex": False if not failures and require_root_owner and require_immutable else None,

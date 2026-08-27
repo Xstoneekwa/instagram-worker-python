@@ -19,7 +19,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from follow60_write_lock_v3_1 import LOCK_VERSION, STATE_NAME, load_protected_paths  # noqa: E402
+from follow60_write_lock_v3_1 import load_protected_paths, protected_directories  # noqa: E402
+from follow60_external_deployment_lock_v2 import (  # noqa: E402
+    initialize_store, storage_guard, exact_admission, seal_path, seal_payload,
+    atomic_record, verify_seal,
+)
 
 
 def _run(*args: str) -> None:
@@ -39,19 +43,34 @@ def main() -> int:
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if revision != args.verified_revision:
         raise SystemExit("verified_revision_mismatch")
+    if manifest != root / 'docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json':
+        raise SystemExit('canonical_installed_manifest_required')
+    before = exact_admission(root)  # Signature/identity/clean source BEFORE OS mutation.
     protected = load_protected_paths(manifest)
-    directories = sorted({str(Path(path).parent) for path in protected if str(Path(path).parent) != "."})
-    state_path = root / STATE_NAME
-    state_path.write_text(json.dumps({
-        "schema": "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1",
-        "lock_version": LOCK_VERSION,
-        "lock_state": "LOCKED",
-        "verified_revision": revision,
-        "protected_paths": list(protected),
-        "protected_directories": directories,
-        "unlock_contract": "LIAM_SIGNED_EXACT_DIFF_TRANSACTION_ONLY",
-    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    directories = protected_directories(protected)
+    initialize_store(root)
+    with storage_guard(root):
+        state_path = seal_path(root)
+        if state_path.exists():
+            raise SystemExit('external_physical_seal_already_exists')
+        _install(root, protected, directories)
+        after = exact_admission(root)
+        if after != before:
+            raise SystemExit('candidate_changed_during_physical_seal')
+        atomic_record(state_path, seal_payload(root, after, protected, directories))
+        result = verify_seal(root)
+    print(json.dumps({**result, 'revision': revision}, sort_keys=True))
+    return 0
 
+
+def _install(root, protected, directories):
+    # Reject symlink/file-type surprises before changing any ownership.
+    for relative in protected:
+        if not stat.S_ISREG((root / relative).lstat().st_mode):
+            raise SystemExit('protected_regular_file_required:' + relative)
+    for relative in directories:
+        if not stat.S_ISDIR((root / relative).lstat().st_mode):
+            raise SystemExit('protected_directory_required:' + relative)
     # Files are root-owned + read-only + user-immutable.  Root ownership makes
     # `chflags nouchg` unavailable to the normal Codex/CI user.
     for relative in protected:
@@ -66,14 +85,9 @@ def main() -> int:
         os.chown(directory, 0, 0)
         os.chmod(directory, stat.S_IMODE(directory.stat().st_mode) & ~0o222)
         _run("chflags", "uchg", str(directory))
-    os.chown(state_path, 0, 0)
-    os.chmod(state_path, 0o444)
-    _run("chflags", "uchg", str(state_path))
     os.chown(root, 0, 0)
     os.chmod(root, stat.S_IMODE(root.stat().st_mode) & ~0o222)
     _run("chflags", "uchg", str(root))
-    print(json.dumps({"ok": True, "status": "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1_INSTALLED", "revision": revision, "protected_file_count": len(protected)}, sort_keys=True))
-    return 0
 
 
 if __name__ == "__main__":

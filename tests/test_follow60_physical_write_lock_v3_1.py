@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from follow60_write_lock_v3_1 import STATE_NAME, direct_write_attempt, verify_physical_write_lock
 
@@ -12,6 +13,14 @@ class Follow60PhysicalWriteLockV31Tests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.external = self.root.parent / (self.root.name + '-external-state.json')
+        self.addCleanup(lambda: self.external.unlink(missing_ok=True))
+        import follow60_external_deployment_lock_v2 as external
+        self.admission = {'candidate_commit_sha': 'a' * 40, 'manifest_sha256': 'b' * 64}
+        for patcher in (mock.patch.object(external, 'seal_path', return_value=self.external),
+                        mock.patch.object(external, 'exact_admission', return_value=self.admission)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.scope = self.root / "protected"
         self.scope.mkdir()
         self.protected = self.scope / "engine.py"
@@ -21,22 +30,25 @@ class Follow60PhysicalWriteLockV31Tests(unittest.TestCase):
             "lock_version": "3.1.0",
             "protected_entries": {"protected/engine.py": {"path": "protected/engine.py"}},
         }), encoding="utf-8")
-        (self.root / STATE_NAME).write_text(json.dumps({
+        self.external.write_text(json.dumps({
             "schema": "FOLLOW60_PHYSICAL_WRITE_LOCK_V3_1",
             "lock_state": "LOCKED",
+            "protocol_version": external.PROTOCOL_VERSION,
+            "verified_revision": 'a' * 40,
+            **self.admission,
             "protected_paths": ["protected/engine.py"],
             "protected_directories": ["protected"],
         }), encoding="utf-8")
         self.protected.chmod(0o444)
         self.scope.chmod(0o555)
-        (self.root / STATE_NAME).chmod(0o444)
+        self.external.chmod(0o444)
         self.root.chmod(0o555)
 
     def tearDown(self):
         self.root.chmod(0o755)
         self.scope.chmod(0o755)
         self.protected.chmod(0o644)
-        (self.root / STATE_NAME).chmod(0o644)
+        self.external.chmod(0o644)
 
     def test_can_read_while_locked(self):
         self.assertIn("VALUE = 1", self.protected.read_text(encoding="utf-8"))

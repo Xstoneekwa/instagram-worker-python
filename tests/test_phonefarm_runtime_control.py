@@ -23,6 +23,15 @@ def _worker_release(root: Path, commit: str = "abc1234") -> None:
 
 
 class PhoneFarmRuntimeControlTest(TestCase):
+    def setUp(self):
+        # These existing tests isolate switch/receipt behavior. The actual
+        # external lease/physical gate has a separate adversarial matrix.
+        patcher = mock.patch('follow60_external_deployment_lock_v2.DeploymentTransaction')
+        self.transaction_factory = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.transaction = self.transaction_factory.return_value.__enter__.return_value
+        self.transaction.finish.return_value = '/synthetic/immutable-lock-history.json'
+
     def _env(self, tmp: Path, current: Path, releases: Path, legacy: Path) -> dict[str, str]:
         return {
             "PHONEFARM_RUNTIME_CURRENT_LINK": str(current),
@@ -159,6 +168,8 @@ class PhoneFarmRuntimeControlTest(TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(current.resolve(), new.resolve())
             self.assertEqual(result["previousRoot"], str(old.resolve()))
+            self.assertGreaterEqual(self.transaction.recheck.call_count, 2)
+            self.transaction.finish.assert_called_once()
 
     def test_switch_release_refuses_non_zero_production_gate(self) -> None:
         import tempfile
