@@ -208,6 +208,62 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
         self.assertNotEqual(kwargs["reason"], "worker_exit_nonzero")
         dispatch_action_notification.assert_not_called()
 
+    def test_wrong_password_incident_links_exact_password_action_to_same_event(self) -> None:
+        worker_summary = {
+            "domain": "auto_login",
+            "run_type": "login_provisioning",
+            "reason_code": "instagram_credentials_rejected",
+            "reason": "instagram_credentials_rejected",
+            "phase": "submit_credentials",
+            "request_id": REQUEST_ID,
+            "run_id": RUN_ID,
+        }
+        with (
+            patch.object(
+                consumer.supabase_client,
+                "load_run_row",
+                return_value={"id": RUN_ID, "status": "failed", "performance_summary": worker_summary},
+            ),
+            patch.object(consumer.supabase_client, "get_account_username", return_value="future_account"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-wrong-password", "occurrence_count": 1},
+            ) as publish,
+            patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "action-password"}) as call_rpc,
+            patch.object(consumer.incident_notifications, "dispatch_operator_review_action_notification") as generic_notification,
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                run_type="login_provisioning",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+                worker_summary=worker_summary,
+            )
+
+        incident = publish.call_args.kwargs
+        self.assertEqual(incident["reason"], "instagram_credentials_rejected")
+        self.assertEqual(incident["failure_reason"], "instagram_credentials_rejected")
+        self.assertEqual(incident["run_id"], RUN_ID)
+        self.assertEqual(incident["metadata"]["run_request_id"], REQUEST_ID)
+        self.assertEqual(incident["metadata"]["phase"], "submit_credentials")
+        params = call_rpc.call_args.args[1]
+        self.assertEqual(params["p_incident_id"], "inc-wrong-password")
+        self.assertEqual(params["p_action_type"], "update_instagram_password")
+        self.assertEqual(params["p_status"], "pending")
+        self.assertEqual(params["p_dedupe_key"], f"account:{ACCOUNT_ID}:dashboard_action:update_instagram_password")
+        self.assertEqual(params["p_metadata"]["request_id"], REQUEST_ID)
+        self.assertEqual(params["p_metadata"]["run_id"], RUN_ID)
+        self.assertEqual(params["p_metadata"]["reason_code"], "instagram_credentials_rejected")
+        self.assertEqual(params["p_metadata"]["phase"], "submit_credentials")
+        self.assertTrue(params["p_requires_client_action"])
+        self.assertTrue(params["p_blocking_campaign"])
+        generic_notification.assert_not_called()
+
     def test_auto_login_request_reason_is_used_when_no_run_exists(self) -> None:
         with (
             patch.object(consumer.supabase_client, "get_account_username", return_value="expected_account"),

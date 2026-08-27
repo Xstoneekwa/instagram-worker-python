@@ -1774,33 +1774,56 @@ def _upsert_operator_review_action(
 ) -> dict[str, Any]:
     if not decision.requires_operator_review:
         return {}
+    is_wrong_password = (
+        decision.reason_code == "instagram_credentials_rejected"
+        and decision.metadata_safe.get("domain") == "auto_login"
+    )
+    action_type = "update_instagram_password" if is_wrong_password else "operator_review_required"
+    action_status = "pending" if is_wrong_password else "pending_verification"
+    action_title = (
+        "Mot de passe Instagram à mettre à jour"
+        if is_wrong_password
+        else decision.operator_label or "Runtime failure requires operator review"
+    )
+    dedupe_key = (
+        f"account:{account_id}:dashboard_action:update_instagram_password"
+        if is_wrong_password
+        else f"account:{account_id}:run:{run_id or request_id}:dashboard_action:operator_review_required"
+    )
+    action_metadata = {
+        "source": "run_dispatcher",
+        "request_id": request_id,
+        "run_id": run_id,
+        "reason": decision.reason_code,
+        "reason_code": decision.reason_code,
+        "phase": decision.metadata_safe.get("phase"),
+        "incident_type": decision.incident_type,
+        "causal_contract": "same_event_wrong_password_v1" if is_wrong_password else "canonical_operator_review",
+    }
     return supabase_client.call_rpc(
         "upsert_account_dashboard_action",
         {
             "p_account_id": account_id,
             "p_client_id": None,
             "p_incident_id": incident_id,
-            "p_action_type": "operator_review_required",
-            "p_status": "pending_verification",
-            "p_title": decision.operator_label or "Runtime failure requires operator review",
-            "p_dedupe_key": f"account:{account_id}:run:{run_id or request_id}:dashboard_action:operator_review_required",
-            "p_safe_client_message": None,
+            "p_action_type": action_type,
+            "p_status": action_status,
+            "p_title": action_title,
+            "p_dedupe_key": dedupe_key,
+            "p_safe_client_message": (
+                "Instagram a refusé les identifiants enregistrés. Mettez à jour le mot de passe pour reprendre la connexion."
+                if is_wrong_password
+                else None
+            ),
             "p_admin_message": decision.admin_message or decision.action_required,
             "p_assistant_message": decision.action_required or "Human review is required before the next launch.",
-            "p_action_label": "Mark reviewed",
-            "p_action_deep_link": "/instagram-dashboard/incidents",
+            "p_action_label": "Mettre à jour le mot de passe" if is_wrong_password else "Mark reviewed",
+            "p_action_deep_link": "/instagram-client?view=account" if is_wrong_password else "/instagram-dashboard/incidents",
             "p_severity": decision.severity,
-            "p_audience": "admin",
-            "p_requires_client_action": False,
+            "p_audience": "client" if is_wrong_password else "admin",
+            "p_requires_client_action": is_wrong_password,
             "p_blocking_campaign": decision.blocking_campaign,
-            "p_metadata": {
-                "source": "run_dispatcher",
-                "request_id": request_id,
-                "run_id": run_id,
-                "reason": decision.reason_code,
-                "incident_type": decision.incident_type,
-                "review_workflow": "canonical_operator_review",
-            },
+            "p_metadata": action_metadata,
         },
     )
 
