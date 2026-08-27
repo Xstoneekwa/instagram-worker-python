@@ -243,10 +243,8 @@ def _validate_human_confirmed_resume_at_claim(
     meta: dict[str, Any],
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Validate the durable authorization and its explicit frozen V2 plan."""
-    from account_session_resume_plan_store import (
-        RESUME_STATE_RESUME_REQUESTED,
-        load_resume_plan,
-    )
+    from account_session_resume_state_contract import RESUME_STATE_RESUME_REQUESTED
+    from account_session_resume_plan_store import load_resume_plan
 
     resume_plan_id = str(meta.get("resume_plan_id") or "").strip()
     original_run_id = str(

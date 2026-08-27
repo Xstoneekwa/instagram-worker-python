@@ -1,6 +1,4 @@
 #!/bin/sh
 set -eu
 ROOT="$(git rev-parse --show-toplevel)"
-python3 "$ROOT/scripts/guard-follow60-protected-index-v3-1.py"
-TREE="$(git write-tree)"
-exec python3 "$ROOT/scripts/verify-follow60-mainline-lock-v3.py" --revision "$TREE"
+exec python3 "$ROOT/scripts/guard-follow60-protected-index-v3-1.py"

@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
 from follow60_lock_v3 import (
+    RESUME_CONTRACT_GATES,
+    RESUME_CONTRACT_SOURCE_FILES,
     canonical_json,
     git,
     git_file_entry,
@@ -173,9 +175,10 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
 
     def test_candidate_generator_cannot_approve(self):
         source = (ROOT / "scripts/generate-follow60-mainline-lock-v3-candidate.py").read_text()
-        self.assertIn("--request-signature", source)
-        self.assertIn("verify_detached_signature", source)
-        self.assertIn("CANDIDATE_REQUIRES_EXTERNAL_MANIFEST_SIGNATURE", source)
+        self.assertIn("raise SystemExit", source)
+        self.assertIn("legacy_generator_retired", source)
+        generated = (ROOT / "scripts/regenerate-follow60-mainline-lock-v3-1.py").read_text()
+        self.assertIn("DETACHED_ED25519_REQUIRED", generated)
         self.assertNotIn("pkeyutl\", \"-sign", source)
 
     def _signed_v31_repo(self, *, source: str = "VALUE = 1\n", include_import: bool = False):
@@ -185,6 +188,10 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
         subprocess.check_call(["git", "-C", str(root), "config", "user.email", "test@example.invalid"])
         subprocess.check_call(["git", "-C", str(root), "config", "user.name", "Test"])
         (root / "protected.py").write_text(source, encoding="utf-8")
+        for name in RESUME_CONTRACT_SOURCE_FILES:
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# synthetic protected fixture\n", encoding="utf-8")
         if include_import:
             (root / "imported.py").write_text("IMPORTED = 1\n", encoding="utf-8")
         subprocess.check_call(["git", "-C", str(root), "add", "."])
@@ -192,6 +199,8 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
         entry = git_file_entry(root, "protected.py")
         entry.update({"role": "runtime", "lock_version": "3.1.0"})
         entries = {"protected.py": entry}
+        for name in RESUME_CONTRACT_SOURCE_FILES:
+            entries[name] = {**git_file_entry(root, name), "role": "contract", "lock_version": "3.1.0"}
         graph = transitive_import_graph(root, entries)
         manifest = {
             "schema": "FOLLOW60_MAINLINE_LOCK_V3_1",
@@ -211,6 +220,12 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
                 "entrypoint": "runner.py",
             },
             "approval": {"token_status": "consumed_once"},
+            "resume_state_contract": {
+                "schema": "RESUME_STATE_END_TO_END_CONTRACT_V1", "status": "PASS",
+                "gates": {name: "PASS" for name in RESUME_CONTRACT_GATES},
+                "backend_sha": "b" * 40, "receipt_sha256": "c" * 64,
+                "source_files": {name: entries[name]["sha256"] for name in RESUME_CONTRACT_SOURCE_FILES},
+            },
         }
         manifest_path = root / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
@@ -309,15 +324,15 @@ class Follow60MainlineLockV3Tests(unittest.TestCase):
         self.assertEqual("FOLLOW60_MAINLINE_INTEGRITY_MISMATCH", result["reason"])
 
     def test_v31_consumed_approval_is_not_reusable(self):
-        generator = (ROOT / "scripts/generate-follow60-mainline-lock-v3-candidate.py").read_text()
+        generator = (ROOT / "scripts/regenerate-follow60-mainline-lock-v3-1.py").read_text()
         self.assertIn("approval_token_already_consumed", generator)
-        self.assertIn('entry.get("change_id") == request.get("change_id")', generator)
+        self.assertIn('entry.get("change_id") == args.change_id', generator)
 
     def test_v31_approval_is_bound_to_exact_diff(self):
-        generator = (ROOT / "scripts/generate-follow60-mainline-lock-v3-candidate.py").read_text()
-        self.assertIn("approved_diff_mismatch", generator)
-        self.assertIn("approved_file_set_mismatch", generator)
-        self.assertIn("approved_head_mismatch", generator)
+        identity = (ROOT / "follow60_candidate_identity_v2.py").read_text()
+        self.assertIn("committed_candidate_does_not_match_freeze", identity)
+        self.assertIn("candidate_not_checked_out_head", identity)
+        self.assertIn("freeze_empty_or_unauthorized_scope", identity)
 
     def test_package_script_rejects_unlocked_state(self):
         source = (ROOT / "scripts/promote-follow60-v2-mainline.sh").read_text()

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT="$(git rev-parse --show-toplevel)"
-python3 "$ROOT/scripts/verify-follow60-mainline-lock-v3.py"
+CERT="$(git config --get follow60.certificationDirectory)"
+python3 "$ROOT/scripts/verify-follow60-deployment-candidate-v1.py" --manifest "$CERT/manifest.json" --signature "$CERT/manifest.sig"
 python3 -m unittest -q tests.test_follow60_mainline_lock_v3
 python3 -m unittest -q tests.test_follow60_physical_write_lock_v3_1

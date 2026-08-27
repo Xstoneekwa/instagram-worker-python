@@ -13,7 +13,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
-from follow60_lock_v3 import sha256_bytes, verify_repository
+from follow60_lock_v3 import sha256_bytes, verify_repository, verify_resume_state_contract_evidence
+from follow60_candidate_identity_v2 import external_path, verify_manifest_identity
 
 
 MANIFEST_RELATIVE = Path("docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json")
@@ -58,6 +59,16 @@ def verify_deployment_candidate(
             "manifest_certified_sha": certified_sha,
         }
 
+    try:
+        if manifest_path != root / MANIFEST_RELATIVE:
+            external_path(root, manifest_path)
+        if signature_path != root / SIGNATURE_RELATIVE:
+            external_path(root, signature_path)
+    except ValueError as exc:
+        return {"ok": False, "reason": str(exc)}
+    identity = verify_manifest_identity(root, manifest, revision)
+    if not identity.get("ok"):
+        return identity
     recertification = manifest.get("recertification") or {}
     if recertification.get("status") != "PASS":
         return {"ok": False, "reason": "follow60_recertification_missing_or_failed"}
@@ -68,6 +79,10 @@ def verify_deployment_candidate(
     receipt_sha = str(recertification.get("receipt_sha256") or "")
     if len(receipt_sha) != 64:
         return {"ok": False, "reason": "follow60_recertification_receipt_invalid"}
+
+    resume_contract = verify_resume_state_contract_evidence(manifest)
+    if not resume_contract["ok"]:
+        return resume_contract
 
     verified = verify_repository(
         root,
@@ -85,10 +100,10 @@ def verify_deployment_candidate(
         **verified,
         "ok": True,
         "status": "FOLLOW60_DEPLOYMENT_GATE_PASS",
+        "candidate_identity": identity,
         "candidate_sha": candidate_sha,
         "manifest_certified_sha": certified_sha,
         "manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
         "predeploy_follow60_integrity_check": "PASS",
         "write_lock_bypass_available_to_codex": False,
     }
-

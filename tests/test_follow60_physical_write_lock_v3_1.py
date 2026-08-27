@@ -72,9 +72,9 @@ class Follow60PhysicalWriteLockV31Tests(unittest.TestCase):
         promote = (Path(__file__).resolve().parents[1] / "scripts/promote-follow60-v2-mainline.sh").read_text()
         guard = (Path(__file__).resolve().parents[1] / "scripts/guard-follow60-protected-index-v3-1.py").read_text()
         self.assertIn("guard-follow60-protected-index-v3-1.py", pre_commit)
-        self.assertIn("verify-follow60-mainline-lock-v3.py", pre_push)
+        self.assertIn("verify-follow60-deployment-candidate-v1.py", pre_push)
         self.assertIn("verify-follow60-physical-write-lock-v3-1.py", promote)
-        self.assertIn("signed_commit_authorization_missing", guard)
+        self.assertIn("external_candidate_evidence_missing", guard)
         self.assertNotIn("BYPASS", guard)
 
 

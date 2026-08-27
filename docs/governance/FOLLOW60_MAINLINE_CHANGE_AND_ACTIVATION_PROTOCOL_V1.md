@@ -4,9 +4,10 @@
 
 The nominal path requires exactly two external Liam signatures. Approval 1
 binds `CHANGE_ID`, `BASE_SHA`, exact authorized paths, dependency scope, nonce
-and expiry. It permits repeated local edits only inside that scope. It never
-permits commit, push, package, promotion or activation. Approval 2 binds the
-frozen diff, candidate manifest and protected-scope hashes and permits the
+and expiry. It permits repeated local edits only inside that scope and, after
+an exact staged freeze, creation of the final candidate commit. It never
+permits push, package, promotion or activation. Approval 2 binds the final
+commit, its tree, canonical diff and protected-scope hashes and permits the
 single final certification path. Its signed payload is the final V3.1 manifest
 itself: the same detached Ed25519 signature is both approval 2 and the manifest
 signature, so the nominal path has no third signing step.
@@ -18,7 +19,8 @@ Only deterministic Python Ed25519 verification is authoritative.
 ## Canonical states
 
 `LOCKED_READ_ONLY → CHANGE_AUTHORIZED → WORK_IN_PROGRESS → CANDIDATE_FROZEN →
-FINAL_APPROVAL_PENDING → RELOCKING → LOCKED_CERTIFIED → PROMOTABLE →
+CANDIDATE_COMMITTED → MANIFEST_GENERATED → FINAL_APPROVAL_PENDING →
+RELOCKING → LOCKED_CERTIFIED → PROMOTABLE →
 ACTIVE_CERTIFIED`.
 
 Every other transition fails closed. A byte change after freeze invalidates
@@ -90,11 +92,15 @@ guard, not a dispatcher defect.
 1. From a certified locked base, generate approval request 1 with exact paths.
 2. Liam signs that JSON locally; verify with the repository public key.
 3. Unlock only the signed paths and work/test freely before expiry.
-4. Freeze: make the scope read-only and emit exact file, diff, manifest and
-   protected-scope hashes.
-5. Liam signs the exact final manifest/approval JSON once.
-6. Verify approval 2, relock physically, install/verify that final manifest,
-   consume approval 1, run all gates, commit/push/package, then promote once.
+4. Stage the exact authorized scope, make source read-only, and emit an external
+   staged-tree freeze using the V2 canonical delta contract. No manifest hash
+   exists yet. The commit hook verifies Approval 1 and the unchanged frozen index.
+5. Create the final candidate commit; generate its external final manifest only
+   after its exact commit SHA exists and recertification binds that SHA.
+   Liam signs those exact manifest bytes once, outside the repository.
+6. Verify Approval 2 against the final commit/tree/diff and protected source,
+   relock physically, install/verify certification, run all gates, then
+   push/package/promote only with separate activation approval and zero-gate.
 7. Publish full SHA, release path, manifest hash, scope hash, signature status,
    `runtimeRootOk` and lock version in the runtime attestation.
 
@@ -105,6 +111,10 @@ not reuse either approval. The audit ledger records every state transition,
 hash, verifier result and activation identity without secrets.
 
 ## Protected navigation recovery invariant
+
+The detailed identity and serialization contract is normative in
+[SIGNATURE_COMMIT_PROTOCOL_V2.md](SIGNATURE_COMMIT_PROTOCOL_V2.md). This isolated
+repair does not itself activate Patch 3.1 or authorize any production operation.
 
 Any Follow60 change affecting candidate-open or Followers recovery must prove
 that recovery is driven by the freshly classified current surface, never by

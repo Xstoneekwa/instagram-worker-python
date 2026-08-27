@@ -27,6 +27,7 @@ from typing import Any
 
 from account_session_resume_state_contract import (
     CONTRACT_VERSION,
+    RESUME_STATE_RESUME_REQUESTED,  # Public compatibility re-export, not a second definition.
     resolve_end_of_session_transition,
 )
 from logs import log

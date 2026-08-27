@@ -12,7 +12,7 @@ jobs:
       - name: Exact-candidate deployment admission
         run: python3 scripts/verify-follow60-deployment-candidate-v1.py
       - name: Lock self-tests
-        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3 tests.test_follow60_deployment_gate_v1
+        run: python3 -m unittest -q tests.test_follow60_mainline_lock_v3 tests.test_follow60_deployment_gate_v1 tests.test_follow60_change_protocol_v1 tests.test_follow60_signature_commit_protocol_v2
   follow60-promotion-matrix:
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +27,10 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Historical Follow60 promotion matrix
         run: python -m unittest -q tests.test_follow60_v2_mainline_v1 tests.test_follow60_mainline_business_session_binding_v1 tests.test_instagram_list_continuation_contract tests.test_target_followers_progressive_resume_v2 tests.test_follow60_surface_driven_return_ct_v1 tests.test_post_viewer_story_highlight_identity_guard
+      - name: Resume state schema and Python API contracts (including lazy human claim)
+        run: python -m unittest -q tests.test_resume_state_schema_contract_gate tests.test_resume_state_python_api_contract tests.test_resume_state_end_to_end_contract tests.test_human_confirmed_resume_claim
+      # Full Worker/DB/backend offline evidence is required in the signed manifest;
+      # both exact-HEAD and deployment admission above reject missing/failed evidence.
   follow60-runtime-integrity:
     runs-on: ubuntu-latest
     steps:

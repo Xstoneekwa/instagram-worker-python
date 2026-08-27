@@ -6,6 +6,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import subprocess
+import json
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from follow60_candidate_identity_v2 import external_path, verify_manifest_identity, manifest_sha256
 
 
 def main() -> int:
@@ -15,12 +21,23 @@ def main() -> int:
     group.add_argument("--manifest")
     parser.add_argument("--private-key", required=True)
     parser.add_argument("--signature-output", required=True)
+    parser.add_argument("--root", default=str(ROOT))
     args = parser.parse_args()
     payload = Path(args.request or args.manifest).resolve()
     private_key = Path(args.private_key).expanduser().resolve()
     output = Path(args.signature_output).resolve()
     if not payload.is_file():
         raise SystemExit("payload_missing")
+    root = Path(args.root).resolve()
+    external_path(root, payload)
+    external_path(root, output)
+    if output.exists():
+        raise SystemExit("signature_output_already_exists")
+    if args.manifest:
+        identity = verify_manifest_identity(root, json.loads(payload.read_text(encoding="utf-8")))
+        if not identity["ok"]:
+            raise SystemExit(identity["reason"])
+    before_hash = manifest_sha256(payload)
     if not private_key.is_file():
         raise SystemExit("private_key_missing")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -28,6 +45,12 @@ def main() -> int:
         "openssl", "pkeyutl", "-sign", "-inkey", str(private_key),
         "-rawin", "-in", str(payload), "-out", str(output),
     ])
+    if manifest_sha256(payload) != before_hash:
+        raise SystemExit("payload_changed_during_signing_signature_not_eligible")
+    if args.manifest:
+        result = verify_manifest_identity(root, json.loads(payload.read_text(encoding="utf-8")))
+        if not result["ok"]:
+            raise SystemExit(result["reason"])
     print(f"SIGNED={payload} SIGNATURE={output}")
     return 0
 

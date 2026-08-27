@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from follow60_lock_v3 import canonical_json, git_file_entry, sha256_bytes, transitive_import_graph  # noqa: E402
+from follow60_candidate_identity_v2 import committed_identity, external_path, manifest_sha256, require_clean
 
 
 def role_for(path: str) -> str:
@@ -48,9 +49,16 @@ def main() -> int:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--change-id", required=True)
     parser.add_argument("--revision", default="HEAD")
+    parser.add_argument("--freeze", required=True)
+    parser.add_argument("--resume-contract-receipt", required=True)
     args = parser.parse_args()
     root = Path(args.root).resolve()
-    candidate_sha = _git(root, "rev-parse", args.revision)
+    output = external_path(root, Path(args.output))
+    freeze = json.loads(Path(args.freeze).read_text(encoding="utf-8"))
+    if freeze.get("change_id") != args.change_id:
+        raise SystemExit("freeze_change_id_mismatch")
+    identity = committed_identity(root, args.base_sha, args.revision, freeze)
+    candidate_sha = identity["candidate_commit_sha"]
     receipt_path = Path(args.recertification_receipt).resolve()
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if receipt.get("status") != "PASS" or receipt.get("candidate_sha") != candidate_sha:
@@ -69,6 +77,8 @@ def main() -> int:
     graph = transitive_import_graph(root, entries)
     previous = json.loads(Path(args.base_manifest).read_text(encoding="utf-8"))
     audit_history = list(previous.get("audit_history") or [])
+    if any(entry.get("change_id") == args.change_id for entry in audit_history):
+        raise SystemExit("approval_token_already_consumed")
     audit_history.append({
         "schema": "FOLLOW60_LOCK_AUDIT_V1",
         "change_id": args.change_id,
@@ -83,6 +93,7 @@ def main() -> int:
         "lock_version": "3.1.0",
         "lock_state": "LOCKED",
         "certified_candidate_sha": candidate_sha,
+        "candidate_identity": identity,
         "protected_entries": entries,
         "protected_scope_sha256": sha256_bytes(canonical_json(entries)),
         "protected_transitive_dependency_count": len({d for values in graph.values() for d in values}),
@@ -114,13 +125,22 @@ def main() -> int:
         "manifest_signature": "DETACHED_ED25519_REQUIRED",
         "field_certification": "PENDING_NEXT_NATURAL_RUNS",
     }
-    output = Path(args.output).resolve()
-    output.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    candidate["resume_state_contract"] = json.loads(Path(args.resume_contract_receipt).read_text(encoding="utf-8"))
+    from follow60_lock_v3 import verify_resume_state_contract_evidence
+    evidence = verify_resume_state_contract_evidence(candidate)
+    if not evidence["ok"]:
+        raise SystemExit(evidence["reason"])
+    require_clean(root)
+    if committed_identity(root, args.base_sha, args.revision, freeze) != identity:
+        raise SystemExit("candidate_changed_during_manifest_generation")
+    with output.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
     print(json.dumps({
         "ok": True, "candidate_sha": candidate_sha,
         "protected_file_count": len(entries),
         "protected_scope_sha256": candidate["protected_scope_sha256"],
-        "manifest_sha256": sha256_bytes(output.read_bytes()),
+        "candidate_identity": identity,
+        "manifest_sha256": manifest_sha256(output),
     }, sort_keys=True))
     return 0
 

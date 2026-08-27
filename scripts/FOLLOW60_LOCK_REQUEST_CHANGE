@@ -13,17 +13,18 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from follow60_lock_v3 import sha256_bytes  # noqa: E402
+from follow60_candidate_identity_v2 import commit_sha, external_path  # noqa: E402
 
 
 def _write(output: str, payload: dict) -> None:
-    Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with external_path(ROOT, Path(output)).open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(json.dumps(payload, sort_keys=True))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("legacy", "initial", "final"), default="legacy")
+    parser.add_argument("--mode", choices=("legacy", "initial", "final"), default="initial")
     parser.add_argument("--base-revision", default="HEAD")
     parser.add_argument("--requested-scope", default="")
     parser.add_argument("--output", required=True)
@@ -35,24 +36,10 @@ def main() -> int:
     parser.add_argument("--freeze")
     args = parser.parse_args()
 
-    if args.mode == "final":
-        if not args.freeze:
-            raise SystemExit("freeze_required")
-        freeze = json.loads(Path(args.freeze).read_text(encoding="utf-8"))
-        payload = {
-            "schema": "FOLLOW60_FINAL_APPROVAL_V1",
-            "change_id": freeze["change_id"],
-            "base_sha": freeze["base_sha"],
-            "final_diff_hash": freeze["final_diff_hash"],
-            "final_manifest_hash": freeze["final_manifest_hash"],
-            "final_protected_scope_hash": freeze["final_protected_scope_hash"],
-        }
-        _write(args.output, payload)
-        return 0
+    if args.mode != "initial":
+        raise SystemExit("legacy_and_precommit_final_requests_retired_use_postcommit_manifest")
 
-    base_sha = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", args.base_revision], text=True
-    ).strip()
+    base_sha = commit_sha(ROOT, args.base_revision)
     now = datetime.now(timezone.utc)
     change_id = args.change_id or str(uuid.uuid4())
     if args.mode == "initial":
@@ -76,23 +63,6 @@ def main() -> int:
         _write(args.output, payload)
         return 0
 
-    head_sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    diff = subprocess.check_output(["git", "-C", str(ROOT), "diff", "--binary", f"{base_sha}..{head_sha}"])
-    files = subprocess.check_output(["git", "-C", str(ROOT), "diff", "--name-only", f"{base_sha}..{head_sha}"], text=True).splitlines()
-    payload = {
-        "schema": "FOLLOW60_LOCK_CHANGE_REQUEST_V1",
-        "change_id": change_id,
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "base_manifest_sha256": sha256_bytes(Path(args.base_manifest).read_bytes()),
-        "files_requested": sorted(set(files)),
-        "diff_sha256": sha256_bytes(diff),
-        "requested_scope": str(args.requested_scope),
-        "requested_at": now.isoformat(),
-        "expires_at": (now + timedelta(minutes=max(1, args.expiry_minutes))).isoformat(),
-        "approval_status": "REQUESTED_NOT_APPROVED",
-    }
-    _write(args.output, payload)
     return 0
 
 

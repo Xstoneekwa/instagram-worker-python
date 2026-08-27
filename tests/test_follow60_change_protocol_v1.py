@@ -80,95 +80,24 @@ class Follow60ChangeProtocolTests(unittest.TestCase):
             self.assertTrue(result["ok"], result)
 
             (root / "runner.py").write_text("x=2\n")
+            subprocess.check_call(["git", "-C", str(root), "add", "."])
             freeze = protocol.freeze_candidate(root, auth, protected_scope_hash="scope")
             self.assertTrue(protocol.freeze_is_current(root, auth, freeze))
             (root / "runner.py").write_text("x=3\n")
             self.assertFalse(protocol.freeze_is_current(root, auth, freeze))
 
-    def test_signed_final_manifest_is_the_single_second_approval(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            manifest = {
-                "schema": "FOLLOW60_MAINLINE_LOCK_V3_1",
-                "lock_state": "LOCKED",
-                "protected_scope_sha256": "scope-hash",
-                "protected_entries": {"runner.py": {"sha256": "abc"}},
-                "runtime_contract": {"engine": "FOLLOW60_V2_MAINLINE_V1"},
-            }
-            manifest_hash = protocol.manifest_candidate_hash(manifest)
-            freeze = {
-                "change_id": "change-2",
-                "base_sha": "base-sha",
-                "final_diff_hash": "diff-hash",
-                "final_manifest_hash": manifest_hash,
-                "final_protected_scope_hash": "scope-hash",
-            }
-            manifest["approval"] = {
-                "change_id": freeze["change_id"],
-                "base_sha": freeze["base_sha"],
-                "final_diff_hash": freeze["final_diff_hash"],
-                "final_manifest_hash": freeze["final_manifest_hash"],
-                "final_protected_scope_hash": freeze["final_protected_scope_hash"],
-                "token_status": "consumed_once",
-            }
-            payload = root / "manifest.json"
-            payload.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
-            private = Ed25519PrivateKey.generate()
-            signature = root / "manifest.sig"
-            signature.write_bytes(private.sign(payload.read_bytes()))
-            public = root / "public.pem"
-            public.write_bytes(private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo))
-            result = protocol.verify_final_approval(payload, signature, public, freeze)
-            self.assertTrue(result["ok"], result)
+    def test_legacy_approval_stripped_body_hash_is_retired(self):
+        with self.assertRaisesRegex(ValueError, "retired_body_hash"):
+            protocol.manifest_candidate_hash({})
 
-            manifest["protected_entries"]["runner.py"]["sha256"] = "changed"
-            payload.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
-            signature.write_bytes(private.sign(payload.read_bytes()))
-            result = protocol.verify_final_approval(payload, signature, public, freeze)
-            self.assertEqual(result["reason"], "final_manifest_candidate_hash_mismatch")
+    def test_precommit_signed_manifest_cannot_authorize_a_tree(self):
+        p = Path("/unused")
+        self.assertFalse(protocol.verify_staged_final_approval(p, p, p, p)["ok"])
+        self.assertFalse(protocol.verify_final_approval(p, p, p, {})["ok"])
 
-    def test_staged_commit_uses_signed_final_manifest_as_approval_two(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            subprocess.check_call(["git", "init", "-q", str(root)])
-            subprocess.check_call(["git", "-C", str(root), "config", "user.email", "test@example.com"])
-            subprocess.check_call(["git", "-C", str(root), "config", "user.name", "Test"])
-            (root / "runner.py").write_text("x=1\n")
-            subprocess.check_call(["git", "-C", str(root), "add", "runner.py"])
-            subprocess.check_call(["git", "-C", str(root), "commit", "-qm", "base"])
-            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-            (root / "runner.py").write_text("x=2\n")
-            manifest_path = root / "manifest.json"
-            signature_path = root / "manifest.sig"
-            public_path = root / "public.pem"
-            subprocess.check_call(["git", "-C", str(root), "add", "runner.py"])
-            diff = subprocess.check_output(["git", "-C", str(root), "diff", "--cached", "--binary", "HEAD", "--", "runner.py"])
-            from follow60_lock_v3 import canonical_json, git_file_entry, sha256_bytes, transitive_import_graph
-            tree = subprocess.check_output(["git", "-C", str(root), "write-tree"], text=True).strip()
-            entry = git_file_entry(root, "runner.py", revision=tree)
-            entry.update({"role": "runtime_entrypoint", "lock_version": "3.1.0"})
-            entries = {"runner.py": entry}
-            graph = transitive_import_graph(root, entries)
-            manifest = {
-                "schema": "FOLLOW60_MAINLINE_LOCK_V3_1", "lock_version": "3.1.0", "lock_state": "LOCKED",
-                "certified_candidate_sha": tree,
-                "protected_entries": entries, "protected_scope_sha256": sha256_bytes(canonical_json(entries)),
-                "protected_transitive_dependency_count": 0, "import_graph": graph,
-                "import_graph_sha256": sha256_bytes(canonical_json(graph)),
-                "runtime_contract": {"runtime_mode": "mainline", "binding_kind": "mainline", "engine": "FOLLOW60_V2_MAINLINE_V1", "entrypoint": "runner.py"},
-                "audit_history": [{"change_id": "change-3", "files": ["runner.py"]}],
-                "manifest_signature": "DETACHED_ED25519_REQUIRED", "field_certification": "PENDING_NEXT_NATURAL_RUNS",
-            }
-            body_hash = protocol.manifest_candidate_hash(manifest)
-            manifest["approval"] = {
-                "change_id": "change-3", "base_sha": base,
-                "final_diff_hash": sha256_bytes(diff), "final_manifest_hash": body_hash,
-                "final_protected_scope_hash": manifest["protected_scope_sha256"], "token_status": "consumed_once",
-            }
-            manifest_path.write_text(json.dumps(manifest, sort_keys=True))
-            private = Ed25519PrivateKey.generate()
-            signature_path.write_bytes(private.sign(manifest_path.read_bytes()))
-            public_path.write_bytes(private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo))
-            subprocess.check_call(["git", "-C", str(root), "add", "manifest.json", "manifest.sig"])
-            result = protocol.verify_staged_final_approval(root, manifest_path, signature_path, public_path)
-            self.assertTrue(result["ok"], result)
+    def test_commit_creation_does_not_grant_promotion(self):
+        self.assertFalse(protocol.evaluate_gate(protocol.LockState.CANDIDATE_FROZEN, "commit").ok)
+        self.assertTrue(protocol.evaluate_gate(protocol.LockState.CANDIDATE_FROZEN, "commit", frozen_index_verified=True).ok)
+        self.assertFalse(protocol.evaluate_gate(protocol.LockState.CANDIDATE_COMMITTED, "release").ok)
+        state = protocol.transition(protocol.LockState.CANDIDATE_FROZEN, protocol.LockState.CANDIDATE_COMMITTED)
+        self.assertEqual(protocol.transition(state, protocol.LockState.MANIFEST_GENERATED), protocol.LockState.MANIFEST_GENERATED)

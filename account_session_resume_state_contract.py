@@ -15,13 +15,16 @@ from typing import Any
 
 CONTRACT_VERSION = "golden_resume_plan_contract_v1"
 
+# Public Python lifecycle API. Keep one definition; legacy store users re-export it.
+RESUME_STATE_RESUME_REQUESTED = "resume_requested"
+
 DB_ALLOWED_RESUME_STATES = frozenset(
     {
         "run_active",
         "pre_device_stopped",
         "recovery_enqueued",
         "awaiting_human_resume_authorization",
-        "resume_requested",
+        RESUME_STATE_RESUME_REQUESTED,
         "resume_succeeded",
         "not_recoverable",
         "completed",
@@ -32,7 +35,7 @@ WORKER_EMITTABLE_RESUME_STATES = frozenset(
     {
         "run_active",
         "awaiting_human_resume_authorization",
-        "resume_requested",
+        RESUME_STATE_RESUME_REQUESTED,
         "resume_succeeded",
         "not_recoverable",
         "completed",
@@ -101,7 +104,7 @@ def resolve_end_of_session_transition(
         return ResumePlanTransition(
             outcome=outcome,
             resume_stage="phases",
-            resume_state="resume_requested",
+            resume_state=RESUME_STATE_RESUME_REQUESTED,
             auto_restart_decision="schedule_resume",
             restart_allowed=True,
             restart_block_reason=str(plan.get("restart_block_reason") or ""),

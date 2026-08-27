@@ -26,6 +26,50 @@ SCHEMA_V3_1 = "FOLLOW60_MAINLINE_LOCK_V3_1"
 APPROVAL_SCHEMA_V3 = "FOLLOW60_MAINLINE_LOCK_V3_EXTERNAL_APPROVAL"
 LOCKED = "LOCKED"
 
+RESUME_CONTRACT_GATES = (
+    "RESUME_STATE_SCHEMA_CONTRACT_GATE",
+    "RESUME_STATE_PYTHON_API_CONTRACT_GATE",
+    "RESUME_STATE_END_TO_END_CONTRACT_GATE",
+)
+RESUME_CONTRACT_SOURCE_FILES = (
+    "account_session_resume_state_contract.py", "account_session_resume_plan_store.py",
+    "auto_restart_runtime.py", "scripts/verify-resume-state-end-to-end-contract.py",
+    "tests/resume-state-backend-contract.mjs", "tests/test_resume_state_python_api_contract.py",
+    "tests/test_resume_state_end_to_end_contract.py", "tests/test_resume_state_schema_contract_gate.py",
+    "tests/test_human_confirmed_resume_claim.py", "tests/test_account_session_resume_state_contract.py",
+    "tests/test_account_session_resume_plan_store.py", "tests/test_auto_restart_runtime.py",
+    "tests/test_auto_restart_hard_stop.py",
+)
+
+
+def verify_resume_state_contract_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Require signed PASS evidence bound to the exact protected contract bytes.
+
+    This is an admission check, not a test runner at service boot. The offline
+    gate executes fixtures; the detached manifest signature attests its receipt.
+    """
+    evidence = manifest.get("resume_state_contract")
+    if not isinstance(evidence, dict) or evidence.get("schema") != "RESUME_STATE_END_TO_END_CONTRACT_V1":
+        return {"ok": False, "reason": "resume_state_contract_evidence_missing"}
+    gates = evidence.get("gates")
+    if evidence.get("status") != "PASS" or not isinstance(gates, dict) or any(
+        gates.get(name) != "PASS" for name in RESUME_CONTRACT_GATES
+    ):
+        return {"ok": False, "reason": "resume_state_contract_gate_failed"}
+    def is_hex(value: Any, length: int) -> bool:
+        return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value)
+    if not is_hex(evidence.get("receipt_sha256"), 64) or not is_hex(evidence.get("backend_sha"), 40):
+        return {"ok": False, "reason": "resume_state_contract_provenance_missing"}
+    sources = evidence.get("source_files")
+    entries = manifest.get("protected_entries")
+    if not isinstance(sources, dict) or not isinstance(entries, dict):
+        return {"ok": False, "reason": "resume_state_contract_source_binding_missing"}
+    for name in RESUME_CONTRACT_SOURCE_FILES:
+        entry = entries.get(name)
+        if not isinstance(entry, dict) or not is_hex(sources.get(name), 64) or sources[name] != entry.get("sha256"):
+            return {"ok": False, "reason": "resume_state_contract_source_binding_mismatch", "path": name}
+    return {"ok": True, "status": "RESUME_STATE_END_TO_END_CONTRACT_GATE_PASS"}
+
 
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
@@ -232,7 +276,15 @@ def verify_repository(
     )
     if not signed:
         return {"ok": False, "reason": signature_reason}
-    revision_sha = git(root, "rev-parse", revision).decode().strip()
+    from follow60_candidate_identity_v2 import commit_sha, verify_manifest_identity
+    try:
+        revision_sha = commit_sha(root, revision)
+    except (ValueError, subprocess.CalledProcessError):
+        return {"ok": False, "reason": "candidate_revision_not_commit"}
+    if "candidate_identity" in manifest:
+        identity = verify_manifest_identity(root, manifest, revision)
+        if not identity.get("ok"):
+            return identity
     certified_candidate_sha = str(manifest.get("certified_candidate_sha") or "").strip()
     entries = manifest.get("protected_entries") or {}
     if not isinstance(entries, dict) or not entries:
@@ -284,6 +336,9 @@ def verify_repository(
             "manifest_certified_sha": certified_candidate_sha,
             "revision": revision_sha,
         }
+    resume_contract = verify_resume_state_contract_evidence(manifest)
+    if not resume_contract["ok"]:
+        return resume_contract
     return {
         "ok": True,
         "status": "FOLLOW60_MAINLINE_LOCK_V3_1_OK",
