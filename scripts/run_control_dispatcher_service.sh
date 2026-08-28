@@ -27,6 +27,19 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+case "${1:-start}" in
+  start|restart|resume|prepare-auto-restart-startup-skip|fix-duplicate)
+    case "$RUN_DIR/" in
+      "$ROOT_DIR/"*) echo "startup_tick_skip_release_local_path_forbidden" >&2; exit 5 ;;
+    esac
+    if [[ "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE" != "$RUN_DIR/auto-restart-skip-startup-tick.once" || "${RUN_CONTROL_DISPATCHER_RUN_DIR:-$RUN_DIR}" != "$RUN_DIR" || "${AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE:-$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE}" != "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE" ]]; then
+      echo "startup_tick_skip_shared_path_mismatch" >&2
+      exit 5
+    fi
+    export RUN_CONTROL_DISPATCHER_RUN_DIR="$RUN_DIR"
+    ;;
+esac
+
 RUNTIME_GIT_ROOT="$(git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 RUNTIME_GIT_SHA="$(git -c "safe.directory=$ROOT_DIR" -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
 if [[ -z "$RUNTIME_GIT_ROOT" || "$(cd "$RUNTIME_GIT_ROOT" && pwd -P)" != "$(cd "$ROOT_DIR" && pwd -P)" ]]; then

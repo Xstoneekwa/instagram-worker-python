@@ -137,7 +137,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             )
         )
 
-    def test_invalid_guard_is_logged_and_does_not_disable_future_ticks(self) -> None:
+    def test_invalid_guard_is_logged_and_blocks_startup(self) -> None:
         with (
             patch.object(
                 consumer,
@@ -146,11 +146,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             ),
             patch.object(consumer, "log") as log_mock,
         ):
-            initial = consumer.initialize_auto_restart_tick_state(
-                worker_id="run-dispatcher:test",
-                now_monotonic=100.0,
-            )
-        self.assertEqual(initial, 0.0)
+            with self.assertRaisesRegex(RuntimeError, "guard_path_not_absolute"):
+                consumer.initialize_auto_restart_tick_state(
+                    worker_id="run-dispatcher:test",
+                    now_monotonic=100.0,
+                )
         log_mock.assert_called_once_with(
             "warning",
             "auto_restart_startup_tick_skip_guard_invalid",

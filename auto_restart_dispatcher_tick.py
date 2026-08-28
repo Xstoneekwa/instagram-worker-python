@@ -22,6 +22,7 @@ AUTO_RESTART_TICK_HTTP_TIMEOUT_SECONDS = 45.0
 AUTO_RESTART_TICK_ROUTE = "/api/instagram-dashboard/auto-restart/tick"
 AUTO_RESTART_TICK_TOKEN_ENV = "INSTAGRAM_AUTO_RESTART_TICK_TOKEN"
 AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV = "AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE"
+AUTO_RESTART_STARTUP_SKIP_MARKER = b"phonefarm-auto-restart-startup-skip-v1\n"
 AUTO_RESTART_TICK_URL_ENV_CANDIDATES = (
     "INSTAGRAM_DASHBOARD_API_BASE_URL",
     "BOTAPP_COMPASS_AI_RELAY_URL",
@@ -38,9 +39,11 @@ def consume_auto_restart_startup_tick_skip_once(
     """Atomically consume the optional local startup-tick skip token.
 
     The wrapper exports an absolute path in the shared dispatcher run directory.
-    Absence preserves the historical immediate startup tick.  A valid regular
-    file is renamed before removal so two concurrent consumers cannot both use
-    the same one-shot token.
+    Absence preserves the historical immediate startup tick. Only the exact
+    marker is accepted; claimed leftovers are never consulted on a later start.
+    Invalid state is returned to the caller for fail-closed startup admission.
+    token_path is an explicit offline-test injection; runtime uses the exported
+    shared directory and cannot silently select a release-local alternative.
     """
 
     resolved_path = str(
@@ -52,6 +55,12 @@ def consume_auto_restart_startup_tick_skip_once(
         return {"consumed": False, "reason": "guard_not_configured"}
     if not os.path.isabs(resolved_path):
         return {"consumed": False, "reason": "guard_path_not_absolute"}
+    if token_path is None:
+        run_dir = _env("RUN_CONTROL_DISPATCHER_RUN_DIR")
+        if not os.path.isabs(run_dir) or resolved_path != os.path.join(
+            run_dir, "auto-restart-skip-startup-tick.once"
+        ):
+            return {"consumed": False, "reason": "guard_shared_path_mismatch"}
 
     try:
         token_stat = os.stat(resolved_path, follow_symlinks=False)
@@ -63,6 +72,28 @@ def consume_auto_restart_startup_tick_skip_once(
     if not stat.S_ISREG(token_stat.st_mode):
         return {"consumed": False, "reason": "guard_not_regular_file"}
 
+    def valid_marker(path: str) -> bool:
+        # O_NOFOLLOW plus inode comparison closes the stat/rename replacement
+        # race. Bound the read: arbitrary files cannot become startup tokens.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            current = os.fstat(fd)
+            return (
+                stat.S_ISREG(current.st_mode)
+                and (current.st_dev, current.st_ino) == (token_stat.st_dev, token_stat.st_ino)
+                and current.st_size == len(AUTO_RESTART_STARTUP_SKIP_MARKER)
+                and os.read(fd, len(AUTO_RESTART_STARTUP_SKIP_MARKER) + 1)
+                == AUTO_RESTART_STARTUP_SKIP_MARKER
+            )
+        finally:
+            os.close(fd)
+
+    try:
+        if not valid_marker(resolved_path):
+            return {"consumed": False, "reason": "guard_invalid_marker"}
+    except OSError:
+        return {"consumed": False, "reason": "guard_read_failed"}
+
     consumed_path = f"{resolved_path}.consumed.{os.getpid()}"
     try:
         os.replace(resolved_path, consumed_path)
@@ -70,6 +101,12 @@ def consume_auto_restart_startup_tick_skip_once(
         return {"consumed": False, "reason": "guard_already_consumed"}
     except OSError:
         return {"consumed": False, "reason": "guard_consume_failed"}
+
+    try:
+        if not valid_marker(consumed_path):
+            return {"consumed": False, "reason": "guard_changed_during_consume"}
+    except OSError:
+        return {"consumed": False, "reason": "guard_claim_read_failed"}
 
     cleanup_ok = True
     try:

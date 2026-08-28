@@ -3937,11 +3937,20 @@ def initialize_auto_restart_tick_state(
     *,
     worker_id: str,
     now_monotonic: float | None = None,
+    startup_state: dict[str, float] | None = None,
 ) -> float:
-    """Return the initial cadence marker after consuming any one-shot guard."""
+    """Consume once per startup, before ANY startup tick, or fail closed.
+
+    The caller-owned cache is scoped to this startup, not a later restart.
+    """
+
+    if startup_state is not None and "cadence_marker" in startup_state:
+        return startup_state["cadence_marker"]
 
     startup_tick_guard = consume_auto_restart_startup_tick_skip_once()
     if startup_tick_guard.get("consumed"):
+        if not startup_tick_guard.get("cleanup_ok"):
+            raise RuntimeError("startup_tick_skip:guard_consumed_cleanup_failed")
         initial_tick_monotonic = (
             now_monotonic if now_monotonic is not None else time.monotonic()
         )
@@ -3953,6 +3962,8 @@ def initialize_auto_restart_tick_state(
             token_consumed=True,
             token_cleanup_ok=bool(startup_tick_guard.get("cleanup_ok")),
         )
+        if startup_state is not None:
+            startup_state["cadence_marker"] = initial_tick_monotonic
         return initial_tick_monotonic
 
     guard_reason = str(startup_tick_guard.get("reason") or "")
@@ -3963,6 +3974,9 @@ def initialize_auto_restart_tick_state(
             worker_id=worker_id,
             reason=guard_reason,
         )
+        raise RuntimeError(f"startup_tick_skip:{guard_reason}")
+    if startup_state is not None:
+        startup_state["cadence_marker"] = 0.0
     return 0.0
 
 
@@ -3993,6 +4007,19 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
             storage_wait_logged = True
         time.sleep(min(cfg.poll_seconds, 5.0))
 
+    # Must precede the initial control-plane recovery tick. Never short-circuit
+    # consumption with a recovery marker: that was the startup bypass.
+    startup_state: dict[str, float] = {}
+    try:
+        startup_tick_marker = initialize_auto_restart_tick_state(
+            worker_id=cfg.worker_id, startup_state=startup_state,
+        )
+    except RuntimeError as exc:
+        log("error", "run_control_dispatcher_startup_skip_blocked",
+            worker_id=cfg.worker_id, reason=str(exc), dispatch_allowed=False)
+        return 5
+    skip_startup_tick = startup_tick_marker != 0.0
+
     control_plane = (
         control_plane_health.CircuitBreaker()
         if _control_plane_reliability_v1_enabled()
@@ -4006,7 +4033,7 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         try:
             supabase_client.probe_control_plane_v1(timeout_seconds=5.0)
             health_snapshot, became_healthy = control_plane.record_probe_success()
-            if became_healthy:
+            if became_healthy and not skip_startup_tick:
                 recovery_tick_monotonic = time.monotonic()
                 run_auto_restart_dispatcher_tick(
                     worker_id=cfg.worker_id,
@@ -4129,8 +4156,10 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_heartbeat = 0.0
-    last_auto_restart_tick = recovery_tick_monotonic or initialize_auto_restart_tick_state(
-        worker_id=cfg.worker_id
+    # Start the unchanged natural cadence after startup completes, even if
+    # network/storage preflight took longer than a tick interval.
+    last_auto_restart_tick = (
+        time.monotonic() if skip_startup_tick else recovery_tick_monotonic
     )
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
