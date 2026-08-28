@@ -16,6 +16,7 @@ from types import MethodType
 from typing import Any
 
 from logs import log
+import ui_continuity_v1
 
 
 class DeviceActionBlocked(RuntimeError):
@@ -62,6 +63,7 @@ def stop_requested() -> bool:
 
 
 def assert_device_action_allowed(action: str) -> None:
+    ui_continuity_v1.check("device_action:" + action)
     with _LOCK:
         if _ENABLED and _STOP_REQUESTED:
             log("warning", "follow_60s_device_action_blocked", action=action, **dict(_TRACE))
@@ -70,6 +72,7 @@ def assert_device_action_allowed(action: str) -> None:
 
 def _before(action: str) -> None:
     global _ACTIVE_ACTIONS
+    ui_continuity_v1.check("device_action:" + action)
     with _LOCK:
         if _ENABLED and _STOP_REQUESTED:
             log("warning", "follow_60s_device_action_blocked", action=action, **dict(_TRACE))
@@ -88,7 +91,7 @@ def _after() -> None:
 
 
 def install_device_guard(device: Any) -> Any:
-    if not _ENABLED or getattr(device, "_follow60_action_guard_installed", False):
+    if (not _ENABLED and not ui_continuity_v1.armed()) or getattr(device, "_follow60_action_guard_installed", False):
         return device
     for name in (
         "click",
@@ -112,7 +115,9 @@ def install_device_guard(device: Any) -> Any:
         def guarded(self: Any, *args: Any, __name: str = name, __original: Any = original, **kwargs: Any) -> Any:
             _before(__name)
             try:
-                return __original(*args, **kwargs)
+                result = __original(*args, **kwargs)
+                ui_continuity_v1.check(__name + ":after")
+                return result
             finally:
                 _after()
 
@@ -120,16 +125,47 @@ def install_device_guard(device: Any) -> Any:
     original_shell = getattr(device, "shell", None)
     if callable(original_shell):
         def guarded_shell(self: Any, command: Any, *args: Any, **kwargs: Any) -> Any:
+            ui_continuity_v1.check("shell:before")
             command_text = " ".join(command) if isinstance(command, (list, tuple)) else str(command or "")
             is_ui_action = any(token in command_text.lower() for token in ("input tap", "input swipe", "input keyevent", "monkey "))
             if not is_ui_action:
-                return original_shell(command, *args, **kwargs)
+                result = original_shell(command, *args, **kwargs)
+                ui_continuity_v1.check("shell:after")
+                return result
             _before("shell_ui_action")
             try:
-                return original_shell(command, *args, **kwargs)
+                result = original_shell(command, *args, **kwargs)
+                ui_continuity_v1.check("shell_ui_action:after")
+                return result
             finally:
                 _after()
         setattr(device, "shell", MethodType(guarded_shell, device))
+    # Lowest RPC dispatch also covers UiObject/direct JSON RPC routes. Check
+    # after reads/writes: a capture interrupted in flight is not fresh proof.
+    for name in ("jsonrpc_call", "dump_hierarchy", "screenshot", "app_current"):
+        original = getattr(device, name, None)
+        if not callable(original):
+            continue
+
+        def observed(self: Any, *args: Any, __name: str = name, __original: Any = original, **kwargs: Any) -> Any:
+            # Positive allowlist only. Unknown/direct JSON RPCs may mutate UI.
+            read_only = __name != "jsonrpc_call" or (
+                (args[0] if args else kwargs.get("method")) in {"dumpWindowHierarchy", "deviceInfo"}
+            )
+            if not read_only:
+                _before("jsonrpc_mutation")
+                try:
+                    result = __original(*args, **kwargs)
+                    ui_continuity_v1.check(__name + ":after")
+                    return result
+                finally:
+                    _after()
+            started_epoch = ui_continuity_v1.observe(__name + ":before")
+            result = __original(*args, **kwargs)
+            ui_continuity_v1.finish_observation(started_epoch, __name + ":after")
+            return result
+
+        setattr(device, name, MethodType(observed, device))
     setattr(device, "_follow60_action_guard_installed", True)
     log("info", "follow_60s_device_action_guard_installed", **dict(_TRACE))
     return device

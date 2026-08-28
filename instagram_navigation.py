@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 import hashlib
 import hmac
 import html
@@ -327,6 +329,7 @@ def _mark_unfollow_direct_search_surface_fresh() -> None:
 
 
 def _consume_unfollow_direct_search_surface_fresh() -> bool:
+    ui_continuity_v1.check("instagram_navigation.py::_consume_unfollow_direct_search_surface_fresh")
     global _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT
     if _UNFOLLOW_DIRECT_SEARCH_SURFACE_FRESH_AT <= 0.0:
         return False
@@ -727,8 +730,10 @@ def _search_surface_proof_token_valid(
     *,
     pkg: str,
 ) -> tuple[bool, str]:
+    ui_continuity_v1.check("instagram_navigation.py::_search_surface_proof_token_valid")
     if token is None:
         return False, "token_absent"
+    ui_continuity_v1.require_capture(token.observed_at_monotonic, "search:surface_token")
     if token.package != str(pkg or "").strip():
         return False, "package_mismatch"
     if token.account_scope != _FOLLOW_CT_SEARCH_ACCOUNT_SCOPE:
@@ -1221,8 +1226,10 @@ def _exact_search_row_proof_valid(
     username: str,
     expected_package: str,
 ) -> tuple[bool, str]:
+    ui_continuity_v1.check("instagram_navigation.py::_exact_search_row_proof_valid")
     if proof is None:
         return False, "proof_absent"
+    ui_continuity_v1.require_capture(proof.observed_at_monotonic, "search:exact_row")
     target = _normalize_handle(username)
     if proof.normalized_username != target or _normalize_handle(proof.row_text) != target:
         return False, "exact_username_mismatch"
@@ -19231,6 +19238,7 @@ def _validate_post_mute_sheet_closed_proof(
     visual_candidate_id: str = "",
     candidate_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], float, str]:
+    ui_continuity_v1.check("instagram_navigation.py::_validate_post_mute_sheet_closed_proof")
     try:
         from follow_60s_canary import (
             enabled as _follow_60s_canary_enabled,
@@ -19287,6 +19295,7 @@ def _validate_post_mute_sheet_closed_proof(
     stash = _post_mute_sheet_closed_proof_stash
     if not isinstance(stash, dict) or not stash:
         return False, {}, 0.0, "missing_proof"
+    ui_continuity_v1.require_capture(float(stash.get("stashed_at_monotonic") or 0), "mute:stash")
     age_ms = round(
         (time.perf_counter() - float(stash.get("stashed_at_monotonic") or 0.0))
         * 1000.0,
@@ -27735,6 +27744,7 @@ def _create_post_open_intent_from_final_proof(
     ttl_ms: float = 1250.0,
 ) -> Any | None:
     """Create exactly one immutable tap intent from the terminal proof."""
+    ui_continuity_v1.check("instagram_navigation.py::_create_post_open_intent_from_final_proof")
     if not isinstance(binding, dict):
         return None
     try:
@@ -31845,10 +31855,12 @@ def _validate_post_follow_open_like_proof_stash(
     Peek post-follow open proof (non-destructive). Returns
     (ok, stash, age_ms, reject_reason).
     """
+    ui_continuity_v1.check("instagram_navigation.py::_validate_post_follow_open_like_proof_stash")
     global _post_follow_open_like_proof_stash
     stash = _post_follow_open_like_proof_stash
     if not isinstance(stash, dict) or not stash:
         return False, None, 0.0, "proof_absent"
+    ui_continuity_v1.require_capture(float(stash.get("stashed_at_monotonic") or 0), "post_follow:stash")
 
     age_ms = round(
         (time.perf_counter() - float(stash.get("stashed_at_monotonic") or 0.0))
@@ -33204,6 +33216,7 @@ def _post_open_context_v1_fresh_reacquisition_contract(
     transported snapshot expires, those UI-derived claims must be rebuilt
     coherently from the one bounded fresh hierarchy.
     """
+    ui_continuity_v1.check("instagram_navigation.py::_post_open_context_v1_fresh_reacquisition_contract")
     ctx = dict(context or {})
     if str(ctx.get("version") or "") != "PostOpenContextV1":
         return False, "liketapcontext_post_open_version_missing"
@@ -33324,6 +33337,7 @@ def _create_like_tap_context_v2(
     A fresh dump is allowed only as the caller's single bounded fallback.  The
     happy path never discards an exact Like node that A2/V5 has just approved.
     """
+    ui_continuity_v1.check("instagram_navigation.py::_create_like_tap_context_v2")
     audit = dict((post_open_context or {}).get("post_open_surface_audit") or {})
     xml = "" if force_fresh_dump else str(audit.get("snapshot_xml") or "")
     snapshot_source = "a2_v5_snapshot"
@@ -33331,6 +33345,7 @@ def _create_like_tap_context_v2(
         audit.get("snapshot_captured_at_monotonic") or 0.0
     )
     if xml:
+        ui_continuity_v1.require_capture(captured_at, "like_tap:transported_snapshot")
         snapshot_age_ms = max(
             0.0, (time.perf_counter() - captured_at) * 1000.0
         )
@@ -33653,7 +33668,9 @@ def _validate_like_tap_context_v2(
     d: u2.Device | None = None,
     expected_package: str = "",
 ) -> tuple[bool, str, float]:
+    ui_continuity_v1.check("instagram_navigation.py::_validate_like_tap_context_v2")
     ctx = dict(context or {})
+    ui_continuity_v1.require_capture(float(ctx.get("created_at_monotonic") or 0), "like_tap:context")
     if str(ctx.get("version") or "") != "LikeTapContextV2":
         return False, "liketapcontext_version_missing", 0.0
     age_ms = max(
@@ -52784,6 +52801,7 @@ def run_mute_engine_v2(
     Short, non-exploratory mute after verified follow. No return_to_followers_list,
     no hierarchy refresh, no profile reopen, no scroll/swipe recovery.
     """
+    ui_continuity_v1.check("instagram_navigation.py::run_mute_engine_v2")
     from navigation_engine import NavigationEngineState, observe_instagram_state
 
     t_all = time.perf_counter()
@@ -54604,11 +54622,13 @@ def _fresh_ui_proof_age_at_tap(
     now_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Freeze FreshUiProof freshness immediately before a physical tap."""
+    ui_continuity_v1.check("instagram_navigation.py::_fresh_ui_proof_age_at_tap")
     now = float(now_monotonic if now_monotonic is not None else time.monotonic())
     try:
         created_at = float(getattr(proof, "created_at_monotonic", 0.0) or 0.0)
     except (TypeError, ValueError):
         created_at = 0.0
+    ui_continuity_v1.require_capture(created_at, "fresh_ui:tap_boundary")
     try:
         ttl_ms = max(1.0, float(getattr(proof, "ttl_ms", 1250.0) or 1250.0))
     except (TypeError, ValueError):
@@ -62261,6 +62281,7 @@ def return_to_followers_list(
     max_retries: int | None = None,
 ) -> tuple[bool, str]:
     """Depth-aware return to Followers, based only on fresh surface proof."""
+    ui_continuity_v1.check("instagram_navigation.py::return_to_followers_list")
     retries = max_retries
     if retries is None:
         retries = int(getattr(config, "FOLLOWERS_LIST_RETURN_MAX_RETRIES", 2))
@@ -62359,6 +62380,7 @@ def visual_flow_final_return_to_ct_followers_list(
     Leave an opened follower-candidate profile and restore the source (CT) followers list.
     Thin wrapper over return_to_followers_list; never raises.
     """
+    ui_continuity_v1.check("instagram_navigation.py::visual_flow_final_return_to_ct_followers_list")
     _ = source_account_context
     try:
         log(
@@ -63320,6 +63342,7 @@ def build_pre_follow_tap_context(
     private_gate: dict[str, Any],
 ) -> dict[str, Any]:
     """Typed snapshot for safe reuse between pre-follow gate and perform_follow_safe."""
+    ui_continuity_v1.check("instagram_navigation.py::build_pre_follow_tap_context")
     sg = dict(screen_guard or {})
     pg = dict(private_gate or {})
     priv_payload = pg.get("private_probe_payload")
@@ -63367,8 +63390,10 @@ def _pre_follow_tap_context_reuse_block_reason(
     follower_username: str,
     source_profile_username: str | None = None,
 ) -> str:
+    ui_continuity_v1.check("instagram_navigation.py::_pre_follow_tap_context_reuse_block_reason")
     if not isinstance(ctx, dict) or ctx.get("kind") != _PRE_FOLLOW_TAP_CONTEXT_KIND:
         return "missing_or_wrong_kind"
+    ui_continuity_v1.require_capture(float(ctx.get("captured_at_mono") or 0), "follow_tap:context")
     if _norm_follow_username(ctx.get("follower_username")) != _norm_follow_username(
         follower_username
     ):
@@ -64398,6 +64423,7 @@ def cleanup_dm_after_send_button_missing(d, pkg=None) -> bool:
 
 
 def verify_app_foreground(d: u2.Device, package: str | None = None) -> bool:
+    ui_continuity_v1.check("instagram_navigation.py::verify_app_foreground")
     package = package or config.INSTAGRAM_PACKAGE
     try:
         cur = d.app_current()

@@ -7,6 +7,8 @@ continue through their existing Golden path.
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 import hashlib
 import os
 import re
@@ -863,12 +865,14 @@ def consume(
     consume_once: bool = False,
     metadata_equals: dict[str, Any] | None = None,
 ) -> tuple[FreshUiProof | None, float, str]:
+    ui_continuity_v1.check("follow_60s_canary.py::consume")
     proof = _RUNTIME.proofs.get(str(purpose)) if enabled() else None
     reason = ""
     age_ms = 0.0
     if proof is None:
         reason = "missing_proof"
     else:
+        ui_continuity_v1.require_capture(proof.created_at_monotonic, "canary:consume")
         age_ms = max(0.0, (time.monotonic() - proof.created_at_monotonic) * 1000.0)
         expected = {
             "account_id": _RUNTIME.account_id,
@@ -1171,11 +1175,13 @@ def get_candidate_profile_verdict(
     *, candidate_username: str, package: str = "", activity: str = "",
     navigation_generation: str = "",
 ) -> tuple[CandidateProfileVerdict | None, float, str]:
+    ui_continuity_v1.check("follow_60s_canary.py::get_candidate_profile_verdict")
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     verdict = _RUNTIME.candidate_verdicts.get(candidate) if enabled("mute_like_handoff") else None
     age_ms = 0.0
     reason = "missing_verdict"
     if verdict is not None:
+        ui_continuity_v1.require_capture(verdict.created_at_monotonic, "canary:candidate_verdict")
         age_ms = max(0.0, (time.monotonic() - verdict.created_at_monotonic) * 1000.0)
         checks = ((verdict.account_id, _RUNTIME.account_id, "account"),
                   (verdict.candidate_username, candidate, "candidate"),
@@ -1376,11 +1382,13 @@ def consume_post_grid_evidence(
     screen_orientation: str = "",
     screen_density: float | None = None,
 ) -> tuple[PostGridEvidence | None, float, str]:
+    ui_continuity_v1.check("follow_60s_canary.py::consume_post_grid_evidence")
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     ev = _RUNTIME.post_grid_evidence.pop(candidate, None) if enabled("like_fresh_cell_bounds") else None
     age_ms = 0.0
     reason = "missing_evidence"
     if ev is not None:
+        ui_continuity_v1.require_capture(ev.created_at_monotonic, "canary:post_grid")
         age_ms = max(0.0, (time.monotonic() - ev.created_at_monotonic) * 1000.0)
         reason = ""
         for got, want, name in ((ev.account_id, _RUNTIME.account_id, "account"),
@@ -1535,11 +1543,13 @@ def consume_fresh_tap_proof(
     consume_once: bool = True,
 ) -> tuple[FreshTapProof | None, float, str]:
     """Validate the last tap boundary in the canonical runtime domain."""
+    ui_continuity_v1.check("follow_60s_canary.py::consume_fresh_tap_proof")
     key = str(purpose or "")
     proof = _RUNTIME.fresh_tap_proofs.get(key) if enabled("like_fresh_cell_bounds") else None
     age_ms = 0.0
     reason = "missing_fresh_tap_proof"
     if proof is not None:
+        ui_continuity_v1.require_capture(proof.created_at_monotonic, "canary:fresh_tap")
         age_ms = max(0.0, (time.monotonic() - proof.created_at_monotonic) * 1000.0)
         reason = ""
         expected = (
@@ -1619,11 +1629,13 @@ def consume_next_candidate_snapshot(
     *, source_profile_username: str, package: str = "", activity: str = "",
     navigation_generation: str = "", viewport_fingerprint: str = "",
 ) -> tuple[NextCandidateSnapshot | None, float, str]:
+    ui_continuity_v1.check("follow_60s_canary.py::consume_next_candidate_snapshot")
     snap = _RUNTIME.next_candidate_snapshot if enabled("post_return_snapshot_reuse") else None
     _RUNTIME.next_candidate_snapshot = None
     age_ms = 0.0
     reason = "missing_snapshot"
     if snap is not None:
+        ui_continuity_v1.require_capture(snap.created_at_monotonic, "canary:next_candidate")
         age_ms = max(0.0, (time.monotonic() - snap.created_at_monotonic) * 1000.0)
         reason = ""
         expected_source = str(source_profile_username or "").strip().lstrip("@").lower()

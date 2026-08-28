@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import ui_continuity_v1
+
+from dataclasses import asdict, dataclass, field
 import secrets
 import time
 from typing import Any
@@ -70,6 +72,7 @@ class PostOpenIntentV2:
     consumed: bool = False
     invalidated: bool = False
     invalidation_reason: str = ""
+    continuity_epoch: int = field(default_factory=ui_continuity_v1.epoch)
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,6 +103,7 @@ def create_post_open_intent_v2(
     ttl_ms: float = 1250.0,
     created_at_monotonic: float | None = None,
 ) -> PostOpenIntentV2 | None:
+    ui_continuity_v1.check("post_open_intent_v2.py::create_post_open_intent_v2")
     branch = str(source_branch or "").upper()
     worker_sha = str(binding.get("worker_sha") or "").strip().lower()
     required = (
@@ -172,8 +176,10 @@ def consume_post_open_intent_v2(
     ui_generation: int,
     now_monotonic: float | None = None,
 ) -> tuple[PostOpenIntentV2 | None, float, str]:
+    ui_continuity_v1.check("post_open_intent_v2.py::consume_post_open_intent_v2")
     if intent is None or intent.version != VERSION:
         return None, 0.0, "post_open_intent_missing_or_version_invalid"
+    ui_continuity_v1.require_epoch(intent.continuity_epoch, "post_open_intent:consume")
     now = float(now_monotonic) if now_monotonic is not None else time.monotonic()
     age_ms = max(0.0, (now - intent.created_at_monotonic) * 1000.0)
     reason = ""

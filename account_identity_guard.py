@@ -10,6 +10,8 @@ ready to distinguish a wrong active account from a possible username rename.
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 import html
 import re
 import time
@@ -939,6 +941,77 @@ def _publish_identity_mismatch_status(
         )
 
 
+def _verify_post_suspension_identity(d, *, expected: str, package: str) -> AccountIdentityCheckResult:
+    """Read-only bootstrap, not recovery navigation or replay of an interrupted frame.
+
+    A candidate/CT header is not account identity. Only a fresh own-profile
+    surface in the exact clone can reopen admission; otherwise safe-stop.
+    """
+    failure = "post_suspension_identity_unproved"
+    try:
+        with ui_continuity_v1.revalidation():
+            before = dict(d.app_current() or {})
+            activity = str(before.get("activity") or "")
+            if (not expected or not package or before.get("package") != package
+                    or activity.rsplit(".", 1)[-1] not in {"MainActivity", "InstagramMainActivity"}):
+                raise ValueError(failure)
+            xml = str(d.dump_hierarchy(compressed=False) or "")
+            root = _parse_xml_root(xml)
+            human = classify_instagram_human_confirmation(xml, package_name=package, activity_name=activity)
+            restriction = classify_instagram_account_restriction(xml)
+            if human.detected:
+                failure = HUMAN_CONFIRMATION_REASON
+                raise ValueError(failure)
+            if restriction.detected:
+                failure = restriction.reason_code
+                raise ValueError(failure)
+            if classify_instagram_ads_data_consent_popup(xml).detected:
+                failure = ADS_DATA_CONSENT_IDENTITY_PENDING_REASON
+                raise ValueError(failure)
+            # Positive structural own-profile proof, never username alone.
+            nodes = list(root.iter()) if root is not None else []
+            owned = [n for n in nodes if n.get("package") == package]
+            selected_profile = any(
+                n.get("resource-id") == package + ":id/profile_tab"
+                and n.get("selected") == "true" for n in owned
+            )
+            edit_profile = any(
+                n.get("resource-id") in {package + ":id/button_edit_profile", package + ":id/profile_header_edit_profile"}
+                and n.get("enabled", "true") == "true" for n in owned
+            )
+            titles = {
+                normalize_account_username(n.get("text") or n.get("content-desc") or "")
+                for n in owned if n.get("resource-id") in {
+                    package + ":id/action_bar_title", package + ":id/profile_header_username"
+                }
+            }
+            after = dict(d.app_current() or {})
+            dialog_present = any("dialog" in str(n.get("class") or "").lower() for n in nodes)
+            if not (selected_profile and edit_profile and not dialog_present and titles == {expected}
+                    and after.get("package") == package and after.get("activity") == activity):
+                raise ValueError(failure)
+            # Existing cache invalidation only; no durable transaction mutation.
+            import instagram_navigation as navigation
+            import follow_60s_canary as canary
+            import followers_surface_proof as followers
+            navigation.invalidate_search_surface_cache("suspension_epoch")
+            navigation._clear_post_follow_open_like_proof_stash()
+            navigation._clear_post_mute_sheet_closed_proof_stash()
+            canary.invalidate("suspension_epoch")
+            followers.clear()
+        return AccountIdentityCheckResult(
+            ok=True, expected_account_username=expected, actual_logged_in_username=expected,
+            verification_method="post_suspension_fresh_own_profile",
+            meta={"ui_continuity_epoch": ui_continuity_v1.epoch(), "fresh_package": package,
+                  "fresh_activity": activity, "interrupted_action_replayed": False},
+        )
+    except Exception:
+        return AccountIdentityCheckResult(
+            ok=False, expected_account_username=expected, failure_reason=failure,
+            verification_method="post_suspension_read_only_fail_closed",
+        )
+
+
 def verify_active_instagram_account_matches_expected(
     d: u2.Device,
     *,
@@ -955,6 +1028,12 @@ def verify_active_instagram_account_matches_expected(
     stage: str = "account_identity_preflight",
 ) -> AccountIdentityCheckResult:
     """Open/inspect own profile and require an exact handle match."""
+    ui_continuity_v1.observe("account_identity_guard.py::verify_active_instagram_account_matches_expected")
+    if ui_continuity_v1.failed():
+        return _verify_post_suspension_identity(
+            d, expected=normalize_account_username(expected_account_username),
+            package=str(expected_package_name or getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        )
     expected_raw = str(expected_account_username or "").strip()
     expected = normalize_account_username(expected_raw)
     expected_stable_id = str(expected_instagram_user_id or "").strip()

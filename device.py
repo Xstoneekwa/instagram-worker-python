@@ -21,6 +21,8 @@ import uiautomator2 as u2
 
 import config
 from logs import log
+from instagram_version_lock_state_v1 import canonical_store
+import ui_continuity_v1
 
 T = TypeVar("T")
 
@@ -29,8 +31,8 @@ _ime_session_original: str | None = None
 # True after global animation scales are set to 0 for this process.
 _android_animations_disabled_session: bool = False
 
-# Local baseline for strict version lock (per clone / phone farm host).
-LOCK_STATE_PATH = Path(__file__).resolve().parent / "lock_state.json"
+# The sealed release is a read-only legacy source, never a runtime write target.
+_LOCK_STATE_RELEASE_ROOT = Path(__file__).resolve().parent
 _PLAY_STORE_PKG = "com.android.vending"
 _VERSION_NAME_RE = re.compile(r"versionName=([^\s\]]+)")
 _VERSION_CODE_RE = re.compile(r"versionCode=(\d+)")
@@ -181,6 +183,7 @@ def runner_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) -> tuple[int, str, str]:
+    ui_continuity_v1.check("adb:before")
     adb_path = resolve_adb_path()
     if not adb_path:
         log("warning", "adb_run_failed", argv=argv[:8], error="adb_not_available")
@@ -197,6 +200,7 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
             timeout=timeout_s,
             env=runner_subprocess_env(),
         )
+        ui_continuity_v1.check("adb:after")
         out = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
         return int(p.returncode), out, err
@@ -207,6 +211,8 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
 
 def _adb_shell_stdin(serial: str | None, shell_line: str, *, timeout_s: float = 10.0) -> tuple[int, str, str]:
     """Run `adb shell` with commands from stdin so sensitive input stays out of argv."""
+
+    ui_continuity_v1.check("adb_stdin:before")
 
     adb_path = resolve_adb_path()
     if not adb_path:
@@ -225,6 +231,7 @@ def _adb_shell_stdin(serial: str | None, shell_line: str, *, timeout_s: float = 
             timeout=timeout_s,
             env=runner_subprocess_env(),
         )
+        ui_continuity_v1.check("adb_stdin:after")
         return int(p.returncode), (p.stdout or "").strip(), (p.stderr or "").strip()
     except Exception as exc:
         log("warning", "adb_shell_stdin_failed", error=type(exc).__name__)
@@ -516,26 +523,16 @@ def retry_until_jitter(
     return None
 
 
-def _lock_state_read() -> dict[str, Any]:
-    try:
-        if LOCK_STATE_PATH.is_file():
-            raw = json.loads(LOCK_STATE_PATH.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                return raw
-    except Exception as e:
-        log("warning", "instagram_lock_state_read_failed", error=str(e))
-    return {}
+def _lock_state_store(serial: str | None, pkg: str):
+    return canonical_store(release_root=_LOCK_STATE_RELEASE_ROOT, serial=serial, package=pkg)
+
+
+def _lock_state_read(serial: str | None, pkg: str) -> dict[str, Any]:
+    return _lock_state_store(serial, pkg).read()
 
 
 def _lock_state_write(data: dict[str, Any]) -> None:
-    try:
-        LOCK_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        LOCK_STATE_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-    except Exception as e:
-        log("warning", "instagram_lock_state_write_failed", error=str(e))
+    _lock_state_store(data.get("device_serial"), str(data.get("package") or "")).write(data)
 
 
 def _parse_package_versions(dumpsys_out: str) -> tuple[str | None, int | None]:
@@ -677,7 +674,7 @@ def lock_instagram_update_system(
         # Record baseline version + lock metadata for strict mode.
         try:
             vn, vc = _fetch_package_version(serial, pkg)
-            prev = _lock_state_read()
+            prev = _lock_state_read(serial, pkg)
             merged: dict[str, Any] = {
                 **prev,
                 "authorized_version_name": vn or prev.get("authorized_version_name"),
@@ -732,7 +729,7 @@ def unlock_instagram_updates(d: u2.Device, unlock_code: str) -> bool:
         )
         log("info", "instagram_update_unlock_success", package=pkg)
         try:
-            prev = _lock_state_read()
+            prev = _lock_state_read(serial, pkg)
             prev["lock_applied"] = False
             prev["unlocked_at_iso"] = datetime.now(timezone.utc).isoformat()
             prev["device_serial"] = serial or prev.get("device_serial")
@@ -766,12 +763,20 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
     play_off = _package_disabled_for_user0(serial, _PLAY_STORE_PKG)
     ig_sus = _package_suspended(serial, pkg)
 
-    state = _lock_state_read()
+    state_error = None
+    state_path = ""
+    try:
+        store = _lock_state_store(serial, pkg)
+        state_path = str(store.path)
+        state = store.read()
+    except Exception as exc:
+        state = {}
+        state_error = str(exc)
     auth_name = state.get("authorized_version_name")
     auth_code = state.get("authorized_version_code")
     baseline_missing = auth_name is None and auth_code is None
 
-    if baseline_missing and (vn is not None or vc is not None):
+    if not state_error and baseline_missing and (vn is not None or vc is not None):
         try:
             state = {
                 **state,
@@ -784,10 +789,13 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
             _lock_state_write(state)
             auth_name, auth_code = vn, vc
         except Exception as e:
+            state_error = str(e)
             log("warning", "instagram_lock_baseline_init_failed", error=str(e))
 
     automation_unsafe_reason: str | None = None
-    unsafe = False
+    unsafe = bool(state_error)
+    if state_error:
+        automation_unsafe_reason = "instagram_lock_state_unproved"
     if ig_sus is True:
         unsafe = True
         automation_unsafe_reason = "instagram_app_suspended"
@@ -815,7 +823,8 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
         "automation_unsafe_reason": automation_unsafe_reason,
         "authorized_version_name": state.get("authorized_version_name"),
         "authorized_version_code": state.get("authorized_version_code"),
-        "lock_state_path": str(LOCK_STATE_PATH),
+        "lock_state_path": state_path,
+        "lock_state_error": state_error,
     }
     log("info", "instagram_lock_state_detected", **payload)
     if unsafe and strict:

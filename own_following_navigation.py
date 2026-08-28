@@ -6,6 +6,8 @@ validates the Following surface only; it never taps a row CTA.
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -867,6 +869,7 @@ def open_own_following_list_from_own_profile(
     pkg: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Open the owner Following list and validate the dedicated Following surface."""
+    ui_continuity_v1.check("own_following_navigation.py::open_own_following_list_from_own_profile")
     del pkg  # kept for symmetry with existing own profile helpers.
     account_username = str(account_username or "").strip()
     log("info", "unfollow_open_own_profile_started", account_username=account_username)

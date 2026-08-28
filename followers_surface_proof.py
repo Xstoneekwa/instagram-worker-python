@@ -7,7 +7,9 @@ must provide fresh evidence after a screen-changing intent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import ui_continuity_v1
+
+from dataclasses import dataclass, field, replace
 from contextvars import ContextVar
 import hashlib
 import threading
@@ -32,6 +34,7 @@ class FollowersSurfaceScope:
 class FollowersSurfaceGenerations:
     navigation_generation: int
     scroll_generation: int
+    continuity_epoch: int = field(default_factory=ui_continuity_v1.epoch)
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,8 @@ _current_proof: ContextVar[FollowersSurfaceProof | None] = ContextVar(
 
 def current_generations(scope: FollowersSurfaceScope) -> FollowersSurfaceGenerations:
     with _lock:
-        return _generations.get(scope, FollowersSurfaceGenerations(0, 0))
+        generation = _generations.get(scope, FollowersSurfaceGenerations(0, 0))
+        return replace(generation, continuity_epoch=ui_continuity_v1.epoch())
 
 
 def capture(
@@ -118,6 +122,7 @@ def capture(
     source: str = "fresh_xml",
     captured_at_monotonic: float | None = None,
 ) -> FollowersSurfaceProof | None:
+    ui_continuity_v1.check("followers_surface_proof.py::capture")
     xml = str(hierarchy_xml or "").strip()
     if not xml:
         return None
@@ -168,6 +173,7 @@ def capture_viewport(
     captured_at_monotonic: float | None = None,
 ) -> FollowersViewportProof | None:
     """Create the only actionable row geometry for the current generation."""
+    ui_continuity_v1.check("followers_surface_proof.py::capture_viewport")
 
     xml = str(hierarchy_xml or "").strip()
     if not xml:
@@ -235,6 +241,7 @@ def issue_row_action_token(
     now_monotonic: float | None = None,
 ) -> tuple[RowActionToken | None, str]:
     """Resolve the expected username just-in-time from current actionable proof."""
+    ui_continuity_v1.check("followers_surface_proof.py::issue_row_action_token")
 
     expected = _normalized_username(expected_username)
     now = time.monotonic() if now_monotonic is None else float(now_monotonic)
@@ -275,6 +282,7 @@ def issue_row_action_token(
 
 def consume_row_action_token(token: RowActionToken | None) -> tuple[bool, str]:
     """Consume once, immediately before invalidation and the physical tap."""
+    ui_continuity_v1.check("followers_surface_proof.py::consume_row_action_token")
 
     if token is None:
         return False, "row_action_token_missing"
@@ -302,6 +310,7 @@ def validate(
     max_age_ms: float = DEFAULT_SAME_SURFACE_MAX_AGE_MS,
     now_monotonic: float | None = None,
 ) -> tuple[bool, str]:
+    ui_continuity_v1.check("followers_surface_proof.py::validate")
     if mode == "certify_after_navigation":
         return False, "cache_forbidden_after_navigation"
     if proof is None:

@@ -49,6 +49,7 @@ import follow_persistence_receipt_replay
 from ambiguous_mutation_reconciliation import decide_reconciliation
 import deferred_projection_outbox
 import device_action_latch
+import ui_continuity_v1
 import storage_health
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
@@ -25769,6 +25770,8 @@ def _main_impl() -> int:
     d = connect_device(device_serial)
     startup_evidence["device_connected_at"] = datetime.now(timezone.utc).isoformat()
     _CURRENT_DEVICE = d
+    if account_session_run or unfollow_session_run or _follow60_canary_active:
+        ui_continuity_v1.begin_attempt(run_id or "standalone-follow")
     device_action_latch.configure(
         enabled=bool(_follow60_canary_active),
         account_id=account_id or "",
@@ -25854,7 +25857,9 @@ def _main_impl() -> int:
             _lock_check = check_instagram_version_lock(d)
         except Exception as e:
             log("warning", "instagram_version_lock_check_failed", error=str(e))
-            _lock_check = {"unsafe_for_automation": False, "error": str(e)}
+            _lock_check = {"unsafe_for_automation": True, "error": str(e),
+                           "automation_unsafe_reason": "instagram_lock_state_unproved",
+                           "lock_state_error": str(e)}
         t = _phase("instagram_version_lock_check", t)
         _startup_timing_log(
             "startup_app_readiness_version_lock_completed",
@@ -25870,8 +25875,9 @@ def _main_impl() -> int:
             lock_check_enabled=True,
             unsafe_for_automation=bool(_lock_check.get("unsafe_for_automation")),
         )
-        if bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False)) and bool(
-            _lock_check.get("unsafe_for_automation")
+        if _lock_check.get("lock_state_error") or (
+            bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False))
+            and bool(_lock_check.get("unsafe_for_automation"))
         ):
             log(
                 "critical",
@@ -27992,6 +27998,23 @@ def _main_impl() -> int:
 def main() -> int:
     try:
         return _main_impl()
+    except ui_continuity_v1.UiContinuityLost as exc:
+        # No device cleanup gesture with an unproved post-suspension surface.
+        # Durable intents/receipts are untouched; a tap interrupted in flight
+        # stays ambiguous for the existing P0C reconciliation contract.
+        summary = {**exc.evidence, "first_failure_reason": ui_continuity_v1.REASON,
+                   "safe_to_continue_ui": False, "session_counters": dict(_SESSION_COUNTERS),
+                   "completed_actions_preserved": True, "fresh_identity_required_on_resume": True}
+        log("error", "ui_continuity_safe_stop", account_id=_CURRENT_ACCOUNT_ID,
+            run_id=_CURRENT_RUN_ID, request_id=_CURRENT_RUN_REQUEST_ID, **summary)
+        if _CURRENT_RUN_ID:
+            _update_run_status_safe(
+                run_id=_CURRENT_RUN_ID, status="failed",
+                totals={"total": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "success": int(_RUNTIME_FOLLOW_COUNT or 0), "failed": 0},
+                performance_summary=summary,
+            )
+        return 1
     except Exception as exc:
         if isinstance(exc, PreDeviceControlPlaneUnavailable):
             log(

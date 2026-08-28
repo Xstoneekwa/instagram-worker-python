@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 from enum import Enum
 import time
 from typing import Any
@@ -87,6 +89,7 @@ def observe_instagram_state(
     - ``phase``: str — e.g. ``candidate_profile_analysis`` for logging.
     - ``expected_state``: str — optional hint (PROFILE / CANDIDATE_PROFILE).
     """
+    ui_continuity_v1.check("navigation_engine.py::observe_instagram_state")
     ctx = dict(context) if isinstance(context, dict) else {}
     _disable_followers_vf = bool(ctx.get("disable_followers_visual_fallback"))
     exp = str(expected_package or "").strip()

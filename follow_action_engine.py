@@ -7,6 +7,8 @@ Does not replace ``wait_for_follow_button_safe`` for other callers.
 
 from __future__ import annotations
 
+import ui_continuity_v1
+
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -2068,6 +2070,7 @@ def follow_action_surface_wait_and_select_element(
     Poll with recovery micro-adjustments until a follow control is selected or timeout.
     Return shape compatible with ``wait_for_follow_button_safe`` (element, meta dict + events).
     """
+    ui_continuity_v1.check("follow_action_engine.py::follow_action_surface_wait_and_select_element")
     import instagram_navigation as ign
 
     events: list[tuple[str, dict[str, Any]]] = []
