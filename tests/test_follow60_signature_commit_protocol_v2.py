@@ -18,6 +18,7 @@ from follow60_candidate_identity_v2 import (
 from follow60_change_protocol_v1 import verify_candidate_commit
 from follow60_deployment_gate_v1 import verify_deployment_candidate
 from follow60_lock_v3 import RESUME_CONTRACT_SOURCE_FILES, verify_repository
+from follow60_status_trust_cache_v1 import PROTOCOL_FILES as STATUS_TRUST_PROTOCOL_FILES
 from tests import test_follow60_deployment_gate_v1 as deployment_fixture
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -134,6 +135,7 @@ class SignatureCommitProtocolV2Tests(unittest.TestCase):
         self.assertFalse(self.gate()["ok"])
 
     def test_I_generator_external_signer_and_deployment_cli_pass(self):
+        generator_base = self.sha
         scope = self.evidence / "scope.json"
         previous = self.evidence / "previous.json"
         recert = self.evidence / "recertification.json"
@@ -141,7 +143,35 @@ class SignatureCommitProtocolV2Tests(unittest.TestCase):
         generated = self.evidence / "generated.json"
         detached = self.evidence / "generated.sig"
         private = self.evidence / "ephemeral-test-only.pem"
-        scope.write_text(json.dumps(["protected.py", *RESUME_CONTRACT_SOURCE_FILES]))
+        # The production generator now fails closed unless every status-trust
+        # verifier/installer/runtime input is in signed scope.  Materialize the
+        # same files in this synthetic candidate and bind them into its exact
+        # Approval-1 freeze before exercising the successful generator path.
+        for relative in STATUS_TRUST_PROTOCOL_FILES:
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(SOURCE / relative, target)
+        self.authorization["authorized_paths"] = sorted({
+            "protected.py", *STATUS_TRUST_PROTOCOL_FILES,
+        })
+        self.authorization["base_sha"] = generator_base
+        self.authorization["authorized_dependency_scope"] = [
+            "protected.py", "signed-status-trust-completeness",
+        ]
+        self.auth_path.write_text(json.dumps(self.authorization))
+        self.auth_sig.write_bytes(self.key.sign(self.auth_path.read_bytes()))
+        git(self.root, "add", *STATUS_TRUST_PROTOCOL_FILES)
+        self.freeze = freeze_index(self.root, self.authorization)
+        self.freeze_path.write_text(json.dumps(self.freeze))
+        self.assertTrue(self.commit_gate()["ok"])
+        git(self.root, "commit", "-qm", "add mandatory status trust scope")
+        self.sha = commit_sha(self.root, "HEAD")
+        self.payload["candidate_identity"] = committed_identity(
+            self.root, generator_base, freeze=self.freeze,
+        )
+        scope.write_text(json.dumps(sorted({
+            "protected.py", *RESUME_CONTRACT_SOURCE_FILES, *STATUS_TRUST_PROTOCOL_FILES,
+        })))
         previous.write_text("{}")
         recert.write_text(json.dumps({"candidate_sha": self.sha, **self.payload["recertification"]}))
         resume.write_text(json.dumps(self.payload["resume_state_contract"]))
@@ -150,7 +180,7 @@ class SignatureCommitProtocolV2Tests(unittest.TestCase):
                 "--root", str(self.root), "--scope", str(scope), "--base-manifest", str(previous),
                 "--recertification-receipt", str(recert), "--resume-contract-receipt", str(resume),
                 "--freeze", str(self.freeze_path), "--output", str(generated),
-                "--base-sha", self.base, "--change-id", self.authorization["change_id"]]
+                "--base-sha", generator_base, "--change-id", self.authorization["change_id"]]
         receipt = json.loads(subprocess.check_output(args))
         self.assertEqual(receipt["candidate_identity"], self.payload["candidate_identity"])
         self.assertEqual(receipt["manifest_sha256"], manifest_sha256(generated))

@@ -31,6 +31,8 @@ PROTOCOL_FILES = (
     'follow60_status_trust_cache_v1.py', 'follow60_lock_v3.py',
     'follow60_candidate_identity_v2.py', 'follow60_deployment_gate_v1.py',
     'follow60_external_deployment_lock_v2.py', 'follow60_write_lock_v3_1.py',
+    'phonefarm_runtime_control.py',
+    'scripts/production_lineage_gate_v1.py',
     'scripts/verify-follow60-status-trust-v1.py',
     'scripts/install-follow60-status-trust-cache-v1.py',
     'scripts/run_control_dispatcher_service.sh',

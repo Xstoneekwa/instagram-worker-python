@@ -396,6 +396,7 @@ def evaluate_post_promotion_registry(
     pre_promotion_registry_sha: str,
     promoted_sha: str,
     post_promotion_active_sha: str,
+    service_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Prove that promotion bookkeeping converged after the runtime switch.
 
@@ -433,6 +434,47 @@ def evaluate_post_promotion_registry(
         raise GateFailure("post_promotion_active_sha_mismatch")
     if post_registry != promoted:
         raise GateFailure("post_promotion_registry_sha_mismatch")
+    expected_root = str(promotion_receipt.get("runtime_root") or "").strip()
+    if component_name == "worker":
+        if not expected_root:
+            raise GateFailure("promotion_receipt_runtime_root_missing")
+        if str(production.get("runtime_root") or "") != expected_root:
+            raise GateFailure("post_promotion_registry_runtime_root_mismatch")
+        if not isinstance(service_snapshot, dict) or service_snapshot.get("ok") is not True:
+            raise GateFailure("post_promotion_service_convergence_blocked")
+        if service_snapshot.get("expected_root") != expected_root:
+            raise GateFailure("post_promotion_service_expected_root_mismatch")
+        if service_snapshot.get("expected_sha") != promoted:
+            raise GateFailure("post_promotion_service_expected_sha_mismatch")
+        if service_snapshot.get("active_root") != expected_root:
+            raise GateFailure("post_promotion_active_root_mismatch")
+        if service_snapshot.get("active_sha") != promoted:
+            raise GateFailure("post_promotion_active_runtime_sha_mismatch")
+        if service_snapshot.get("old_root_process_count") != 0:
+            raise GateFailure("post_promotion_old_root_service_blocking")
+        services = service_snapshot.get("services")
+        if not isinstance(services, dict) or set(services) != {"dispatcher", "heartbeat", "notifier"}:
+            raise GateFailure("post_promotion_service_set_mismatch")
+        for name in ("dispatcher", "heartbeat", "notifier"):
+            service = services.get(name)
+            if not isinstance(service, dict):
+                raise GateFailure(f"post_promotion_missing_service:{name}")
+            if service.get("process_count") != 1:
+                reason = "missing" if service.get("process_count") == 0 else "duplicate"
+                raise GateFailure(f"post_promotion_{reason}_service:{name}")
+            processes = service.get("processes")
+            if not isinstance(processes, list) or len(processes) != 1:
+                raise GateFailure(f"post_promotion_service_process_evidence_invalid:{name}")
+            process = processes[0]
+            if (
+                process.get("cwd") != expected_root
+                or process.get("module_root") != expected_root
+                or process.get("runtime_sha") != promoted
+            ):
+                raise GateFailure(f"post_promotion_service_identity_mismatch:{name}")
+        receipt_convergence = promotion_receipt.get("service_convergence")
+        if not isinstance(receipt_convergence, dict) or receipt_convergence.get("ok") is not True:
+            raise GateFailure("promotion_receipt_service_convergence_missing")
 
     return {
         "ok": True,
@@ -443,6 +485,9 @@ def evaluate_post_promotion_registry(
         "promoted_sha": promoted,
         "post_promotion_active_sha": post_active,
         "post_promotion_registry_sha": post_registry,
+        "runtime_root": expected_root or None,
+        "service_convergence": "PASS" if component_name == "worker" else "NOT_APPLICABLE",
+        "old_root_process_count": 0 if component_name == "worker" else None,
     }
 
 
@@ -495,6 +540,14 @@ def main() -> int:
             if not _is_user_immutable(args.promotion_receipt):
                 raise GateFailure("promotion_receipt_not_immutable")
             promotion_receipt = _load_json(args.promotion_receipt)
+            service_snapshot = None
+            if args.component == "worker":
+                from phonefarm_runtime_control import canonical_service_snapshot
+
+                service_snapshot = canonical_service_snapshot(
+                    expected_root=str(promotion_receipt.get("runtime_root") or ""),
+                    expected_sha=str(args.promoted_sha or ""),
+                )
             result = evaluate_post_promotion_registry(
                 registry=registry,
                 component_name=args.component,
@@ -503,6 +556,7 @@ def main() -> int:
                 pre_promotion_registry_sha=args.pre_promotion_registry_sha,
                 promoted_sha=args.promoted_sha,
                 post_promotion_active_sha=args.post_promotion_active_sha,
+                service_snapshot=service_snapshot,
             )
             result["promotion_receipt_sha256"] = hashlib.sha256(
                 args.promotion_receipt.read_bytes()

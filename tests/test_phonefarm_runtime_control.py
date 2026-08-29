@@ -13,8 +13,10 @@ def _worker_release(root: Path, commit: str = "abc1234") -> None:
     for rel in (
         "account_run_request_consumer.py",
         "device_heartbeat_publisher.py",
+        "incident_notification_service.py",
         "scripts/run_control_dispatcher_service.sh",
         "scripts/device_heartbeat_service.sh",
+        "scripts/incident_notifier_service.sh",
     ):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,12 +164,19 @@ class PhoneFarmRuntimeControlTest(TestCase):
                             "lineage": {"validated_migrations": [{"version": "v1"}]},
                         },
                     ), mock.patch.object(ctl, "_git_full_commit", return_value="oldsha"), mock.patch.object(
-                        ctl, "_stage_receipt", return_value=tmp / "receipt.pending"
-                    ), mock.patch.object(ctl, "_publish_immutable_receipt"):
+                        ctl, "_stage_receipt", side_effect=[tmp / "pending.stage", tmp / "final.stage"]
+                    ), mock.patch.object(ctl, "_publish_immutable_receipt"), mock.patch.object(
+                        ctl, "_receipt_sha256", return_value="a" * 64
+                    ), mock.patch.object(ctl, "_atomic_update_worker_registry"), mock.patch.object(
+                        ctl, "_run_canonical_controller", return_value={"ok": True}
+                    ), mock.patch.object(
+                        ctl, "_wait_for_service_convergence", return_value={"ok": True, "services": {}}
+                    ):
                         result = ctl.switch_release("new")
             self.assertTrue(result["ok"])
             self.assertEqual(current.resolve(), new.resolve())
             self.assertEqual(result["previousRoot"], str(old.resolve()))
+            self.assertEqual(result["receiptState"], "PROMOTED")
             self.assertGreaterEqual(self.transaction.recheck.call_count, 2)
             self.transaction.finish.assert_called_once()
 

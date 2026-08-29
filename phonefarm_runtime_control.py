@@ -23,6 +23,14 @@ DEFAULT_CURRENT_LINK = Path("/Users/admin/phonefarm-worker-current")
 DEFAULT_RELEASES_DIR = Path("/Users/admin/phonefarm-worker-releases")
 DEFAULT_RUNTIME_HOME = Path("/Users/admin/phonefarm-runtime")
 DEFAULT_LEGACY_ROOT = Path("/Users/admin/instagram-worker-python")
+DEFAULT_CANONICAL_REGISTRY = Path(
+    "/Users/admin/Projects/phonefarm-golden-resume-plan-contract-v1/"
+    "docs/governance/PRODUCTION_CANONICAL_DELTA_REGISTRY_V1.json"
+)
+
+PROMOTION_SERVICES = ("dispatcher", "heartbeat", "notifier")
+PROMOTION_PENDING = "SWITCHED_PENDING_SERVICE_VERIFICATION"
+PROMOTION_COMPLETE = "PROMOTED"
 
 DISPATCHER_LABEL = "com.boost.phonefarm.dispatcher"
 HEARTBEAT_LABEL = "com.boost.phonefarm.device-heartbeat"
@@ -327,6 +335,65 @@ def _publish_immutable_receipt(staged: Path, final: Path) -> None:
         raise RuntimeError("promotion_receipt_not_immutable")
 
 
+def _canonical_registry_path() -> Path:
+    return _path_from_env("PHONEFARM_CANONICAL_REGISTRY", DEFAULT_CANONICAL_REGISTRY)
+
+
+def _receipt_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _atomic_update_worker_registry(
+    registry_path: Path,
+    *,
+    expected_sha: str,
+    release_sha: str,
+    runtime_root: str,
+    receipt_path: Path,
+    receipt_sha256: str,
+) -> dict[str, Any]:
+    """Move only the canonical worker production pointer, fail-closed.
+
+    The exact expected SHA is a compare-and-swap guard.  Other registry fields,
+    components and deltas are retained byte-for-byte at the JSON value level.
+    """
+    registry_path = registry_path.expanduser().resolve(strict=True)
+    payload = _read_json_object(registry_path)
+    if payload.get("schema") != "PHONE_FARM_CANONICAL_DELTA_REGISTRY_V1":
+        raise ValueError("canonical_registry_schema_mismatch")
+    worker = ((payload.get("components") or {}).get("worker") or {})
+    production = worker.get("production")
+    if not isinstance(production, dict):
+        raise ValueError("canonical_worker_production_missing")
+    if str(production.get("sha") or "") != expected_sha:
+        raise ValueError("canonical_registry_compare_and_swap_mismatch")
+    production.update({
+        "verification_state": "VERIFIED",
+        "sha": release_sha,
+        "runtime_root": runtime_root,
+        "promotion_receipt": str(receipt_path),
+        "promotion_receipt_sha256": receipt_sha256,
+    })
+    original_info = registry_path.stat()
+    mode = stat.S_IMODE(original_info.st_mode)
+    staged = registry_path.with_name(
+        f".{registry_path.name}.{os.getpid()}.{time.monotonic_ns()}.pending"
+    )
+    try:
+        with staged.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(staged, mode)
+        if os.geteuid() == 0:
+            os.chown(staged, original_info.st_uid, original_info.st_gid)
+        os.replace(staged, registry_path)
+    finally:
+        staged.unlink(missing_ok=True)
+    return payload
+
+
 def resolve_runtime_root(paths: RuntimePaths | None = None) -> RuntimeRoot:
     paths = paths or runtime_paths()
     link = paths.current_link
@@ -347,8 +414,10 @@ def resolve_runtime_root(paths: RuntimePaths | None = None) -> RuntimeRoot:
     required = [
         resolved / "account_run_request_consumer.py",
         resolved / "device_heartbeat_publisher.py",
+        resolved / "incident_notification_service.py",
         resolved / "scripts" / "run_control_dispatcher_service.sh",
         resolved / "scripts" / "device_heartbeat_service.sh",
+        resolved / "scripts" / "incident_notifier_service.sh",
     ]
     missing = [str(path.relative_to(resolved)) for path in required if not path.exists()]
     if missing:
@@ -477,6 +546,55 @@ def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int 
     if command == "status":
         enriched = _detect_component_mismatch(component, enriched, root)
     return enriched
+
+
+def _run_canonical_controller(
+    component: str, command: str, *, paths: RuntimePaths, timeout: int = 60
+) -> dict[str, Any]:
+    """Invoke the stable runtime controller, never a release-specific script."""
+    controller = paths.runtime_home / "bin" / "phonefarm-runtimectl"
+    if not controller.is_file():
+        return {
+            "ok": False,
+            "status": "canonical_runtime_controller_missing",
+            "component": component,
+            "controller": str(controller),
+        }
+    env = os.environ.copy()
+    env["PHONEFARM_RUNTIME_CURRENT_LINK"] = str(paths.current_link)
+    env["PHONEFARM_RUNTIME_RELEASES_DIR"] = str(paths.releases_dir)
+    env["PHONEFARM_RUNTIME_HOME"] = str(paths.runtime_home)
+    env["PHONEFARM_RUNTIME_LEGACY_ROOT"] = str(paths.legacy_root)
+    try:
+        proc = subprocess.run(
+            [str(controller), component, command, "--json"],
+            cwd=str(paths.runtime_home),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "canonical_runtime_controller_failed",
+            "component": component,
+            "reason": type(exc).__name__,
+        }
+    parsed = _json_line(proc.stdout)
+    if parsed is None:
+        parsed = {
+            "ok": False,
+            "status": "canonical_runtime_controller_invalid_output",
+            "message": (proc.stdout or proc.stderr or "")[:600],
+        }
+    parsed["exitCode"] = proc.returncode
+    parsed["canonicalController"] = str(controller)
+    parsed["currentLink"] = str(paths.current_link)
+    if proc.returncode != 0:
+        parsed["ok"] = False
+    return parsed
 
 
 def serve_component(component: str) -> int:
@@ -772,13 +890,151 @@ def _pid_cwd(pid: int) -> str:
     return ""
 
 
+def _component_process_needle(component: str) -> str:
+    return {
+        "dispatcher": "account_run_request_consumer.py",
+        "heartbeat": "device_heartbeat_publisher.py",
+        "notifier": "incident_notification_service.py",
+    }[component]
+
+
+def _resolved_process_module_root(command: str, cwd: str, needle: str) -> str:
+    """Resolve the executed service module independently from process name."""
+    if not cwd:
+        return ""
+    cwd_path = _safe_resolve(Path(cwd))
+    for token in command.split():
+        cleaned = token.strip("'\"")
+        if Path(cleaned).name != needle:
+            continue
+        module = Path(cleaned)
+        if not module.is_absolute():
+            module = cwd_path / module
+        try:
+            resolved_module = module.resolve(strict=True)
+        except OSError:
+            return ""
+        return str(resolved_module.parent)
+    fallback = cwd_path / needle
+    try:
+        return str(fallback.resolve(strict=True).parent)
+    except OSError:
+        return ""
+
+
+def _release_sha_for_process_root(paths: RuntimePaths, root: Path | None) -> str:
+    if root is None:
+        return ""
+    resolved = _safe_resolve(root)
+    try:
+        resolved.relative_to(_safe_resolve(paths.releases_dir))
+    except ValueError:
+        return ""
+    return _git_full_commit(resolved).lower()
+
+
+def canonical_service_snapshot(
+    *,
+    paths: RuntimePaths | None = None,
+    expected_root: str | None = None,
+    expected_sha: str | None = None,
+) -> dict[str, Any]:
+    """Prove exact PID/root/module/SHA convergence for all canonical services."""
+    paths = paths or runtime_paths()
+    active = resolve_runtime_root(paths)
+    if not active.ok:
+        return {"ok": False, "reason": active.reason, "services": {}}
+    target_root = _safe_resolve(Path(expected_root or active.resolved_root))
+    target_sha = str(expected_sha or _git_full_commit(target_root)).lower()
+    active_sha = _git_full_commit(Path(active.resolved_root)).lower()
+    failures: list[str] = []
+    services: dict[str, Any] = {}
+    rows = _ps_rows()
+    for component in PROMOTION_SERVICES:
+        needle = _component_process_needle(component)
+        matches: list[dict[str, Any]] = []
+        for pid, ppid, command in rows:
+            if needle not in command:
+                continue
+            cwd = _pid_cwd(pid)
+            module_root = _resolved_process_module_root(command, cwd, needle)
+            cwd_root = _safe_resolve(Path(cwd)) if cwd else None
+            module_root_path = _safe_resolve(Path(module_root)) if module_root else None
+            runtime_sha = _release_sha_for_process_root(paths, cwd_root)
+            matches.append({
+                "pid": pid,
+                "ppid": ppid,
+                "cwd": str(cwd_root) if cwd_root else "",
+                "module_root": str(module_root_path) if module_root_path else "",
+                "runtime_sha": runtime_sha,
+                "command": command[:240],
+            })
+        component_failures: list[str] = []
+        if not matches:
+            component_failures.append("missing_service")
+        elif len(matches) != 1:
+            component_failures.append("duplicate_service")
+        for row in matches:
+            if not row["cwd"] or _safe_resolve(Path(row["cwd"])) != target_root:
+                component_failures.append("cwd_old_or_unknown_root")
+            if not row["module_root"] or _safe_resolve(Path(row["module_root"])) != target_root:
+                component_failures.append("module_old_or_unknown_root")
+            if row["runtime_sha"] != target_sha:
+                component_failures.append("runtime_sha_mismatch")
+        component_failures = sorted(set(component_failures))
+        services[component] = {
+            "ok": not component_failures,
+            "process_count": len(matches),
+            "processes": matches,
+            "failures": component_failures,
+        }
+        failures.extend(f"{component}:{reason}" for reason in component_failures)
+    if _safe_resolve(Path(active.resolved_root)) != target_root:
+        failures.append("active_symlink_root_mismatch")
+    if active_sha != target_sha:
+        failures.append("active_symlink_sha_mismatch")
+    old_root_process_count = sum(
+        1
+        for service in services.values()
+        for row in service["processes"]
+        if row.get("cwd") and _safe_resolve(Path(row["cwd"])) != target_root
+    )
+    return {
+        "ok": not failures,
+        "status": "SERVICE_CONVERGENCE_PASS" if not failures else "SERVICE_CONVERGENCE_BLOCKED",
+        "expected_root": str(target_root),
+        "expected_sha": target_sha,
+        "active_root": active.resolved_root,
+        "active_sha": active_sha,
+        "old_root_process_count": old_root_process_count,
+        "services": services,
+        "failures": sorted(set(failures)),
+    }
+
+
+def _wait_for_service_convergence(
+    *,
+    paths: RuntimePaths,
+    expected_root: str,
+    expected_sha: str,
+    timeout_seconds: float = 30.0,
+    interval_seconds: float = 0.25,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    last: dict[str, Any] = {}
+    while True:
+        last = canonical_service_snapshot(
+            paths=paths, expected_root=expected_root, expected_sha=expected_sha
+        )
+        if last.get("ok"):
+            return last
+        if time.monotonic() >= deadline:
+            return {**last, "status": "SERVICE_CONVERGENCE_TIMEOUT"}
+        time.sleep(max(0.01, interval_seconds))
+
+
 def _detect_component_mismatch(component: str, payload: dict[str, Any], root: RuntimeRoot) -> dict[str, Any]:
-    if component == "dispatcher":
-        needle = "account_run_request_consumer.py"
-    elif component == "notifier":
-        needle = "incident_notification_service.py"
-    else:
-        needle = "device_heartbeat_publisher.py"
+    needle = _component_process_needle(component)
     matching: list[dict[str, Any]] = []
     for pid, ppid, command in _ps_rows():
         if needle not in command:
@@ -911,6 +1167,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
             "status": "promotion_evidence_blocked",
             "message": "Release switch refused: immutable promotion evidence is incomplete.",
         }
+    promotion_clock_started = time.monotonic()
     promotion_started_at = datetime.now(timezone.utc).isoformat()
     gate = deployment_zero_gate(paths)
     if not gate.get("ok"):
@@ -934,13 +1191,13 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
     previous = _safe_resolve(paths.current_link) if (paths.current_link.exists() or paths.current_link.is_symlink()) else None
     previous_sha = _git_full_commit(previous) if previous else None
     candidate_sha = str(evidence["candidate_sha"])
-    completed_at = datetime.now(timezone.utc).isoformat()
     receipt_dir = paths.runtime_home / "deployment-receipts"
-    receipt_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{candidate_sha[:12]}.json"
-    receipt_path = receipt_dir / receipt_name
+    receipt_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{candidate_sha[:12]}"
+    pending_receipt_path = receipt_dir / f"{receipt_prefix}-switched-pending.json"
+    final_receipt_path = receipt_dir / f"{receipt_prefix}-promoted.json"
     migration = dict(evidence["migration"])
     lineage = dict(evidence["lineage"])
-    receipt = {
+    base_receipt = {
         "schema": "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1",
         "candidate_sha": candidate_sha,
         "release_sha": candidate_sha,
@@ -962,14 +1219,18 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         "zero_gate_device_locks": counts["auto_restart_device_locks"],
         "zero_gate_tick_locks": counts["auto_restart_tick_locks"],
         "promotion_started_at": promotion_started_at,
-        "promotion_completed_at": completed_at,
         "runtime_root": validation.resolved_root,
         "previous_release_sha": previous_sha,
         "previous_release_path": str(previous) if previous else None,
-        "receipt_state": "PROMOTED",
+    }
+    pending_receipt = {
+        **base_receipt,
+        "receipt_state": PROMOTION_PENDING,
+        "promotion_completed_at": None,
+        "service_convergence": None,
     }
     try:
-        staged_receipt = _stage_receipt(receipt_path, receipt)
+        staged_pending_receipt = _stage_receipt(pending_receipt_path, pending_receipt)
     except Exception as exc:
         return {
             "ok": False,
@@ -984,7 +1245,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
     tmp.symlink_to(validation.resolved_root)
     os.replace(tmp, paths.current_link)
     try:
-        _publish_immutable_receipt(staged_receipt, receipt_path)
+        _publish_immutable_receipt(staged_pending_receipt, pending_receipt_path)
     except Exception as exc:
         rollback_tmp = paths.current_link.with_name(f"{paths.current_link.name}.rollback.tmp")
         if rollback_tmp.exists() or rollback_tmp.is_symlink():
@@ -992,7 +1253,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         if previous is not None:
             rollback_tmp.symlink_to(previous)
             os.replace(rollback_tmp, paths.current_link)
-        for leftover in (receipt_path, staged_receipt):
+        for leftover in (pending_receipt_path, staged_pending_receipt):
             try:
                 if leftover.exists():
                     os.chmod(leftover, 0o600)
@@ -1005,21 +1266,159 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
             "reason": type(exc).__name__,
             "command": "switch-release",
         }
+
+    registry_path = _canonical_registry_path()
+    pending_receipt_sha = _receipt_sha256(pending_receipt_path)
     try:
-        lock_archive = transaction.finish(receipt_path)
+        _atomic_update_worker_registry(
+            registry_path,
+            expected_sha=str(previous_sha or ""),
+            release_sha=candidate_sha,
+            runtime_root=validation.resolved_root,
+            receipt_path=pending_receipt_path,
+            receipt_sha256=pending_receipt_sha,
+        )
     except Exception as exc:
         return _with_root(validation, {
-            'ok': False, 'status': 'promotion_completed_lock_archive_failed',
-            'runtimeSwitched': True, 'promotionReceipt': str(receipt_path),
-            'reason': str(exc), 'requiresOperatorReview': True,
+            "ok": False,
+            "status": "promotion_registry_update_failed",
+            "receiptState": PROMOTION_PENDING,
+            "runtimeSwitched": True,
+            "pendingPromotionReceipt": str(pending_receipt_path),
+            "reason": str(exc)[:240] or type(exc).__name__,
+            "requiresOperatorReview": True,
+        })
+
+    pre_restart_gate = deployment_zero_gate(paths)
+    pre_restart_counts = pre_restart_gate.get("counts") or {}
+    if (
+        not pre_restart_gate.get("ok")
+        or set(pre_restart_counts) != expected_zero_keys
+        or any(pre_restart_counts.get(key) != 0 for key in expected_zero_keys)
+    ):
+        return _with_root(validation, {
+            "ok": False,
+            "status": "promotion_pending_active_work_before_service_restart",
+            "receiptState": PROMOTION_PENDING,
+            "runtimeSwitched": True,
+            "pendingPromotionReceipt": str(pending_receipt_path),
+            "zeroGate": pre_restart_gate,
+            "requiresOperatorReview": True,
+        })
+
+    restart_results: dict[str, Any] = {}
+    for component in PROMOTION_SERVICES:
+        result = _run_canonical_controller(component, "restart", paths=paths, timeout=60)
+        restart_results[component] = result
+        if not result.get("ok"):
+            return _with_root(validation, {
+                "ok": False,
+                "status": f"promotion_pending_{component}_restart_failed",
+                "receiptState": PROMOTION_PENDING,
+                "runtimeSwitched": True,
+                "pendingPromotionReceipt": str(pending_receipt_path),
+                "restartResults": restart_results,
+                "requiresOperatorReview": True,
+            })
+
+    timeout_seconds = float(os.environ.get("PHONEFARM_PROMOTION_CONVERGENCE_TIMEOUT_SECONDS", "30"))
+    convergence = _wait_for_service_convergence(
+        paths=paths,
+        expected_root=validation.resolved_root,
+        expected_sha=candidate_sha,
+        timeout_seconds=timeout_seconds,
+    )
+    if not convergence.get("ok"):
+        return _with_root(validation, {
+            "ok": False,
+            "status": "promotion_pending_service_convergence_failed",
+            "receiptState": PROMOTION_PENDING,
+            "runtimeSwitched": True,
+            "pendingPromotionReceipt": str(pending_receipt_path),
+            "restartResults": restart_results,
+            "serviceConvergence": convergence,
+            "requiresOperatorReview": True,
+        })
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    final_receipt = {
+        **base_receipt,
+        "receipt_state": PROMOTION_COMPLETE,
+        "promotion_completed_at": completed_at,
+        "pending_receipt": str(pending_receipt_path),
+        "pending_receipt_sha256": pending_receipt_sha,
+        "service_restart_order": list(PROMOTION_SERVICES),
+        "service_convergence": convergence,
+        "promotion_added_time_ms": round((time.monotonic() - promotion_clock_started) * 1000, 3),
+    }
+    try:
+        staged_final_receipt = _stage_receipt(final_receipt_path, final_receipt)
+        final_receipt_sha = _receipt_sha256(staged_final_receipt)
+    except Exception as exc:
+        return _with_root(validation, {
+            "ok": False,
+            "status": "promotion_final_receipt_stage_failed",
+            "receiptState": PROMOTION_PENDING,
+            "pendingPromotionReceipt": str(pending_receipt_path),
+            "reason": type(exc).__name__,
+            "requiresOperatorReview": True,
+        })
+
+    try:
+        _atomic_update_worker_registry(
+            registry_path,
+            expected_sha=candidate_sha,
+            release_sha=candidate_sha,
+            runtime_root=validation.resolved_root,
+            receipt_path=final_receipt_path,
+            receipt_sha256=final_receipt_sha,
+        )
+        _publish_immutable_receipt(staged_final_receipt, final_receipt_path)
+    except Exception as exc:
+        try:
+            _atomic_update_worker_registry(
+                registry_path,
+                expected_sha=candidate_sha,
+                release_sha=candidate_sha,
+                runtime_root=validation.resolved_root,
+                receipt_path=pending_receipt_path,
+                receipt_sha256=pending_receipt_sha,
+            )
+        except Exception:
+            pass
+        return _with_root(validation, {
+            "ok": False,
+            "status": "promotion_final_receipt_publish_failed",
+            "receiptState": PROMOTION_PENDING,
+            "pendingPromotionReceipt": str(pending_receipt_path),
+            "reason": type(exc).__name__,
+            "requiresOperatorReview": True,
+        })
+
+    try:
+        lock_archive = transaction.finish(final_receipt_path)
+    except Exception as exc:
+        return _with_root(validation, {
+            "ok": False,
+            "status": "promotion_completed_lock_archive_failed",
+            "receiptState": PROMOTION_COMPLETE,
+            "runtimeSwitched": True,
+            "promotionReceipt": str(final_receipt_path),
+            "reason": str(exc),
+            "requiresOperatorReview": True,
         })
     return _with_root(validation, {
         "ok": True,
-        "status": "switched",
+        "status": "promoted",
+        "receiptState": PROMOTION_COMPLETE,
         "previousRoot": str(previous) if previous else None,
-        "promotionReceipt": str(receipt_path),
+        "pendingPromotionReceipt": str(pending_receipt_path),
+        "promotionReceipt": str(final_receipt_path),
         "deploymentLockArchive": str(lock_archive),
-        "zeroGate": counts,
+        "zeroGate": pre_restart_counts,
+        "restartResults": restart_results,
+        "serviceConvergence": convergence,
+        "promotionAddedTimeMs": final_receipt["promotion_added_time_ms"],
     })
 
 

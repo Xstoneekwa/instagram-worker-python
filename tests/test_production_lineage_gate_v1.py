@@ -347,6 +347,22 @@ class ProductionLineageGateV1Test(unittest.TestCase):
         previous = "1" * 40
         promoted = "2" * 40
         registry = _registry("worker", promoted, [_delta("worker", "required", previous)])
+        root = "/canonical/release"
+        registry["components"]["worker"]["production"]["runtime_root"] = root
+        process = {"cwd": root, "module_root": root, "runtime_sha": promoted}
+        services = {
+            name: {"ok": True, "process_count": 1, "processes": [process], "failures": []}
+            for name in ("dispatcher", "heartbeat", "notifier")
+        }
+        service_snapshot = {
+            "ok": True,
+            "expected_root": root,
+            "expected_sha": promoted,
+            "active_root": root,
+            "active_sha": promoted,
+            "old_root_process_count": 0,
+            "services": services,
+        }
         receipt = {
             "schema": "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1",
             "receipt_state": "PROMOTED",
@@ -354,6 +370,8 @@ class ProductionLineageGateV1Test(unittest.TestCase):
             "candidate_sha": promoted,
             "release_sha": promoted,
             "manifest_certified_sha": promoted,
+            "runtime_root": root,
+            "service_convergence": {"ok": True},
         }
         result = self.gate.evaluate_post_promotion_registry(
             registry=registry,
@@ -363,6 +381,7 @@ class ProductionLineageGateV1Test(unittest.TestCase):
             pre_promotion_registry_sha=previous,
             promoted_sha=promoted,
             post_promotion_active_sha=promoted,
+            service_snapshot=service_snapshot,
         )
         self.assertEqual(result["status"], "PRODUCTION_REGISTRY_POST_PROMOTION_FULL_PASS")
         self.assertEqual(result["post_promotion_registry_sha"], promoted)
@@ -377,7 +396,46 @@ class ProductionLineageGateV1Test(unittest.TestCase):
                 pre_promotion_registry_sha=previous,
                 promoted_sha=promoted,
                 post_promotion_active_sha=promoted,
+                service_snapshot=service_snapshot,
             )
+
+        registry["components"]["worker"]["production"]["sha"] = promoted
+        duplicate = json.loads(json.dumps(service_snapshot))
+        duplicate["services"]["dispatcher"]["process_count"] = 2
+        with self.assertRaisesRegex(self.gate.GateFailure, "post_promotion_duplicate_service:dispatcher"):
+            self.gate.evaluate_post_promotion_registry(
+                registry=registry,
+                component_name="worker",
+                promotion_receipt=receipt,
+                pre_promotion_active_sha=previous,
+                pre_promotion_registry_sha=previous,
+                promoted_sha=promoted,
+                post_promotion_active_sha=promoted,
+                service_snapshot=duplicate,
+            )
+
+    def test_non_worker_post_promotion_keeps_registry_only_contract(self) -> None:
+        previous = "3" * 40
+        promoted = "4" * 40
+        registry = _registry("backend", promoted, [_delta("backend", "required", previous)])
+        receipt = {
+            "schema": "PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1",
+            "receipt_state": "PROMOTED",
+            "previous_release_sha": previous,
+            "candidate_sha": promoted,
+            "release_sha": promoted,
+            "manifest_certified_sha": promoted,
+        }
+        result = self.gate.evaluate_post_promotion_registry(
+            registry=registry,
+            component_name="backend",
+            promotion_receipt=receipt,
+            pre_promotion_active_sha=previous,
+            pre_promotion_registry_sha=previous,
+            promoted_sha=promoted,
+            post_promotion_active_sha=promoted,
+        )
+        self.assertEqual(result["service_convergence"], "NOT_APPLICABLE")
 
 
 if __name__ == "__main__":

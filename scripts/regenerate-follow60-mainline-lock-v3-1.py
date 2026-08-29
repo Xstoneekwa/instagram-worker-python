@@ -17,6 +17,30 @@ from follow60_lock_v3 import canonical_json, git_file_entry, sha256_bytes, trans
 from follow60_candidate_identity_v2 import committed_identity, external_path, manifest_sha256, require_clean
 
 
+REQUIRED_STATUS_TRUST_SCOPE = {
+    "follow60_status_trust_cache_v1.py",
+    "follow60_lock_v3.py",
+    "follow60_candidate_identity_v2.py",
+    "follow60_deployment_gate_v1.py",
+    "follow60_external_deployment_lock_v2.py",
+    "follow60_write_lock_v3_1.py",
+    "phonefarm_runtime_control.py",
+    "scripts/production_lineage_gate_v1.py",
+    "scripts/verify-follow60-status-trust-v1.py",
+    "scripts/install-follow60-status-trust-cache-v1.py",
+    "scripts/run_control_dispatcher_service.sh",
+}
+
+
+def require_status_trust_scope(scope: list[str]) -> None:
+    missing_status_trust = sorted(REQUIRED_STATUS_TRUST_SCOPE - set(scope))
+    if missing_status_trust:
+        raise SystemExit(
+            "missing_status_trust_file_from_protected_scope:"
+            + ",".join(missing_status_trust)
+        )
+
+
 def role_for(path: str) -> str:
     if path.startswith("tests/"):
         return "regression_contract"
@@ -67,6 +91,7 @@ def main() -> int:
         raise SystemExit("recertification_missing_canonical_delta")
 
     scope = json.loads(Path(args.scope).read_text(encoding="utf-8"))
+    require_status_trust_scope(scope)
     graph = transitive_import_graph(root, scope)
     protected_paths = sorted(set(scope) | set(graph) | {d for values in graph.values() for d in values})
     entries = {}
