@@ -14,6 +14,10 @@ TERMINAL_STAGES = {
     "abandoned_before_verified_follow",
     "abandoned_before_physical_attempt",
     "review_required",
+    # The physical outcome remains unresolved, but its durable cross-session
+    # marker and backend-only recovery row now own reconciliation.  The local
+    # journal must not monopolize every later bounded startup scan.
+    "ambiguity_durable_projected",
 }
 RECEIPT_SCHEMA = "FOLLOW_CANDIDATE_LOCAL_RECEIPT_V2"
 MUTATION_INTENT_SCHEMA = "AMBIGUOUS_MUTATION_INTENT_V1"
@@ -23,6 +27,13 @@ class FollowPersistenceRuntimeUnavailable(RuntimeError):
     """Global fail-closed boundary: durable Follow intent storage is unusable."""
 
     reason = "follow_persistence_runtime_unavailable"
+
+
+class FollowTapDispatchJournalUnavailable(FollowPersistenceRuntimeUnavailable):
+    """The physical Follow tap was sent but its local post-tap fsync failed."""
+
+    reason = "follow_tap_dispatch_journal_unavailable"
+    tap_dispatched = True
 
 
 def preflight_runtime_storage() -> dict[str, Any]:
@@ -324,4 +335,38 @@ def load_all_nonterminal_intents(*, limit: int = 100) -> list[dict[str, Any]]:
             out.append(payload)
             if len(out) >= max(1, int(limit or 1)):
                 break
+    return out
+
+
+def load_account_post_tap_projection_intents(
+    *, account_id: str, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Load only future V1 post-tap crash boundaries for one account.
+
+    The limit is applied after exact account/stage filtering, so unrelated or
+    legacy journal rows cannot starve projection.  The legacy ``ambiguous``
+    stage is deliberately excluded: Approval 1 does not authorize automatic
+    historical backfill of incidents predating this contract.
+    """
+    root = _root()
+    if not root.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    allowed_stages = {"tap_dispatched", "ambiguous_post_tap_v1"}
+    for path in sorted(root.glob("*/*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(
+                f"follow_persistence_intent_unreadable:{path.name}"
+            ) from exc
+        if str(payload.get("account_id") or "") != str(account_id):
+            continue
+        if str(payload.get("action_type") or "follow").lower() != "follow":
+            continue
+        if str(payload.get("stage") or "") not in allowed_stages:
+            continue
+        out.append(payload)
+        if len(out) >= max(1, int(limit or 1)):
+            break
     return out

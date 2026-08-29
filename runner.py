@@ -749,6 +749,19 @@ _SESSION_COUNTERS: dict[str, int] = {
 }
 
 
+def _invalidate_social_memory_candidate_cache(
+    account_id: str, candidate_username: str
+) -> None:
+    """Drop only exact candidate cache entries after a durable risk write."""
+    account_key = str(account_id or "").strip()
+    username_key = _norm_ig_handle(candidate_username)
+    if not account_key or not username_key:
+        return
+    for cache_key in list(_SOCIAL_MEMORY_EXACT_PHASE_CACHE):
+        if cache_key[0] == account_key and cache_key[1] == username_key:
+            _SOCIAL_MEMORY_EXACT_PHASE_CACHE.pop(cache_key, None)
+
+
 def _follow_settings_for_account(account_id: str | None) -> Any | None:
     """Account Follow settings, cached for this runner session."""
     aid = str(account_id or "").strip()
@@ -4782,6 +4795,130 @@ def _persist_verified_follow_from_durable_intent(
     )
 
 
+def _persist_unresolved_follow_ambiguity(
+    *,
+    account_id: str,
+    candidate_username: str,
+    source_target_id: str | None,
+    source_ct_username: str | None,
+    original_run_id: str,
+    original_request_id: str | None,
+    business_session_id: str | None,
+    action_id: str,
+    follow_state_after: str | None,
+    failure_reason: str,
+) -> bool:
+    """Converge every unresolved post-tap Follow on one durable risk state.
+
+    This writes neither a Follow receipt nor a counter.  The Social Memory
+    marker blocks future physical taps while the existing recovery queue
+    provides idempotent backend-only reconciliation for the same action.
+    """
+    candidate = follow_candidate_recovery.normalize_username(candidate_username)
+    if not candidate or not str(action_id or "").strip():
+        return False
+    result = follow_candidate_recovery.persist_unresolved_ambiguity(
+        account_id=account_id,
+        candidate_username=candidate,
+        source_target_id=str(source_target_id or "") or None,
+        source_ct_username=str(source_ct_username or "") or None,
+        original_run_id=str(original_run_id or "") or None,
+        original_request_id=str(original_request_id or "") or None,
+        business_session_id=str(business_session_id or "") or None,
+        action_id=str(action_id),
+        follow_state_after=str(follow_state_after or "unknown"),
+        failure_reason=str(failure_reason or "follow_mutation_ambiguous"),
+        session_id=_SESSION_SOCIAL_ID or None,
+    )
+    marker_ok = result.get("marker_ok") is True
+    queue_ok = result.get("queue_ok") is True
+    if marker_ok:
+        _invalidate_social_memory_candidate_cache(account_id, candidate)
+        _RUNTIME_INTERACTED_USERNAMES.add(candidate)
+    log(
+        "warning" if marker_ok and queue_ok else "error",
+        "follow_mutation_ambiguous_durable_projection",
+        account_id=account_id,
+        run_id=str(original_run_id or ""),
+        candidate_username=candidate,
+        action_id_hash=action_id_hash(str(action_id)),
+        mutation_state="ambiguous",
+        tap_sent=True,
+        receipt_exists=False,
+        social_memory_persisted=marker_ok,
+        recovery_queue_persisted=queue_ok,
+        follow_counter_delta=0,
+        follow_receipt_created=False,
+        safe_to_continue_ui=False,
+    )
+    return bool(marker_ok and queue_ok)
+
+
+def _project_future_v1_post_tap_follow_intents(
+    *, account_id: str, limit: int = 100
+) -> bool:
+    """Project only V1 post-tap crash intents without historical backfill.
+
+    Current-lineage P0C remains first.  This bounded pass only persists
+    exclusion/reconciliation state and performs no device read or action.
+    """
+    try:
+        intents = follow_persistence_intent.load_account_post_tap_projection_intents(
+            account_id=account_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "future_v1_follow_ambiguity_projection_load_failed",
+            account_id=account_id,
+            error_type=type(exc).__name__,
+            safe_to_continue_ui=False,
+        )
+        return False
+    for intent in intents:
+        try:
+            ok = _persist_unresolved_follow_ambiguity(
+                account_id=account_id,
+                candidate_username=str(intent.get("candidate_username") or ""),
+                source_target_id=str(intent.get("source_target_id") or "") or None,
+                source_ct_username=str(intent.get("source_ct_username") or "") or None,
+                original_run_id=str(intent.get("run_id") or ""),
+                original_request_id=str(intent.get("request_id") or "") or None,
+                business_session_id=str(intent.get("business_session_id") or "") or None,
+                action_id=str(intent.get("action_id") or ""),
+                follow_state_after=str(
+                    dict(intent.get("receipt_metadata_safe") or {}).get(
+                        "physical_follow_state"
+                    )
+                    or "unknown"
+                ),
+                failure_reason="future_v1_post_tap_intent_unresolved",
+            )
+        except Exception as exc:
+            log(
+                "error",
+                "future_v1_follow_ambiguity_projection_failed",
+                account_id=account_id,
+                action_id_hash=action_id_hash(str(intent.get("action_id") or "")),
+                error_type=type(exc).__name__,
+                safe_to_continue_ui=False,
+            )
+            return False
+        if not ok:
+            return False
+        try:
+            follow_persistence_intent.update_intent_stage(
+                run_id=str(intent.get("run_id") or ""),
+                action_id=str(intent.get("action_id") or ""),
+                stage="ambiguity_durable_projected",
+                metadata_safe={"cross_session_projection_v1": True},
+            )
+        except Exception:
+            return False
+    return True
+
+
 def _recover_verified_follow_persistence_intents(
     d,
     *,
@@ -4851,7 +4988,11 @@ def _recover_verified_follow_persistence_intents(
         intent_run_id = str(intent.get("run_id") or "")
         prior_stage = str(intent.get("stage") or "")
         username = str(intent.get("candidate_username") or "")
-        if prior_stage in {"prepared", "prepared_before_follow_tap"}:
+        if prior_stage in {
+            "prepared",
+            "prepared_before_follow_tap",
+            "physical_attempt_started",
+        }:
             try:
                 follow_persistence_intent.update_intent_stage(
                     run_id=intent_run_id,
@@ -4878,8 +5019,9 @@ def _recover_verified_follow_persistence_intents(
             )
             continue
         if prior_stage not in {
-            "physical_attempt_started",
+            "tap_dispatched",
             "ambiguous",
+            "ambiguous_post_tap_v1",
             "follow_physically_verified",
             "verified",
         }:
@@ -4934,6 +5076,18 @@ def _recover_verified_follow_persistence_intents(
                 stage="persisted",
                 metadata_safe={"reconciled_from_canonical_receipt": True},
             )
+            try:
+                supabase_client.resolve_ambiguous_follow_mutation(
+                    account_id,
+                    username,
+                    str(intent.get("source_ct_username") or ""),
+                    action_id=action_id,
+                    resolution="canonical_follow_receipt",
+                )
+            except Exception:
+                # The receipt remains authoritative. A later idempotent queue
+                # reconciliation can finish the cache projection.
+                pass
             log(
                 "info",
                 "follow_persistence_intent_recovered",
@@ -4970,6 +5124,32 @@ def _recover_verified_follow_persistence_intents(
         )
         fresh_follow_state = fresh_follow_states[-1]
         if decision.decision != "reconciled":
+            try:
+                ambiguity_persisted = _persist_unresolved_follow_ambiguity(
+                    account_id=account_id,
+                    candidate_username=username,
+                    source_target_id=str(intent.get("source_target_id") or "") or None,
+                    source_ct_username=str(intent.get("source_ct_username") or "") or None,
+                    original_run_id=intent_run_id,
+                    original_request_id=str(intent.get("request_id") or "") or None,
+                    business_session_id=str(intent.get("business_session_id") or "") or None,
+                    action_id=action_id,
+                    follow_state_after=fresh_follow_state,
+                    failure_reason=str(decision.reason or "follow_reconciliation_unresolved"),
+                )
+            except Exception:
+                ambiguity_persisted = False
+            if not ambiguity_persisted:
+                return "RECOVERY_INFRA_UNAVAILABLE"
+            try:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=intent_run_id,
+                    action_id=action_id,
+                    stage="ambiguity_durable_projected",
+                    metadata_safe={"cross_session_projection_v1": True},
+                )
+            except Exception:
+                return "RECOVERY_INFRA_UNAVAILABLE"
             nonretryable = decision.reason in {"unsupported_action"}
             log(
                 "error" if nonretryable else "warning",
@@ -5032,6 +5212,16 @@ def _recover_verified_follow_persistence_intents(
         )
         if not persisted:
             return "RECOVERY_PENDING_RETRYABLE"
+        try:
+            supabase_client.resolve_ambiguous_follow_mutation(
+                account_id,
+                username,
+                str(intent.get("source_ct_username") or ""),
+                action_id=action_id,
+                resolution="canonical_follow_receipt",
+            )
+        except Exception:
+            pass
     return "RECOVERY_RESOLVED"
 
 
@@ -12733,6 +12923,29 @@ def _run_followers_list_engine_session(
             dict(_followers_session_summary),
         )
         return 97
+    if account_id and supabase_mode:
+        _future_v1_ambiguity_ok = _project_future_v1_post_tap_follow_intents(
+            account_id=account_id,
+            limit=100,
+        )
+        if not _future_v1_ambiguity_ok:
+            _followers_session_summary.update(
+                {
+                    "follow_processed_count": 0,
+                    "follows_completed_count": 0,
+                    "follow_session_outcome": "partial_resumable",
+                    "follow_stop_reason": "future_v1_follow_ambiguity_projection_failed",
+                    "first_causal_reason": "future_v1_follow_ambiguity_projection_failed",
+                    "safe_to_resume": True,
+                    "exit_code": 97,
+                }
+            )
+            setattr(
+                _run_followers_list_engine_session,
+                "last_session_summary",
+                dict(_followers_session_summary),
+            )
+            return 97
     if _p0c_state == "RECOVERY_BLOCKED_NONRETRYABLE":
         return 1
 
@@ -21486,7 +21699,7 @@ def _run_followers_list_engine_session(
                             run_id=run_id,
                             action_id=_action_id,
                             stage="physical_attempt_started",
-                            metadata_safe={"tap_dispatch_boundary_reached": True},
+                            metadata_safe={"tap_ready_boundary_reached": True},
                         )
                     except Exception as exc:
                         log(
@@ -21527,6 +21740,31 @@ def _run_followers_list_engine_session(
                     if _follow_persistence_intent_enabled_for_account(account_id)
                     else None
                 )
+
+                def _mark_follow_tap_dispatched() -> None:
+                    intent = _follow_persistence_holder.get("ctx")
+                    if not isinstance(intent, dict):
+                        raise follow_persistence_intent.FollowPersistenceRuntimeUnavailable(
+                            "follow_persistence_runtime_unavailable:tap_dispatch_intent_missing"
+                        )
+                    try:
+                        updated = follow_persistence_intent.update_intent_stage(
+                            run_id=run_id,
+                            action_id=str(intent.get("action_id") or ""),
+                            stage="tap_dispatched",
+                            metadata_safe={"tap_sent": True},
+                        )
+                    except Exception as exc:
+                        raise follow_persistence_intent.FollowTapDispatchJournalUnavailable(
+                            f"follow_tap_dispatch_journal_unavailable:{type(exc).__name__}"
+                        ) from exc
+                    _follow_persistence_holder["ctx"] = updated
+
+                _after_tap_dispatched = (
+                    _mark_follow_tap_dispatched
+                    if _follow_persistence_intent_enabled_for_account(account_id)
+                    else None
+                )
                 _ordering_v2_ledger = _ordering_v2.get("ledger")
                 if _ordering_v2.get("selected") is True:
                     _ordering_v2_ledger.apply_receipt(
@@ -21550,51 +21788,93 @@ def _run_followers_list_engine_session(
                         dont_follow_private_accounts=_dont_follow_private_pre,
                         pre_follow_context=_pre_follow_tap_ctx,
                         prepare_before_follow_tap=_prepare_before_tap,
+                        after_follow_tap_dispatched=_after_tap_dispatched,
                     )
                 except follow_persistence_intent.FollowPersistenceRuntimeUnavailable as exc:
+                    _tap_was_dispatched = isinstance(
+                        exc,
+                        follow_persistence_intent.FollowTapDispatchJournalUnavailable,
+                    )
+                    _tap_dispatch_ambiguity_persisted = False
+                    if _tap_was_dispatched:
+                        _ctx_at_failure = _follow_persistence_holder.get("ctx")
+                        if isinstance(_ctx_at_failure, dict):
+                            try:
+                                _tap_dispatch_ambiguity_persisted = (
+                                    _persist_unresolved_follow_ambiguity(
+                                        account_id=account_id,
+                                        candidate_username=str(follower_un or ""),
+                                        source_target_id=str(target_id or "") or None,
+                                        source_ct_username=source_profile_username,
+                                        original_run_id=run_id,
+                                        original_request_id=_resolve_follow_persistence_request_id(
+                                            run_request_id
+                                        ),
+                                        business_session_id=business_session_id,
+                                        action_id=str(
+                                            _ctx_at_failure.get("action_id") or ""
+                                        ),
+                                        follow_state_after="unknown",
+                                        failure_reason="follow_tap_dispatch_journal_unavailable",
+                                    )
+                                )
+                            except Exception:
+                                _tap_dispatch_ambiguity_persisted = False
                     try:
-                        _recovery_enqueue = follow_candidate_recovery.enqueue(
-                            account_id=account_id,
-                            candidate_username=str(follower_un or ""),
-                            source_target_id=str(target_id or "") or None,
-                            source_ct_username=source_profile_username,
-                            original_run_id=run_id,
-                            original_request_id=_resolve_follow_persistence_request_id(
-                                run_request_id
-                            ),
-                            business_session_id=business_session_id,
-                            evidence={
-                                "schema": "FOLLOW_CANDIDATE_RECOVERY_EVIDENCE_V1",
-                                "failure_reason": "follow_persistence_runtime_unavailable",
-                                "follow_tap_sent": False,
-                                "follow_verified": False,
-                                "follow_receipt_exists": False,
-                                "like_state": (
-                                    "liked"
-                                    if bool(
+                        if _tap_was_dispatched:
+                            if not _tap_dispatch_ambiguity_persisted:
+                                raise RuntimeError(
+                                    "post_tap_ambiguity_backend_projection_failed"
+                                )
+                            _recovery_enqueue = {
+                                "ok": True,
+                                "enqueued": True,
+                                "classification": "follow_mutation_ambiguous",
+                                "reason": "post_tap_journal_unavailable",
+                            }
+                        else:
+                            _recovery_enqueue = follow_candidate_recovery.enqueue(
+                                account_id=account_id,
+                                candidate_username=str(follower_un or ""),
+                                source_target_id=str(target_id or "") or None,
+                                source_ct_username=source_profile_username,
+                                original_run_id=run_id,
+                                original_request_id=_resolve_follow_persistence_request_id(
+                                    run_request_id
+                                ),
+                                business_session_id=business_session_id,
+                                evidence={
+                                    "schema": "FOLLOW_CANDIDATE_RECOVERY_EVIDENCE_V1",
+                                    "failure_reason": "follow_persistence_runtime_unavailable",
+                                    "follow_tap_sent": False,
+                                    "follow_verified": False,
+                                    "follow_receipt_exists": False,
+                                    "like_state": (
+                                        "liked"
+                                        if bool(
+                                            dict(
+                                                _ordering_v2.get(
+                                                    "precompleted_like_result"
+                                                )
+                                                or {}
+                                            ).get("liked_count")
+                                        )
+                                        else "ambiguous"
+                                    ),
+                                    "like_tap_sent": bool(
                                         dict(
-                                            _ordering_v2.get(
-                                                "precompleted_like_result"
-                                            )
+                                            _ordering_v2.get("precompleted_like_result")
                                             or {}
                                         ).get("liked_count")
-                                    )
-                                    else "ambiguous"
-                                ),
-                                "like_tap_sent": bool(
-                                    dict(
-                                        _ordering_v2.get("precompleted_like_result")
-                                        or {}
-                                    ).get("liked_count")
-                                ),
-                                "like_verify_success": bool(
-                                    dict(
-                                        _ordering_v2.get("precompleted_like_result")
-                                        or {}
-                                    ).get("liked_count")
-                                ),
-                            },
-                        )
+                                    ),
+                                    "like_verify_success": bool(
+                                        dict(
+                                            _ordering_v2.get("precompleted_like_result")
+                                            or {}
+                                        ).get("liked_count")
+                                    ),
+                                },
+                            )
                         _recovery_enqueued = not (
                             isinstance(_recovery_enqueue, dict)
                             and _recovery_enqueue.get("enqueued") is False
@@ -21640,6 +21920,8 @@ def _run_followers_list_engine_session(
                         root_failure_code="follow_persistence_runtime_unavailable",
                         failure_category="systemic_persistence_failure",
                         reason=str(exc)[:200],
+                        physical_follow_tap_dispatched=_tap_was_dispatched,
+                        durable_ambiguity_persisted=_tap_dispatch_ambiguity_persisted,
                         safe_to_continue_ui=False,
                     )
                     _publish_followers_session_summary(
@@ -21691,7 +21973,7 @@ def _run_followers_list_engine_session(
                             _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
                                 run_id=run_id,
                                 action_id=str(_follow_persistence_ctx["action_id"]),
-                                stage="ambiguous",
+                                stage="ambiguous_post_tap_v1",
                                 metadata_safe={
                                     "physical_follow_state": _intent_follow_state or "unknown",
                                     "tap_sent": True,
@@ -22014,6 +22296,72 @@ def _run_followers_list_engine_session(
                             )
                     if not follow_out.get("ok"):
                         fc = int(follow_out.get("failure_code") or 33)
+                        _final_follow_state = str(
+                            follow_out.get("follow_state_after") or ""
+                        ).strip().lower()
+                        _post_tap_unresolved = bool(
+                            _tap_sent_seen
+                            and _follow_persistence_ctx is not None
+                            and _final_follow_state
+                            not in {"follow", "following", "requested"}
+                        )
+                        if _post_tap_unresolved:
+                            try:
+                                _ambiguity_ok = _persist_unresolved_follow_ambiguity(
+                                    account_id=account_id,
+                                    candidate_username=str(follower_un or ""),
+                                    source_target_id=str(target_id or "") or None,
+                                    source_ct_username=source_profile_username,
+                                    original_run_id=run_id,
+                                    original_request_id=_resolve_follow_persistence_request_id(
+                                        run_request_id
+                                    ),
+                                    business_session_id=business_session_id,
+                                    action_id=str(
+                                        _follow_persistence_ctx.get("action_id") or ""
+                                    ),
+                                    follow_state_after=_final_follow_state or "unknown",
+                                    failure_reason=str(
+                                        follow_out.get("failure_reason")
+                                        or follow_out.get("visual_follow_failure_reason")
+                                        or _exit_reason_from_code(fc)
+                                    ),
+                                )
+                            except Exception:
+                                _ambiguity_ok = False
+                            if not _ambiguity_ok:
+                                _publish_followers_session_summary(
+                                    follow_session_outcome="failed",
+                                    follow_stop_reason="follow_ambiguity_persistence_failed",
+                                    first_causal_reason="follow_ambiguity_persistence_failed",
+                                    root_failure_code="follow_ambiguity_persistence_failed",
+                                    failure_category="systemic_persistence_failure",
+                                    exit_code=1,
+                                )
+                                return 1
+                            try:
+                                _follow_persistence_ctx = (
+                                    follow_persistence_intent.update_intent_stage(
+                                        run_id=run_id,
+                                        action_id=str(
+                                            _follow_persistence_ctx.get("action_id") or ""
+                                        ),
+                                        stage="ambiguity_durable_projected",
+                                        metadata_safe={
+                                            "cross_session_projection_v1": True
+                                        },
+                                    )
+                                )
+                            except Exception:
+                                _publish_followers_session_summary(
+                                    follow_session_outcome="failed",
+                                    follow_stop_reason="follow_ambiguity_local_projection_failed",
+                                    first_causal_reason="follow_ambiguity_local_projection_failed",
+                                    root_failure_code="follow_ambiguity_local_projection_failed",
+                                    failure_category="systemic_persistence_failure",
+                                    exit_code=1,
+                                )
+                                return 1
                         if _vcid_sm:
                             log(
                                 "error",
@@ -22027,7 +22375,7 @@ def _run_followers_list_engine_session(
                         _SESSION_COUNTERS["interactions"] += 1
                         _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                         _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
-                        if supabase_mode and account_id:
+                        if supabase_mode and account_id and not _post_tap_unresolved:
                             _vfp_un = str(follower_un or "").strip()
                             if _vfp_un:
                                 _safe_supabase_call(

@@ -26,6 +26,25 @@ def recovery_key(account_id: str, candidate_username: str, source_target_id: str
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def ambiguous_follow_recovery_key(
+    account_id: str,
+    candidate_username: str,
+    source_target_id: str | None,
+    action_id: str,
+) -> str:
+    """Bind a post-tap recovery row to one immutable physical mutation."""
+    canonical = ":".join(
+        (
+            "FOLLOW_AMBIGUITY_V1",
+            str(account_id or ""),
+            normalize_username(candidate_username),
+            str(source_target_id or ""),
+            str(action_id or ""),
+        )
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class RecoveryDecision:
     action: str
@@ -145,6 +164,74 @@ def enqueue(
         business_session_id=business_session_id,
         evidence=dict(evidence or {}),
     )
+
+
+def persist_unresolved_ambiguity(
+    *,
+    account_id: str,
+    candidate_username: str,
+    source_target_id: str | None,
+    source_ct_username: str | None,
+    original_run_id: str,
+    original_request_id: str | None,
+    business_session_id: str | None,
+    action_id: str,
+    follow_state_after: str | None,
+    failure_reason: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist one exact post-tap ambiguity in memory and recovery queue."""
+    candidate = normalize_username(candidate_username)
+    evidence = {
+        "schema": "FOLLOW_CANDIDATE_RECOVERY_EVIDENCE_V1",
+        "action_id": str(action_id or ""),
+        "failure_reason": str(failure_reason or "follow_mutation_ambiguous"),
+        "follow_tap_sent": True,
+        "follow_verified": False,
+        "follow_receipt_exists": False,
+        "follow_state_after": str(follow_state_after or "unknown"),
+        "mutation_state": "ambiguous",
+        "source_run_id": str(original_run_id or ""),
+        "source_business_session_id": str(business_session_id or "") or None,
+    }
+    marker = supabase_client.record_ambiguous_follow_mutation(
+        account_id,
+        candidate,
+        str(source_ct_username or ""),
+        action_id=str(action_id or ""),
+        run_id=str(original_run_id or "") or None,
+        session_id=str(session_id or "") or None,
+        business_session_id=str(business_session_id or "") or None,
+        follow_state_after=str(follow_state_after or "unknown"),
+        failure_reason=str(failure_reason or "follow_mutation_ambiguous"),
+        target_id=str(source_target_id or "") or None,
+    )
+    marker_ok = not isinstance(marker, dict) or marker.get("ok") is not False
+    queued = supabase_client.enqueue_follow_candidate_recovery_v1(
+        recovery_key=ambiguous_follow_recovery_key(
+            account_id,
+            candidate,
+            str(source_target_id or "") or None,
+            str(action_id or ""),
+        ),
+        account_id=account_id,
+        candidate_username=candidate,
+        source_target_id=str(source_target_id or "") or None,
+        source_ct_username=str(source_ct_username or "") or None,
+        original_run_id=str(original_run_id or "") or None,
+        original_request_id=str(original_request_id or "") or None,
+        business_session_id=str(business_session_id or "") or None,
+        evidence=evidence,
+    )
+    queue_ok = not isinstance(queued, dict) or queued.get("ok") is not False
+    if isinstance(queued, dict) and queued.get("enqueued") is False:
+        queue_ok = False
+    return {
+        "ok": bool(marker_ok and queue_ok),
+        "marker_ok": marker_ok,
+        "queue_ok": queue_ok,
+        "evidence": evidence,
+    }
 
 
 def complete(*, recovery_id: str, worker_id: str, outcome: str, receipt_id: str | None = None) -> Any:

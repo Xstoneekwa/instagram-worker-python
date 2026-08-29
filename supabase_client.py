@@ -2204,6 +2204,118 @@ def record_follow_interaction_outcome(
     return mout
 
 
+def record_ambiguous_follow_mutation(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    action_id: str,
+    run_id: str | None,
+    session_id: str | None,
+    business_session_id: str | None,
+    follow_state_after: str | None,
+    failure_reason: str | None,
+    target_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist physical Follow risk without manufacturing Follow success.
+
+    This projection is deliberately distinct from ``follow_failed``.  It is
+    monotone until an authoritative reconciliation explicitly resolves the
+    exact action id, and is read by Social Memory across business sessions.
+    """
+    safe_action_id = _safe_uuid_text(action_id)
+    if not safe_action_id:
+        return {"ok": False, "error": "ambiguous_follow_action_id_invalid"}
+    now = _utc_now_iso()
+    safe_target_id = _safe_uuid_text(target_id)
+    marker = {
+        "durable": True,
+        "resolved": False,
+        "mutation_state": "ambiguous",
+        "action_id": safe_action_id,
+        "tap_sent": True,
+        "receipt_exists": False,
+        "follow_state_after": str(follow_state_after or "unknown")[:80],
+        "observed_at": now,
+        "source_run_id": str(run_id or "") or None,
+        "source_business_session_id": str(business_session_id or "") or None,
+        "source_target_id": safe_target_id or None,
+        "failure_reason": str(failure_reason or "follow_mutation_ambiguous")[:200],
+        "evidence_source": "worker_post_tap_unresolved_follow_v1",
+    }
+    marker = {key: value for key, value in marker.items() if value is not None}
+    patch: dict[str, Any] = {
+        "interaction_type": "follow_ambiguous",
+        "was_successful": False,
+        "last_interaction_at": now,
+        "payload": {"follow_mutation_ambiguous": marker},
+        "source_target_username": _canonical_source_profile(source_profile) or None,
+        "evidence_source": "worker_post_tap_unresolved_follow_v1",
+        "evidence_confidence": "high",
+        "evidence_summary": _safe_interaction_evidence_summary(
+            action_type="follow mutation ambiguous",
+            username=username,
+            source_profile=source_profile,
+            run_id=run_id,
+        ),
+        "metadata_safe": {
+            "source": "worker_post_tap_unresolved_follow_v1",
+            "action_id": safe_action_id,
+            "tap_sent": True,
+            "receipt_exists": False,
+        },
+    }
+    if safe_target_id:
+        patch["source_target_id"] = safe_target_id
+        patch["ct_id"] = safe_target_id
+    if run_id:
+        patch["run_id"] = str(run_id)
+    if session_id:
+        patch["last_session_id"] = str(session_id)
+    return merge_interacted_user_row(account_id, username, source_profile, patch)
+
+
+def resolve_ambiguous_follow_mutation(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    action_id: str,
+    resolution: str,
+) -> dict[str, Any]:
+    """Resolve only the exact durable ambiguity after authoritative proof."""
+    safe_action_id = _safe_uuid_text(action_id)
+    if not safe_action_id:
+        return {"ok": False, "error": "ambiguous_follow_action_id_invalid"}
+    row = load_interacted_user(account_id, username, source_profile)
+    payload = dict((row or {}).get("payload") or {})
+    marker = payload.get("follow_mutation_ambiguous")
+    if not isinstance(marker, dict) or marker.get("durable") is not True:
+        return {"ok": True, "resolved": False, "reason": "no_durable_ambiguity"}
+    if str(marker.get("action_id") or "") != safe_action_id:
+        return {"ok": False, "error": "ambiguous_follow_action_id_mismatch"}
+    resolution_value = str(resolution or "").strip()
+    if resolution_value not in {
+        "canonical_follow_receipt",
+        "canonical_already_following_proof",
+        "operator_evidence_resolution",
+    }:
+        return {"ok": False, "error": "ambiguous_follow_resolution_unauthorized"}
+    resolved_marker = {
+        **marker,
+        "resolved": True,
+        "mutation_state": "resolved",
+        "resolved_at": _utc_now_iso(),
+        "resolution": resolution_value,
+    }
+    return merge_interacted_user_row(
+        account_id,
+        username,
+        source_profile,
+        {"payload": {"follow_mutation_ambiguous": resolved_marker}},
+    )
+
+
 def record_unfollow_interaction_outcome(
     account_id: str,
     username: str,

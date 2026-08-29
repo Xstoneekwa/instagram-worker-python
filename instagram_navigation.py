@@ -10380,6 +10380,7 @@ def perform_follow_safe(
     dont_follow_private_accounts: bool = False,
     pre_follow_context: dict[str, Any] | None = None,
     prepare_before_follow_tap: Callable[[dict[str, Any]], Any] | None = None,
+    after_follow_tap_dispatched: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """
     Single-tap follow with bounded verification (Following or Requested). No retries / multi-tap.
@@ -10991,6 +10992,8 @@ def perform_follow_safe(
             d.click(tap_cx, tap_cy)
         else:
             btn.click()
+        if after_follow_tap_dispatched is not None:
+            after_follow_tap_dispatched()
         try:
             from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
 
@@ -10998,6 +11001,11 @@ def perform_follow_safe(
         except Exception:
             pass
     except storage_health.HostStorageCriticalError:
+        raise
+    except follow_persistence_intent.FollowTapDispatchJournalUnavailable:
+        # A physical mutation may already exist.  The runner must persist the
+        # durable ambiguity; visual reconciliation cannot downgrade this to a
+        # generic Follow failure.
         raise
     except Exception as e:
         _record(
