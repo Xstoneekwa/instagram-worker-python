@@ -271,6 +271,47 @@ def build_incident_notification_payload(incident: dict) -> dict:
         return _redact_payload({key: value for key, value in payload.items() if value is not None})
 
     if incident_type == "instagram_account_restriction":
+        if reason_code == "instagram_action_rate_limit":
+            recommended_pause_until = _safe_text(
+                metadata.get("recommended_pause_until"), max_len=80
+            )
+            title = f"[{severity.upper()}] Temporary Instagram action limit"
+            message_parts = [
+                title,
+                f"Account: @{account_username or 'unknown'}",
+                "Safety: Phone Farm stopped the current run and performed no further business gesture.",
+                "Policy: A 48h operational pause is recommended by BMB; Instagram did not provide an exact expiry.",
+            ]
+            if recommended_pause_until:
+                message_parts.append(
+                    f"Recommended pause until: {recommended_pause_until}"
+                )
+            message_parts.extend(
+                [
+                    "Incident: One incident-only campaign blocker was created.",
+                    "Action: Resolve manually after the pause. Execution may resume only on a future natural scheduler tick.",
+                ]
+            )
+            if run_id:
+                message_parts.append(f"Run: {_short_id(run_id) or run_id}")
+            payload = {
+                "title": title,
+                "text": "\n".join(message_parts),
+                "severity": severity,
+                "incident_type": incident_type,
+                "reason_code": reason_code,
+                "account_username": account_username,
+                "status": status,
+                "detected_at": metadata.get("detected_at") or last_seen_at,
+                "recommended_pause_until": recommended_pause_until,
+                "pause_policy_source": metadata.get("pause_policy_source"),
+                "instagram_exact_expiry_provided": False,
+                "run_id": run_id,
+                "dashboard_url": _incident_dashboard_url(incident),
+            }
+            return _redact_payload(
+                {key: value for key, value in payload.items() if value is not None}
+            )
         scope = _safe_text(metadata.get("restriction_scope"), max_len=80) or "unknown"
         action = _safe_text(metadata.get("restriction_action"), max_len=80) or "unknown"
         start_date = _operator_date(metadata.get("restriction_start_date"))

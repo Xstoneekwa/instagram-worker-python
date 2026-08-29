@@ -250,6 +250,29 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertIn("Resolve the incident", payload["required_operator_action"])
         self.assertIn("explicitly set the account to Active", payload["text"])
 
+    def test_action_rate_limit_notification_has_no_operator_review_wording(self) -> None:
+        payload = incident_notifications.build_incident_notification_payload({
+            **_incident("incident-action-limit"),
+            "incident_type": "instagram_account_restriction",
+            "reason": "instagram_action_rate_limit",
+            "failure_reason": "instagram_action_rate_limit",
+            "metadata": {
+                "incident_only_blocker_v2": True,
+                "detected_at": "2026-08-29T11:14:55+00:00",
+                "recommended_pause_until": "2026-08-31T11:14:55+00:00",
+                "pause_policy_source": "bmb_operational_policy_48h",
+                "instagram_exact_expiry_provided": False,
+            },
+        })
+        self.assertEqual(payload["reason_code"], "instagram_action_rate_limit")
+        self.assertEqual(
+            payload["recommended_pause_until"],
+            "2026-08-31T11:14:55+00:00",
+        )
+        self.assertIn("future natural scheduler tick", payload["text"])
+        self.assertNotIn("operator review", payload["text"].lower())
+        self.assertFalse(payload["instagram_exact_expiry_provided"])
+
     def test_package_mismatch_notification_payload_safe_for_dry_run(self) -> None:
         payload = incident_notifications.build_incident_notification_payload(_package_mismatch_incident("incident-1"))
         text = json.dumps(payload, sort_keys=True)
