@@ -80,7 +80,12 @@ state, safety-policy and human-authorization functions with read-only fakes.
 Source integration assertions supplement executable checks; no production
 tick or database call is used. Missing backend input or any failure is fatal.
 
-The receipt binds tested Worker files and backend source hashes. Its compact
+The receipt binds tested Worker files and backend source hashes. The generator
+now emits `receipt_hash_contract=RESUME_RECEIPT_PREBINDING_JSON_V1` and
+`receipt_sha256` itself. The preimage is the exact historical receipt
+serialization (`json.dumps(..., indent=2, sort_keys=True)`, UTF-8, one trailing
+newline) with `receipt_sha256` omitted to avoid self-reference. The manifest
+verifier reconstructs those bytes and rejects any mismatch. Its compact
 `resume_state_contract` block must be included in the newly signed manifest,
 with the receipt SHA-256, backend SHA and three PASS gate results. The tested
 source hashes must equal protected manifest entries. Both `verify_repository`

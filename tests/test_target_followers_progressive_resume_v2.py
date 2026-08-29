@@ -1791,6 +1791,28 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertTrue(plan_b.use_legacy_navigation)
         self.assertEqual(run_b.navigation_mutations, 0)
 
+    def test_75_actionable_see_more_veto_preserves_checkpoint_before_swipe(self):
+        continuation = {
+            "state": "EXPAND_PRIMARY_LIST_AVAILABLE",
+            "see_more_visible": True,
+            "see_more_actionable": True,
+            "see_more_before_suggestions": True,
+            "visible_primary_rows_exhausted": True,
+            "selected_followers_tab": True,
+        }
+        self.assertTrue(
+            runner._followers_resume_pre_scroll_see_more_veto(
+                continuation,
+                followers_list_proved=True,
+            )
+        )
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        start = source.index("ct_resume_pre_scroll_boundary_check")
+        handler = source.index("followers_try_expand_primary_list(", start)
+        swipe = source.index("scroll_followers_list_forward(", handler)
+        self.assertLess(handler, swipe)
+        self.assertNotIn("commit_verified_progress(", source[handler:swipe])
+
 
 if __name__ == "__main__":
     unittest.main()

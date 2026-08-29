@@ -183,6 +183,7 @@ from instagram_navigation import (
     run_post_follow_post_likes_phase,
     run_visual_candidate_post_follow_phase,
     scroll_followers_list_forward,
+    scroll_followers_list_backward,
     followers_refresh_hierarchy_for_candidates,
     followers_force_hierarchy_refresh,
     followers_suggestions_boundary_from_cached_hierarchy,
@@ -230,6 +231,7 @@ from instagram_navigation import (
     runner_invalidate_visual_followers_session_after_safe_stop,
 )
 
+from instagram_list_continuation import FollowersContinuationMemory
 from logs import get_run_log_file_path, init_run_file_logging, log
 
 
@@ -2212,7 +2214,37 @@ def _followers_post_scroll_failure_continuation_action(
         return "continue_primary_rows"
     if state == "EXPAND_PRIMARY_LIST_AVAILABLE":
         return "expand_primary_list"
+    if state == "STRUCTURAL_END_PROVED":
+        return "rotate_safe"
+    if state == "CONTINUATION_RECOVERY_REQUIRED":
+        return "recover_continuation"
+    if state in {
+        "CONTINUE_SCROLL_ALLOWED",
+        "TRANSIENT_NO_ROWS",
+        "UNKNOWN",
+    }:
+        return "continue_bounded_proof"
+    # Historical adapters that have not enabled the structural contract keep
+    # their old result.  Follow enables the new states at every rotation gate.
     return "rotate_safe"
+
+
+def _followers_ct_rotation_allowed(
+    continuation: dict[str, Any] | None,
+) -> bool:
+    """Positive gate: absence/stagnation can never rotate a Follow CT."""
+    contract = dict(continuation or {})
+    return bool(
+        str(contract.get("state") or "") == "STRUCTURAL_END_PROVED"
+        and contract.get("is_boundary") is True
+        and not bool(contract.get("checkpoint_continuity_pending"))
+        and not bool(contract.get("known_see_more_unresolved"))
+        and not bool(contract.get("known_see_more_lost_after_own_scroll"))
+        and bool(contract.get("bounded_continuation_attempted"))
+        and bool(contract.get("bounded_continuation_no_progress"))
+        and bool(contract.get("list_identity_stable"))
+        and int(contract.get("stable_observation_count") or 0) >= 2
+    )
 
 
 def _followers_visible_window_scroll_strategy(*, scroll_used: int) -> dict[str, Any]:
@@ -2259,15 +2291,40 @@ def _followers_pre_scroll_contract_decision(
         or visual.get("suggestions_boundary_proved")
         or visual.get("suggestions_only_proved")
     )
+    actionable_see_more = bool(
+        continuation.get("see_more_visible")
+        and continuation.get("see_more_actionable")
+        and continuation.get("see_more_before_suggestions")
+    )
+    if actionable_see_more and bool(
+        continuation.get("visible_primary_rows_exhausted")
+    ):
+        return "expand_primary_list"
     if state == "EXPAND_PRIMARY_LIST_AVAILABLE":
         return "expand_primary_list"
-    if bool(continuation.get("is_boundary")) or visual_hard_boundary:
+    structural_contract = bool(
+        continuation.get("structural_end_contract_enabled")
+    )
+    if structural_contract and state == "STRUCTURAL_END_PROVED":
         return "stop_hard_boundary"
+    if not structural_contract and (
+        bool(continuation.get("is_boundary")) or visual_hard_boundary
+    ):
+        return "stop_hard_boundary"
+    if state == "CONTINUATION_RECOVERY_REQUIRED":
+        return "recover_continuation"
+    if state in {"CONTINUE_SCROLL_ALLOWED", "TRANSIENT_NO_ROWS"}:
+        return "allow_canonical_scroll" if followers_list_proved else "stop_ambiguous_surface"
     # This helper is called only after every candidate in the current visible
     # viewport has already been processed or safely rejected. Seeing those
     # same primary rows again proves the followers surface; it must not send
     # the engine back around the same viewport without a scroll.
     if state == "PRIMARY_ROWS_AVAILABLE":
+        if (
+            "visible_primary_rows_exhausted" in continuation
+            and not bool(continuation.get("visible_primary_rows_exhausted"))
+        ):
+            return "process_rows"
         if followers_list_proved and int(continuation.get("primary_row_count") or 0) > 0:
             return "allow_canonical_scroll"
         return "stop_ambiguous_surface"
@@ -2300,6 +2357,20 @@ def _followers_resume_pre_scroll_see_more_veto(
             visual_evidence=visual_evidence,
         )
         == "expand_primary_list"
+    )
+
+
+def _followers_resume_pre_scroll_continuation_action(
+    continuation: dict[str, Any],
+    *,
+    followers_list_proved: bool,
+    visual_evidence: dict[str, Any] | None = None,
+) -> str:
+    """Expose the shared normal/Resume no-swipe continuation decision."""
+    return _followers_pre_scroll_contract_decision(
+        continuation,
+        followers_list_proved=followers_list_proved,
+        visual_evidence=visual_evidence,
     )
 
 
@@ -12836,6 +12907,13 @@ def _run_followers_list_engine_session(
         run_id=str(run_id or ""),
     )
     target_scan_tracker["_ct_checkpoint"] = ct_checkpoint
+    _followers_continuation_memory = FollowersContinuationMemory()
+    _followers_continuation_memory.bind(
+        account_id=str(account_id or ""),
+        target_id=str(target_id or source_profile_username or ""),
+        list_identity=f"{_norm_ig_handle(source_profile_username)}:followers",
+        list_generation=str(ct_checkpoint.get("created_at") or run_id or ""),
+    )
 
     # C+ upstream boundary: P0C is completed once before checkpoint
     # load/claim and before any CT Resume planning.  Only the explicit current
@@ -15884,7 +15962,19 @@ def _run_followers_list_engine_session(
             if not det.get("is_followers_list"):
                 _canonical_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
                 _canonical_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                _canonical_processed_rows.update(_RUNTIME_INTERACTED_USERNAMES)
                 _canonical_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
+                _checkpoint_continuity_pending = bool(
+                    ct_checkpoint.get("scroll_resume_pending")
+                    or (
+                        ct_checkpoint.get("scroll_resume_planned_index") is not None
+                        and not ct_checkpoint.get("scroll_resume_applied")
+                    )
+                )
+                _candidate_stable_count = int(
+                    target_scan_tracker.get("structural_end_stable_observation_count")
+                    or 0
+                ) + 1
                 suggestions_boundary = followers_suggestions_boundary_from_cached_hierarchy(
                     previously_valid_followers_rows=bool(
                         follows_completed_count > 0
@@ -15894,7 +15984,41 @@ def _run_followers_list_engine_session(
                     ),
                     processed_primary_row_ids=_canonical_processed_rows,
                     continuation_probe_count=1,
+                    structural_end_contract_enabled=True,
+                    known_see_more_unresolved=bool(
+                        _followers_continuation_memory.known_see_more_unresolved
+                    ),
+                    known_see_more_lost_after_own_scroll=bool(
+                        _followers_continuation_memory.own_scroll_since_known_see_more
+                    ),
+                    list_identity_stable=bool(
+                        followers_session_list_committed_open_for(
+                            source_profile_username
+                        )
+                    ),
+                    bounded_continuation_attempted=bool(
+                        target_scan_tracker.get("bounded_continuation_attempted")
+                    ),
+                    bounded_continuation_no_progress=bool(
+                        target_scan_tracker.get("bounded_continuation_no_progress")
+                    ),
+                    stable_observation_count=_candidate_stable_count,
+                    checkpoint_continuity_pending=_checkpoint_continuity_pending,
                 )
+                _followers_continuation_memory.observe(
+                    see_more_visible=bool(suggestions_boundary.get("see_more_visible")),
+                    see_more_actionable=bool(
+                        suggestions_boundary.get("see_more_actionable")
+                    ),
+                )
+                if bool(suggestions_boundary.get("structural_bottom_signature")):
+                    target_scan_tracker[
+                        "structural_end_stable_observation_count"
+                    ] = _candidate_stable_count
+                else:
+                    target_scan_tracker[
+                        "structural_end_stable_observation_count"
+                    ] = 0
                 if bool(suggestions_boundary.get("is_boundary")):
                     # A single post-scroll hierarchy is only a boundary candidate.
                     # Confirm it from a second fresh, bounded probe before rotating
@@ -15911,6 +16035,30 @@ def _run_followers_list_engine_session(
                                 previously_valid_followers_rows=True,
                                 processed_primary_row_ids=_canonical_processed_rows,
                                 continuation_probe_count=2,
+                                structural_end_contract_enabled=True,
+                                known_see_more_unresolved=bool(
+                                    _followers_continuation_memory.known_see_more_unresolved
+                                ),
+                                known_see_more_lost_after_own_scroll=bool(
+                                    _followers_continuation_memory.own_scroll_since_known_see_more
+                                ),
+                                list_identity_stable=True,
+                                bounded_continuation_attempted=bool(
+                                    target_scan_tracker.get(
+                                        "bounded_continuation_attempted"
+                                    )
+                                ),
+                                bounded_continuation_no_progress=bool(
+                                    target_scan_tracker.get(
+                                        "bounded_continuation_no_progress"
+                                    )
+                                ),
+                                stable_observation_count=max(
+                                    2, _candidate_stable_count
+                                ),
+                                checkpoint_continuity_pending=(
+                                    _checkpoint_continuity_pending
+                                ),
                             )
                         )
                     except Exception as _boundary_probe_exc:
@@ -16021,17 +16169,21 @@ def _run_followers_list_engine_session(
                         # See more extends the current viewport.  It is neither
                         # a depth scroll nor target exhaustion.
                         see_more_status = "see_more_expanded"
+                        _followers_continuation_memory.mark_expanded_or_consumed()
+                        target_scan_tracker[
+                            "structural_end_stable_observation_count"
+                        ] = 0
                         continue
                     see_more_status = str(
                         expansion.get("see_more_status")
                         or "see_more_failed_terminal"
                     )
                     _followers_loop_finally_status = "see_more_no_progress"
-                    _followers_loop_finally_stop = str(
-                        expansion.get("reason") or "see_more_no_progress"
+                    _followers_loop_finally_stop = (
+                        "follow_see_more_unresolved_after_bounded_expansion"
                     )
                     break
-                if bool(suggestions_boundary.get("is_boundary")):
+                if _followers_ct_rotation_allowed(suggestions_boundary):
                     see_more_status = (
                         "see_more_expansion_confirmed_but_no_more_followers"
                         if see_more_status == "see_more_expanded"
@@ -16055,7 +16207,7 @@ def _run_followers_list_engine_session(
                         ),
                         overlap_count=0,
                         scroll_distance=0.0,
-                        reason="no_primary_rows_and_no_primary_continuation",
+                        reason="positive_structural_end_contract_proved",
                         elapsed_ms=0.0,
                     )
                     log(
@@ -16072,7 +16224,7 @@ def _run_followers_list_engine_session(
                         visible_primary_row_count=0,
                         overlap_count=0,
                         scroll_distance=0.0,
-                        reason="suggestions_boundary_confirmed",
+                        reason="structural_end_proved",
                         elapsed_ms=0.0,
                     )
                     log(
@@ -16590,6 +16742,7 @@ def _run_followers_list_engine_session(
                     # contract says an actionable See-more continuation wins.
                     _ff_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
                     _ff_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                    _ff_processed_rows.update(_RUNTIME_INTERACTED_USERNAMES)
                     _ff_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
                     _ff_continuation: dict[str, Any] = {}
                     try:
@@ -16597,7 +16750,36 @@ def _run_followers_list_engine_session(
                             followers_suggestions_boundary_from_cached_hierarchy(
                                 previously_valid_followers_rows=True,
                                 processed_primary_row_ids=_ff_processed_rows,
+                                # A checkpoint-depth replay is traversing a
+                                # previously committed viewport.  It must not
+                                # swipe past an actionable primary-list footer.
+                                visible_primary_rows_exhausted=True,
                                 continuation_probe_count=1,
+                                structural_end_contract_enabled=True,
+                                known_see_more_unresolved=bool(
+                                    _followers_continuation_memory.known_see_more_unresolved
+                                ),
+                                known_see_more_lost_after_own_scroll=bool(
+                                    _followers_continuation_memory.own_scroll_since_known_see_more
+                                ),
+                                list_identity_stable=True,
+                                bounded_continuation_attempted=bool(
+                                    target_scan_tracker.get(
+                                        "bounded_continuation_attempted"
+                                    )
+                                ),
+                                bounded_continuation_no_progress=bool(
+                                    target_scan_tracker.get(
+                                        "bounded_continuation_no_progress"
+                                    )
+                                ),
+                                stable_observation_count=int(
+                                    target_scan_tracker.get(
+                                        "structural_end_stable_observation_count"
+                                    )
+                                    or 0
+                                ),
+                                checkpoint_continuity_pending=True,
                             )
                         )
                     except Exception as _ff_continuation_exc:
@@ -16634,11 +16816,23 @@ def _run_followers_list_engine_session(
                         )
                         else {}
                     )
-                    _ff_see_more_veto = _followers_resume_pre_scroll_see_more_veto(
-                        _ff_continuation,
-                        followers_list_proved=_ff_followers_list_proved,
-                        visual_evidence=_ff_visual_evidence,
+                    _followers_continuation_memory.observe(
+                        see_more_visible=bool(
+                            _ff_continuation.get("see_more_visible")
+                        ),
+                        see_more_actionable=bool(
+                            _ff_continuation.get("see_more_actionable")
+                        ),
                     )
+                    _ff_pre_scroll_action = (
+                        _followers_resume_pre_scroll_continuation_action(
+                            _ff_continuation,
+                            followers_list_proved=_ff_followers_list_proved,
+                            visual_evidence=_ff_visual_evidence,
+                        )
+                    )
+                    _ff_see_more_veto = _ff_pre_scroll_action == "expand_primary_list"
+                    _ff_recovery_veto = _ff_pre_scroll_action == "recover_continuation"
                     log(
                         "info",
                         "ct_resume_pre_scroll_boundary_check",
@@ -16658,7 +16852,11 @@ def _run_followers_list_engine_session(
                         decision=(
                             "expand_primary_list"
                             if _ff_see_more_veto
-                            else "allow_checkpoint_scroll"
+                            else (
+                                "recover_continuation"
+                                if _ff_recovery_veto
+                                else "allow_checkpoint_scroll"
+                            )
                         ),
                         decision_source="existing_fresh_hierarchy_cache",
                         new_xml_dump_count=0,
@@ -16678,6 +16876,7 @@ def _run_followers_list_engine_session(
                         )
                         if bool(_ff_expansion.get("expanded")):
                             see_more_status = "see_more_expanded"
+                            _followers_continuation_memory.mark_expanded_or_consumed()
                             log(
                                 "info",
                                 "ct_resume_pre_scroll_see_more_veto_applied",
@@ -16695,8 +16894,8 @@ def _run_followers_list_engine_session(
                             or "see_more_failed_terminal"
                         )
                         _followers_loop_finally_status = "see_more_no_progress"
-                        _followers_loop_finally_stop = str(
-                            _ff_expansion.get("reason") or "see_more_no_progress"
+                        _followers_loop_finally_stop = (
+                            "follow_see_more_unresolved_after_bounded_expansion"
                         )
                         log(
                             "warning",
@@ -16711,9 +16910,26 @@ def _run_followers_list_engine_session(
                             physical_swipe_attempted=False,
                         )
                         break
+                    if _ff_recovery_veto:
+                        if scroll_followers_list_backward(
+                            d,
+                            source_profile_username=source_profile_username,
+                            scroll_steps=1,
+                            scroll_profile="compact",
+                        ):
+                            continue
+                        _followers_loop_finally_status = (
+                            "continuation_recovery_required"
+                        )
+                        _followers_loop_finally_stop = (
+                            "ct_resume_known_see_more_reanchor_failed"
+                        )
+                        break
                     _ff_surface, _ff_target = _target_followers_resume_v2_surface_proof(det)
                     _ff_diag: dict[str, Any] = {}
                     _ff_scroll_index = int(scroll_used) + 1
+                    if _ff_surface and _ff_target:
+                        _followers_continuation_memory.note_own_forward_scroll()
                     _ff_ok = bool(
                         _ff_surface
                         and _ff_target
@@ -16731,6 +16947,7 @@ def _run_followers_list_engine_session(
                             account_id=str(account_id or ""),
                             target_id=str(target_id or ""),
                             run_id=str(run_id or ""),
+                            processed_primary_row_ids=_ff_processed_rows,
                             previous_actual_overlap=(
                                 int(target_scan_tracker.get("last_verified_scroll_overlap"))
                                 if target_scan_tracker.get("last_verified_scroll_overlap") is not None
@@ -16745,6 +16962,12 @@ def _run_followers_list_engine_session(
                         followers_surface_confirmed=_ff_surface,
                         expected_target_confirmed=_ff_target,
                     )
+                    if bool(_ff_diag.get("whether_physical_swipe_attempted")):
+                        target_scan_tracker["bounded_continuation_attempted"] = True
+                        target_scan_tracker["bounded_continuation_no_progress"] = bool(
+                            not _ff_diag.get("depth_advanced")
+                            and not _ff_diag.get("unsafe_anchor_loss")
+                        )
                     if _ff_ok:
                         scroll_used = _ff_scroll_index
                         target_scan_tracker["scrolls_attempted"] = int(
@@ -18726,6 +18949,7 @@ def _run_followers_list_engine_session(
                     # mistaken for exhausted scroll depth.
                     _visible_window_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
                     _visible_window_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                    _visible_window_processed_rows.update(_RUNTIME_INTERACTED_USERNAMES)
                     _visible_window_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
                     # The last picker capture can predate the rendered footer.
                     # Refresh immediately at the scroll boundary so See More
@@ -18752,8 +18976,55 @@ def _run_followers_list_engine_session(
                         followers_suggestions_boundary_from_cached_hierarchy(
                             previously_valid_followers_rows=True,
                             processed_primary_row_ids=_visible_window_processed_rows,
+                            visible_primary_rows_exhausted=True,
                             continuation_probe_count=1,
+                            structural_end_contract_enabled=True,
+                            known_see_more_unresolved=bool(
+                                _followers_continuation_memory.known_see_more_unresolved
+                            ),
+                            known_see_more_lost_after_own_scroll=bool(
+                                _followers_continuation_memory.own_scroll_since_known_see_more
+                            ),
+                            list_identity_stable=True,
+                            bounded_continuation_attempted=bool(
+                                target_scan_tracker.get(
+                                    "bounded_continuation_attempted"
+                                )
+                            ),
+                            bounded_continuation_no_progress=bool(
+                                target_scan_tracker.get(
+                                    "bounded_continuation_no_progress"
+                                )
+                            ),
+                            stable_observation_count=int(
+                                target_scan_tracker.get(
+                                    "structural_end_stable_observation_count"
+                                )
+                                or 0
+                            ),
+                            checkpoint_continuity_pending=bool(
+                                ct_checkpoint.get("scroll_resume_pending")
+                                or (
+                                    ct_checkpoint.get(
+                                        "scroll_resume_planned_index"
+                                    )
+                                    is not None
+                                    and not ct_checkpoint.get(
+                                        "scroll_resume_applied"
+                                    )
+                                )
+                            ),
                         )
+                    )
+                    _followers_continuation_memory.observe(
+                        see_more_visible=bool(
+                            _visible_window_continuation.get("see_more_visible")
+                        ),
+                        see_more_actionable=bool(
+                            _visible_window_continuation.get(
+                                "see_more_actionable"
+                            )
+                        ),
                     )
                     _pre_scroll_continuation_state = str(
                         _visible_window_continuation.get("state") or ""
@@ -18823,18 +19094,28 @@ def _run_followers_list_engine_session(
                             # Expansion is continuation inside the same CT.  It
                             # consumes neither a scroll attempt nor CT rotation.
                             see_more_status = "see_more_expanded"
+                            _followers_continuation_memory.mark_expanded_or_consumed()
                             continue
                         see_more_status = str(
                             _visible_window_expansion.get("see_more_status")
                             or "see_more_failed_terminal"
                         )
                         _followers_loop_finally_status = "see_more_no_progress"
-                        _followers_loop_finally_stop = str(
-                            _visible_window_expansion.get("reason")
-                            or "see_more_no_progress"
+                        _followers_loop_finally_stop = (
+                            "follow_see_more_unresolved_after_bounded_expansion"
                         )
                         break
                     if _pre_scroll_action == "stop_hard_boundary":
+                        if not _followers_ct_rotation_allowed(
+                            _visible_window_continuation
+                        ):
+                            _followers_loop_finally_status = (
+                                "structural_end_unproved"
+                            )
+                            _followers_loop_finally_stop = (
+                                "structural_end_unproved"
+                            )
+                            break
                         see_more_status = "see_more_absent"
                         _followers_loop_finally_status = "suggestions_boundary"
                         _followers_loop_finally_stop = "followers_suggestions_boundary"
@@ -18849,6 +19130,28 @@ def _run_followers_list_engine_session(
                             state=_pre_scroll_continuation_state,
                             action="stop_before_scroll",
                             reason="suggestions_boundary_fresh_xml",
+                        )
+                        break
+                    if _pre_scroll_action == "recover_continuation":
+                        _reanchor_ok = scroll_followers_list_backward(
+                            d,
+                            source_profile_username=source_profile_username,
+                            scroll_steps=1,
+                            scroll_profile="compact",
+                        )
+                        if _reanchor_ok:
+                            target_scan_tracker[
+                                "bounded_continuation_attempted"
+                            ] = True
+                            target_scan_tracker[
+                                "bounded_continuation_no_progress"
+                            ] = False
+                            continue
+                        _followers_loop_finally_status = (
+                            "continuation_recovery_required"
+                        )
+                        _followers_loop_finally_stop = (
+                            "known_see_more_reanchor_failed"
                         )
                         break
                     if _pre_scroll_action == "allow_canonical_scroll":
@@ -18979,6 +19282,7 @@ def _run_followers_list_engine_session(
                     pass
                 _scroll_forward_t0 = time.perf_counter()
                 _main_scroll_diag: dict[str, Any] = {}
+                _followers_continuation_memory.note_own_forward_scroll()
                 _scroll_forward_ok = scroll_followers_list_forward(
                     d,
                     apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
@@ -18996,6 +19300,11 @@ def _run_followers_list_engine_session(
                     account_id=str(account_id or ""),
                     target_id=str(target_id or ""),
                     run_id=str(run_id or ""),
+                    processed_primary_row_ids=(
+                        _visible_window_processed_rows
+                        if _visible_window_scroll_required
+                        else None
+                    ),
                     previous_actual_overlap=(
                         int(target_scan_tracker.get("last_verified_scroll_overlap"))
                         if target_scan_tracker.get("last_verified_scroll_overlap") is not None
@@ -19006,6 +19315,37 @@ def _run_followers_list_engine_session(
                     target_scan_tracker.get("scrolls_attempted") or 0
                 ) + 1
                 target_scan_tracker["last_scroll_index"] = int(scroll_used)
+                if bool(_main_scroll_diag.get("whether_physical_swipe_attempted")):
+                    target_scan_tracker["bounded_continuation_attempted"] = True
+                    _bounded_no_progress = bool(
+                        not _main_scroll_diag.get("depth_advanced")
+                        and not _main_scroll_diag.get("unsafe_anchor_loss")
+                        and str(_main_scroll_diag.get("surface_state_after") or "")
+                        in {
+                            "SUGGESTIONS_BOUNDARY_CONFIRMED",
+                            "TRANSIENT_NO_ROWS",
+                            "STRUCTURAL_END_PROVED",
+                        }
+                    )
+                    target_scan_tracker[
+                        "bounded_continuation_no_progress"
+                    ] = _bounded_no_progress
+                    if _bounded_no_progress:
+                        target_scan_tracker[
+                            "structural_end_stable_observation_count"
+                        ] = max(
+                            1,
+                            int(
+                                target_scan_tracker.get(
+                                    "structural_end_stable_observation_count"
+                                )
+                                or 0
+                            ),
+                        )
+                    else:
+                        target_scan_tracker[
+                            "structural_end_stable_observation_count"
+                        ] = 0
                 if _scroll_forward_ok and bool(_main_scroll_diag.get("depth_advanced")):
                     _verified_overlap = int(_main_scroll_diag.get("overlap_count") or 0)
                     if _verified_overlap > 0:
@@ -19034,6 +19374,8 @@ def _run_followers_list_engine_session(
                         # the existing safe rotation path remains authoritative.
                         _post_scroll_failure_see_more_expanded = False
                         _post_scroll_failure_primary_rows_available = False
+                        _post_scroll_failure_recovery_required = False
+                        _post_scroll_failure_continuation: dict[str, Any] = {}
                         try:
                             from instagram_navigation import (
                                 followers_refresh_detect_hierarchy_cache,
@@ -19049,8 +19391,60 @@ def _run_followers_list_engine_session(
                                     processed_primary_row_ids=(
                                         _visible_window_processed_rows
                                     ),
+                                    visible_primary_rows_exhausted=True,
                                     continuation_probe_count=1,
+                                    structural_end_contract_enabled=True,
+                                    known_see_more_unresolved=bool(
+                                        _followers_continuation_memory.known_see_more_unresolved
+                                    ),
+                                    known_see_more_lost_after_own_scroll=bool(
+                                        _followers_continuation_memory.own_scroll_since_known_see_more
+                                    ),
+                                    list_identity_stable=True,
+                                    bounded_continuation_attempted=bool(
+                                        target_scan_tracker.get(
+                                            "bounded_continuation_attempted"
+                                        )
+                                    ),
+                                    bounded_continuation_no_progress=bool(
+                                        target_scan_tracker.get(
+                                            "bounded_continuation_no_progress"
+                                        )
+                                    ),
+                                    stable_observation_count=max(
+                                        2,
+                                        int(
+                                            target_scan_tracker.get(
+                                                "structural_end_stable_observation_count"
+                                            )
+                                            or 0
+                                        ),
+                                    ),
+                                    checkpoint_continuity_pending=bool(
+                                        ct_checkpoint.get("scroll_resume_pending")
+                                        or (
+                                            ct_checkpoint.get(
+                                                "scroll_resume_planned_index"
+                                            )
+                                            is not None
+                                            and not ct_checkpoint.get(
+                                                "scroll_resume_applied"
+                                            )
+                                        )
+                                    ),
                                 )
+                            )
+                            _followers_continuation_memory.observe(
+                                see_more_visible=bool(
+                                    _post_scroll_failure_continuation.get(
+                                        "see_more_visible"
+                                    )
+                                ),
+                                see_more_actionable=bool(
+                                    _post_scroll_failure_continuation.get(
+                                        "see_more_actionable"
+                                    )
+                                ),
                             )
                             _post_scroll_failure_action = (
                                 _followers_post_scroll_failure_continuation_action(
@@ -19060,6 +19454,10 @@ def _run_followers_list_engine_session(
                             _post_scroll_failure_primary_rows_available = bool(
                                 _post_scroll_failure_action
                                 == "continue_primary_rows"
+                            )
+                            _post_scroll_failure_recovery_required = bool(
+                                _post_scroll_failure_action
+                                == "recover_continuation"
                             )
                             if _post_scroll_failure_action == "expand_primary_list":
                                 _post_scroll_failure_expansion = (
@@ -19082,6 +19480,8 @@ def _run_followers_list_engine_session(
                                         "expanded"
                                     )
                                 )
+                                if _post_scroll_failure_see_more_expanded:
+                                    _followers_continuation_memory.mark_expanded_or_consumed()
                                 see_more_status = str(
                                     _post_scroll_failure_expansion.get(
                                         "see_more_status"
@@ -19105,6 +19505,17 @@ def _run_followers_list_engine_session(
                             )
                         if _post_scroll_failure_see_more_expanded:
                             continue
+                        if _post_scroll_failure_recovery_required:
+                            if scroll_followers_list_backward(
+                                d,
+                                source_profile_username=source_profile_username,
+                                scroll_steps=1,
+                                scroll_profile="compact",
+                            ):
+                                target_scan_tracker[
+                                    "bounded_continuation_no_progress"
+                                ] = False
+                                continue
                         if _post_scroll_failure_primary_rows_available:
                             log(
                                 "info",
@@ -19130,14 +19541,21 @@ def _run_followers_list_engine_session(
                                 ),
                             )
                             continue
-                        _followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"
+                        _structural_rotation_allowed = (
+                            _followers_ct_rotation_allowed(
+                                _post_scroll_failure_continuation
+                            )
+                        )
+                        _followers_loop_finally_stop = (
+                            "followers_structural_end_proved"
+                            if _structural_rotation_allowed
+                            else "visible_window_exhausted_scroll_failed"
+                        )
                         scroll_failure_recovery_attempts = int(
                             _main_scroll_diag.get("forward_attempt_count") or 0
                         )
-                        scroll_failure_target_rotation_safe = not bool(
-                            _main_scroll_diag.get("unsafe_anchor_loss")
-                        ) and str(_main_scroll_diag.get("failure_reason") or "") == (
-                            "adaptive_short_and_bounded_recovery_exhausted"
+                        scroll_failure_target_rotation_safe = bool(
+                            _structural_rotation_allowed
                         )
                         visual_loop_state["list_progressive_exploration_exhausted"] = True
                         try:
@@ -24510,7 +24928,6 @@ def _run_followers_list_engine_session(
         follow_stop_reason=_followers_stable_reason,
         target_rotation_safe_after_scroll_failure=bool(
             scroll_failure_target_rotation_safe
-            or see_more_status == "see_more_failed_terminal"
         ),
         scroll_recovery_attempts=int(scroll_failure_recovery_attempts),
         scroll_failure_surface_ambiguous=bool(
@@ -24532,7 +24949,6 @@ def _run_followers_list_engine_session(
         current_target_id=source_profile_username,
         safe_boundary=bool(
             scroll_failure_target_rotation_safe
-            or see_more_status == "see_more_failed_terminal"
         ),
         target_budget_reached=bool(
             int(target_follow_budget_effective or 0) > 0

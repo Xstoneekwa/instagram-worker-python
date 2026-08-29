@@ -31,6 +31,7 @@ RESUME_CONTRACT_GATES = (
     "RESUME_STATE_PYTHON_API_CONTRACT_GATE",
     "RESUME_STATE_END_TO_END_CONTRACT_GATE",
 )
+RESUME_RECEIPT_HASH_CONTRACT = "RESUME_RECEIPT_PREBINDING_JSON_V1"
 RESUME_CONTRACT_SOURCE_FILES = (
     "account_session_resume_state_contract.py", "account_session_resume_plan_store.py",
     "auto_restart_runtime.py", "scripts/verify-resume-state-end-to-end-contract.py",
@@ -40,6 +41,30 @@ RESUME_CONTRACT_SOURCE_FILES = (
     "tests/test_account_session_resume_plan_store.py", "tests/test_auto_restart_runtime.py",
     "tests/test_auto_restart_hard_stop.py",
 )
+
+
+def canonical_resume_receipt_bytes(evidence: dict[str, Any]) -> bytes:
+    """Serialize the immutable pre-binding Resume receipt canonically.
+
+    The historical gate already emitted deterministic ``indent=2``, sorted
+    JSON with one trailing newline.  ``receipt_sha256`` binds those exact
+    bytes and is excluded from its own preimage to avoid a self-reference.
+    """
+    payload = dict(evidence)
+    payload.pop("receipt_sha256", None)
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def resume_receipt_sha256(evidence: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_resume_receipt_bytes(evidence)).hexdigest()
+
+
+def bind_resume_receipt_provenance(evidence: dict[str, Any]) -> dict[str, Any]:
+    bound = dict(evidence)
+    bound.pop("receipt_sha256", None)
+    bound["receipt_hash_contract"] = RESUME_RECEIPT_HASH_CONTRACT
+    bound["receipt_sha256"] = resume_receipt_sha256(bound)
+    return bound
 
 
 def verify_resume_state_contract_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +85,14 @@ def verify_resume_state_contract_evidence(manifest: dict[str, Any]) -> dict[str,
         return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value)
     if not is_hex(evidence.get("receipt_sha256"), 64) or not is_hex(evidence.get("backend_sha"), 40):
         return {"ok": False, "reason": "resume_state_contract_provenance_missing"}
+    hash_contract = str(evidence.get("receipt_hash_contract") or "")
+    if hash_contract and hash_contract != RESUME_RECEIPT_HASH_CONTRACT:
+        return {"ok": False, "reason": "resume_state_contract_receipt_hash_contract_unknown"}
+    # Historical signed manifests predate the explicit self-verification
+    # convention and remain verifiable under their original detached
+    # signatures. Every newly generated receipt declares V1 and must verify.
+    if hash_contract and evidence["receipt_sha256"] != resume_receipt_sha256(evidence):
+        return {"ok": False, "reason": "resume_state_contract_receipt_sha256_mismatch"}
     sources = evidence.get("source_files")
     entries = manifest.get("protected_entries")
     if not isinstance(sources, dict) or not isinstance(entries, dict):

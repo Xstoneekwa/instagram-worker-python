@@ -17,6 +17,14 @@ from typing import Iterable, Sequence
 class InstagramListContinuationState(str, Enum):
     PRIMARY_ROWS_AVAILABLE = "PRIMARY_ROWS_AVAILABLE"
     EXPAND_PRIMARY_LIST_AVAILABLE = "EXPAND_PRIMARY_LIST_AVAILABLE"
+    CONTINUE_SCROLL_ALLOWED = "CONTINUE_SCROLL_ALLOWED"
+    TRANSIENT_NO_ROWS = "TRANSIENT_NO_ROWS"
+    STRUCTURAL_END_PROVED = "STRUCTURAL_END_PROVED"
+    CONTINUATION_RECOVERY_REQUIRED = "CONTINUATION_RECOVERY_REQUIRED"
+    UNKNOWN = "UNKNOWN"
+    # Historical shared states remain part of the adapter contract for
+    # Unfollow/Welcome consumers that have not opted into the stronger Follow
+    # structural-end proof below.
     SUGGESTIONS_BOUNDARY_CONFIRMED = "SUGGESTIONS_BOUNDARY_CONFIRMED"
     NO_PROGRESS = "NO_PROGRESS"
     AMBIGUOUS_SURFACE = "AMBIGUOUS_SURFACE"
@@ -28,6 +36,7 @@ class InstagramListContinuationSignals:
     expected_surface_selected: bool
     primary_row_ids: tuple[str, ...] = ()
     processed_primary_row_ids: tuple[str, ...] = ()
+    visible_primary_rows_exhausted: bool = False
     see_more_visible: bool = False
     see_more_actionable: bool = False
     see_more_before_suggestions: bool = False
@@ -39,6 +48,75 @@ class InstagramListContinuationSignals:
     overlap_count: int = 0
     scroll_excessive: bool = False
     continuation_probe_count: int = 0
+    structural_end_contract_enabled: bool = False
+    known_see_more_unresolved: bool = False
+    known_see_more_lost_after_own_scroll: bool = False
+    list_identity_stable: bool = False
+    bounded_continuation_attempted: bool = False
+    bounded_continuation_no_progress: bool = False
+    stable_observation_count: int = 0
+    checkpoint_continuity_pending: bool = False
+    structural_bottom_signature: bool = False
+
+
+@dataclass
+class FollowersContinuationMemory:
+    """Bounded, CT-local memory for an unresolved Followers ``See more``.
+
+    The caller owns the context/generation key.  Rebinding clears the memory,
+    so evidence can never leak to another account, target, Followers list or
+    checkpoint generation.  A physical forward scroll after a known footer
+    does not clear it: losing that footer must trigger recovery, never target
+    rotation.
+    """
+
+    context_key: tuple[str, str, str, str] = ("", "", "", "")
+    known_see_more_unresolved: bool = False
+    own_scroll_since_known_see_more: bool = False
+
+    def bind(
+        self,
+        *,
+        account_id: str,
+        target_id: str,
+        list_identity: str,
+        list_generation: str,
+    ) -> None:
+        key = (
+            str(account_id or ""),
+            str(target_id or ""),
+            str(list_identity or ""),
+            str(list_generation or ""),
+        )
+        if key != self.context_key:
+            self.context_key = key
+            self.known_see_more_unresolved = False
+            self.own_scroll_since_known_see_more = False
+
+    def observe(self, *, see_more_visible: bool, see_more_actionable: bool) -> None:
+        if bool(see_more_visible and see_more_actionable):
+            self.known_see_more_unresolved = True
+            self.own_scroll_since_known_see_more = False
+
+    def note_own_forward_scroll(self) -> None:
+        if self.known_see_more_unresolved:
+            self.own_scroll_since_known_see_more = True
+
+    def mark_expanded_or_consumed(self) -> None:
+        self.known_see_more_unresolved = False
+        self.own_scroll_since_known_see_more = False
+
+    def lost_after_own_scroll(
+        self,
+        *,
+        see_more_visible: bool,
+        see_more_actionable: bool,
+    ) -> bool:
+        return bool(
+            self.known_see_more_unresolved
+            and self.own_scroll_since_known_see_more
+            and not (see_more_visible and see_more_actionable)
+        )
 
 
 @dataclass(frozen=True)
@@ -237,22 +315,71 @@ def classify_instagram_list_continuation(
     signals: InstagramListContinuationSignals,
 ) -> InstagramListContinuationState:
     """Classify list continuation using the business-safe priority order."""
-    if not signals.expected_surface_selected or signals.loading:
-        return InstagramListContinuationState.AMBIGUOUS_SURFACE
-    if signals.scroll_excessive:
-        return InstagramListContinuationState.AMBIGUOUS_SURFACE
+    if signals.structural_end_contract_enabled:
+        if not signals.expected_surface_selected:
+            return InstagramListContinuationState.UNKNOWN
+        if signals.loading:
+            return InstagramListContinuationState.TRANSIENT_NO_ROWS
+        if signals.scroll_excessive:
+            return InstagramListContinuationState.CONTINUATION_RECOVERY_REQUIRED
+    else:
+        if not signals.expected_surface_selected or signals.loading:
+            return InstagramListContinuationState.AMBIGUOUS_SURFACE
+        if signals.scroll_excessive:
+            return InstagramListContinuationState.AMBIGUOUS_SURFACE
 
     processed = set(_normalize_row_ids(signals.processed_primary_row_ids))
     visible = _normalize_row_ids(signals.primary_row_ids)
-    if any(row_id not in processed for row_id in visible):
-        return InstagramListContinuationState.PRIMARY_ROWS_AVAILABLE
-
-    if (
+    unprocessed_primary_rows = tuple(
+        row_id for row_id in visible if row_id not in processed
+    )
+    actionable_primary_expansion = bool(
         signals.see_more_visible
         and signals.see_more_actionable
         and signals.see_more_before_suggestions
+    )
+
+    # The runner's canonical row-state is authoritative when it has already
+    # exhausted the immutable visible snapshot.  In that state, a rendered
+    # actionable See More footer is the next primary-list continuation even if
+    # the accessibility hierarchy still repeats those consumed row ids.
+    # Conversely, See More must never hide a genuinely unprocessed row.
+    if actionable_primary_expansion and (
+        signals.visible_primary_rows_exhausted or not unprocessed_primary_rows
     ):
         return InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE
+
+    if unprocessed_primary_rows:
+        return InstagramListContinuationState.PRIMARY_ROWS_AVAILABLE
+
+    if signals.structural_end_contract_enabled:
+        # Once a footer has been proved, its disappearance after our own
+        # gesture is positive evidence of lost anchoring, never exhaustion.
+        if (
+            signals.known_see_more_unresolved
+            or signals.known_see_more_lost_after_own_scroll
+        ):
+            return InstagramListContinuationState.CONTINUATION_RECOVERY_REQUIRED
+
+        positive_structural_bottom = bool(
+            signals.suggestions_visible
+            and not signals.see_more_visible
+            and not visible
+            and signals.list_identity_stable
+            and signals.bounded_continuation_attempted
+            and signals.bounded_continuation_no_progress
+            and int(signals.stable_observation_count or 0) >= 2
+            and not signals.checkpoint_continuity_pending
+            and signals.structural_bottom_signature
+        )
+        if positive_structural_bottom:
+            return InstagramListContinuationState.STRUCTURAL_END_PROVED
+
+        if visible:
+            return InstagramListContinuationState.CONTINUE_SCROLL_ALLOWED
+        if signals.suggestions_visible or signals.scroll_attempted:
+            return InstagramListContinuationState.TRANSIENT_NO_ROWS
+        return InstagramListContinuationState.UNKNOWN
 
     if (
         signals.scroll_attempted

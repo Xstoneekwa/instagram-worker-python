@@ -20,7 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from account_session_resume_state_contract import DB_ALLOWED_RESUME_STATES
-from follow60_lock_v3 import RESUME_CONTRACT_SOURCE_FILES
+from follow60_lock_v3 import (
+    RESUME_CONTRACT_SOURCE_FILES,
+    bind_resume_receipt_provenance,
+)
 
 
 def forbid_network(event, _args):
@@ -70,14 +73,14 @@ def main():
     if backend_result.get("status") != "PASS":
         results["RESUME_STATE_END_TO_END_CONTRACT_GATE"]["status"] = "FAIL"
     status = "PASS" if all(item["status"] == "PASS" for item in results.values()) else "FAIL"
-    evidence = {
+    evidence = bind_resume_receipt_provenance({
         "schema": "RESUME_STATE_END_TO_END_CONTRACT_V1", "status": status,
         "gates": {key: value["status"] for key, value in results.items()}, "tests": results,
         "source_files": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                          for name in RESUME_CONTRACT_SOURCE_FILES},
         "backend_sha": subprocess.check_output(["git", "-C", str(backend), "rev-parse", "HEAD"], text=True).strip(),
         "backend": backend_result, "production_mutations": 0,
-    }
+    })
     with Path(args.output).open("x", encoding="utf-8") as handle:
         json.dump(evidence, handle, indent=2, sort_keys=True)
         handle.write("\n")

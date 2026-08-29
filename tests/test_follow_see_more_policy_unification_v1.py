@@ -54,6 +54,37 @@ class FollowSeeMorePolicyUnificationV1Tests(unittest.TestCase):
         self.assertNotIn("dump_hierarchy", fast_forward)
         self.assertNotIn("time.sleep", fast_forward)
 
+    def test_ct_resume_marks_checkpoint_viewport_exhausted_without_advancing_it(self) -> None:
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        start = source.index("_ff_processed_rows =")
+        handler = source.index("followers_try_expand_primary_list(", start)
+        swipe = source.index("scroll_followers_list_forward(", handler)
+        checkpoint_stage = source.index("note_legacy_scroll_progress(", swipe)
+        fast_forward = source[start:swipe]
+        self.assertIn("visible_primary_rows_exhausted=True", fast_forward)
+        self.assertLess(handler, swipe)
+        self.assertGreater(checkpoint_stage, swipe)
+        self.assertNotIn("commit_verified_progress(", source[handler:swipe])
+
+    def test_normal_exhausted_viewport_uses_same_handler_before_scroll(self) -> None:
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        start = source.index("_visible_window_processed_rows =")
+        handler = source.index("followers_try_expand_primary_list(", start)
+        swipe = source.index("scroll_followers_list_forward(", handler)
+        normal = source[start:swipe]
+        self.assertIn("visible_primary_rows_exhausted=True", normal)
+        self.assertIn("_followers_pre_scroll_contract_decision", normal)
+        self.assertLess(handler, swipe)
+
+    def test_debug_capture_is_not_before_selector_dispatch(self) -> None:
+        import instagram_navigation as nav
+
+        source = inspect.getsource(nav.followers_try_expand_primary_list)
+        click = source.index("selector.click()")
+        capture = source.index("see_more_after_dispatch_")
+        self.assertLess(click, capture)
+        self.assertNotIn("see_more_before_", source[:click])
+
     def test_see_more_failure_rotates_when_another_ct_remains(self) -> None:
         outcome = build_follow_outcome(
             stable_reason=SEE_MORE_REASON,

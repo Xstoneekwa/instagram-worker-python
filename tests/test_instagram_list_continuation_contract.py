@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
+import statistics
 import unittest
 from unittest.mock import patch
 
@@ -186,6 +187,44 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(out["state"], State.EXPAND_PRIMARY_LIST_AVAILABLE.value)
         self.assertFalse(out["is_boundary"])
+
+    def test_03a_historical_six_consumed_rows_actionable_see_more_expands(self) -> None:
+        """Exact bistrotdelagare1 regression: the old priority returned PRIMARY."""
+        row_ids = tuple(f"consumed_{index}" for index in range(6))
+        state = classify_instagram_list_continuation(
+            InstagramListContinuationSignals(
+                flow="follow",
+                expected_surface_selected=True,
+                primary_row_ids=row_ids,
+                processed_primary_row_ids=(),
+                visible_primary_rows_exhausted=True,
+                see_more_visible=True,
+                see_more_actionable=True,
+                see_more_before_suggestions=True,
+                suggestions_visible=True,
+            )
+        )
+        self.assertEqual(state, State.EXPAND_PRIMARY_LIST_AVAILABLE)
+
+    def test_03b_unprocessed_rows_keep_priority_without_unsafe_scroll(self) -> None:
+        xml = _surface(
+            rows=[("processed", "Following"), ("unprocessed", "Follow")],
+            see_more=True,
+            suggestions=True,
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            processed_primary_row_ids={"processed"},
+            visible_primary_rows_exhausted=False,
+        )
+        self.assertEqual(out["state"], State.PRIMARY_ROWS_AVAILABLE.value)
+        self.assertEqual(
+            runner._followers_pre_scroll_contract_decision(
+                out,
+                followers_list_proved=True,
+            ),
+            "process_rows",
+        )
 
     def test_04_see_more_click_loads_new_primary_rows(self) -> None:
         before = _surface(rows=[], see_more=True, suggestions=True)
@@ -391,6 +430,97 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("see_more_detected", events)
         self.assertIn("see_more_click_attempted", events)
         self.assertIn("see_more_expansion_confirmed", events)
+
+    def test_05m_malformed_stale_see_more_proof_never_taps(self) -> None:
+        malformed = (
+            "<hierarchy>"
+            + _node(text="22 followers", selected=True)
+            + '<node text="See more" content-desc="" resource-id="" '
+            'class="android.widget.TextView" bounds="invalid" '
+            'selected="false" clickable="false" />'
+            + "</hierarchy>"
+        )
+
+        class NoSelectorDevice:
+            clicks = 0
+
+            def __call__(self, **_kwargs):
+                return _FakeSelector(self, False)
+
+        nav._followers_store_detect_hierarchy_xml(malformed)
+        device = NoSelectorDevice()
+        result = nav.followers_try_expand_primary_list(device)
+        self.assertFalse(result["expanded"])
+        self.assertEqual(device.clicks, 0)
+
+    def test_05n_selector_tap_failure_is_bounded_and_fails_closed(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+
+        class FailingSelector:
+            def __init__(self, device) -> None:
+                self.device = device
+
+            def exists(self, timeout: float = 0.0) -> bool:
+                _ = timeout
+                return True
+
+            def click(self) -> None:
+                self.device.tap_attempts += 1
+                raise RuntimeError("synthetic_tap_failure")
+
+        class FailingDevice:
+            def __init__(self) -> None:
+                self.tap_attempts = 0
+
+            def __call__(self, **_kwargs):
+                return FailingSelector(self)
+
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = FailingDevice()
+        result = nav.followers_try_expand_primary_list(device, max_attempts=2)
+        self.assertFalse(result["expanded"])
+        self.assertGreaterEqual(device.tap_attempts, 1)
+        self.assertLessEqual(device.tap_attempts, 4)
+
+    def test_05o_debug_screenshot_failure_occurs_only_after_tap(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        after = _surface(rows=[("row_new", "Follow")])
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _FakeDevice(after)
+
+        def screenshot_fails_after_tap(*_args, **_kwargs):
+            self.assertEqual(device.clicks, 1)
+            raise RuntimeError("synthetic_debug_capture_failure")
+
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav, "screenshot", side_effect=screenshot_fails_after_tap
+        ):
+            result = nav.followers_try_expand_primary_list(
+                device,
+                account_id="account",
+                run_id="run",
+            )
+        self.assertTrue(result["expanded"])
+        self.assertEqual(device.clicks, 1)
+        self.assertLessEqual(result["actionable_to_tap_ms"], 150.0)
+
+    def test_05p_actionable_to_tap_latency_distribution_is_below_contract(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        after = _surface(rows=[("row_new", "Follow")])
+        samples: list[float] = []
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav, "log"
+        ):
+            for _ in range(40):
+                nav._followers_store_detect_hierarchy_xml(before)
+                result = nav.followers_try_expand_primary_list(_FakeDevice(after))
+                self.assertTrue(result["expanded"])
+                samples.append(float(result["actionable_to_tap_ms"]))
+        ordered = sorted(samples)
+        p95 = ordered[max(0, int(len(ordered) * 0.95) - 1)]
+        self.assertLessEqual(statistics.median(samples), 150.0)
+        self.assertLessEqual(p95, 150.0)
+        self.assertLessEqual(max(samples), 150.0)
 
     def test_06_suggestions_without_see_more_is_boundary(self) -> None:
         out = nav.followers_list_continuation_from_hierarchy_xml(
@@ -931,6 +1061,52 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(diag["overlap_count"], 2)
         self.assertEqual(diag["new_primary_row_count"], 7)
 
+    def test_29b_post_scroll_actionable_see_more_handoffs_immediately(self) -> None:
+        before_rows = [(f"row_{index}", "Following") for index in range(8)]
+        after_rows = [("row_7", "Following")]
+        before = _surface(rows=before_rows)
+        after = _surface(rows=after_rows, see_more=True, suggestions=True)
+        processed = {username for username, _ in before_rows}
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _FakeScrollDevice()
+        diag: dict = {}
+
+        def refresh_after(*_args, **_kwargs):
+            nav._followers_store_detect_hierarchy_xml(after)
+            return after
+
+        with (
+            patch.object(
+                nav,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=refresh_after,
+            ),
+            patch.object(nav, "_followers_log_scroll_or_swipe_about_to_run"),
+            patch.object(nav.time, "sleep", return_value=None),
+            patch.object(
+                nav,
+                "followers_try_expand_primary_list",
+                return_value={
+                    "expanded": True,
+                    "reason": "new_primary_rows_stable",
+                    "see_more_status": "see_more_expanded",
+                },
+            ) as expand,
+        ):
+            ok = nav._followers_scroll_list_forward(
+                device,
+                scroll_profile="canonical_adaptive",
+                bypass_post_tap_capture_gate=True,
+                bypass_scroll_xml_guards=True,
+                scroll_diag_out=diag,
+                processed_primary_row_ids=processed,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(len(device.swipes), 1)
+        self.assertTrue(diag["post_scroll_expand_handoff"])
+        self.assertFalse(diag["depth_advanced"])
+        expand.assert_called_once()
+
     def test_30_adaptive_failure_runs_short_fallback_and_reprobes(self) -> None:
         before = _surface(rows=[(f"row_{idx}", "Following") for idx in range(8)])
         after_short = _surface(
@@ -1205,11 +1381,11 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
 
-    def test_39b_failed_scroll_gets_one_fresh_see_more_probe_before_rotation(self) -> None:
+    def test_39b_failed_scroll_gets_fresh_probe_before_structural_rotation_gate(self) -> None:
         source = inspect.getsource(runner._run_followers_list_engine_session)
         failure_offset = source.index("if not _scroll_forward_ok:")
         rotation_offset = source.index(
-            '_followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"',
+            "_structural_rotation_allowed =",
             failure_offset,
         )
         final_probe = source[failure_offset:rotation_offset]
@@ -1222,6 +1398,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("max_attempts=1", final_probe)
         self.assertIn("if _post_scroll_failure_see_more_expanded", final_probe)
         self.assertIn("_post_scroll_failure_primary_rows_available", final_probe)
+        self.assertIn("_post_scroll_failure_recovery_required", final_probe)
         self.assertIn(
             "instagram_list_final_primary_rows_continue_same_ct", final_probe
         )
