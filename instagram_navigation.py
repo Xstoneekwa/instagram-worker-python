@@ -9384,6 +9384,69 @@ def _follow_ui_state_snapshot(d: u2.Device) -> str:
     return "unknown"
 
 
+def _follow_ui_state_from_fresh_hierarchy(
+    hierarchy_xml: str,
+    *,
+    screen_height: int,
+) -> str:
+    """Resolve the same coarse header state from one already-fresh hierarchy."""
+    y_limit = int(max(1, screen_height) * 0.52)
+    candidates: list[str] = []
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return "unknown"
+    for node in root.iter():
+        attrs = node.attrib
+        resource_id = str(attrs.get("resource-id") or "")
+        bounds = str(attrs.get("bounds") or "")
+        match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if match:
+            top, bottom = int(match.group(2)), int(match.group(4))
+            if bottom <= top or (top + bottom) // 2 > y_limit:
+                continue
+        elif "profile_header_follow_button" not in resource_id:
+            continue
+        for key in ("text", "content-desc"):
+            value = str(attrs.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+    normalized = {_follow_norm(value) for value in candidates}
+    if normalized.intersection({"requested", "demande envoyée", "en attente"}):
+        return "requested"
+    if normalized.intersection({"following", "abonné", "abonnée", "suivi"}):
+        return "following"
+    if any(value in {"follow back", "suivre en retour"} for value in normalized):
+        return "follow_back"
+    if normalized.intersection({"follow", "suivre"}):
+        return "follow"
+    return "unknown"
+
+
+def _follow_ui_state_and_fresh_hierarchy(d: u2.Device) -> tuple[str, str]:
+    """Use one hierarchy as both Follow-state proof and late-popup authority."""
+    try:
+        try:
+            hierarchy = str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            hierarchy = str(d.dump_hierarchy() or "")
+    except Exception:
+        hierarchy = ""
+    if not hierarchy:
+        return _follow_ui_state_snapshot(d), ""
+    try:
+        screen_height = int(d.window_size()[1])
+    except Exception:
+        screen_height = 1920
+    return (
+        _follow_ui_state_from_fresh_hierarchy(
+            hierarchy,
+            screen_height=screen_height,
+        ),
+        hierarchy,
+    )
+
+
 _FOLLOW_POST_TAP_RID_FAST_FOLLOW_FALLBACK_ATTEMPTS = 3
 
 
@@ -11319,6 +11382,7 @@ def perform_follow_safe(
     attempts = 0
     state_after = state_before
     review_popup_handled_once = False
+    late_action_rate_limit_checked_once = False
     while time.monotonic() < verify_deadline:
         attempts += 1
         _verify_poll_t0 = time.perf_counter()
@@ -11363,6 +11427,30 @@ def perform_follow_safe(
                 state_after = _follow_ui_state_snapshot(d)
         else:
             state_after = _follow_ui_state_snapshot(d)
+        if state_after == "unknown" and not late_action_rate_limit_checked_once:
+            _fresh_state, _fresh_verify_hierarchy = (
+                _follow_ui_state_and_fresh_hierarchy(d)
+            )
+            if _fresh_state != "unknown":
+                state_after = _fresh_state
+            else:
+                late_action_rate_limit_checked_once = True
+            log(
+                "info",
+                "follow_post_tap_unknown_rate_limit_reclassification",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                verify_attempt=attempts,
+                hierarchy_reused=bool(_fresh_verify_hierarchy),
+            )
+            if late_action_rate_limit_checked_once:
+                guard_instagram_action_rate_limit(
+                    d,
+                    phase="follow",
+                    preceding_action="follow_first_unknown_post_tap_verification",
+                    hierarchy_xml=_fresh_verify_hierarchy,
+                    package_name=str(pkg or ""),
+                )
         if (
             not review_popup_handled_once
             and attempts <= 2

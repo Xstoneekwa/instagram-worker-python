@@ -543,6 +543,13 @@ _SAFE_METADATA_KEYS = (
     "safety_scope",
     "fail_closed",
     "business_actions_allowed",
+    "detected_at",
+    "recommended_pause_until",
+    "pause_policy_source",
+    "instagram_exact_expiry_provided",
+    "incident_only_blocker_v2",
+    "is_temporary_restriction",
+    "manual_incident_resolution_required",
 )
 
 
@@ -700,17 +707,16 @@ def classify_terminal_run_failure(
             incident_type="instagram_account_restriction",
             reason_code="instagram_action_rate_limit",
             severity="error",
-            operator_label="Instagram action restriction detected",
+            operator_label="Temporary Instagram action limit",
             action_required=(
-                "Open the account manually, verify whether Instagram still shows the action "
-                "restriction, wait if necessary, then resolve the incident only after confirming "
-                "the restriction is cleared."
+                "Wait about 48 hours, then resolve this incident manually. Execution may resume "
+                "only on a future natural scheduler tick."
             ),
-            requires_operator_review=True,
+            requires_operator_review=False,
             blocking_campaign=True,
             admin_message=(
-                "Instagram is temporarily limiting actions. The campaign is paused and Auto Restart "
-                "must remain blocked until human review and a physical preflight pass."
+                "Instagram is temporarily limiting actions. A 48-hour operational pause is "
+                "recommended; this open incident is the only blocker created for this reason."
             ),
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -942,10 +948,16 @@ def build_run_failure_incident_payload(
         human_confirmation_dedupe_key = (
             f"account:{aid}:instagram_human_confirmation"
         )
+    action_rate_limit_dedupe_key = ""
+    if decision.reason_code == "instagram_action_rate_limit":
+        aid = str(account_id or "").strip() or "unknown"
+        action_rate_limit_dedupe_key = f"account:{aid}:instagram_action_rate_limit:v2"
+        metadata["incident_only_blocker_v2"] = True
     return {
         "incident_type": decision.incident_type,
         "dedupe_key": human_confirmation_dedupe_key
         or restriction_dedupe_key
+        or action_rate_limit_dedupe_key
         or str(metadata.get("incident_dedupe_key") or "").strip()
         or build_incident_dedupe_key(
             account_id=account_id,
@@ -965,7 +977,10 @@ def build_run_failure_incident_payload(
         "failure_reason": decision.reason_code,
         "action_required": decision.action_required,
         "safe_client_message": str(
-            metadata.get("client_safe_message") or "Automation paused for account safety."
+            metadata.get("client_safe_message")
+            or ("Instagram temporarily limited actions. A 48h pause is required."
+                if decision.reason_code == "instagram_action_rate_limit"
+                else "Automation paused for account safety.")
         ),
         "assistant_message": decision.operator_label,
         "admin_message": decision.admin_message,

@@ -114,6 +114,34 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertEqual(decision.incident_type, "account_login_required")
         self.assertEqual(decision.severity, "critical")
 
+    def test_action_rate_limit_is_temporary_incident_only_blocker(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=76,
+            performance_summary={
+                "reason": "instagram_action_rate_limit",
+                "detected_at": "2026-08-29T11:14:55+00:00",
+                "recommended_pause_until": "2026-08-31T11:14:55+00:00",
+                "pause_policy_source": "bmb_operational_policy_48h",
+            },
+        )
+        self.assertTrue(decision.should_publish)
+        self.assertEqual(decision.reason_code, "instagram_action_rate_limit")
+        self.assertTrue(decision.blocking_campaign)
+        self.assertFalse(decision.requires_operator_review)
+        self.assertIn("48", decision.action_required)
+        self.assertNotIn("preflight", decision.admin_message.lower())
+        payload = build_run_failure_incident_payload(
+            decision,
+            account_id=ACCOUNT_ID,
+            run_id=RUN_ID,
+        )
+        self.assertEqual(
+            payload["dedupe_key"],
+            f"account:{ACCOUNT_ID}:instagram_action_rate_limit:v2",
+        )
+        self.assertTrue(payload["metadata"]["incident_only_blocker_v2"])
+        self.assertIn("48h", payload["safe_client_message"])
+
     def test_dispatcher_timeout_incident(self) -> None:
         decision = classify_terminal_run_failure(exit_code=143, timed_out=True)
         self.assertTrue(decision.should_publish)

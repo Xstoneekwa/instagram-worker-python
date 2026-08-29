@@ -15,7 +15,7 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,9 @@ from logs import log
 
 STABLE_REASON = "instagram_action_rate_limit"
 INCIDENT_TYPE = "instagram_account_restriction"
-RISK_CLASS = "human_review_required"
+RISK_CLASS = "temporary_restriction"
+PAUSE_POLICY_SOURCE = "bmb_operational_policy_48h"
+RECOMMENDED_PAUSE = timedelta(hours=48)
 EXIT_CODE = 76
 
 _EVIDENCE_ROOT = Path(__file__).resolve().parent / "logs" / "restriction-evidence"
@@ -371,14 +373,19 @@ def guard_instagram_action_rate_limit(
     preceding_action: str,
     visual_text: str = "",
     hierarchy_xml: str | None = None,
+    package_name: str | None = None,
 ) -> RestrictionClassification:
-    """Raise after atomically pausing/publishing a confirmed restriction."""
+    """Raise after atomically publishing a confirmed incident-only blocker."""
     xml = _dump_hierarchy(d) if hierarchy_xml is None else str(hierarchy_xml or "")
     # Human confirmation is an account-global boundary.  Reuse this exact XML
     # and package observation; the classifier never clicks Continue.
     from instagram_human_confirmation_challenge import guard_instagram_human_confirmation
 
-    current_package = _current_package(d)
+    current_package = (
+        str(package_name or "").strip()
+        if package_name is not None
+        else _current_package(d)
+    )
     guard_instagram_human_confirmation(
         d,
         hierarchy_xml=xml,
@@ -418,7 +425,9 @@ def guard_instagram_action_rate_limit(
 
     configure_restriction_runtime_context(phase=phase, preceding_action=preceding_action)
     ctx = _RUNTIME_CONTEXT
-    detected_at = datetime.now(timezone.utc).isoformat()
+    detected_at_dt = datetime.now(timezone.utc)
+    detected_at = detected_at_dt.isoformat()
+    recommended_pause_until = (detected_at_dt + RECOMMENDED_PAUSE).isoformat()
     log(
         "error",
         "instagram_action_rate_limit_detected",
@@ -429,7 +438,7 @@ def guard_instagram_action_rate_limit(
         language=result.language,
         confidence=result.confidence,
         auto_restart_allowed=False,
-        account_pause_required=True,
+        account_pause_required=False,
     )
     log(
         "info",
@@ -442,9 +451,13 @@ def guard_instagram_action_rate_limit(
     safe_metadata = {
         "risk_class": RISK_CLASS,
         "blocking_campaign": True,
-        "operator_review_required": True,
+        "operator_review_required": False,
+        "requires_human_confirmation": False,
+        "requires_credentials_update": False,
+        "is_temporary_restriction": True,
+        "manual_incident_resolution_required": True,
         "auto_restart_allowed": False,
-        "account_pause_required": True,
+        "account_pause_required": False,
         "phase": phase,
         "preceding_action": preceding_action,
         "language": result.language,
@@ -462,8 +475,11 @@ def guard_instagram_action_rate_limit(
         "quotas_remaining": dict(ctx.quotas_remaining),
         "evidence": evidence,
         "detected_at": detected_at,
+        "recommended_pause_until": recommended_pause_until,
+        "pause_policy_source": PAUSE_POLICY_SOURCE,
+        "instagram_exact_expiry_provided": False,
         "button_policy": "never_click_contact;ok_not_required_for_terminalization",
-        "physical_preflight_required": True,
+        "physical_preflight_required": False,
     }
     apply_result: dict[str, Any]
     try:
@@ -484,10 +500,10 @@ def guard_instagram_action_rate_limit(
     incident_id = str(apply_result.get("incident_id") or "") or None
     log(
         "info" if apply_result.get("ok") else "error",
-        "restriction_account_pause_applied",
+        "restriction_incident_blocker_applied",
         account_id=ctx.account_id or None,
         incident_id=incident_id,
-        pause_status=apply_result.get("hold_status"),
+        incident_status=apply_result.get("incident_status"),
         applied=bool(apply_result.get("ok")),
     )
     log("info", "restriction_incident_created", incident_id=incident_id, deduplicated=bool(apply_result.get("deduplicated")))
@@ -512,12 +528,19 @@ def guard_instagram_action_rate_limit(
         "language": result.language,
         "confidence": result.confidence,
         "blocking_campaign": True,
-        "operator_review_required": True,
+        "operator_review_required": False,
+        "requires_human_confirmation": False,
+        "requires_credentials_update": False,
+        "is_temporary_restriction": True,
+        "manual_incident_resolution_required": True,
         "auto_restart_allowed": False,
-        "account_pause_required": True,
-        "physical_preflight_required": True,
+        "account_pause_required": False,
+        "physical_preflight_required": False,
         "incident_id": incident_id,
         "incident_dedupe_key": str(apply_result.get("dedupe_key") or "") or None,
         "detected_at": detected_at,
+        "recommended_pause_until": recommended_pause_until,
+        "pause_policy_source": PAUSE_POLICY_SOURCE,
+        "instagram_exact_expiry_provided": False,
     }
     raise InstagramActionRestrictionDetected(device=d, summary=summary)

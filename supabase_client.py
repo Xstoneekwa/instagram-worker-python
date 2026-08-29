@@ -1174,7 +1174,7 @@ def upsert_account_incident(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_instagram_action_restriction(payload: dict[str, Any]) -> dict[str, Any]:
-    """Atomically create/enrich the restriction incident and apply its account hold."""
+    """Atomically create/enrich the incident-only temporary action-limit blocker."""
     body = dict(payload or {})
     row = _call_rpc(
         "apply_instagram_action_restriction_v1",

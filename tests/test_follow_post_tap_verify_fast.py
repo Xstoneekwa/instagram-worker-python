@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import instagram_navigation as nav
+from instagram_action_restriction import InstagramActionRestrictionDetected
 
 
 class _Selector:
@@ -134,7 +135,10 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
 
     def test_rid_following_succeeds_without_full_snapshot(self) -> None:
         device = _Device([self._state_info("Following")])
-        with patch.object(nav, "_follow_ui_state_snapshot") as mock_snapshot:
+        with patch.object(nav, "_follow_ui_state_snapshot") as mock_snapshot, patch.object(
+            nav,
+            "guard_instagram_action_rate_limit",
+        ) as restriction_guard:
             out, mock_review_confirm, mock_review_visible = _run_follow(
                 device, return_review_mocks=True
             )
@@ -143,8 +147,49 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
         self.assertEqual(out["follow_state_after"], "following")
         self.assertEqual(out["verify_attempts"], 1)
         mock_snapshot.assert_not_called()
+        self.assertEqual(restriction_guard.call_count, 2)
+        self.assertNotIn(
+            "follow_first_unknown_post_tap_verification",
+            [call.kwargs.get("preceding_action") for call in restriction_guard.call_args_list],
+        )
         mock_review_confirm.assert_not_called()
         mock_review_visible.assert_not_called()
+
+    def test_late_async_rate_limit_reclassifies_first_unknown_once(self) -> None:
+        device = _Device([None])
+        terminal = InstagramActionRestrictionDetected(
+            device=device,
+            summary={
+                "reason": "instagram_action_rate_limit",
+                "operator_review_required": False,
+            },
+        )
+        with patch.object(
+            nav,
+            "_follow_ui_state_snapshot",
+            return_value="unknown",
+        ), patch.object(
+            nav,
+            "_follow_ui_state_and_fresh_hierarchy",
+            return_value=("unknown", "<hierarchy />"),
+        ), patch.object(
+            nav,
+            "guard_instagram_action_rate_limit",
+            side_effect=[None, None, terminal],
+        ) as restriction_guard:
+            with self.assertRaises(InstagramActionRestrictionDetected) as raised:
+                _run_follow(device)
+
+        self.assertEqual(raised.exception.summary["reason"], "instagram_action_rate_limit")
+        self.assertFalse(raised.exception.summary["operator_review_required"])
+        self.assertEqual(restriction_guard.call_count, 3)
+        late = restriction_guard.call_args_list[-1]
+        self.assertEqual(
+            late.kwargs["preceding_action"],
+            "follow_first_unknown_post_tap_verification",
+        )
+        self.assertEqual(late.kwargs["hierarchy_xml"], "<hierarchy />")
+        self.assertEqual(late.kwargs["package_name"], "com.instagram.android")
 
     def test_durable_prepare_runs_after_exact_bounds_and_before_tap(self) -> None:
         device = _Device([self._state_info("Following")])

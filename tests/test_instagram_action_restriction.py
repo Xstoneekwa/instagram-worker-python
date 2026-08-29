@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from instagram_action_restriction import (
@@ -30,6 +31,19 @@ FR_BODY = "Nous limitons la fréquence de certaines actions que vous pouvez effe
 
 
 class RestrictionClassifierTests(unittest.TestCase):
+    def test_two_field_screenshot_replays_share_exact_signature(self) -> None:
+        field_copy = (
+            "Try again later",
+            "We limit how often you can do certain things on Instagram, such as following people, to protect our community. Let us know if you think that we've made a mistake.",
+            "Let us know",
+            "OK",
+        )
+        for account in ("le_reve_de_blue", "jc4surlesflots"):
+            with self.subTest(account=account):
+                result = classify_instagram_action_rate_limit(xml(*field_copy))
+                self.assertTrue(result.detected)
+                self.assertEqual(result.language, "en")
+
     def test_exact_english_popup(self) -> None:
         result = classify_instagram_action_rate_limit(xml(EN_TITLE, EN_BODY, "OK", "Let us know"))
         self.assertTrue(result.detected)
@@ -92,7 +106,7 @@ class RestrictionRuntimeGuardTests(unittest.TestCase):
             device_id="device-1",
         )
 
-    def test_confirmed_popup_applies_hold_once_and_never_clicks(self) -> None:
+    def test_confirmed_popup_applies_incident_blocker_once_and_never_clicks(self) -> None:
         class Device:
             click_count = 0
 
@@ -132,6 +146,20 @@ class RestrictionRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(raised.exception.summary["reason"], "instagram_action_rate_limit")
         self.assertEqual(raised.exception.summary["incident_id"], "incident-1")
         self.assertFalse(raised.exception.summary["auto_restart_allowed"])
+        self.assertFalse(raised.exception.summary["operator_review_required"])
+        self.assertFalse(raised.exception.summary["physical_preflight_required"])
+        detected = datetime.fromisoformat(raised.exception.summary["detected_at"])
+        pause_until = datetime.fromisoformat(
+            raised.exception.summary["recommended_pause_until"]
+        )
+        self.assertEqual((pause_until - detected).total_seconds(), 48 * 60 * 60)
+        self.assertEqual(
+            raised.exception.summary["pause_policy_source"],
+            "bmb_operational_policy_48h",
+        )
+        payload = apply_hold.call_args.args[0]
+        self.assertFalse(payload["metadata_safe"]["operator_review_required"])
+        self.assertTrue(payload["metadata_safe"]["manual_incident_resolution_required"])
 
     def test_database_failure_still_stops_the_session(self) -> None:
         class Device:
@@ -154,7 +182,7 @@ class RestrictionRuntimeGuardTests(unittest.TestCase):
                 )
 
         self.assertIsNone(raised.exception.summary["incident_id"])
-        self.assertTrue(raised.exception.summary["account_pause_required"])
+        self.assertFalse(raised.exception.summary["account_pause_required"])
 
     def test_package_read_is_shared_only_within_one_guard_invocation(self) -> None:
         class Device:
