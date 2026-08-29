@@ -68,8 +68,8 @@ recertification → signature → remote parity → clean worktree → certified
 release creation → external physical seal → acquire process-bound external
 deployment lock → exact identity recheck → zero gate → exact identity recheck
 → runtime switch → immutable promotion receipt → archive deployment lock
-→ aligned services → one shared
-startup-tick skip → canonical production registry
+→ aligned services → exact shared startup-tick skip consumption proof
+→ canonical production registry
 update → post-promotion registry gate → post-activation gate`.
 
 The protocol must not declare `FULL_PASS` after a runtime switch until

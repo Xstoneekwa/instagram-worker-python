@@ -168,6 +168,8 @@ class PhoneFarmRuntimeControlTest(TestCase):
                     ), mock.patch.object(ctl, "_publish_immutable_receipt"), mock.patch.object(
                         ctl, "_receipt_sha256", return_value="a" * 64
                     ), mock.patch.object(ctl, "_atomic_update_worker_registry"), mock.patch.object(
+                        ctl, "prepare_startup_skip_token", return_value={"token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}}
+                    ), mock.patch.object(
                         ctl, "_run_canonical_controller", return_value={"ok": True}
                     ), mock.patch.object(
                         ctl, "_wait_for_service_convergence", return_value={"ok": True, "services": {}}
@@ -277,6 +279,8 @@ class PhoneFarmRuntimeControlTest(TestCase):
                  mock.patch.object(ctl, "_validate_release_evidence", return_value=evidence), \
                  mock.patch.object(ctl, "deployment_zero_gate", return_value=zero), \
                  mock.patch.object(ctl, "_stage_receipt", return_value=tmp / "receipt.pending"), \
+                 mock.patch.object(ctl, "prepare_startup_skip_token", return_value={"token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}}), \
+                 mock.patch.object(ctl, "cancel_prepared_startup_skip_token"), \
                  mock.patch.object(ctl, "_publish_immutable_receipt", side_effect=OSError("denied")):
                 result = ctl.switch_release("new")
             self.assertFalse(result["ok"])

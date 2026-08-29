@@ -10,11 +10,27 @@ not a scheduling, quota, queue or device defect.
 
 ## Contract
 
-The canonical runtime controller supplies `RUN_CONTROL_DISPATCHER_RUN_DIR`
+The canonical runtime controller supplies `PHONEFARM_RUNTIME_HOME` and
+`RUN_CONTROL_DISPATCHER_RUN_DIR`
 outside the sealed release. The dispatcher wrapper arms and exports exactly
 `<shared run directory>/auto-restart-skip-startup-tick.once`. It refuses an
 alternate token path, release-local directory or environment-file redirection.
 Heartbeat and notifier neither arm nor consume this marker.
+
+`startup_tick_skip_token.py` is the only implementation of creation,
+permission/ownership setup, atomic publication, validation, consumption,
+cleanup and consumption proof. The service identity is derived from the owner
+and group of the canonical runtime home; the shared dispatcher run directory
+must have the same owner/group and must not be group/world writable. No account
+name or UID is hard-coded. A root promotion controller therefore creates for
+the launchd service identity rather than for root. The published token is a
+single-link regular file with exact mode `0600`.
+
+Publication is `O_EXCL` private temporary file, complete bounded write,
+`fchown` when required, exact `fchmod 0600`, file `fsync`, metadata verification,
+atomic rename, then directory `fsync`. The target path never exposes a partial
+or incorrectly-owned file. Any permission or ownership failure removes the
+temporary file and fails closed.
 
 After the existing storage preflight, but before any startup probe can trigger
 a tick, the consumer calls the single shared consumption helper. Its decision
@@ -39,7 +55,14 @@ TTL is invented: an aged but valid *pending* marker is conservatively consumed
 once. Renamed `.consumed.*` artifacts are never read as pending state. Thus a
 previously consumed skip cannot postpone another restart; malformed/obsolete
 formats fail closed rather than silently enabling a startup tick. A fresh
-canonical arm replaces pending state through the existing atomic wrapper.
+canonical arm validates an existing exact token or atomically creates one; two
+parallel arms converge on one inode.
+
+Consumption atomically claims the token, revalidates its owner, group, mode,
+marker and inode, writes a private atomic receipt bound to that device/inode,
+then removes the claim. Promotion convergence requires the pending path to be
+absent and the exact receipt to match the prepared token. Neither service
+convergence nor marker absence alone can produce `PROMOTED`.
 
 ## Machine-enforced regression
 
@@ -49,10 +72,14 @@ test doubles. It proves initial suppression, subsequent natural cadence,
 long startup, absence, consumed-marker restart, repeated initialization,
 malformed state and cleanup failure. Structural dominance checks prevent
 reintroducing the initial recovery-tick short circuit. The pure existing
-wrapper arm function is exercised solely under a temporary directory; no
+wrapper/helper arm path is exercised solely under a temporary directory; no
 service entrypoint is executed. Runtime-controller path propagation,
 heartbeat/notifier isolation and the restart/resume zero-gate ordering are
-also asserted. These fixtures are included in the new protected manifest.
+also asserted. `tests/test_startup_tick_skip_token_ownership_v1.py` additionally
+proves root-creator ownership transfer, same-identity access, unrelated-user
+permission denial, wrong mode/owner rejection, atomic visibility, permission
+failure cleanup, stale one-shot behavior and parallel creation. These fixtures
+are included in the new protected manifest.
 
 ## Preservation and release policy
 

@@ -7,6 +7,7 @@ import urllib.error
 from unittest import mock
 
 import auto_restart_dispatcher_tick as tick
+from startup_tick_skip_token import TOKEN_FILENAME, prepare_startup_skip_token
 
 
 class AutoRestartDispatcherTickTests(unittest.TestCase):
@@ -35,8 +36,9 @@ class AutoRestartDispatcherTickTests(unittest.TestCase):
 
     def test_startup_skip_guard_absent_preserves_historical_startup_tick(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            token_path = os.path.join(tmp, "startup-skip.once")
-            result = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+            token_path = os.path.join(tmp, TOKEN_FILENAME)
+            with mock.patch.dict(os.environ, {"PHONEFARM_RUNTIME_HOME": tmp}):
+                result = tick.consume_auto_restart_startup_tick_skip_once(token_path)
         self.assertFalse(result["consumed"])
         self.assertEqual(result["reason"], "guard_absent")
         self.assertTrue(
@@ -48,11 +50,11 @@ class AutoRestartDispatcherTickTests(unittest.TestCase):
 
     def test_startup_skip_guard_is_consumed_atomically_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            token_path = os.path.join(tmp, "startup-skip.once")
-            with open(token_path, "w", encoding="utf-8") as handle:
-                handle.write("phonefarm-auto-restart-startup-skip-v1\n")
-            first = tick.consume_auto_restart_startup_tick_skip_once(token_path)
-            second = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+            token_path = os.path.join(tmp, TOKEN_FILENAME)
+            prepare_startup_skip_token(token_path, tmp)
+            with mock.patch.dict(os.environ, {"PHONEFARM_RUNTIME_HOME": tmp}):
+                first = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+                second = tick.consume_auto_restart_startup_tick_skip_once(token_path)
             leftovers = [name for name in os.listdir(tmp) if ".consumed." in name]
         self.assertTrue(first["consumed"])
         self.assertTrue(first["cleanup_ok"])

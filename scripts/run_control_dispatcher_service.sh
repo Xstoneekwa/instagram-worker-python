@@ -724,14 +724,10 @@ _start_foreground() {
 }
 
 _prepare_auto_restart_startup_skip_once() {
-  local token_dir token_tmp
-  token_dir="$(dirname "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE")"
-  mkdir -p "$token_dir"
-  token_tmp="${AUTO_RESTART_STARTUP_SKIP_ONCE_FILE}.prepare.$$"
-  umask 077
-  printf '%s\n' 'phonefarm-auto-restart-startup-skip-v1' > "$token_tmp"
-  chmod 600 "$token_tmp"
-  mv -f "$token_tmp" "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE"
+  : "${PHONEFARM_RUNTIME_HOME:?PHONEFARM_RUNTIME_HOME is required}"
+  "$PYTHON_BIN" "$ROOT_DIR/startup_tick_skip_token.py" prepare \
+    --token-path "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE" \
+    --runtime-home "$PHONEFARM_RUNTIME_HOME" >/dev/null
   echo "auto_restart_startup_tick_skip_once_prepared"
 }
 

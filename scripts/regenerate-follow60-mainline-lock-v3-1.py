@@ -25,6 +25,7 @@ REQUIRED_STATUS_TRUST_SCOPE = {
     "follow60_external_deployment_lock_v2.py",
     "follow60_write_lock_v3_1.py",
     "phonefarm_runtime_control.py",
+    "startup_tick_skip_token.py",
     "scripts/production_lineage_gate_v1.py",
     "scripts/verify-follow60-status-trust-v1.py",
     "scripts/install-follow60-status-trust-cache-v1.py",

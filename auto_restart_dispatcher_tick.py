@@ -9,20 +9,20 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
 
 from logs import log
+from startup_tick_skip_token import TOKEN_MARKER, consume_startup_skip_token
 
 AUTO_RESTART_TICK_MIN_INTERVAL_SECONDS = 60.0
 AUTO_RESTART_TICK_HTTP_TIMEOUT_SECONDS = 45.0
 AUTO_RESTART_TICK_ROUTE = "/api/instagram-dashboard/auto-restart/tick"
 AUTO_RESTART_TICK_TOKEN_ENV = "INSTAGRAM_AUTO_RESTART_TICK_TOKEN"
 AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV = "AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE"
-AUTO_RESTART_STARTUP_SKIP_MARKER = b"phonefarm-auto-restart-startup-skip-v1\n"
+AUTO_RESTART_STARTUP_SKIP_MARKER = TOKEN_MARKER
 AUTO_RESTART_TICK_URL_ENV_CANDIDATES = (
     "INSTAGRAM_DASHBOARD_API_BASE_URL",
     "BOTAPP_COMPASS_AI_RELAY_URL",
@@ -62,62 +62,10 @@ def consume_auto_restart_startup_tick_skip_once(
         ):
             return {"consumed": False, "reason": "guard_shared_path_mismatch"}
 
-    try:
-        token_stat = os.stat(resolved_path, follow_symlinks=False)
-    except FileNotFoundError:
-        return {"consumed": False, "reason": "guard_absent"}
-    except OSError:
-        return {"consumed": False, "reason": "guard_stat_failed"}
-
-    if not stat.S_ISREG(token_stat.st_mode):
-        return {"consumed": False, "reason": "guard_not_regular_file"}
-
-    def valid_marker(path: str) -> bool:
-        # O_NOFOLLOW plus inode comparison closes the stat/rename replacement
-        # race. Bound the read: arbitrary files cannot become startup tokens.
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            current = os.fstat(fd)
-            return (
-                stat.S_ISREG(current.st_mode)
-                and (current.st_dev, current.st_ino) == (token_stat.st_dev, token_stat.st_ino)
-                and current.st_size == len(AUTO_RESTART_STARTUP_SKIP_MARKER)
-                and os.read(fd, len(AUTO_RESTART_STARTUP_SKIP_MARKER) + 1)
-                == AUTO_RESTART_STARTUP_SKIP_MARKER
-            )
-        finally:
-            os.close(fd)
-
-    try:
-        if not valid_marker(resolved_path):
-            return {"consumed": False, "reason": "guard_invalid_marker"}
-    except OSError:
-        return {"consumed": False, "reason": "guard_read_failed"}
-
-    consumed_path = f"{resolved_path}.consumed.{os.getpid()}"
-    try:
-        os.replace(resolved_path, consumed_path)
-    except FileNotFoundError:
-        return {"consumed": False, "reason": "guard_already_consumed"}
-    except OSError:
-        return {"consumed": False, "reason": "guard_consume_failed"}
-
-    try:
-        if not valid_marker(consumed_path):
-            return {"consumed": False, "reason": "guard_changed_during_consume"}
-    except OSError:
-        return {"consumed": False, "reason": "guard_claim_read_failed"}
-
-    cleanup_ok = True
-    try:
-        os.unlink(consumed_path)
-    except OSError:
-        cleanup_ok = False
-    return {
-        "consumed": True,
-        "reason": "guard_consumed" if cleanup_ok else "guard_consumed_cleanup_failed",
-        "cleanup_ok": cleanup_ok,
-    }
+    runtime_home = _env("PHONEFARM_RUNTIME_HOME")
+    if not os.path.isabs(runtime_home):
+        return {"consumed": False, "reason": "guard_runtime_home_invalid"}
+    return consume_startup_skip_token(resolved_path, runtime_home)
 
 
 def resolve_auto_restart_tick_base_url() -> str:

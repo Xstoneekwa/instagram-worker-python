@@ -64,7 +64,7 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
         }
         return base, old, new, current, env
 
-    def _run(self, raw: str, *, restarts=None, convergence=None, registry_effect=None):
+    def _run(self, raw: str, *, restarts=None, convergence=None, registry_effect=None, prepare_effect=None):
         base, old, new, current, env = self._layout(raw)
         transaction = mock.Mock()
         transaction.finish.return_value = "/archive/lock.json"
@@ -83,6 +83,11 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
             "services": {},
         }
         registry = mock.Mock(side_effect=registry_effect) if registry_effect else mock.Mock()
+        prepared = {
+            "ok": True,
+            "status": "STARTUP_TOKEN_PREPARED",
+            "token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600},
+        }
         with mock.patch.dict(os.environ, env, clear=False), \
              mock.patch.object(ctl, "_git_commit", return_value=self.candidate_sha[:7]), \
              mock.patch.object(ctl, "_git_full_commit", return_value=self.previous_sha), \
@@ -93,14 +98,20 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
              mock.patch.object(ctl, "_publish_immutable_receipt") as publish, \
              mock.patch.object(ctl, "_receipt_sha256", return_value="c" * 64), \
              mock.patch.object(ctl, "_atomic_update_worker_registry", registry), \
+             mock.patch.object(
+                 ctl,
+                 "prepare_startup_skip_token",
+                 side_effect=prepare_effect,
+                 return_value=prepared,
+             ) as prepare, \
              mock.patch.object(ctl, "_run_canonical_controller", side_effect=restart_results) as restart, \
              mock.patch.object(ctl, "_wait_for_service_convergence", return_value=convergence):
             result = ctl._switch_release_locked(str(new), transaction)
-        return result, current, old, new, transaction, stage, publish, restart, registry
+        return result, current, old, new, transaction, stage, publish, restart, registry, prepare
 
     def test_all_services_converged_is_the_only_promoted_path(self):
         with tempfile.TemporaryDirectory() as raw:
-            result, current, _, new, transaction, stage, publish, restart, registry = self._run(raw)
+            result, current, _, new, transaction, stage, publish, restart, registry, prepare = self._run(raw)
             resolved_current = current.resolve()
             resolved_new = new.resolve()
         self.assertTrue(result["ok"])
@@ -115,13 +126,54 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
         self.assertEqual(publish.call_count, 2)
         self.assertEqual(registry.call_count, 2)
         transaction.finish.assert_called_once()
+        prepare.assert_called_once()
+
+    def test_permission_setup_failure_blocks_before_active_root_switch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            result, current, old, _, transaction, stage, publish, restart, registry, _ = self._run(
+                raw,
+                prepare_effect=ctl.StartupSkipTokenError("startup_token_owner_group_setup_failed"),
+            )
+            resolved_current = current.resolve()
+            resolved_old = old.resolve()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "promotion_startup_token_prepare_failed")
+        self.assertEqual(result["receiptState"], "SEALED")
+        self.assertFalse(result["runtimeSwitched"])
+        self.assertEqual(resolved_current, resolved_old)
+        publish.assert_not_called()
+        restart.assert_not_called()
+        registry.assert_not_called()
+        transaction.finish.assert_not_called()
+
+    def test_convergence_requires_exact_consumption_proof_after_services_align(self):
+        paths = ctl.RuntimePaths(Path("/current"), Path("/releases"), Path("/runtime"), Path("/legacy"))
+        expected = {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}
+        service_pass = {"ok": True, "status": "SERVICE_CONVERGENCE_PASS", "services": {}}
+        with mock.patch.object(ctl, "canonical_service_snapshot", return_value=service_pass), \
+             mock.patch.object(ctl, "verify_startup_skip_consumed", side_effect=[
+                 {"ok": False, "status": "STARTUP_TOKEN_PENDING"},
+                 {"ok": True, "status": "STARTUP_TOKEN_GATE_PASS"},
+             ]) as verify, \
+             mock.patch.object(ctl.time, "sleep"):
+            result = ctl._wait_for_service_convergence(
+                paths=paths,
+                expected_root="/release/new",
+                expected_sha=self.candidate_sha,
+                expected_startup_token=expected,
+                timeout_seconds=2,
+                interval_seconds=0.01,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["startupTokenGate"]["status"], "STARTUP_TOKEN_GATE_PASS")
+        self.assertEqual(verify.call_count, 2)
 
     def test_each_restart_failure_leaves_only_pending_state(self):
         for index, component in enumerate(ctl.PROMOTION_SERVICES):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as raw:
                 restarts = [{"ok": True} for _ in ctl.PROMOTION_SERVICES]
                 restarts[index] = {"ok": False, "reason": "fixture_failure"}
-                result, _, _, _, transaction, stage, publish, restart, registry = self._run(
+                result, _, _, _, transaction, stage, publish, restart, registry, _ = self._run(
                     raw, restarts=restarts
                 )
             self.assertFalse(result["ok"])
@@ -136,7 +188,7 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
     def test_old_root_or_duplicate_or_missing_service_never_promotes(self):
         for reason in ("dispatcher:cwd_old_or_unknown_root", "heartbeat:missing_service", "notifier:duplicate_service"):
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as raw:
-                result, _, _, _, transaction, stage, publish, _, _ = self._run(
+                result, _, _, _, transaction, stage, publish, _, _, _ = self._run(
                     raw,
                     convergence={
                         "ok": False,
@@ -152,7 +204,7 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
 
     def test_registry_failure_after_switch_is_pending_and_restarts_nothing(self):
         with tempfile.TemporaryDirectory() as raw:
-            result, current, _, new, transaction, stage, publish, restart, registry = self._run(
+            result, current, _, new, transaction, stage, publish, restart, registry, _ = self._run(
                 raw, registry_effect=OSError("fixture registry failure")
             )
             resolved_current = current.resolve()
@@ -185,6 +237,7 @@ class CanonicalRuntimeRootPromotionV2Test(unittest.TestCase):
                  mock.patch.object(ctl, "_publish_immutable_receipt") as publish, \
                  mock.patch.object(ctl, "_receipt_sha256", return_value="c" * 64), \
                  mock.patch.object(ctl, "_atomic_update_worker_registry"), \
+                 mock.patch.object(ctl, "prepare_startup_skip_token", return_value={"token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}}), \
                  mock.patch.object(ctl, "_run_canonical_controller", return_value={"ok": True}), \
                  mock.patch.object(ctl, "_wait_for_service_convergence", side_effect=RuntimeError("crash")):
                 with self.assertRaisesRegex(RuntimeError, "crash"):

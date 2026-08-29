@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_SOURCE = REPO_ROOT / "scripts" / "run_control_dispatcher_service.sh"
+TOKEN_HELPER_SOURCE = REPO_ROOT / "startup_tick_skip_token.py"
 
 
 def test_wrapper_git_identity_uses_exact_process_scoped_safe_directory() -> None:
@@ -61,6 +62,7 @@ def _make_harness(tmp_path: Path) -> dict[str, Path]:
     run_dir.mkdir()
     logs.mkdir()
     shutil.copy2(WRAPPER_SOURCE, scripts / "run_control_dispatcher_service.sh")
+    shutil.copy2(TOKEN_HELPER_SOURCE, root / "startup_tick_skip_token.py")
     (scripts / "run_control_dispatcher_service.sh").chmod(0o755)
 
     # The production wrapper now fails closed through the exact-candidate
@@ -167,6 +169,7 @@ def _env(harness: dict[str, Path], events: Path, **extra: str) -> dict[str, str]
             "SUPABASE_SERVICE_ROLE_KEY": "dummy",
             "ADB_PATH": str(harness["adb"]),
             "DUMMY_CONSUMER_EVENTS": str(events),
+            "PHONEFARM_RUNTIME_HOME": str(harness["root"]),
         }
     )
     env.update(extra)

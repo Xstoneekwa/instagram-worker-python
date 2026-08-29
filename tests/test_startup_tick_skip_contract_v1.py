@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import account_run_request_consumer as consumer
 import auto_restart_dispatcher_tick as tick
 import phonefarm_runtime_control as runtime
+import startup_tick_skip_token as token_protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKER = b'phonefarm-auto-restart-startup-skip-v1\n'
@@ -24,8 +25,11 @@ class StartupSkipContractTests(unittest.TestCase):
     def exercise_startup(self, directory, *, marker=True, reliability=True, delay=0):
         """Execute run_forever, not an imitation; stop after two natural intervals."""
         token = Path(directory) / 'auto-restart-skip-startup-tick.once'
-        if marker is not None:
-            token.write_bytes(MARKER if marker is True else marker)
+        if marker is True:
+            token_protocol.prepare_startup_skip_token(token, Path(directory))
+        elif marker is not None:
+            token.write_bytes(marker)
+            token.chmod(0o600)
         clock = [100.0]
         signals = {}
         observed = []
@@ -55,6 +59,7 @@ class StartupSkipContractTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, {
                 'RUN_CONTROL_DISPATCHER_RUN_DIR': str(directory),
+                'PHONEFARM_RUNTIME_HOME': str(directory),
                 tick.AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV: str(token),
             }))
             stack.enter_context(patch.object(consumer, 'log'))
@@ -148,14 +153,10 @@ class StartupSkipContractTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 env = runtime._component_env(paths, root, 'dispatcher')
             run_dir = Path(env['RUN_CONTROL_DISPATCHER_RUN_DIR'])
+            run_dir.mkdir(parents=True)
             token = run_dir / 'auto-restart-skip-startup-tick.once'
             wrapper = (ROOT / 'scripts/run_control_dispatcher_service.sh').read_text()
-            # Execute ONLY the pure arm function in a temporary directory.
-            # No wrapper entrypoint, service command, restart or tick is run.
-            arm = wrapper.split('_prepare_auto_restart_startup_skip_once() {', 1)[1].split('\n}\n', 1)[0]
-            script = 'set -eu\n_prepare_auto_restart_startup_skip_once() {' + arm + '\n}\n_prepare_auto_restart_startup_skip_once\n'
-            env['AUTO_RESTART_STARTUP_SKIP_ONCE_FILE'] = str(token)
-            subprocess.run(['/bin/bash', '-c', script], env=env, check=True, capture_output=True)
+            token_protocol.prepare_startup_skip_token(token, paths.runtime_home)
             self.assertEqual(token.read_bytes(), tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
             env[tick.AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV] = str(token)
             with patch.dict(os.environ, env, clear=True):
@@ -170,37 +171,37 @@ class StartupSkipContractTests(unittest.TestCase):
         # V1 has no expiry or generation payload. Do not invent a TTL. An old
         # still-pending valid marker suppresses once and cannot poison restart.
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / 'pending'
-            path.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
+            path = Path(d) / token_protocol.TOKEN_FILENAME
+            token_protocol.prepare_startup_skip_token(path, Path(d))
             os.utime(path, (1, 1))
-            self.assertTrue(tick.consume_auto_restart_startup_tick_skip_once(str(path))['consumed'])
-            self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(path))['reason'], 'guard_absent')
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d}):
+                self.assertTrue(tick.consume_auto_restart_startup_tick_skip_once(str(path))['consumed'])
+                self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(path))['reason'], 'guard_absent')
 
     def test_replacement_between_stat_and_claim_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / 'pending'
-            path.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
-            replace = os.replace
-            def race(source, dest):
-                alternate = Path(d) / 'alternate'
-                alternate.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
-                replace(alternate, source)
-                replace(source, dest)
-            with patch.object(tick.os, 'replace', side_effect=race):
+            path = Path(d) / token_protocol.TOKEN_FILENAME
+            token_protocol.prepare_startup_skip_token(path, Path(d))
+            original_read = token_protocol._read_exact
+            calls = [0]
+            def race(path_arg, identity, expected):
+                info = original_read(path_arg, identity, expected)
+                calls[0] += 1
+                if calls[0] == 2:
+                    values = list(info)
+                    values[1] += 1
+                    return os.stat_result(values)
+                return info
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d}), patch.object(token_protocol, '_read_exact', side_effect=race):
                 result = tick.consume_auto_restart_startup_tick_skip_once(str(path))
             self.assertFalse(result['consumed'])
             self.assertEqual(result['reason'], 'guard_changed_during_consume')
 
     def test_two_simultaneous_claimants_consume_exactly_once(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / 'pending'
-            path.write_bytes(MARKER)
-            barrier = threading.Barrier(2)
-            replace = os.replace
-            def simultaneous(source, dest):
-                barrier.wait(timeout=5)
-                replace(source, dest)
-            with patch.object(tick.os, 'replace', side_effect=simultaneous), ThreadPoolExecutor(max_workers=2) as executor:
+            path = Path(d) / token_protocol.TOKEN_FILENAME
+            token_protocol.prepare_startup_skip_token(path, Path(d))
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d}), ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(tick.consume_auto_restart_startup_tick_skip_once, str(path)) for _ in range(2)]
                 results = [f.result(timeout=10) for f in futures]
             self.assertEqual(sum(bool(r['consumed']) for r in results), 1)
@@ -210,7 +211,7 @@ class StartupSkipContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'different.once'
             path.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
-            with patch.dict(os.environ, {'RUN_CONTROL_DISPATCHER_RUN_DIR': d, tick.AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV: str(path)}):
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d, 'RUN_CONTROL_DISPATCHER_RUN_DIR': d, tick.AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV: str(path)}):
                 self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once()['reason'], 'guard_shared_path_mismatch')
             self.assertTrue(path.exists())
 
@@ -218,17 +219,19 @@ class StartupSkipContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             original = Path(d) / 'original'
             original.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
-            link = Path(d) / 'link'
+            link = Path(d) / token_protocol.TOKEN_FILENAME
             link.symlink_to(original)
-            self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(link))['reason'], 'guard_not_regular_file')
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d}):
+                self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(link))['reason'], 'startup_token_read_failed')
             self.assertTrue(original.exists())
 
     def test_claimed_leftover_is_not_a_pending_token(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / 'pending'
+            path = Path(d) / token_protocol.TOKEN_FILENAME
             leftover = Path(str(path) + '.consumed.123')
             leftover.write_bytes(tick.AUTO_RESTART_STARTUP_SKIP_MARKER)
-            self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(path))['reason'], 'guard_absent')
+            with patch.dict(os.environ, {'PHONEFARM_RUNTIME_HOME': d}):
+                self.assertEqual(tick.consume_auto_restart_startup_tick_skip_once(str(path))['reason'], 'guard_absent')
             self.assertTrue(leftover.exists())
 
     def test_every_startup_tick_is_dominated_by_shared_initialization(self):

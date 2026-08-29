@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from follow60_deployment_gate_v1 import verify_deployment_candidate
+from startup_tick_skip_token import (
+    TOKEN_FILENAME,
+    StartupSkipTokenError,
+    cancel_prepared_startup_skip_token,
+    prepare_startup_skip_token,
+    verify_startup_skip_consumed,
+)
 
 
 DEFAULT_CURRENT_LINK = Path("/Users/admin/phonefarm-worker-current")
@@ -463,6 +470,7 @@ def _component_env(paths: RuntimePaths, root: RuntimeRoot, component: str) -> di
         env.setdefault("INCIDENT_NOTIFIER_INTERVAL_SECONDS", "60")
     env["PHONEFARM_ACTIVE_ROOT"] = root.resolved_root
     env["PHONEFARM_ACTIVE_COMMIT"] = root.commit
+    env["PHONEFARM_RUNTIME_HOME"] = str(paths.runtime_home)
     return env
 
 
@@ -1017,6 +1025,7 @@ def _wait_for_service_convergence(
     paths: RuntimePaths,
     expected_root: str,
     expected_sha: str,
+    expected_startup_token: dict[str, Any] | None = None,
     timeout_seconds: float = 30.0,
     interval_seconds: float = 0.25,
 ) -> dict[str, Any]:
@@ -1027,7 +1036,15 @@ def _wait_for_service_convergence(
             paths=paths, expected_root=expected_root, expected_sha=expected_sha
         )
         if last.get("ok"):
-            return last
+            if expected_startup_token is None:
+                return last
+            token_path = paths.run_dir / "run-control-dispatcher" / TOKEN_FILENAME
+            token_gate = verify_startup_skip_consumed(
+                token_path, paths.runtime_home, expected_startup_token
+            )
+            last = {**last, "startupTokenGate": token_gate}
+            if token_gate.get("ok"):
+                return last
         if time.monotonic() >= deadline:
             return {**last, "status": "SERVICE_CONVERGENCE_TIMEOUT"}
         time.sleep(max(0.01, interval_seconds))
@@ -1238,12 +1255,55 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
             "reason": type(exc).__name__,
             "command": "switch-release",
         }
-    transaction.recheck()  # Same owner, exact identity, signature and physical seal AFTER zero-gate.
-    tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
-    if tmp.exists() or tmp.is_symlink():
-        tmp.unlink()
-    tmp.symlink_to(validation.resolved_root)
-    os.replace(tmp, paths.current_link)
+    startup_token_path = paths.run_dir / "run-control-dispatcher" / TOKEN_FILENAME
+    try:
+        startup_token_preparation = prepare_startup_skip_token(
+            startup_token_path, paths.runtime_home
+        )
+        startup_token_evidence = dict(startup_token_preparation["token"])
+    except (OSError, StartupSkipTokenError, KeyError, TypeError) as exc:
+        try:
+            if staged_pending_receipt.exists():
+                os.chmod(staged_pending_receipt, 0o600)
+                staged_pending_receipt.unlink()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "status": "promotion_startup_token_prepare_failed",
+            "reason": str(exc)[:240] or type(exc).__name__,
+            "command": "switch-release",
+            "runtimeSwitched": False,
+            "receiptState": "SEALED",
+        }
+    try:
+        transaction.recheck()  # Same owner, identity, signature and seal AFTER zero-gate.
+        tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
+        if tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+        tmp.symlink_to(validation.resolved_root)
+        os.replace(tmp, paths.current_link)
+    except Exception as exc:
+        try:
+            cancel_prepared_startup_skip_token(
+                startup_token_path, paths.runtime_home, startup_token_evidence
+            )
+        except Exception:
+            pass
+        try:
+            if staged_pending_receipt.exists():
+                os.chmod(staged_pending_receipt, 0o600)
+                staged_pending_receipt.unlink()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "status": "promotion_pre_switch_token_or_root_switch_failed",
+            "reason": str(exc)[:240] or type(exc).__name__,
+            "command": "switch-release",
+            "runtimeSwitched": False,
+            "receiptState": "SEALED",
+        }
     try:
         _publish_immutable_receipt(staged_pending_receipt, pending_receipt_path)
     except Exception as exc:
@@ -1260,6 +1320,12 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
                     leftover.unlink()
             except Exception:
                 pass
+        try:
+            cancel_prepared_startup_skip_token(
+                startup_token_path, paths.runtime_home, startup_token_evidence
+            )
+        except Exception:
+            pass
         return {
             "ok": False,
             "status": "promotion_receipt_publish_failed_rolled_back",
@@ -1326,6 +1392,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         paths=paths,
         expected_root=validation.resolved_root,
         expected_sha=candidate_sha,
+        expected_startup_token=startup_token_evidence,
         timeout_seconds=timeout_seconds,
     )
     if not convergence.get("ok"):
@@ -1349,6 +1416,10 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         "pending_receipt_sha256": pending_receipt_sha,
         "service_restart_order": list(PROMOTION_SERVICES),
         "service_convergence": convergence,
+        "startup_skip_token": {
+            "preparation": startup_token_preparation,
+            "convergence": convergence.get("startupTokenGate"),
+        },
         "promotion_added_time_ms": round((time.monotonic() - promotion_clock_started) * 1000, 3),
     }
     try:
@@ -1418,6 +1489,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         "zeroGate": pre_restart_counts,
         "restartResults": restart_results,
         "serviceConvergence": convergence,
+        "startupSkipToken": final_receipt["startup_skip_token"],
         "promotionAddedTimeMs": final_receipt["promotion_added_time_ms"],
     })
 
