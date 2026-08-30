@@ -97,7 +97,12 @@ class FakeDevice:
         self.missing_target = _ActionTarget("", 0)
 
     def __call__(self, **kwargs):
-        if kwargs in ({"text": "Not now"}, {"description": "Not now"}):
+        if (
+            (kwargs.get("text") == "Not now" or kwargs.get("description") == "Not now")
+            and kwargs.get("className") == "android.widget.Button"
+            and kwargs.get("clickable") is True
+            and kwargs.get("enabled") is True
+        ):
             return self.save_not_now_target
         if "text" in kwargs or "description" in kwargs:
             return self.missing_target
@@ -119,7 +124,13 @@ class _ActionTarget:
     def __init__(self, text: str, count: int) -> None:
         self._count = count
         self.click_calls = 0
-        self.info = {"text": text, "bounds": {"left": 10, "top": 20, "right": 100, "bottom": 60}}
+        self.info = {
+            "text": text,
+            "className": "android.widget.Button",
+            "clickable": True,
+            "enabled": True,
+            "bounds": {"left": 10, "top": 20, "right": 100, "bottom": 60},
+        }
 
     def count(self) -> int:
         return self._count

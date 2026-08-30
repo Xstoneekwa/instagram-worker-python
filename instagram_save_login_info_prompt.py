@@ -208,13 +208,19 @@ def _resolve_unique_live_selector(
     d: Any,
     target: CanonicalSemanticActionTarget,
 ) -> Any | None:
-    """Address the proved ancestor semantically; never fall back to coordinates."""
+    """Address the proved ancestor by semantic and actionable structure."""
 
-    candidates: list[dict[str, str]] = []
+    structural: dict[str, Any] = {
+        "clickable": True,
+        "enabled": True,
+    }
+    if target.class_name:
+        structural["className"] = target.class_name
+    candidates: list[dict[str, Any]] = []
     if _normalize_label(target.content_description) in NOT_NOW_LABELS:
-        candidates.append({"description": target.content_description})
+        candidates.append({"description": target.content_description, **structural})
     if _normalize_label(target.text) in NOT_NOW_LABELS:
-        candidates.append({"text": target.text})
+        candidates.append({"text": target.text, **structural})
     for kwargs in candidates:
         try:
             selector = d(**kwargs)
@@ -255,7 +261,13 @@ def _selector_matches_canonical_target(
     if live_bounds != target.bounds:
         return False
     live_class = str(info.get("className") or info.get("class") or "")
-    return not target.class_name or not live_class or live_class == target.class_name
+    if target.class_name and live_class and live_class != target.class_name:
+        return False
+    if "clickable" in info and info.get("clickable") is not True:
+        return False
+    if "enabled" in info and info.get("enabled") is not True:
+        return False
+    return True
 
 
 def _selector_count(selector: Any) -> int:

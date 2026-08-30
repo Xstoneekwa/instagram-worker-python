@@ -41,6 +41,8 @@ class Target:
                 "bottom": bounds[3],
             },
             "className": class_name,
+            "clickable": True,
+            "enabled": True,
         }
 
     def count(self) -> int:
@@ -54,10 +56,15 @@ class Device:
     def __init__(self, mapping: dict[tuple[str, str], Target]) -> None:
         self.mapping = mapping
         self.missing = Target(0, bounds=(0, 0, 1, 1))
+        self.selector_calls: list[dict[str, object]] = []
 
-    def __call__(self, **selector: str) -> Target:
-        key, value = next(iter(selector.items()))
-        return self.mapping.get((key, value), self.missing)
+    def __call__(self, **selector: object) -> Target:
+        self.selector_calls.append(dict(selector))
+        for key in ("description", "text"):
+            value = selector.get(key)
+            if isinstance(value, str) and (key, value) in self.mapping:
+                return self.mapping[(key, value)]
+        return self.missing
 
 
 class SaveLoginInfoPromptTests(unittest.TestCase):
@@ -119,14 +126,44 @@ class SaveLoginInfoPromptTests(unittest.TestCase):
             "</node></node></hierarchy>"
         )
         parent = Target(1, bounds=(73, 2008, 1007, 2132))
+        device = Device({("description", "Not now"): parent})
         result = dismiss_save_login_info_prompt_once(
-            Device({("description", "Not now"): parent}),
+            device,
             hierarchy_xml=hierarchy,
         )
         self.assertTrue(result.dismissed)
         self.assertEqual(result.raw_semantic_match_count, 2)
         self.assertEqual(result.canonical_target_count, 1)
         self.assertEqual(parent.click_calls, 1)
+        self.assertEqual(
+            device.selector_calls,
+            [{
+                "description": "Not now",
+                "clickable": True,
+                "enabled": True,
+                "className": "android.widget.Button",
+            }],
+        )
+
+    def test_structural_selector_is_layout_independent(self) -> None:
+        hierarchy = button_xml(SEMANTIC_CHILD, top=713)
+        parent = Target(1, bounds=(10, 713, 100, 753))
+        device = Device({("description", "Not now"): parent})
+        result = dismiss_save_login_info_prompt_once(device, hierarchy_xml=hierarchy)
+        self.assertTrue(result.dismissed)
+        self.assertEqual(parent.click_calls, 1)
+        self.assertNotIn("bounds", device.selector_calls[0])
+
+    def test_structural_selector_rejects_two_live_actionable_matches(self) -> None:
+        hierarchy = button_xml(SEMANTIC_CHILD)
+        duplicate = Target(2, bounds=(10, 20, 100, 60))
+        result = dismiss_save_login_info_prompt_once(
+            Device({("description", "Not now"): duplicate}),
+            hierarchy_xml=hierarchy,
+        )
+        self.assertFalse(result.dismissed)
+        self.assertEqual(result.failure_reason, "not_now_canonical_target_unaddressable")
+        self.assertEqual(duplicate.click_calls, 0)
 
     def test_unique_structural_target_without_semantic_address_fails_closed(self) -> None:
         hierarchy = (
