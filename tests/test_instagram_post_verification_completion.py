@@ -76,6 +76,23 @@ DISCOVER_XML = (
     '<node package="com.instagram.androig" text="Find people to follow" />'
     '<node package="com.instagram.androig" text="Get started" /></hierarchy>'
 )
+CONTACT_SYNC_PREPARATION_XML = (
+    '<hierarchy><node package="com.instagram.androig" '
+    'text="Next, you can allow access to your contacts to make it easier to find your friends" />'
+    '<node package="com.instagram.androig" '
+    'text="Your contacts will be periodically synced and stored securely" />'
+    '<node package="com.instagram.androig" class="android.widget.Button" '
+    'text="Next" clickable="true" enabled="true" bounds="[10,20][100,60]" />'
+    '<node package="com.instagram.androig" '
+    'text="By tapping Next, you can choose to sync your contacts or skip this step." />'
+    '</hierarchy>'
+)
+ANDROID_CONTACT_PERMISSION_XML = (
+    '<hierarchy><node package="com.google.android.permissioncontroller" '
+    'text="Allow Instagram to access your contacts?" />'
+    '<node class="android.widget.Button" text="While using the app" clickable="true" />'
+    '<node class="android.widget.Button" text="Don\'t allow" clickable="true" /></hierarchy>'
+)
 UNKNOWN_XML = '<hierarchy><node package="com.instagram.androig" text="Unexpected surface" /></hierarchy>'
 
 
@@ -98,6 +115,8 @@ class FakeDevice:
         self.save_not_now_target = _ActionTarget("Not now", save_not_now_count)
         notification_count = 1 if any(item == NOTIFICATIONS_XML for item in self.hierarchies) else 0
         self.notification_target = _ActionTarget("Next", notification_count)
+        contact_count = 1 if any(item == CONTACT_SYNC_PREPARATION_XML for item in self.hierarchies) else 0
+        self.contact_sync_target = _ActionTarget("Next", contact_count)
         self.missing_target = _ActionTarget("", 0)
 
     def __call__(self, **kwargs):
@@ -114,6 +133,8 @@ class FakeDevice:
             and kwargs.get("clickable") is True
             and kwargs.get("enabled") is True
         ):
+            if "contacts" in self.last.casefold():
+                return self.contact_sync_target
             return self.notification_target
         if "text" in kwargs or "description" in kwargs:
             return self.missing_target
@@ -257,6 +278,69 @@ class PostVerificationCompletionTests(unittest.TestCase):
     def test_discover_people_is_recovered_once(self) -> None:
         device, result = self._recover(DISCOVER_XML)
         self.assertEqual(result.recovered_screen_types, ("post_login_discover_people_prompt",))
+        self.assertEqual(device.press_calls, ["back"])
+
+    def test_contact_sync_preparation_is_classified_and_uses_next_once(self) -> None:
+        screen, _ = classify_post_verification_surface(
+            CONTACT_SYNC_PREPARATION_XML,
+            expected_package_name=PACKAGE,
+        )
+        self.assertEqual(screen, "instagram_contact_sync_preparation_prompt")
+        device = FakeDevice([CONTACT_SYNC_PREPARATION_XML, HOME_XML, HOME_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertTrue(result.safe_for_identity_guard)
+        self.assertEqual(device.contact_sync_target.click_calls, 1)
+        self.assertEqual(device.press_calls, [])
+
+    def test_contact_sync_preparation_requires_fingerprint_transition(self) -> None:
+        device = FakeDevice([CONTACT_SYNC_PREPARATION_XML, CONTACT_SYNC_PREPARATION_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(
+            result.failure_reason,
+            "post_verification_surface_unchanged_after_contact_sync_next",
+        )
+        self.assertEqual(device.contact_sync_target.click_calls, 1)
+        self.assertEqual(device.press_calls, [])
+
+    def test_android_contacts_permission_is_not_misclassified_as_preparation(self) -> None:
+        screen, _ = classify_post_verification_surface(
+            ANDROID_CONTACT_PERMISSION_XML,
+            expected_package_name=PACKAGE,
+        )
+        self.assertEqual(screen, "android_instagram_contacts_permission")
+
+    def test_android_contacts_permission_uses_back_then_continues_to_identity_surface(self) -> None:
+        device = FakeDevice([ANDROID_CONTACT_PERMISSION_XML, HOME_XML, HOME_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertTrue(result.safe_for_identity_guard)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(
+            result.recovered_screen_types,
+            ("android_instagram_contacts_permission",),
+        )
+
+    def test_unchanged_android_contacts_permission_fails_after_one_back(self) -> None:
+        device = FakeDevice([ANDROID_CONTACT_PERMISSION_XML, ANDROID_CONTACT_PERMISSION_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(result.failure_reason, "post_verification_surface_unchanged_after_back")
         self.assertEqual(device.press_calls, ["back"])
 
     def test_two_successive_known_setup_surfaces_are_recovered_with_fresh_observations(self) -> None:

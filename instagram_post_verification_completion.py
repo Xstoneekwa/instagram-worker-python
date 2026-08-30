@@ -19,6 +19,11 @@ from instagram_ads_data_consent_popup import (
     POPUP_TYPE as ADS_DATA_CONSENT_POPUP_TYPE,
     classify_instagram_ads_data_consent_popup,
 )
+from instagram_contact_sync_preparation_prompt import (
+    activate_contact_sync_next_once,
+    is_android_contacts_permission_dialog,
+    is_contact_sync_preparation_prompt,
+)
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
 from instagram_turn_on_notifications_prompt import activate_notification_prompt_action_once
@@ -32,6 +37,7 @@ _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
     {
         "connected_post_login_location_services_prompt",
         "android_instagram_notification_settings",
+        "android_instagram_contacts_permission",
         "save_login_info_prompt",
         "google_password_manager_save_prompt",
         "samsung_pass_save_password_prompt",
@@ -41,7 +47,10 @@ _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
 )
 
 _SEMANTIC_ACTION_RECOVERABLE_SCREEN_TYPES = frozenset(
-    {"instagram_turn_on_notifications_prompt"}
+    {
+        "instagram_contact_sync_preparation_prompt",
+        "instagram_turn_on_notifications_prompt",
+    }
 )
 
 _RECOVERABLE_SCREEN_TYPES = (
@@ -186,6 +195,26 @@ def prepare_post_verification_identity_surface(
                         "fail_closed": True,
                     },
                 )
+        elif screen_type == "instagram_contact_sync_preparation_prompt":
+            recovery_action = "contact_sync_next"
+            contact_result = activate_contact_sync_next_once(
+                d,
+                hierarchy_xml=hierarchy,
+            )
+            if not contact_result.acted:
+                return PostVerificationCompletionResult(
+                    safe_for_identity_guard=False,
+                    screen_type=screen_type,
+                    recovery_count=len(recovered),
+                    recovered_screen_types=tuple(recovered),
+                    failure_reason=contact_result.failure_reason,
+                    metadata={
+                        "semantic_action": "contact_sync_next",
+                        "raw_semantic_match_count": contact_result.raw_semantic_match_count,
+                        "canonical_target_count": contact_result.canonical_target_count,
+                        "fail_closed": True,
+                    },
+                )
         else:
             press = getattr(d, "press", None)
             if not callable(press):
@@ -214,9 +243,13 @@ def prepare_post_verification_identity_surface(
                 "post_verification_save_login_info_not_now_recovery"
                 if recovery_action == "not_now"
                 else (
-                    "post_verification_notification_cta_recovery"
-                    if recovery_action == "notification_cta"
-                    else "post_verification_known_surface_back_recovery"
+                    "post_verification_contact_sync_next_recovery"
+                    if recovery_action == "contact_sync_next"
+                    else (
+                        "post_verification_notification_cta_recovery"
+                        if recovery_action == "notification_cta"
+                        else "post_verification_known_surface_back_recovery"
+                    )
                 )
             ),
             screen_type=screen_type,
@@ -236,9 +269,13 @@ def prepare_post_verification_identity_surface(
                     "post_verification_surface_unchanged_after_not_now"
                     if recovery_action == "not_now"
                     else (
-                        "post_verification_surface_unchanged_after_notification_cta"
-                        if recovery_action == "notification_cta"
-                        else "post_verification_surface_unchanged_after_back"
+                        "post_verification_surface_unchanged_after_contact_sync_next"
+                        if recovery_action == "contact_sync_next"
+                        else (
+                            "post_verification_surface_unchanged_after_notification_cta"
+                            if recovery_action == "notification_cta"
+                            else "post_verification_surface_unchanged_after_back"
+                        )
                     )
                 ),
                 fingerprint_changed=False,
@@ -274,6 +311,10 @@ def classify_post_verification_surface(
             screen_type = "active_account_home"
         return screen_type, {**signals, "connected_surface_proof": connected_surface_proof}
 
+    if is_android_contacts_permission_dialog(hierarchy):
+        return "android_instagram_contacts_permission", signals
+    if is_contact_sync_preparation_prompt(hierarchy):
+        return "instagram_contact_sync_preparation_prompt", signals
     if _is_sync_contacts_prompt(normalized):
         return "post_login_sync_contacts_prompt", signals
     if _is_discover_people_prompt(normalized):
