@@ -20,6 +20,7 @@ from instagram_ads_data_consent_popup import (
     classify_instagram_ads_data_consent_popup,
 )
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
+from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
 from logs import log
 
 
@@ -135,31 +136,54 @@ def prepare_post_verification_identity_surface(
             )
 
         seen_fingerprints.add(fingerprint)
-        press = getattr(d, "press", None)
-        if not callable(press):
-            return PostVerificationCompletionResult(
-                safe_for_identity_guard=False,
-                screen_type=screen_type,
-                recovery_count=len(recovered),
-                recovered_screen_types=tuple(recovered),
-                failure_reason="post_verification_back_unavailable",
-            )
-        try:
-            press("back")
-        except Exception:
-            return PostVerificationCompletionResult(
-                safe_for_identity_guard=False,
-                screen_type=screen_type,
-                recovery_count=len(recovered),
-                recovered_screen_types=tuple(recovered),
-                failure_reason="post_verification_back_failed",
-            )
+        recovery_action = "back"
+        if screen_type == "save_login_info_prompt":
+            recovery_action = "not_now"
+            dismiss_result = dismiss_save_login_info_prompt_once(d)
+            if not dismiss_result.dismissed:
+                return PostVerificationCompletionResult(
+                    safe_for_identity_guard=False,
+                    screen_type=screen_type,
+                    recovery_count=len(recovered),
+                    recovered_screen_types=tuple(recovered),
+                    failure_reason=dismiss_result.failure_reason,
+                    metadata={
+                        "semantic_action": "not_now",
+                        "matched_control_count": dismiss_result.matched_control_count,
+                        "fail_closed": True,
+                    },
+                )
+        else:
+            press = getattr(d, "press", None)
+            if not callable(press):
+                return PostVerificationCompletionResult(
+                    safe_for_identity_guard=False,
+                    screen_type=screen_type,
+                    recovery_count=len(recovered),
+                    recovered_screen_types=tuple(recovered),
+                    failure_reason="post_verification_back_unavailable",
+                )
+            try:
+                press("back")
+            except Exception:
+                return PostVerificationCompletionResult(
+                    safe_for_identity_guard=False,
+                    screen_type=screen_type,
+                    recovery_count=len(recovered),
+                    recovered_screen_types=tuple(recovered),
+                    failure_reason="post_verification_back_failed",
+                )
 
         recovered.append(screen_type)
         log(
             "info",
-            "post_verification_known_surface_back_recovery",
+            (
+                "post_verification_save_login_info_not_now_recovery"
+                if recovery_action == "not_now"
+                else "post_verification_known_surface_back_recovery"
+            ),
             screen_type=screen_type,
+            recovery_action=recovery_action,
             recovery_count=len(recovered),
         )
         sleeper(POST_VERIFICATION_RECOVERY_WAIT_SECONDS)
@@ -171,9 +195,13 @@ def prepare_post_verification_identity_surface(
                 screen_type=screen_type,
                 recovery_count=len(recovered),
                 recovered_screen_types=tuple(recovered),
-                failure_reason="post_verification_surface_unchanged_after_back",
+                failure_reason=(
+                    "post_verification_surface_unchanged_after_not_now"
+                    if recovery_action == "not_now"
+                    else "post_verification_surface_unchanged_after_back"
+                ),
                 fingerprint_changed=False,
-                metadata={"anti_loop_blocked": True},
+                metadata={"anti_loop_blocked": True, "recovery_action": recovery_action},
             )
 
     return PostVerificationCompletionResult(

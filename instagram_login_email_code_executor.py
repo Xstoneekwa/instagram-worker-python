@@ -21,6 +21,7 @@ from device import (
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
+from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
 
 ACTION_EMAIL_CODE_SUBMIT = "email_code_submit"
 ACTION_VERIFICATION_CODE_SUBMIT = ACTION_EMAIL_CODE_SUBMIT
@@ -778,25 +779,10 @@ def _click_target(target: Any) -> None:
 
 
 def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
-    selectors = (
-        {"text": "Not now"},
-        {"description": "Not now"},
-        {"text": "Pas maintenant"},
-        {"description": "Pas maintenant"},
-    )
-    for selector in selectors:
-        try:
-            obj = d(**selector)
-        except Exception:
-            continue
-        try:
-            if obj.exists(timeout=0):
-                obj.click()
-                return True
-        except Exception:
-            continue
-    warnings.append("not_now_button_not_found")
-    return False
+    result = dismiss_save_login_info_prompt_once(d)
+    if not result.dismissed:
+        warnings.append(result.failure_reason)
+    return result.dismissed
 
 
 def _elapsed_ms(start: float, timer: Timer) -> int:

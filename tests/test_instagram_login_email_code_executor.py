@@ -41,14 +41,15 @@ POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
 
 
 class FakeTarget:
-    def __init__(self, text: str = "", *, set_text_updates: bool = True) -> None:
+    def __init__(self, text: str = "", *, set_text_updates: bool = True, exists: bool = True) -> None:
         self.text = text
         self.clicked = False
         self.value = ""
         self.set_text_updates = set_text_updates
+        self._exists = exists
 
     def exists(self, timeout: float = 0) -> bool:
-        return True
+        return self._exists
 
     def click(self) -> None:
         self.clicked = True
@@ -73,6 +74,7 @@ class FakeDevice:
         self.code_target = FakeTarget("Enter code", set_text_updates=set_text_updates)
         self.continue_target = FakeTarget("Continue")
         self.not_now_target = FakeTarget("Not now")
+        self.missing_target = FakeTarget(exists=False)
         self.press_calls: list[str] = []
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
@@ -85,7 +87,7 @@ class FakeDevice:
             return self.continue_target
         if selector.get("text") == "Not now":
             return self.not_now_target
-        return FakeTarget()
+        return self.missing_target
 
     def press(self, key: str) -> None:
         self.press_calls.append(key)

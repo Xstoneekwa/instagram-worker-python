@@ -28,6 +28,7 @@ from instagram_credentials_runtime_access import (
 )
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
+from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
 from auto_login_auth_forensics import AuthForensicsTrace
 
 
@@ -3122,20 +3123,10 @@ def _dismiss_save_password_prompt_once(d: Any, observed: dict[str, Any], warning
 
 
 def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
-    target = _find_unique_target(
-        d,
-        ({"text": "Not now"}, {"description": "Not now"}, {"text": "Pas maintenant"}, {"description": "Pas maintenant"}),
-        missing_reason="not_now_button_not_found",
-    )
-    if target["failure_reason"]:
-        warnings.append(str(target["failure_reason"]))
-        return False
-    try:
-        _click_target(target["target"])
-        return True
-    except Exception:
-        warnings.append("save_login_info_not_now_tap_failed")
-        return False
+    result = dismiss_save_login_info_prompt_once(d)
+    if not result.dismissed:
+        warnings.append(result.failure_reason)
+    return result.dismissed
 
 
 def _dismiss_post_login_location_services_prompt_once(d: Any, warnings: list[str]) -> bool:

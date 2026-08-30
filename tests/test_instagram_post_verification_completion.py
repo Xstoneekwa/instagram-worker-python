@@ -60,15 +60,29 @@ UNKNOWN_XML = '<hierarchy><node package="com.instagram.androig" text="Unexpected
 
 
 class FakeDevice:
-    def __init__(self, hierarchies: list[str], *, current_package: str = PACKAGE) -> None:
+    def __init__(
+        self,
+        hierarchies: list[str],
+        *,
+        current_package: str = PACKAGE,
+        save_not_now_count: int | None = None,
+    ) -> None:
         self.hierarchies = list(hierarchies)
         self.last = self.hierarchies[-1] if self.hierarchies else ""
         self.press_calls: list[str] = []
         self.current_package = current_package
         self.selector = Mock()
         self.selector.wait.return_value = True
+        if save_not_now_count is None:
+            save_not_now_count = 1 if any(item == SAVE_LOGIN_XML for item in self.hierarchies) else 0
+        self.save_not_now_target = _ActionTarget("Not now", save_not_now_count)
+        self.missing_target = _ActionTarget("", 0)
 
-    def __call__(self, **_kwargs):
+    def __call__(self, **kwargs):
+        if kwargs == {"text": "Not now"}:
+            return self.save_not_now_target
+        if "text" in kwargs or "description" in kwargs:
+            return self.missing_target
         return self.selector
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
@@ -81,6 +95,19 @@ class FakeDevice:
 
     def app_current(self) -> dict[str, str]:
         return {"package": self.current_package}
+
+
+class _ActionTarget:
+    def __init__(self, text: str, count: int) -> None:
+        self._count = count
+        self.click_calls = 0
+        self.info = {"text": text, "bounds": {"left": 10, "top": 20, "right": 100, "bottom": 60}}
+
+    def count(self) -> int:
+        return self._count
+
+    def click(self) -> None:
+        self.click_calls += 1
 
 
 class PostVerificationCompletionTests(unittest.TestCase):
@@ -123,7 +150,62 @@ class PostVerificationCompletionTests(unittest.TestCase):
     def test_save_login_info_is_recovered_once(self) -> None:
         device, result = self._recover(SAVE_LOGIN_XML)
         self.assertTrue(result.safe_for_identity_guard)
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.save_not_now_target.click_calls, 1)
+
+    def test_save_login_info_zero_not_now_controls_fails_closed_without_back(self) -> None:
+        device = FakeDevice([SAVE_LOGIN_XML], save_not_now_count=0)
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(result.failure_reason, "not_now_button_not_found")
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.save_not_now_target.click_calls, 0)
+
+    def test_save_login_info_ambiguous_not_now_controls_fails_closed(self) -> None:
+        device = FakeDevice([SAVE_LOGIN_XML], save_not_now_count=2)
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(result.failure_reason, "ambiguous_not_now_control")
+        self.assertEqual(result.metadata["matched_control_count"], 2)
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.save_not_now_target.click_calls, 0)
+
+    def test_save_login_info_unchanged_after_not_now_fails_without_double_tap(self) -> None:
+        device = FakeDevice([SAVE_LOGIN_XML, SAVE_LOGIN_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(result.failure_reason, "post_verification_surface_unchanged_after_not_now")
+        self.assertEqual(device.save_not_now_target.click_calls, 1)
+        self.assertEqual(device.press_calls, [])
+
+    def test_notification_then_save_info_uses_back_then_semantic_not_now(self) -> None:
+        device = FakeDevice(
+            [NOTIFICATIONS_XML, SAVE_LOGIN_XML, SAVE_LOGIN_XML, HOME_XML, HOME_XML]
+        )
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertTrue(result.safe_for_identity_guard)
         self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.save_not_now_target.click_calls, 1)
+        self.assertEqual(
+            result.recovered_screen_types,
+            ("instagram_turn_on_notifications_prompt", "save_login_info_prompt"),
+        )
 
     def test_sync_contacts_is_recovered_once(self) -> None:
         device, result = self._recover(SYNC_CONTACTS_XML)
