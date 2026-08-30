@@ -39,7 +39,9 @@ NOTIFICATIONS_XML = (
     '<hierarchy><node package="com.instagram.androig" text="Turn on notifications" />'
     '<node package="com.instagram.androig" text="Find out right away when people follow you" />'
     '<node package="com.instagram.androig" text="like and comment on your posts" />'
-    '<node package="com.instagram.androig" text="Skip" /></hierarchy>'
+    '<node package="com.instagram.androig" class="android.widget.Button" '
+    'text="Next" clickable="true" enabled="true" bounds="[10,20][100,60]" />'
+    '</hierarchy>'
 )
 SAVE_LOGIN_XML = (
     '<hierarchy><node package="com.instagram.androig" text="Save your login info?" />'
@@ -94,6 +96,8 @@ class FakeDevice:
         if save_not_now_count is None:
             save_not_now_count = 1 if any(item == SAVE_LOGIN_XML for item in self.hierarchies) else 0
         self.save_not_now_target = _ActionTarget("Not now", save_not_now_count)
+        notification_count = 1 if any(item == NOTIFICATIONS_XML for item in self.hierarchies) else 0
+        self.notification_target = _ActionTarget("Next", notification_count)
         self.missing_target = _ActionTarget("", 0)
 
     def __call__(self, **kwargs):
@@ -104,6 +108,13 @@ class FakeDevice:
             and kwargs.get("enabled") is True
         ):
             return self.save_not_now_target
+        if (
+            kwargs.get("text") == "Next"
+            and kwargs.get("className") == "android.widget.Button"
+            and kwargs.get("clickable") is True
+            and kwargs.get("enabled") is True
+        ):
+            return self.notification_target
         if "text" in kwargs or "description" in kwargs:
             return self.missing_target
         return self.selector
@@ -174,7 +185,8 @@ class PostVerificationCompletionTests(unittest.TestCase):
     def test_notification_onboarding_is_recovered_once(self) -> None:
         device, result = self._recover(NOTIFICATIONS_XML)
         self.assertTrue(result.safe_for_identity_guard)
-        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.notification_target.click_calls, 1)
 
     def test_save_login_info_is_recovered_once(self) -> None:
         device, result = self._recover(SAVE_LOGIN_XML)
@@ -219,7 +231,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(device.save_not_now_target.click_calls, 1)
         self.assertEqual(device.press_calls, [])
 
-    def test_notification_then_save_info_uses_back_then_semantic_not_now(self) -> None:
+    def test_notification_then_save_info_uses_semantic_ctas_only(self) -> None:
         device = FakeDevice(
             [NOTIFICATIONS_XML, SAVE_LOGIN_XML, SAVE_LOGIN_XML, HOME_XML, HOME_XML]
         )
@@ -229,7 +241,8 @@ class PostVerificationCompletionTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         self.assertTrue(result.safe_for_identity_guard)
-        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.notification_target.click_calls, 1)
         self.assertEqual(device.save_not_now_target.click_calls, 1)
         self.assertEqual(
             result.recovered_screen_types,
@@ -261,7 +274,23 @@ class PostVerificationCompletionTests(unittest.TestCase):
                 "instagram_turn_on_notifications_prompt",
             ),
         )
-        self.assertEqual(device.press_calls, ["back", "back"])
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.notification_target.click_calls, 1)
+
+    def test_unchanged_notification_surface_fails_without_back_or_double_tap(self) -> None:
+        device = FakeDevice([NOTIFICATIONS_XML, NOTIFICATIONS_XML])
+        result = prepare_post_verification_identity_surface(
+            device,
+            expected_package_name=PACKAGE,
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(result.safe_for_identity_guard)
+        self.assertEqual(
+            result.failure_reason,
+            "post_verification_surface_unchanged_after_notification_cta",
+        )
+        self.assertEqual(device.press_calls, [])
+        self.assertEqual(device.notification_target.click_calls, 1)
 
     def test_unchanged_surface_never_receives_second_blind_back(self) -> None:
         device = FakeDevice([LOCATION_XML, LOCATION_XML])
