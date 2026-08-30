@@ -457,7 +457,11 @@ def _observe_post_submit_settled(
                 warnings.append("save_login_info_prompt_blocking")
                 break
             save_login_info_dismiss_attempt_count += 1
-            if not _dismiss_save_login_info_prompt_once(d, warnings):
+            if not _dismiss_save_login_info_prompt_once(
+                d,
+                warnings,
+                hierarchy_xml=hierarchy_xml,
+            ):
                 last_observed = {
                     **last_observed,
                     "outcome": "save_login_info_prompt_blocking",
@@ -778,8 +782,13 @@ def _click_target(target: Any) -> None:
     target.click()
 
 
-def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
-    result = dismiss_save_login_info_prompt_once(d)
+def _dismiss_save_login_info_prompt_once(
+    d: Any,
+    warnings: list[str],
+    *,
+    hierarchy_xml: str,
+) -> bool:
+    result = dismiss_save_login_info_prompt_once(d, hierarchy_xml=hierarchy_xml)
     if not result.dismissed:
         warnings.append(result.failure_reason)
     return result.dismissed

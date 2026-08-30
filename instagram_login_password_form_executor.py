@@ -2759,7 +2759,11 @@ def _observe_post_submit_settled(
                 break
             dismiss_method = "not_now"
             save_password_prompt_dismiss_attempt_count += 1
-            if not _dismiss_save_login_info_prompt_once(d, warnings):
+            if not _dismiss_save_login_info_prompt_once(
+                d,
+                warnings,
+                hierarchy_xml=hierarchy_xml,
+            ):
                 last_observed = {
                     **observed,
                     "outcome": "save_login_info_prompt_blocking",
@@ -3122,8 +3126,13 @@ def _dismiss_save_password_prompt_once(d: Any, observed: dict[str, Any], warning
         return False
 
 
-def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
-    result = dismiss_save_login_info_prompt_once(d)
+def _dismiss_save_login_info_prompt_once(
+    d: Any,
+    warnings: list[str],
+    *,
+    hierarchy_xml: str,
+) -> bool:
+    result = dismiss_save_login_info_prompt_once(d, hierarchy_xml=hierarchy_xml)
     if not result.dismissed:
         warnings.append(result.failure_reason)
     return result.dismissed

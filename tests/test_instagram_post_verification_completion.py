@@ -43,7 +43,25 @@ NOTIFICATIONS_XML = (
 )
 SAVE_LOGIN_XML = (
     '<hierarchy><node package="com.instagram.androig" text="Save your login info?" />'
-    '<node package="com.instagram.androig" text="Not now" />'
+    '<node package="com.instagram.androig" class="android.widget.Button" '
+    'content-desc="Not now" clickable="true" enabled="true" bounds="[10,20][100,60]">'
+    '<node package="com.instagram.androig" class="android.view.View" '
+    'text="Not now" clickable="false" enabled="true" bounds="[30,30][80,50]" />'
+    '</node>'
+    '<node package="com.instagram.androig" text="Save" /></hierarchy>'
+)
+SAVE_LOGIN_ORPHAN_XML = (
+    '<hierarchy><node package="com.instagram.androig" text="Save your login info?" />'
+    '<node package="com.instagram.androig" text="Not now" clickable="false" '
+    'enabled="true" bounds="[30,30][80,50]" />'
+    '<node package="com.instagram.androig" text="Save" /></hierarchy>'
+)
+SAVE_LOGIN_AMBIGUOUS_XML = (
+    '<hierarchy><node package="com.instagram.androig" text="Save your login info?" />'
+    '<node class="android.widget.Button" content-desc="Not now" clickable="true" '
+    'enabled="true" bounds="[10,20][100,60]" />'
+    '<node class="android.widget.Button" content-desc="Not now" clickable="true" '
+    'enabled="true" bounds="[10,80][100,120]" />'
     '<node package="com.instagram.androig" text="Save" /></hierarchy>'
 )
 SYNC_CONTACTS_XML = (
@@ -79,7 +97,7 @@ class FakeDevice:
         self.missing_target = _ActionTarget("", 0)
 
     def __call__(self, **kwargs):
-        if kwargs == {"text": "Not now"}:
+        if kwargs in ({"text": "Not now"}, {"description": "Not now"}):
             return self.save_not_now_target
         if "text" in kwargs or "description" in kwargs:
             return self.missing_target
@@ -154,7 +172,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(device.save_not_now_target.click_calls, 1)
 
     def test_save_login_info_zero_not_now_controls_fails_closed_without_back(self) -> None:
-        device = FakeDevice([SAVE_LOGIN_XML], save_not_now_count=0)
+        device = FakeDevice([SAVE_LOGIN_ORPHAN_XML], save_not_now_count=0)
         result = prepare_post_verification_identity_surface(
             device,
             expected_package_name=PACKAGE,
@@ -166,7 +184,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(device.save_not_now_target.click_calls, 0)
 
     def test_save_login_info_ambiguous_not_now_controls_fails_closed(self) -> None:
-        device = FakeDevice([SAVE_LOGIN_XML], save_not_now_count=2)
+        device = FakeDevice([SAVE_LOGIN_AMBIGUOUS_XML], save_not_now_count=2)
         result = prepare_post_verification_identity_surface(
             device,
             expected_package_name=PACKAGE,

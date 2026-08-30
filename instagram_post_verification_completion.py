@@ -139,7 +139,10 @@ def prepare_post_verification_identity_surface(
         recovery_action = "back"
         if screen_type == "save_login_info_prompt":
             recovery_action = "not_now"
-            dismiss_result = dismiss_save_login_info_prompt_once(d)
+            dismiss_result = dismiss_save_login_info_prompt_once(
+                d,
+                hierarchy_xml=hierarchy,
+            )
             if not dismiss_result.dismissed:
                 return PostVerificationCompletionResult(
                     safe_for_identity_guard=False,
@@ -150,6 +153,8 @@ def prepare_post_verification_identity_surface(
                     metadata={
                         "semantic_action": "not_now",
                         "matched_control_count": dismiss_result.matched_control_count,
+                        "raw_semantic_match_count": dismiss_result.raw_semantic_match_count,
+                        "canonical_target_count": dismiss_result.canonical_target_count,
                         "fail_closed": True,
                     },
                 )

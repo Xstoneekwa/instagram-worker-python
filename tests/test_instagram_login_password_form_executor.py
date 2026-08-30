@@ -116,7 +116,8 @@ SAMSUNG_PASS_SAVE_PASSWORD_PROMPT_XML = (
 INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML = (
     '<node text="Save your login info?" />'
     '<node text="Save" clickable="true" />'
-    '<node text="Not now" clickable="true" />'
+    '<node class="android.widget.Button" text="Not now" clickable="true" '
+    'enabled="true" bounds="[10,20][100,60]" />'
 )
 FILLED_LOGIN_FORM_XML = (
     '<node class="android.widget.EditText" text="cinema_catchup" editable="true" />'
@@ -1252,6 +1253,11 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
     def test_instagram_save_login_info_prompt_taps_not_now_never_save(self) -> None:
         device, _username, _password_selector, _login = configured_device()
         not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        not_now.info = {
+            "text": "Not now",
+            "className": "android.widget.Button",
+            "bounds": {"left": 10, "top": 20, "right": 100, "bottom": 60},
+        }
         save = device.add_selector("text", "Save", FakeSelector(1))
         device.hierarchies = [INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML, EMAIL_CODE_CHALLENGE_XML]
 
