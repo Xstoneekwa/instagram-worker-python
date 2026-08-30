@@ -206,8 +206,8 @@ class PostVerificationCompletionTests(unittest.TestCase):
     def test_notification_onboarding_is_recovered_once(self) -> None:
         device, result = self._recover(NOTIFICATIONS_XML)
         self.assertTrue(result.safe_for_identity_guard)
-        self.assertEqual(device.press_calls, [])
-        self.assertEqual(device.notification_target.click_calls, 1)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.notification_target.click_calls, 0)
 
     def test_save_login_info_is_recovered_once(self) -> None:
         device, result = self._recover(SAVE_LOGIN_XML)
@@ -252,9 +252,9 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(device.save_not_now_target.click_calls, 1)
         self.assertEqual(device.press_calls, [])
 
-    def test_notification_then_save_info_uses_semantic_ctas_only(self) -> None:
+    def test_save_info_then_notification_uses_not_now_then_one_back(self) -> None:
         device = FakeDevice(
-            [NOTIFICATIONS_XML, SAVE_LOGIN_XML, SAVE_LOGIN_XML, HOME_XML, HOME_XML]
+            [SAVE_LOGIN_XML, NOTIFICATIONS_XML, NOTIFICATIONS_XML, HOME_XML, HOME_XML]
         )
         result = prepare_post_verification_identity_surface(
             device,
@@ -262,12 +262,12 @@ class PostVerificationCompletionTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         self.assertTrue(result.safe_for_identity_guard)
-        self.assertEqual(device.press_calls, [])
-        self.assertEqual(device.notification_target.click_calls, 1)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.notification_target.click_calls, 0)
         self.assertEqual(device.save_not_now_target.click_calls, 1)
         self.assertEqual(
             result.recovered_screen_types,
-            ("instagram_turn_on_notifications_prompt", "save_login_info_prompt"),
+            ("save_login_info_prompt", "instagram_turn_on_notifications_prompt"),
         )
 
     def test_sync_contacts_is_recovered_once(self) -> None:
@@ -358,8 +358,8 @@ class PostVerificationCompletionTests(unittest.TestCase):
                 "instagram_turn_on_notifications_prompt",
             ),
         )
-        self.assertEqual(device.press_calls, ["back"])
-        self.assertEqual(device.notification_target.click_calls, 1)
+        self.assertEqual(device.press_calls, ["back", "back"])
+        self.assertEqual(device.notification_target.click_calls, 0)
 
     def test_unchanged_notification_surface_fails_without_back_or_double_tap(self) -> None:
         device = FakeDevice([NOTIFICATIONS_XML, NOTIFICATIONS_XML])
@@ -369,12 +369,9 @@ class PostVerificationCompletionTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         self.assertFalse(result.safe_for_identity_guard)
-        self.assertEqual(
-            result.failure_reason,
-            "post_verification_surface_unchanged_after_notification_cta",
-        )
-        self.assertEqual(device.press_calls, [])
-        self.assertEqual(device.notification_target.click_calls, 1)
+        self.assertEqual(result.failure_reason, "post_verification_surface_unchanged_after_back")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(device.notification_target.click_calls, 0)
 
     def test_unchanged_surface_never_receives_second_blind_back(self) -> None:
         device = FakeDevice([LOCATION_XML, LOCATION_XML])
@@ -456,6 +453,30 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.actual_logged_in_username, "bmybusinesses")
         self.assertEqual(device.press_calls, ["back"])
+
+    def test_simplified_save_notification_home_profile_identity_path(self) -> None:
+        device = FakeDevice(
+            [SAVE_LOGIN_XML, NOTIFICATIONS_XML, NOTIFICATIONS_XML, HOME_XML, HOME_XML, HOME_XML, PROFILE_XML]
+        )
+        with (
+            patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
+            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=True),
+        ):
+            result = identity_guard.verify_active_instagram_account_matches_expected(
+                device,
+                expected_account_username="bmybusinesses",
+                run_type="login_provisioning",
+                stage="login_provisioning_post_login_identity",
+            )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.actual_logged_in_username, "bmybusinesses")
+        self.assertEqual(device.save_not_now_target.click_calls, 1)
+        self.assertEqual(device.notification_target.click_calls, 0)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertNotIn(
+            "instagram_contact_sync_preparation_prompt",
+            result.meta["post_verification_recovered_screen_types"],
+        )
 
     def test_location_recovery_wrong_account_fails_closed(self) -> None:
         wrong_profile = PROFILE_XML.replace("bmybusinesses", "another_account")

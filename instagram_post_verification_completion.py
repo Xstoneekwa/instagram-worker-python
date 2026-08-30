@@ -26,7 +26,6 @@ from instagram_contact_sync_preparation_prompt import (
 )
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
-from instagram_turn_on_notifications_prompt import activate_notification_prompt_action_once
 from logs import log
 
 
@@ -38,6 +37,7 @@ _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
         "connected_post_login_location_services_prompt",
         "android_instagram_notification_settings",
         "android_instagram_contacts_permission",
+        "instagram_turn_on_notifications_prompt",
         "save_login_info_prompt",
         "google_password_manager_save_prompt",
         "samsung_pass_save_password_prompt",
@@ -49,7 +49,6 @@ _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
 _SEMANTIC_ACTION_RECOVERABLE_SCREEN_TYPES = frozenset(
     {
         "instagram_contact_sync_preparation_prompt",
-        "instagram_turn_on_notifications_prompt",
     }
 )
 
@@ -175,26 +174,6 @@ def prepare_post_verification_identity_surface(
                         "fail_closed": True,
                     },
                 )
-        elif screen_type == "instagram_turn_on_notifications_prompt":
-            recovery_action = "notification_cta"
-            notification_result = activate_notification_prompt_action_once(
-                d,
-                hierarchy_xml=hierarchy,
-            )
-            if not notification_result.acted:
-                return PostVerificationCompletionResult(
-                    safe_for_identity_guard=False,
-                    screen_type=screen_type,
-                    recovery_count=len(recovered),
-                    recovered_screen_types=tuple(recovered),
-                    failure_reason=notification_result.failure_reason,
-                    metadata={
-                        "semantic_action": "notification_cta",
-                        "raw_semantic_match_count": notification_result.raw_semantic_match_count,
-                        "canonical_target_count": notification_result.canonical_target_count,
-                        "fail_closed": True,
-                    },
-                )
         elif screen_type == "instagram_contact_sync_preparation_prompt":
             recovery_action = "contact_sync_next"
             contact_result = activate_contact_sync_next_once(
@@ -245,11 +224,7 @@ def prepare_post_verification_identity_surface(
                 else (
                     "post_verification_contact_sync_next_recovery"
                     if recovery_action == "contact_sync_next"
-                    else (
-                        "post_verification_notification_cta_recovery"
-                        if recovery_action == "notification_cta"
-                        else "post_verification_known_surface_back_recovery"
-                    )
+                    else "post_verification_known_surface_back_recovery"
                 )
             ),
             screen_type=screen_type,
@@ -271,11 +246,7 @@ def prepare_post_verification_identity_surface(
                     else (
                         "post_verification_surface_unchanged_after_contact_sync_next"
                         if recovery_action == "contact_sync_next"
-                        else (
-                            "post_verification_surface_unchanged_after_notification_cta"
-                            if recovery_action == "notification_cta"
-                            else "post_verification_surface_unchanged_after_back"
-                        )
+                        else "post_verification_surface_unchanged_after_back"
                     )
                 ),
                 fingerprint_changed=False,
