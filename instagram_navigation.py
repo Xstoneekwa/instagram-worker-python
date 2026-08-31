@@ -24611,6 +24611,11 @@ def _post_follow_post_grid_evidence_from_xml(
     except Exception:
         out["rejection_reason"] = "final_mute_close_xml_parse_failed"
         return _finalize()
+    parent_by_node_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
     expected = _normalize_handle(candidate_username)
     tabs_bottom = 0
     raw_cells: list[dict[str, int]] = []
@@ -24693,6 +24698,44 @@ def _post_follow_post_grid_evidence_from_xml(
             ).hexdigest()[:20],
         }
 
+    def _excluded_story_highlight_lineage(node: Any) -> str:
+        """Reject media-shaped descendants owned by Story/Highlight chrome.
+
+        Instagram frequently renders Highlight covers as ImageViews with the
+        same third-column geometry as post thumbnails.  Geometry and image
+        class therefore cannot establish post-grid ownership.  Walk only the
+        already-loaded XML ancestry and reject strong Story/Highlight
+        semantics before a physical cell can enter the grid proof.
+        """
+
+        current = node
+        while current is not None:
+            attrs = current.attrib or {}
+            text = " ".join(
+                str(attrs.get(key) or "")
+                for key in ("text", "content-desc", "resource-id")
+            ).lower()
+            normalized = " ".join(text.replace("_", " ").split())
+            if any(
+                marker in normalized
+                for marker in (
+                    "story highlight",
+                    "highlights tray",
+                    "highlight tray",
+                    "highlight ring",
+                    "highlight viewer",
+                    "story viewer",
+                    "story controls",
+                    "story ring",
+                    "profile story",
+                )
+            ):
+                return "story_highlight_ancestor"
+            if normalized in {"highlight", "highlights", "story"}:
+                return "story_highlight_ancestor"
+            current = parent_by_node_id.get(id(current))
+        return ""
+
     for node_order, node in enumerate(root.iter()):
         attrs = node.attrib or {}
         label = " ".join(
@@ -24763,6 +24806,9 @@ def _post_follow_post_grid_evidence_from_xml(
             continue
         if id(node) in empty_state_node_ids:
             continue
+        excluded_lineage = _excluded_story_highlight_lineage(node)
+        if excluded_lineage:
+            continue
         # Instagram's own bottom navigation clips the first post row in the
         # dominant post-Mute layout.  Derive that boundary from hierarchy
         # semantics and geometry; never from a screenshot pixel coordinate.
@@ -24806,6 +24852,10 @@ def _post_follow_post_grid_evidence_from_xml(
             **bounds,
             "center_x": (bounds["left"] + bounds["right"]) // 2,
             "center_y": (bounds["top"] + bounds["bottom"]) // 2,
+            "grid_lineage_proven": bool(
+                grid_tab_order >= 0 and node_order > grid_tab_order
+            ),
+            "grid_lineage_source": "xml_order_after_exact_posts_tab",
             **_absolute_cell_identity(label, node_order),
         }
         if int(ww * 0.08) <= height <= int(ww * 0.48):
@@ -24965,8 +25015,15 @@ def _post_follow_post_grid_evidence_from_xml(
         )
         return _finalize()
     if tabs_bottom > 0:
-        below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
-        clipped_candidates = list(raw_clipped_cells)
+        below = [
+            cell for cell in raw_cells
+            if int(cell["top"]) >= tabs_bottom - 4
+            and bool(cell.get("grid_lineage_proven"))
+        ]
+        clipped_candidates = [
+            cell for cell in raw_clipped_cells
+            if bool(cell.get("grid_lineage_proven"))
+        ]
     else:
         # Missing tab bounds are common in the dominant post-Mute layout.  XML
         # order gives a structural boundary: genuine grid media must occur
@@ -24974,11 +25031,13 @@ def _post_follow_post_grid_evidence_from_xml(
         below = [
             cell for order, cell in media_cells_with_order
             if order > grid_tab_order
+            and bool(cell.get("grid_lineage_proven"))
             and (suggested_bounds_bottom <= 0 or int(cell["top"]) >= suggested_bounds_bottom)
         ]
         clipped_candidates = [
             cell for order, cell in clipped_cells_with_order
             if order > grid_tab_order
+            and bool(cell.get("grid_lineage_proven"))
             and (suggested_bounds_bottom <= 0 or int(cell["top"]) >= suggested_bounds_bottom)
         ]
         out["tabs_boundary_source"] = "xml_order_after_posts_tab"
@@ -26534,6 +26593,78 @@ def _visual_wait_profile_after_back(
         "return_profile_poll_count": int(poll_count),
         "return_profile_fast_confirmed": False,
         "return_profile_poll_wait_ms": round(elapsed_s * 1000.0, 2),
+    }
+
+
+def _visual_wait_exact_candidate_profile_after_back_fast(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_profile_username: str,
+    initial_delay_s: float = _VISUAL_RETURN_PROFILE_POLL_INITIAL_S,
+    poll_interval_s: float = _VISUAL_RETURN_PROFILE_POLL_INTERVAL_S,
+    max_wait_s: float = _VISUAL_RETURN_PROFILE_POLL_MAX_S,
+) -> dict[str, Any]:
+    """Exact normal-post return using existing selector probes, never XML."""
+
+    started = time.perf_counter()
+    poll_count = 0
+    last_reason = "fresh_candidate_profile_unproved"
+    if initial_delay_s > 0:
+        time.sleep(float(initial_delay_s))
+    while True:
+        poll_count += 1
+        try:
+            observed = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip().lstrip("@")
+        except Exception:
+            observed = ""
+        identity_ok, identity_meta = _expected_profile_identity_boundary(
+            d,
+            expected_profile_username,
+            pkg,
+            observed_username=observed,
+        )
+        controls = _profile_signal_c_chrome(d, pkg)
+        exact = bool(
+            identity_ok
+            and _normalize_handle(observed)
+            == _normalize_handle(expected_profile_username)
+            and controls
+        )
+        elapsed = time.perf_counter() - started
+        if exact:
+            return {
+                "exact_profile_proved": True,
+                "reason": "exact_candidate_profile_proved",
+                "identity_reason": str(identity_meta.get("reason") or ""),
+                "profile_control": str(controls or ""),
+                "return_profile_poll_count": poll_count,
+                "return_profile_fast_confirmed": bool(
+                    poll_count <= 2 and elapsed < 0.55
+                ),
+                "return_profile_poll_wait_ms": round(elapsed * 1000.0, 2),
+                "extra_xml_dump_count": 0,
+            }
+        last_reason = str(
+            identity_meta.get("reason")
+            or "fresh_candidate_profile_contract_failed"
+        )
+        if elapsed >= float(max_wait_s):
+            break
+        time.sleep(
+            min(float(poll_interval_s), float(max_wait_s) - elapsed)
+        )
+    return {
+        "exact_profile_proved": False,
+        "reason": last_reason,
+        "return_profile_poll_count": poll_count,
+        "return_profile_fast_confirmed": False,
+        "return_profile_poll_wait_ms": round(
+            (time.perf_counter() - started) * 1000.0, 2
+        ),
+        "extra_xml_dump_count": 0,
     }
 
 
@@ -35210,47 +35341,171 @@ def visual_return_to_profile_from_post(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
+    expected_profile_username: str | None = None,
+    initial_hierarchy_xml: str = "",
+    open_surface_kind: str = "post",
 ) -> dict[str, Any]:
-    """Single Back from post/reel viewer toward profile; verify profile chrome. No scroll."""
+    """Recover one proved post/story depth to the exact candidate profile.
+
+    A proven Story comment education prompt owns a single semantic ``Not now``
+    action.  After that action, Back is allowed only when a fresh hierarchy
+    proves the Story/Highlight viewer remains.  Direct post or Highlight
+    recovery also owns exactly one Back.  Success always requires a fresh,
+    exact candidate-profile contract on a safe Instagram activity.
+    """
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    expected_profile = str(
+        expected_profile_username or source_profile_username or ""
+    ).strip()
     meta0 = _followers_current_pkg_activity(d)
     log(
         "info",
         "visual_return_to_profile_started",
         source_profile_username=source_profile_username or "",
+        expected_profile_username=expected_profile,
+        open_surface_kind=str(open_surface_kind or "unknown"),
         current_activity=meta0.get("current_activity"),
         current_package=meta0.get("current_package"),
     )
+    base_out: dict[str, Any] = {
+        "ok": False,
+        "profile_detected": False,
+        "source_profile_username": source_profile_username or "",
+        "expected_profile_username": expected_profile,
+        "not_now_clicked": False,
+        "back_count": 0,
+        "open_surface_kind": str(open_surface_kind or "unknown"),
+    }
+
+    if not expected_profile:
+        return {
+            **base_out,
+            "current_activity": meta0.get("current_activity"),
+            "current_package": meta0.get("current_package"),
+            "failure_reason": "expected_candidate_profile_missing",
+        }
+
+    initial_xml = str(initial_hierarchy_xml or "")
+    prompt = _story_comment_education_prompt_from_xml(initial_xml)
+    if bool(prompt.get("recognized")):
+        if int(prompt.get("canonical_target_count") or 0) != 1:
+            return {
+                **base_out,
+                "current_activity": meta0.get("current_activity"),
+                "current_package": meta0.get("current_package"),
+                "story_comment_prompt": prompt,
+                "failure_reason": str(
+                    prompt.get("reason")
+                    or "story_comment_education_not_now_target_unproved"
+                ),
+            }
+        target = dict(prompt.get("canonical_target") or {})
+        bounds = dict(target.get("bounds") or {})
+        try:
+            d.click(
+                (int(bounds["left"]) + int(bounds["right"])) // 2,
+                (int(bounds["top"]) + int(bounds["bottom"])) // 2,
+            )
+        except Exception as exc:
+            return {
+                **base_out,
+                "current_activity": meta0.get("current_activity"),
+                "current_package": meta0.get("current_package"),
+                "story_comment_prompt": prompt,
+                "failure_reason": f"story_comment_not_now_click_failed:{type(exc).__name__}",
+            }
+        base_out["not_now_clicked"] = True
+        log(
+            "info",
+            "instagram_story_comment_education_not_now_clicked",
+            source_profile_username=source_profile_username or "",
+            expected_profile_username=expected_profile,
+            canonical_target_count=1,
+        )
+        after_prompt = _wait_story_or_exact_profile_after_popup(
+            d,
+            pkg=pkg,
+            expected_profile_username=expected_profile,
+        )
+        base_out["post_prompt_observation"] = dict(after_prompt)
+        if bool(after_prompt.get("exact_profile_proved")):
+            meta = _followers_current_pkg_activity(d)
+            return {
+                **base_out,
+                "ok": True,
+                "profile_detected": True,
+                "current_activity": meta.get("current_activity"),
+                "current_package": meta.get("current_package"),
+                "failure_reason": None,
+            }
+        if not bool(after_prompt.get("story_or_highlight_proved")):
+            meta = _followers_current_pkg_activity(d)
+            return {
+                **base_out,
+                "current_activity": meta.get("current_activity"),
+                "current_package": meta.get("current_package"),
+                "failure_reason": "post_not_now_surface_unproved_no_back",
+            }
+    else:
+        supported_surface = str(open_surface_kind or "").lower() in {
+            "post", "story", "highlight", "story_or_highlight"
+        }
+        if not supported_surface:
+            return {
+                **base_out,
+                "current_activity": meta0.get("current_activity"),
+                "current_package": meta0.get("current_package"),
+                "failure_reason": "open_surface_unproved_no_back",
+            }
+        activity_lower = str(meta0.get("current_activity") or "").lower()
+        if "modalactivity" in activity_lower:
+            return {
+                **base_out,
+                "current_activity": meta0.get("current_activity"),
+                "current_package": meta0.get("current_package"),
+                "failure_reason": "transparent_modal_without_proven_prompt_no_back",
+            }
+
     try:
         d.press("back")
+        base_out["back_count"] = 1
     except Exception as e:
         meta = _followers_current_pkg_activity(d)
-        log(
-            "error",
-            "visual_return_to_profile_failed",
-            source_profile_username=source_profile_username or "",
-            current_activity=meta.get("current_activity"),
-            current_package=meta.get("current_package"),
-            profile_detected=False,
-            failure_reason=str(e),
-        )
         return {
-            "ok": False,
-            "profile_detected": False,
+            **base_out,
             "current_activity": meta.get("current_activity"),
             "current_package": meta.get("current_package"),
-            "source_profile_username": source_profile_username or "",
             "failure_reason": str(e),
         }
 
-    poll_out = _visual_wait_profile_after_back(d, pkg=pkg)
-    profile_detected = bool(poll_out.get("profile_detected"))
+    hierarchy_required = bool(
+        base_out.get("not_now_clicked")
+        or str(open_surface_kind or "").lower()
+        in {"story", "highlight", "story_or_highlight"}
+    )
+    if hierarchy_required:
+        poll_out = _wait_exact_candidate_profile_after_navigation(
+            d,
+            pkg=pkg,
+            expected_profile_username=expected_profile,
+        )
+    else:
+        # Normal post return keeps the certified no-extra-XML fast path.  The
+        # selector poll is now identity-exact and activity-safe rather than
+        # accepting generic profile chrome.
+        poll_out = _visual_wait_exact_candidate_profile_after_back_fast(
+            d,
+            pkg=pkg,
+            expected_profile_username=expected_profile,
+        )
+    profile_detected = bool(poll_out.get("exact_profile_proved"))
     meta = _followers_current_pkg_activity(d)
     if profile_detected:
         log(
             "info",
             "visual_return_to_profile_success",
             source_profile_username=source_profile_username or "",
+            expected_profile_username=expected_profile,
             current_activity=meta.get("current_activity"),
             current_package=meta.get("current_package"),
             profile_detected=True,
@@ -35259,11 +35514,13 @@ def visual_return_to_profile_from_post(
             return_profile_poll_wait_ms=poll_out.get("return_profile_poll_wait_ms"),
         )
         return {
+            **base_out,
             "ok": True,
             "profile_detected": True,
             "current_activity": meta.get("current_activity"),
             "current_package": meta.get("current_package"),
             "source_profile_username": source_profile_username or "",
+            "expected_profile_username": expected_profile,
             "failure_reason": None,
             "return_profile_poll_count": poll_out.get("return_profile_poll_count"),
             "return_profile_fast_confirmed": poll_out.get(
@@ -35285,12 +35542,16 @@ def visual_return_to_profile_from_post(
         return_profile_poll_wait_ms=poll_out.get("return_profile_poll_wait_ms"),
     )
     return {
+        **base_out,
         "ok": False,
         "profile_detected": False,
         "current_activity": meta.get("current_activity"),
         "current_package": meta.get("current_package"),
         "source_profile_username": source_profile_username or "",
-        "failure_reason": "profile_not_verified_after_back",
+        "expected_profile_username": expected_profile,
+        "failure_reason": str(
+            poll_out.get("reason") or "profile_not_verified_after_back"
+        ),
         "return_profile_poll_count": poll_out.get("return_profile_poll_count"),
         "return_profile_fast_confirmed": poll_out.get("return_profile_fast_confirmed"),
         "return_profile_poll_wait_ms": poll_out.get("return_profile_poll_wait_ms"),
@@ -54671,6 +54932,383 @@ def _ui_story_or_highlight_viewer_detected(d: u2.Device) -> tuple[bool, str]:
     return False, ""
 
 
+def _story_comment_education_prompt_from_xml(
+    hierarchy_xml: str,
+) -> dict[str, Any]:
+    """Classify the Story-comment education prompt and one physical Not now.
+
+    The field surface has duplicate parent/child accessibility labels.  Every
+    semantic ``Not now`` node is therefore resolved to its nearest clickable,
+    enabled ancestor and canonicalized by that physical ancestor's bounds.
+    No selector query or device RPC is performed here.
+    """
+
+    base: dict[str, Any] = {
+        "state": "instagram_story_comment_education_prompt",
+        "recognized": False,
+        "canonical_target_count": 0,
+        "canonical_target": None,
+        "reason": "story_comment_education_prompt_unproved",
+    }
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except ET.ParseError:
+        return {**base, "reason": "story_comment_education_xml_invalid"}
+
+    parent_by_node_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+
+    def _labels(node: Any) -> list[str]:
+        attrs = node.attrib or {}
+        values = [
+            " ".join(
+                str(attrs.get(key) or "").replace("’", "'").lower().split()
+            )
+            for key in ("text", "content-desc")
+            if str(attrs.get(key) or "").strip()
+        ]
+        return list(dict.fromkeys(values))
+
+    labels = [value for node in root.iter() for value in _labels(node)]
+    title_signal = any(
+        "leave a comment" in value and "show friends" in value
+        for value in labels
+    )
+    body_signal = any(
+        "comment" in value and "stories" in value
+        for value in labels
+    )
+    try_it_signal = any(value == "try it" for value in labels)
+    not_now_nodes = [
+        node for node in root.iter() if "not now" in _labels(node)
+    ]
+    if not (title_signal and body_signal and try_it_signal and not_now_nodes):
+        return base
+
+    canonical: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+    for semantic_node in not_now_nodes:
+        current = semantic_node
+        target = None
+        while current is not None:
+            attrs = current.attrib or {}
+            current_labels = _labels(current)
+            clickable = str(attrs.get("clickable") or "").lower() == "true"
+            enabled = str(attrs.get("enabled") or "true").lower() != "false"
+            bounds = _parse_ui_bounds_str(attrs.get("bounds"))
+            if clickable and enabled and bounds:
+                target = {
+                    "bounds": dict(bounds),
+                    "semantic_label": "Not now",
+                    "clickable": True,
+                    "enabled": True,
+                }
+            parent = parent_by_node_id.get(id(current))
+            if parent is None:
+                break
+            parent_labels = _labels(parent)
+            # A parent/child accessibility duplicate owns one physical
+            # action.  Ascend through unlabeled wrappers or another exact
+            # Not-now label, but never through a differently labelled modal.
+            if parent_labels and "not now" not in parent_labels:
+                break
+            current = parent
+        if target is None:
+            continue
+        bounds = dict(target["bounds"])
+        key = (
+            int(bounds["left"]), int(bounds["top"]),
+            int(bounds["right"]), int(bounds["bottom"]),
+        )
+        canonical[key] = target
+
+    targets = list(canonical.values())
+    out = {
+        **base,
+        "recognized": True,
+        "canonical_target_count": len(targets),
+        "canonical_target": targets[0] if len(targets) == 1 else None,
+        "title_signal": True,
+        "body_signal": True,
+        "try_it_signal": True,
+        "not_now_semantic_node_count": len(not_now_nodes),
+    }
+    if not targets:
+        out["reason"] = "story_comment_education_not_now_target_missing"
+    elif len(targets) > 1:
+        out["reason"] = "story_comment_education_not_now_target_ambiguous"
+    else:
+        out["reason"] = "story_comment_education_prompt_proved"
+    return out
+
+
+def _exact_candidate_profile_from_fresh_hierarchy(
+    d: u2.Device,
+    *,
+    hierarchy_xml: str,
+    pkg: str,
+    expected_profile_username: str,
+) -> dict[str, Any]:
+    """Require safe activity, exact identity and profile controls together."""
+
+    expected = _normalize_handle(expected_profile_username)
+    out: dict[str, Any] = {
+        "exact_profile_proved": False,
+        "expected_profile_username": expected_profile_username,
+        "observed_username": "",
+        "profile_controls_proved": False,
+        "reason": "fresh_candidate_profile_unproved",
+    }
+    if not expected:
+        out["reason"] = "expected_candidate_profile_missing"
+        return out
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except ET.ParseError:
+        out["reason"] = "fresh_candidate_profile_xml_invalid"
+        return out
+
+    observed = str(
+        _followers_entry_v2_action_bar_title_from_hierarchy_xml(
+            hierarchy_xml
+        )
+        or ""
+    ).strip()
+    profile_controls = False
+    exact_identity_node = False
+    story_or_modal_marker = False
+    for node in root.iter():
+        attrs = node.attrib or {}
+        label = " ".join(
+            str(attrs.get(key) or "")
+            for key in ("text", "content-desc", "resource-id")
+        ).strip()
+        normalized = " ".join(label.lower().replace("_", " ").split())
+        if _normalize_handle(str(attrs.get("text") or "")) == expected:
+            exact_identity_node = True
+        if _normalize_handle(str(attrs.get("content-desc") or "")) == expected:
+            exact_identity_node = True
+        if any(
+            marker in normalized
+            for marker in (
+                "profile tabs container", "profile tab grid",
+                "followers", "following", "follow", "message",
+            )
+        ):
+            profile_controls = True
+        if any(
+            marker in normalized
+            for marker in (
+                "story viewer", "highlight viewer", "story controls",
+                "leave a comment and show friends", "comment on stories",
+            )
+        ):
+            story_or_modal_marker = True
+
+    observed_exact = bool(
+        observed and _normalize_handle(observed) == expected
+    )
+    identity_ok, identity_meta = _expected_profile_identity_boundary(
+        d,
+        expected_profile_username,
+        pkg,
+        observed_username=(observed if observed_exact else ""),
+    )
+    out.update(
+        {
+            "observed_username": observed,
+            "profile_controls_proved": bool(profile_controls),
+            "exact_identity_node": bool(exact_identity_node),
+            "identity_reason": str(identity_meta.get("reason") or ""),
+            "current_package": identity_meta.get("current_package"),
+            "current_activity": identity_meta.get("current_activity"),
+            "story_or_modal_marker": bool(story_or_modal_marker),
+        }
+    )
+    proved = bool(
+        identity_ok
+        and (observed_exact or exact_identity_node)
+        and profile_controls
+        and not story_or_modal_marker
+    )
+    out["exact_profile_proved"] = proved
+    out["reason"] = (
+        "exact_candidate_profile_proved"
+        if proved
+        else "fresh_candidate_profile_contract_failed"
+    )
+    return out
+
+
+def _wait_exact_candidate_profile_after_navigation(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_profile_username: str,
+    max_wait_s: float = _VISUAL_RETURN_PROFILE_POLL_MAX_S,
+) -> dict[str, Any]:
+    """Bounded exception-path polling; every decision uses a fresh hierarchy."""
+
+    started = time.perf_counter()
+    observation_count = 0
+    last: dict[str, Any] = {
+        "exact_profile_proved": False,
+        "reason": "fresh_candidate_profile_unproved",
+    }
+    while True:
+        observation_count += 1
+        hierarchy = _dump_post_viewer_hierarchy(d)
+        last = _exact_candidate_profile_from_fresh_hierarchy(
+            d,
+            hierarchy_xml=hierarchy,
+            pkg=pkg,
+            expected_profile_username=expected_profile_username,
+        )
+        elapsed = time.perf_counter() - started
+        if bool(last.get("exact_profile_proved")):
+            return {
+                **last,
+                "return_profile_poll_count": observation_count,
+                "return_profile_fast_confirmed": bool(
+                    observation_count <= 2 and elapsed < 0.55
+                ),
+                "return_profile_poll_wait_ms": round(elapsed * 1000.0, 2),
+            }
+        if elapsed >= float(max_wait_s):
+            break
+        time.sleep(
+            min(
+                float(_VISUAL_RETURN_PROFILE_POLL_INTERVAL_S),
+                float(max_wait_s) - elapsed,
+            )
+        )
+    return {
+        **last,
+        "return_profile_poll_count": observation_count,
+        "return_profile_fast_confirmed": False,
+        "return_profile_poll_wait_ms": round(
+            (time.perf_counter() - started) * 1000.0, 2
+        ),
+    }
+
+
+def _wait_story_or_exact_profile_after_popup(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_profile_username: str,
+    max_wait_s: float = _VISUAL_RETURN_PROFILE_POLL_MAX_S,
+) -> dict[str, Any]:
+    """After Not now, prove Story/Highlight or exact profile before acting."""
+
+    started = time.perf_counter()
+    observation_count = 0
+    last: dict[str, Any] = {
+        "story_or_highlight_proved": False,
+        "exact_profile_proved": False,
+        "reason": "post_not_now_surface_unproved",
+    }
+    while True:
+        observation_count += 1
+        hierarchy = _dump_post_viewer_hierarchy(d)
+        profile = _exact_candidate_profile_from_fresh_hierarchy(
+            d,
+            hierarchy_xml=hierarchy,
+            pkg=pkg,
+            expected_profile_username=expected_profile_username,
+        )
+        if bool(profile.get("exact_profile_proved")):
+            return {
+                **profile,
+                "story_or_highlight_proved": False,
+                "observation_count": observation_count,
+                "hierarchy_xml": hierarchy,
+            }
+        story = _strong_story_highlight_recovery_proof_from_xml(hierarchy)
+        if bool(story.get("story_or_highlight_proved")):
+            return {
+                **story,
+                "exact_profile_proved": False,
+                "reason": "story_or_highlight_proved_after_not_now",
+                "observation_count": observation_count,
+                "hierarchy_xml": hierarchy,
+            }
+        last = {
+            **profile,
+            "story_or_highlight_proved": False,
+            "observation_count": observation_count,
+        }
+        elapsed = time.perf_counter() - started
+        if elapsed >= float(max_wait_s):
+            break
+        time.sleep(
+            min(
+                float(_POST_FOLLOW_VIEWER_OPEN_POLL_INTERVAL_S),
+                float(max_wait_s) - elapsed,
+            )
+        )
+    return last
+
+
+def _strong_story_highlight_recovery_proof_from_xml(
+    hierarchy_xml: str,
+) -> dict[str, Any]:
+    """Prove viewer depth without treating a profile Message CTA as Story."""
+
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except ET.ParseError:
+        return {
+            "story_or_highlight_proved": False,
+            "reason": "story_highlight_recovery_xml_invalid",
+        }
+    strong_marker = False
+    story_control_count = 0
+    profile_controls = False
+    for node in root.iter():
+        attrs = node.attrib or {}
+        label = " ".join(
+            str(attrs.get(key) or "")
+            for key in ("text", "content-desc", "resource-id")
+        ).lower()
+        normalized = " ".join(label.replace("_", " ").split())
+        if any(
+            marker in normalized
+            for marker in (
+                "story viewer", "highlight viewer", "story controls",
+                "story progress", "reel tray", "highlight tray",
+            )
+        ):
+            strong_marker = True
+        if any(
+            marker == normalized or f" {marker} " in f" {normalized} "
+            for marker in ("message", "share", "like", "pause", "more")
+        ):
+            story_control_count += 1
+        if any(
+            marker in normalized
+            for marker in ("profile tabs container", "profile tab grid")
+        ):
+            profile_controls = True
+    proved = bool(
+        not profile_controls
+        and (strong_marker or story_control_count >= 3)
+    )
+    return {
+        "story_or_highlight_proved": proved,
+        "strong_story_marker": bool(strong_marker),
+        "story_control_count": int(story_control_count),
+        "profile_controls_present": bool(profile_controls),
+        "reason": (
+            "strong_story_highlight_surface_proved"
+            if proved
+            else "story_highlight_surface_unproved"
+        ),
+    }
+
+
 _POST_OPEN_STORY_RESOURCE_MARKERS = (
     "story_viewer",
     "reel_viewer",
@@ -59599,7 +60237,27 @@ def run_post_follow_post_likes_phase(
                 stable_reason=str(stable_reason or skipped_reason),
             )
             _t_ret_skip0 = time.perf_counter()
-            ret_skip = visual_return_to_profile_from_post(d, source_profile_username=src)
+            _return_surface_kind = (
+                "highlight"
+                if bool(post_open_audit.get("story_detected"))
+                and "highlight" in str(
+                    post_open_audit.get("story_method") or ""
+                ).lower()
+                else "story"
+                if bool(post_open_audit.get("story_detected"))
+                else "post"
+                if bool(post_open_audit.get("like_surface_ok"))
+                else "unknown"
+            )
+            ret_skip = visual_return_to_profile_from_post(
+                d,
+                source_profile_username=src,
+                expected_profile_username=cand,
+                initial_hierarchy_xml=str(
+                    post_open_audit.get("snapshot_xml") or ""
+                ),
+                open_surface_kind=_return_surface_kind,
+            )
             _likes_perf_ctx["return_to_profile_ms"] = round(
                 (time.perf_counter() - _t_ret_skip0) * 1000.0, 2
             )
@@ -59983,7 +60641,15 @@ def run_post_follow_post_likes_phase(
                 red_ratio=al_pre.get("red_ratio"),
             )
             _t_ret_p0 = time.perf_counter()
-            ret_p = visual_return_to_profile_from_post(d, source_profile_username=src)
+            ret_p = visual_return_to_profile_from_post(
+                d,
+                source_profile_username=src,
+                expected_profile_username=cand,
+                initial_hierarchy_xml=str(
+                    post_open_audit.get("snapshot_xml") or ""
+                ),
+                open_surface_kind="post",
+            )
             _likes_perf_ctx["return_to_profile_ms"] = round(
                 (time.perf_counter() - _t_ret_p0) * 1000.0, 2
             )
@@ -60211,7 +60877,15 @@ def run_post_follow_post_likes_phase(
             post_rec["failure_reason"] = str(like_out.get("failure_reason") or "")
             per_post.append(post_rec)
             _t_ret_pf0 = time.perf_counter()
-            ret_pf = visual_return_to_profile_from_post(d, source_profile_username=src)
+            ret_pf = visual_return_to_profile_from_post(
+                d,
+                source_profile_username=src,
+                expected_profile_username=cand,
+                initial_hierarchy_xml=str(
+                    post_open_audit.get("snapshot_xml") or ""
+                ),
+                open_surface_kind="post",
+            )
             _likes_perf_ctx["return_to_profile_ms"] = round(
                 (time.perf_counter() - _t_ret_pf0) * 1000.0, 2
             )
@@ -60265,7 +60939,15 @@ def run_post_follow_post_likes_phase(
             )
 
         _t_ret_ok0 = time.perf_counter()
-        ret_ok = visual_return_to_profile_from_post(d, source_profile_username=src)
+        ret_ok = visual_return_to_profile_from_post(
+            d,
+            source_profile_username=src,
+            expected_profile_username=cand,
+            initial_hierarchy_xml=str(
+                post_open_audit.get("snapshot_xml") or ""
+            ),
+            open_surface_kind="post",
+        )
         _likes_perf_ctx["return_to_profile_ms"] = round(
             (time.perf_counter() - _t_ret_ok0) * 1000.0, 2
         )
