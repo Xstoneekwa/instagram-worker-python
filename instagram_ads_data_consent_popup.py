@@ -175,9 +175,15 @@ def publish_ads_data_consent_operator_alert(
         try:
             from login_challenge_runtime import sync_login_challenge_dashboard_action
 
+            incident_id = (
+                str(incident.get("incident_id") or incident.get("id") or "").strip()
+                if isinstance(incident, dict)
+                else ""
+            ) or None
             action = sync_login_challenge_dashboard_action(
                 account_id=aid,
                 dashboard_action_type="review_login_challenge",
+                incident_id=incident_id,
                 run_id=str(run_id or "").strip() or None,
                 screen_type=POPUP_TYPE,
                 stage=str(phase or "unknown"),

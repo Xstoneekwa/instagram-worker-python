@@ -7,6 +7,94 @@ import login_dashboard_action_publisher as publisher
 
 
 class LoginDashboardActionPublisherTests(unittest.TestCase):
+    def test_incident_lineage_is_persisted_by_rpc(self) -> None:
+        captured: dict = {}
+
+        def _call_rpc(name: str, params: dict) -> dict:
+            captured["name"] = name
+            captured["params"] = params
+            return {"id": "action-1", "incident_id": params["p_incident_id"]}
+
+        with patch.object(publisher, "call_rpc", side_effect=_call_rpc):
+            out = publisher.upsert_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                action_type="review_login_challenge",
+                incident_id="22222222-2222-4222-8222-222222222222",
+                run_id="run-1",
+            )
+
+        self.assertTrue(out["published"])
+        self.assertEqual(
+            captured["params"]["p_incident_id"],
+            "22222222-2222-4222-8222-222222222222",
+        )
+
+    def test_standalone_action_keeps_null_incident_lineage(self) -> None:
+        captured: dict = {}
+
+        with patch.object(
+            publisher,
+            "call_rpc",
+            side_effect=lambda name, params: captured.update(name=name, params=params) or {"id": "action-1"},
+        ):
+            publisher.upsert_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                action_type="review_login_challenge",
+                run_id="run-1",
+            )
+
+        self.assertIsNone(captured["params"]["p_incident_id"])
+
+    def test_fallback_persists_incident_lineage(self) -> None:
+        requests: list[tuple[str, str, dict]] = []
+
+        def _request(method: str, table: str, **kwargs: object) -> list[dict]:
+            requests.append((method, table, dict(kwargs)))
+            if method == "GET":
+                return []
+            return [{"id": "action-fallback"}]
+
+        with (
+            patch.object(publisher, "call_rpc", side_effect=RuntimeError("rpc unavailable")),
+            patch("supabase_client._request_json", side_effect=_request),
+        ):
+            out = publisher.upsert_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                action_type="review_login_challenge",
+                incident_id="22222222-2222-4222-8222-222222222222",
+                run_id="run-1",
+            )
+
+        self.assertTrue(out["published"])
+        post = next(row for row in requests if row[0] == "POST")
+        self.assertEqual(
+            post[2]["body"]["incident_id"],
+            "22222222-2222-4222-8222-222222222222",
+        )
+
+    def test_fallback_retry_without_incident_does_not_erase_existing_lineage(self) -> None:
+        requests: list[tuple[str, str, dict]] = []
+
+        def _request(method: str, table: str, **kwargs: object) -> list[dict]:
+            requests.append((method, table, dict(kwargs)))
+            if method == "GET":
+                return [{"id": "action-existing", "status": "pending"}]
+            return [{"id": "action-existing"}]
+
+        with (
+            patch.object(publisher, "call_rpc", side_effect=RuntimeError("rpc unavailable")),
+            patch("supabase_client._request_json", side_effect=_request),
+        ):
+            out = publisher.upsert_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                action_type="review_login_challenge",
+                run_id="run-1",
+            )
+
+        self.assertTrue(out["published"])
+        patch_request = next(row for row in requests if row[0] == "PATCH")
+        self.assertNotIn("incident_id", patch_request[2]["body"])
+
     def test_disabled_returns_reason(self) -> None:
         with patch.object(publisher, "_enabled", return_value=False):
             out = publisher.upsert_login_challenge_dashboard_action(

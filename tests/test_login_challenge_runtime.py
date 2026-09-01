@@ -7,6 +7,20 @@ import login_challenge_runtime as runtime
 
 
 class LoginChallengeRuntimeTests(unittest.TestCase):
+    def test_sync_dashboard_action_propagates_exact_incident_id(self) -> None:
+        with patch.object(runtime, "upsert_login_challenge_dashboard_action", return_value={"published": True}) as upsert:
+            runtime.sync_login_challenge_dashboard_action(
+                account_id="11111111-1111-4111-8111-111111111111",
+                dashboard_action_type="review_login_challenge",
+                incident_id="22222222-2222-4222-8222-222222222222",
+                run_id="run-1",
+            )
+
+        self.assertEqual(
+            upsert.call_args.kwargs["incident_id"],
+            "22222222-2222-4222-8222-222222222222",
+        )
+
     def test_publish_login_challenge_incident_uses_safe_metadata(self) -> None:
         with patch.object(runtime, "publish_account_incident", return_value={"published": True}) as publish:
             runtime.publish_login_challenge_pending_incident(

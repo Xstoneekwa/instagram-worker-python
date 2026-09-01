@@ -116,7 +116,7 @@ class AdsDataConsentIdentityTests(unittest.TestCase):
         ]
         with (
             patch("instagram_ads_data_consent_popup.publish_account_incident", side_effect=incident_rows) as incident,
-            patch("login_challenge_runtime.sync_login_challenge_dashboard_action", return_value={"dashboard_action_id": "action-1"}),
+            patch("login_challenge_runtime.sync_login_challenge_dashboard_action", return_value={"dashboard_action_id": "action-1"}) as action,
             patch("incident_notifications.dispatch_account_incident_notifications", return_value={"dispatched": True}),
         ):
             results = [
@@ -129,6 +129,10 @@ class AdsDataConsentIdentityTests(unittest.TestCase):
                 for _ in range(2)
             ]
         self.assertEqual([row["incident_id"] for row in results], ["incident-1", "incident-1"])
+        self.assertEqual(
+            [call.kwargs["incident_id"] for call in action.call_args_list],
+            ["incident-1", "incident-1"],
+        )
         for call in incident.call_args_list:
             self.assertEqual(call.kwargs["dedupe_key"], "account:account-1:instagram_ads_data_consent_popup")
             self.assertIn("Choose if we process your data for ads", call.kwargs["admin_message"])

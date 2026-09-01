@@ -102,6 +102,7 @@ def upsert_login_challenge_dashboard_action(
     *,
     account_id: str,
     action_type: str,
+    incident_id: str | None = None,
     client_id: str | None = None,
     run_id: str | None = None,
     challenge_type: str | None = None,
@@ -115,6 +116,7 @@ def upsert_login_challenge_dashboard_action(
 
     aid = str(account_id or "").strip()
     atype = str(action_type or "").strip()
+    iid = str(incident_id or "").strip() or None
     if not _enabled():
         return {"published": False, "reason": "disabled", "action_type": atype or None}
     if not aid or atype not in LOGIN_CHALLENGE_ACTIONS:
@@ -189,6 +191,7 @@ def upsert_login_challenge_dashboard_action(
             "upsert_login_challenge_dashboard_action",
             {
                 "p_account_id": aid,
+                "p_incident_id": iid,
                 "p_client_id": client_id,
                 "p_action_type": atype,
                 "p_status": "pending",
@@ -216,6 +219,7 @@ def upsert_login_challenge_dashboard_action(
         fallback = _fallback_upsert_login_challenge_dashboard_action(
             account_id=aid,
             action_type=atype,
+            incident_id=iid,
             spec=spec,
             safe_metadata=safe_metadata,
             dedupe_key=dedupe_key,
@@ -241,6 +245,7 @@ def _fallback_upsert_login_challenge_dashboard_action(
     *,
     account_id: str,
     action_type: str,
+    incident_id: str | None,
     spec: dict[str, Any],
     safe_metadata: dict[str, Any],
     dedupe_key: str,
@@ -279,19 +284,24 @@ def _fallback_upsert_login_challenge_dashboard_action(
         "dedupe_key": dedupe_key,
         "metadata": safe_metadata,
     }
+    if incident_id:
+        body["incident_id"] = incident_id
     try:
         if existing_rows:
             action_id = str(existing_rows[0].get("id") or "").strip()
             if not action_id:
                 return {"published": False, "reason": "fallback_missing_action_id"}
+            patch_body = {
+                "status": "pending",
+                "metadata": safe_metadata,
+            }
+            if incident_id:
+                patch_body["incident_id"] = incident_id
             rows = _request_json(
                 "PATCH",
                 "account_dashboard_actions",
                 query={"id": f"eq.{action_id}"},
-                body={
-                    "status": "pending",
-                    "metadata": safe_metadata,
-                },
+                body=patch_body,
                 prefer_representation=True,
             ) or []
             patched_id = str((rows[0] or {}).get("id") or action_id) if rows else action_id

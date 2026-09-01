@@ -225,6 +225,7 @@ def sync_login_challenge_dashboard_action(
     *,
     account_id: str,
     dashboard_action_type: str | None,
+    incident_id: str | None = None,
     client_id: str | None = None,
     run_id: str | None = None,
     challenge_type: str | None = None,
@@ -239,6 +240,7 @@ def sync_login_challenge_dashboard_action(
     return upsert_login_challenge_dashboard_action(
         account_id=account_id,
         action_type=dashboard_action_type,
+        incident_id=incident_id,
         client_id=client_id,
         run_id=run_id,
         challenge_type=challenge_type,
