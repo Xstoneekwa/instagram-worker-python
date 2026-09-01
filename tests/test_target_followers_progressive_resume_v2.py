@@ -1813,6 +1813,217 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertLess(handler, swipe)
         self.assertNotIn("commit_verified_progress(", source[handler:swipe])
 
+    def test_76_rpc_observability_is_structural_and_non_mutating(self):
+        raw_response = {
+            "ok": True,
+            "reason": "claimed",
+            "optimistic_version": 8,
+            "lease_generation": 3,
+            "lease_expires_at": "2026-09-01T15:00:00+00:00",
+            "account_id": ACCOUNT_A,
+            "secret": "must-never-be-logged",
+        }
+        encoded = json.dumps(raw_response).encode("utf-8")
+        with (
+            patch.object(
+                supabase_client,
+                "_base_url",
+                return_value="https://example.invalid",
+            ),
+            patch.object(
+                supabase_client,
+                "_service_key",
+                return_value="service-secret",
+            ),
+            patch.object(
+                supabase_client,
+                "_request_urlopen",
+                return_value=encoded,
+            ) as network,
+            patch.object(supabase_client, "log") as observer,
+        ):
+            result = supabase_client.call_rpc_shadow(
+                resume.CT_RESUME_CLAIM_RPC,
+                {"p_account_id": ACCOUNT_A, "p_secret": "request-secret"},
+            )
+
+        self.assertEqual(result, raw_response)
+        self.assertEqual(network.call_count, 1)
+        stages = [call.kwargs["stage"] for call in observer.call_args_list]
+        self.assertEqual(stages, ["rpc_json_decoded", "shadow_before_return"])
+        allowed = {
+            "container_type",
+            "row_count",
+            "safe_row_keys",
+            "lease_present",
+            "lease_type",
+            "optimistic_version",
+            "lease_generation",
+            "contract_version",
+            "rpc_name",
+            "stage",
+        }
+        self.assertTrue(
+            all(set(call.kwargs) <= allowed for call in observer.call_args_list)
+        )
+        observed = json.dumps([call.kwargs for call in observer.call_args_list])
+        for forbidden in (
+            ACCOUNT_A,
+            "must-never-be-logged",
+            "request-secret",
+            "service-secret",
+        ):
+            self.assertNotIn(forbidden, observed)
+
+    def test_77_repository_claim_observes_one_boundary_without_mutation(self):
+        raw_response = [
+            {
+                "ok": True,
+                "reason": "claimed",
+                "optimistic_version": 9,
+                "lease_generation": 4,
+                "lease_expires_at": "2026-09-01T15:00:00+00:00",
+                "target_id": TARGET_A,
+            }
+        ]
+        rpc_calls = []
+
+        def rpc(name, params):
+            rpc_calls.append((name, dict(params)))
+            return raw_response
+
+        with patch.object(resume, "log") as observer:
+            result = resume.ResumeRepository(rpc).claim(
+                account_id=ACCOUNT_A,
+                target_id=TARGET_A,
+                run_id=RUN_A,
+                mode="shadow",
+                expected_version=8,
+            )
+
+        self.assertEqual(result, raw_response[0])
+        self.assertEqual(len(rpc_calls), 1)
+        self.assertEqual(
+            [call.kwargs["stage"] for call in observer.call_args_list],
+            ["repository_claim_before_one", "repository_claim_after_one"],
+        )
+        self.assertEqual(
+            observer.call_args_list[0].kwargs["container_type"], "list"
+        )
+        self.assertEqual(
+            observer.call_args_list[1].kwargs["container_type"], "dict"
+        )
+        self.assertNotIn(
+            TARGET_A,
+            json.dumps([call.kwargs for call in observer.call_args_list]),
+        )
+
+    def test_78_controller_claim_lease_matrix_preserves_result(self):
+        cases = (
+            (
+                "valid",
+                (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                True,
+                True,
+            ),
+            ("absent", None, False, False),
+            ("invalid", "not-a-timestamp", True, False),
+        )
+        for name, lease_value, lease_present, lease_parse_ok in cases:
+            with self.subTest(name=name):
+
+                class ClaimRpc:
+                    def __init__(self):
+                        self.calls = []
+
+                    def __call__(self, rpc_name, params):
+                        self.calls.append((rpc_name, dict(params)))
+                        if rpc_name.startswith("get_"):
+                            return None
+                        if rpc_name.startswith("claim_"):
+                            return {
+                                "ok": True,
+                                "reason": "claimed",
+                                "optimistic_version": 2,
+                                "lease_generation": 1,
+                                "lease_expires_at": lease_value,
+                            }
+                        raise AssertionError(f"unexpected RPC: {rpc_name}")
+
+                rpc = ClaimRpc()
+                controller = resume.ProgressiveResumeController(
+                    repository=resume.ResumeRepository(rpc),
+                    flags=resume.ResumeFlags(True, False),
+                    account_id=ACCOUNT_A,
+                    target_id=TARGET_A,
+                    target_username="neutral.target",
+                    run_id=RUN_A,
+                    source_request_id=REQUEST_A,
+                    source_attempt_id=1,
+                    release_sha=FULL_RELEASE_SHA,
+                    hmac_secret=TEST_HMAC_SECRET,
+                )
+                controller.load_and_plan()
+                with patch.object(resume, "log") as observer:
+                    result = controller.claim()
+
+                self.assertTrue(result)
+                self.assertEqual(len(rpc.calls), 2)
+                after = next(
+                    call.kwargs
+                    for call in observer.call_args_list
+                    if call.kwargs["stage"]
+                    == "controller_claim_after_lease_parse"
+                )
+                self.assertIs(after["lease_present"], lease_present)
+                self.assertIs(after["lease_parse_ok"], lease_parse_ok)
+
+    def test_79_observability_helpers_have_no_io_or_sensitive_fields(self):
+        allowed = {
+            "container_type",
+            "row_count",
+            "safe_row_keys",
+            "lease_present",
+            "lease_type",
+            "lease_parse_ok",
+            "optimistic_version",
+            "lease_generation",
+            "contract_version",
+            "rpc_name",
+            "stage",
+        }
+        for helper in (
+            resume._log_claim_structure,
+            supabase_client._log_ct_resume_rpc_structure,
+        ):
+            source = inspect.getsource(helper)
+            for forbidden in (
+                "_rpc(",
+                "_request_urlopen(",
+                "adb",
+                "scrcpy",
+                "sleep(",
+                "payload",
+                "params",
+            ):
+                self.assertNotIn(forbidden, source)
+
+        with patch.object(resume, "log") as observer:
+            resume._log_claim_structure(
+                stage="no_leak_test",
+                value={
+                    "lease_expires_at": "invalid",
+                    "account_id": ACCOUNT_A,
+                    "target_id": TARGET_A,
+                    "secret": "never-log-this",
+                },
+                lease_parse_ok=False,
+            )
+        self.assertTrue(set(observer.call_args.kwargs) <= allowed)
+        observed = json.dumps(observer.call_args.kwargs)
+        for forbidden in (ACCOUNT_A, TARGET_A, "never-log-this", "invalid"):
+            self.assertNotIn(forbidden, observed)
+
 
 if __name__ == "__main__":
     unittest.main()

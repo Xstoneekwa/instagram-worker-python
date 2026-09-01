@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from logs import log
+
 
 CHECKPOINT_NAME = "TARGET_FOLLOWERS_PROGRESSIVE_RESUME_V2"
 SURFACE_FOLLOWERS = "followers"
@@ -43,6 +45,16 @@ MAX_LEASE_SECONDS = 2 * 60 * 60
 RENEWAL_MARGIN_SECONDS = 10 * 60
 CT_RESUME_TARGET_OVERLAP_MIN = 1
 CT_RESUME_TARGET_OVERLAP_MAX = 2
+CT_RESUME_CLAIM_RPC = "claim_target_followers_resume_checkpoint_v3"
+CT_RESUME_OBSERVABILITY_CONTRACT = "CT_RESUME_LEASE_OBSERVABILITY_V1"
+CT_RESUME_SAFE_ROW_KEYS = frozenset(
+    {
+        "lease_expires_at",
+        "optimistic_version",
+        "lease_generation",
+        "contract_version",
+    }
+)
 
 EVENTS = frozenset(
     {
@@ -127,6 +139,62 @@ def _parse_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _claim_structural_fields(value: Any) -> dict[str, Any]:
+    if isinstance(value, list):
+        container_type = "list"
+        row_count = len(value)
+        row = value[0] if value and isinstance(value[0], Mapping) else None
+    elif isinstance(value, Mapping):
+        container_type = "dict"
+        row_count = 1
+        row = value
+    elif value is None:
+        container_type = "none"
+        row_count = 0
+        row = None
+    else:
+        container_type = type(value).__name__[:32]
+        row_count = 0
+        row = None
+
+    lease_value = row.get("lease_expires_at") if row is not None else None
+    lease_present = lease_value is not None and str(lease_value).strip() != ""
+
+    def safe_int(name: str) -> int | None:
+        if row is None:
+            return None
+        try:
+            return int(row.get(name))
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "container_type": container_type,
+        "row_count": row_count,
+        "safe_row_keys": sorted(CT_RESUME_SAFE_ROW_KEYS.intersection(row or {})),
+        "lease_present": lease_present,
+        "lease_type": type(lease_value).__name__ if lease_present else "none",
+        "optimistic_version": safe_int("optimistic_version"),
+        "lease_generation": safe_int("lease_generation"),
+        "contract_version": CT_RESUME_OBSERVABILITY_CONTRACT,
+    }
+
+
+def _log_claim_structure(
+    *, stage: str, value: Any, lease_parse_ok: bool | None = None
+) -> None:
+    fields = _claim_structural_fields(value)
+    if lease_parse_ok is not None:
+        fields["lease_parse_ok"] = bool(lease_parse_ok)
+    log(
+        "info",
+        "ct_resume_lease_observability",
+        rpc_name=CT_RESUME_CLAIM_RPC,
+        stage=stage,
+        **fields,
+    )
 
 
 def _sha256_token(value: str, *, prefix: str) -> str:
@@ -786,20 +854,22 @@ class ResumeRepository:
         expected_version: int | None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> dict[str, Any]:
-        return self._one(
-            self._rpc(
-                "claim_target_followers_resume_checkpoint_v3",
-                {
-                    "p_account_id": account_id,
-                    "p_target_id": target_id,
-                    "p_surface": SURFACE_FOLLOWERS,
-                    "p_run_id": run_id,
-                    "p_mode": mode,
-                    "p_expected_version": expected_version,
-                    "p_lease_seconds": max(300, min(MAX_LEASE_SECONDS, int(lease_seconds))),
-                },
-            )
-        ) or {"ok": False, "reason": "empty_claim_response"}
+        raw_response = self._rpc(
+            CT_RESUME_CLAIM_RPC,
+            {
+                "p_account_id": account_id,
+                "p_target_id": target_id,
+                "p_surface": SURFACE_FOLLOWERS,
+                "p_run_id": run_id,
+                "p_mode": mode,
+                "p_expected_version": expected_version,
+                "p_lease_seconds": max(300, min(MAX_LEASE_SECONDS, int(lease_seconds))),
+            },
+        )
+        _log_claim_structure(stage="repository_claim_before_one", value=raw_response)
+        normalized = self._one(raw_response)
+        _log_claim_structure(stage="repository_claim_after_one", value=normalized)
+        return normalized or {"ok": False, "reason": "empty_claim_response"}
 
     def commit(
         self,
@@ -1176,7 +1246,16 @@ class ProgressiveResumeController:
             )
             return False
         self.claimed_version = int(response.get("optimistic_version") or 0)
-        self.lease_expires_at = _parse_timestamp(response.get("lease_expires_at"))
+        _log_claim_structure(
+            stage="controller_claim_before_lease_parse", value=response
+        )
+        parsed_lease = _parse_timestamp(response.get("lease_expires_at"))
+        self.lease_expires_at = parsed_lease
+        _log_claim_structure(
+            stage="controller_claim_after_lease_parse",
+            value=response,
+            lease_parse_ok=parsed_lease is not None,
+        )
         self._claimed = self.claimed_version > 0
         if self._claimed:
             reclaimed = str(response.get("reason") or "") == "reclaimed"

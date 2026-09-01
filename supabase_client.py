@@ -18,6 +18,68 @@ import account_protection_lists
 
 BUSINESS_TIMEZONE = ZoneInfo("Africa/Johannesburg")
 
+_CT_RESUME_CLAIM_RPC = "claim_target_followers_resume_checkpoint_v3"
+_CT_RESUME_OBSERVABILITY_CONTRACT = "CT_RESUME_LEASE_OBSERVABILITY_V1"
+_CT_RESUME_SAFE_ROW_KEYS = frozenset(
+    {
+        "lease_expires_at",
+        "optimistic_version",
+        "lease_generation",
+        "contract_version",
+    }
+)
+
+
+def _ct_resume_structural_fields(value: Any) -> dict[str, Any]:
+    if isinstance(value, list):
+        container_type = "list"
+        row_count = len(value)
+        row = value[0] if value and isinstance(value[0], dict) else None
+    elif isinstance(value, dict):
+        container_type = "dict"
+        row_count = 1
+        row = value
+    elif value is None:
+        container_type = "none"
+        row_count = 0
+        row = None
+    else:
+        container_type = type(value).__name__[:32]
+        row_count = 0
+        row = None
+
+    lease_value = row.get("lease_expires_at") if row is not None else None
+    lease_present = lease_value is not None and str(lease_value).strip() != ""
+
+    def safe_int(name: str) -> int | None:
+        if row is None:
+            return None
+        try:
+            return int(row.get(name))
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "container_type": container_type,
+        "row_count": row_count,
+        "safe_row_keys": sorted(_CT_RESUME_SAFE_ROW_KEYS.intersection(row or {})),
+        "lease_present": lease_present,
+        "lease_type": type(lease_value).__name__ if lease_present else "none",
+        "optimistic_version": safe_int("optimistic_version"),
+        "lease_generation": safe_int("lease_generation"),
+        "contract_version": _CT_RESUME_OBSERVABILITY_CONTRACT,
+    }
+
+
+def _log_ct_resume_rpc_structure(*, stage: str, value: Any) -> None:
+    log(
+        "info",
+        "ct_resume_lease_observability",
+        rpc_name=_CT_RESUME_CLAIM_RPC,
+        stage=stage,
+        **_ct_resume_structural_fields(value),
+    )
+
 
 def sast_business_day_window(now: datetime | None = None) -> tuple[str, datetime, datetime]:
     current = now or datetime.now(timezone.utc)
@@ -3233,7 +3295,10 @@ def _call_rpc(
         )
         if not raw:
             return None
-        return json.loads(raw.decode("utf-8"))
+        decoded = json.loads(raw.decode("utf-8"))
+        if fn == _CT_RESUME_CLAIM_RPC:
+            _log_ct_resume_rpc_structure(stage="rpc_json_decoded", value=decoded)
+        return decoded
     except SupabaseRestError:
         raise
     except Exception as e:
@@ -3586,12 +3651,15 @@ def call_rpc_shadow(
     timeout_seconds: float = 3.0,
 ) -> Any:
     """Invoke a non-authoritative shadow RPC once with a short fail-open bound."""
-    return _call_rpc(
+    result = _call_rpc(
         function_name,
         params,
         timeout_seconds=max(1.0, min(5.0, float(timeout_seconds))),
         max_retries=0,
     )
+    if str(function_name or "").strip() == _CT_RESUME_CLAIM_RPC:
+        _log_ct_resume_rpc_structure(stage="shadow_before_return", value=result)
+    return result
 
 
 def ensure_account_dm_settings(account_id: str) -> dict[str, Any]:
