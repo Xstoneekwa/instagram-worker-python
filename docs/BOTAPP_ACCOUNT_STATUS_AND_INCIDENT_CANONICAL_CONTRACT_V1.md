@@ -110,12 +110,29 @@ projection actually requires a human action.
 
 ## Incidents and notifications
 
+A session whose effective Follow/Unfollow quota is reached, whose persistence
+is complete and which has no mandatory recovery or safety blocker is normally
+terminal. Remaining canonical Unfollow backlog is future business work, not
+mandatory work for that completed session. Terminal persistence preserves the
+immutable request lineage (`request_id`, root/parent business session and
+monotone attempt); a validated resume capsule wins, and `run_id` is only a
+legacy fallback when no canonical request lineage exists. Genuine lineage
+contradictions remain fail-closed.
+
 `account_incidents` is durable operational truth and
 `account_dashboard_actions` is the actionable UI projection. Notification Router
 V2 owns five business categories (`incident`, `new_client`, `plan_change`,
 `auto_login`, `ct_lifecycle`), each separated by `test`/`live` and
 Slack/Discord destinations. Category ownership suppresses a generic incident
 notification when a more specific producer owns the event.
+
+Router V2 is the sole provider-delivery path for incident lifecycle events.
+Covered Worker ORF-4/operator-review paths are disabled and retained only for
+rollback archaeology. A resolved event projects the persisted safe resolution
+note once to Slack/Discord and to the Backend timeline consumed by BotApp. It
+also carries `Open Incidents/Actions`, containing only the canonical incident
+UUID; Admin validates it before routing to exact incident detail and fails
+safely for invalid or inaccessible identifiers.
 
 Business events and `(event, destination)` delivery rows are idempotent.
 Deliveries are claimed atomically, retried with bounded backoff, and eventually
