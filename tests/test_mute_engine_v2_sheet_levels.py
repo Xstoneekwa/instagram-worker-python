@@ -5,9 +5,148 @@ import unittest
 from unittest import mock
 
 import instagram_navigation as nav
+import navigation_engine
 
 
 class MuteEngineV2SheetLevelsTest(unittest.TestCase):
+    def test_following_transition_happy_path_reuses_first_fresh_classification(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(nav, "_mute_engine_v2_detect_sheet_level") as detect, mock.patch.object(
+            navigation_engine, "observe_instagram_state"
+        ) as observe, mock.patch.object(nav, "_mute_engine_v2_pick_following_cta") as pick, mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            level, meta, reason = nav._mute_engine_v2_confirm_following_transition(
+                device,
+                initial_level="following_options",
+                initial_meta={"mute_row_candidate_count": 1},
+                following_cta_tapped=True,
+                pkg="com.instagram.android",
+                follower_username="cand",
+                source_profile_username="ct",
+                visual_candidate_id="xml_list:cand",
+                t_all=time.perf_counter(),
+            )
+        self.assertEqual(level, "following_options")
+        self.assertEqual(meta["mute_row_candidate_count"], 1)
+        self.assertEqual(reason, "first_fresh_classification")
+        detect.assert_not_called()
+        observe.assert_not_called()
+        pick.assert_not_called()
+        tmock.sleep.assert_not_called()
+
+    def test_following_transition_unknown_reclassifies_before_any_retap(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            return_value=("following_options", {"unfollow_visible": True}),
+        ) as detect, mock.patch.object(
+            navigation_engine, "observe_instagram_state"
+        ) as observe, mock.patch.object(nav, "_mute_engine_v2_pick_following_cta") as pick:
+            level, _meta, reason = nav._mute_engine_v2_confirm_following_transition(
+                device,
+                initial_level="unknown",
+                initial_meta={},
+                following_cta_tapped=True,
+                pkg="com.instagram.android",
+                follower_username="cand",
+                source_profile_username="ct",
+                visual_candidate_id="xml_list:cand",
+                t_all=time.perf_counter(),
+            )
+        self.assertEqual((level, reason), ("following_options", "bounded_reclassification"))
+        detect.assert_called_once()
+        observe.assert_not_called()
+        pick.assert_not_called()
+
+    def test_following_transition_allows_one_guarded_following_retap(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        following = mock.MagicMock()
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            side_effect=[("unknown", {}), ("following_options", {"unfollow_visible": True})],
+        ) as detect, mock.patch.object(
+            nav, "_mute_engine_v2_build_lightweight_profile_det", return_value={"action_bar_title": "cand"}
+        ), mock.patch.object(
+            navigation_engine,
+            "observe_instagram_state",
+            return_value={"state": navigation_engine.NavigationEngineState.PROFILE.value},
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_pick_following_cta", return_value=(following, "canonical_profile_header_cta")
+        ) as pick, mock.patch.object(nav, "_mute_engine_v2_pre_toggle_wait_s", return_value=0.0):
+            level, _meta, reason = nav._mute_engine_v2_confirm_following_transition(
+                device,
+                initial_level="unknown",
+                initial_meta={},
+                following_cta_tapped=True,
+                pkg="com.instagram.android",
+                follower_username="cand",
+                source_profile_username="ct",
+                visual_candidate_id="xml_list:cand",
+                t_all=time.perf_counter(),
+            )
+        self.assertEqual((level, reason), ("following_options", "guarded_following_retap"))
+        self.assertEqual(detect.call_count, 2)
+        pick.assert_called_once()
+        following.click.assert_called_once()
+
+    def test_following_transition_persistent_unknown_fails_closed_after_one_retap(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        following = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_mute_engine_v2_detect_sheet_level", side_effect=[("unknown", {}), ("unknown", {})]
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_build_lightweight_profile_det", return_value={"action_bar_title": "cand"}
+        ), mock.patch.object(
+            navigation_engine,
+            "observe_instagram_state",
+            return_value={"state": navigation_engine.NavigationEngineState.PROFILE.value},
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_pick_following_cta", return_value=(following, "canonical_profile_header_cta")
+        ), mock.patch.object(nav, "_mute_engine_v2_pre_toggle_wait_s", return_value=0.0):
+            level, _meta, reason = nav._mute_engine_v2_confirm_following_transition(
+                device,
+                initial_level="unknown",
+                initial_meta={},
+                following_cta_tapped=True,
+                pkg="com.instagram.android",
+                follower_username="cand",
+                source_profile_username="ct",
+                visual_candidate_id="xml_list:cand",
+                t_all=time.perf_counter(),
+            )
+        self.assertEqual((level, reason), ("unknown", "persistent_unknown_after_guarded_retap"))
+        following.click.assert_called_once()
+
+    def test_following_transition_never_retaps_without_exact_profile_identity(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_mute_engine_v2_detect_sheet_level", return_value=("unknown", {})
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_build_lightweight_profile_det", return_value={"action_bar_title": "other"}
+        ), mock.patch.object(
+            navigation_engine,
+            "observe_instagram_state",
+            return_value={"state": navigation_engine.NavigationEngineState.PROFILE.value},
+        ), mock.patch.object(nav, "_mute_engine_v2_pick_following_cta") as pick:
+            level, _meta, reason = nav._mute_engine_v2_confirm_following_transition(
+                device,
+                initial_level="unknown",
+                initial_meta={},
+                following_cta_tapped=True,
+                pkg="com.instagram.android",
+                follower_username="cand",
+                source_profile_username="ct",
+                visual_candidate_id="xml_list:cand",
+                t_all=time.perf_counter(),
+            )
+        self.assertEqual((level, reason), ("unknown", "candidate_profile_retap_guard_failed"))
+        pick.assert_not_called()
+
     def test_known_depth_uses_light_unfollow_marker_before_final_profile_proof(self) -> None:
         d = mock.MagicMock()
         logs: list[str] = []

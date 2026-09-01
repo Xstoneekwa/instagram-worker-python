@@ -312,9 +312,36 @@ def record_end_of_session(
             "error": "resume_plan_lineage_incomplete",
         }
 
+    incoming_roots = {
+        value
+        for value in (
+            _clean(plan.get("root_business_session_id")),
+            _clean(plan.get("business_session_id")),
+        )
+        if value
+    }
+    if incoming_roots and incoming_roots != {root_business_session_id}:
+        return {"persisted": False, "reason": "resume_plan_lineage_root_mismatch"}
+    incoming_parent = _clean(plan.get("parent_request_id"))
+    if incoming_parent and incoming_parent != request_id:
+        return {"persisted": False, "reason": "resume_plan_lineage_parent_mismatch"}
+    incoming_attempts = {
+        int(value)
+        for value in (
+            plan.get("execution_attempt_no"),
+            plan.get("attempt_id"),
+            plan.get("current_attempt_id"),
+        )
+        if value not in (None, "") and not isinstance(value, bool)
+    }
+    if incoming_attempts and incoming_attempts != {execution_attempt_no}:
+        return {"persisted": False, "reason": "resume_plan_lineage_attempt_mismatch"}
+
     # The atomic admission capsule owns lineage.  A later business summary may
     # carry legacy run-scoped aliases, but it cannot rewrite the request root.
     plan["root_business_session_id"] = root_business_session_id
+    plan["business_session_id"] = root_business_session_id
+    plan["parent_request_id"] = request_id
     plan["execution_attempt_no"] = execution_attempt_no
     plan["attempt_id"] = execution_attempt_no
     plan["retry_index"] = execution_attempt_no - 1

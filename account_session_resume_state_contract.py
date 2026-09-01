@@ -76,8 +76,20 @@ def _positive_remaining_quota(plan: dict[str, Any]) -> bool:
 
 def _has_planned_phase(plan: dict[str, Any]) -> bool:
     phases = plan.get("phases_to_run")
-    return isinstance(phases, dict) and any(
-        phases.get(name) is True for name in ("welcome", "follow", "unfollow")
+    if not isinstance(phases, dict):
+        return False
+    if any(phases.get(name) is True for name in ("welcome", "follow", "unfollow")):
+        return True
+    quota = plan.get("quota_remaining")
+    return (
+        phases.get("post_follow_recovery") is True
+        and phases.get("follow") is False
+        and plan.get("new_follow_blocked_until_recovery") is True
+        and str(plan.get("safe_next_step") or "") == "post_follow_recovery"
+        and isinstance(quota, dict)
+        and isinstance(quota.get("follow"), (int, float))
+        and not isinstance(quota.get("follow"), bool)
+        and int(quota["follow"]) > 0
     )
 
 

@@ -137,6 +137,60 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
         self.assertTrue(policy["restriction_preflight_only"])
         self.assertFalse(any(policy["phases_to_run"].values()))
 
+    def test_post_follow_recovery_runs_before_remaining_follow_quota(self) -> None:
+        meta = _metadata()
+        meta["resume_plan"].update(
+            {
+                "phase_order": [
+                    "post_follow_recovery", "welcome", "follow", "unfollow"
+                ],
+                "safe_next_step": "post_follow_recovery",
+                "phases_to_run": {
+                    "post_follow_recovery": True,
+                    "welcome": False,
+                    "follow": True,
+                    "unfollow": False,
+                },
+                "quota_remaining": {
+                    "welcome": 0, "follow": 5, "unfollow": 0, "outreach": 0
+                },
+            }
+        )
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID, metadata=meta
+            )
+        self.assertTrue(ok, reason)
+        self.assertEqual(
+            policy["phase_order"],
+            ["post_follow_recovery", "welcome", "follow", "unfollow"],
+        )
+        self.assertTrue(policy["phases_to_run"]["post_follow_recovery"])
+        self.assertTrue(policy["phases_to_run"]["follow"])
+
+    def test_post_follow_recovery_without_safe_next_step_fails_closed(self) -> None:
+        meta = _metadata()
+        meta["resume_plan"].update(
+            {
+                "phase_order": [
+                    "post_follow_recovery", "welcome", "follow", "unfollow"
+                ],
+                "phases_to_run": {
+                    "post_follow_recovery": True,
+                    "welcome": False,
+                    "follow": True,
+                    "unfollow": False,
+                },
+            }
+        )
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID, metadata=meta
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "post_follow_recovery_contract_invalid")
+        self.assertIsNone(policy)
+
     def test_restriction_preflight_with_business_phase_fails_closed(self) -> None:
         meta = _metadata(restriction_preflight_only=True)
         meta["resume_plan"].update(

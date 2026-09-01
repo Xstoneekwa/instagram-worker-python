@@ -350,6 +350,48 @@ class RecordEndOfSessionTest(unittest.TestCase):
         self.assertFalse(result["persisted"])
         self.assertEqual(result["reason"], "resume_plan_reconciliation_required")
 
+    def test_contradictory_root_fails_closed_before_write(self) -> None:
+        import supabase_client
+
+        with patch.object(store, "load_resume_plan", return_value=self._existing()), patch.object(
+            supabase_client, "persist_account_session_resume_plan_v1"
+        ) as persist:
+            result = store.record_end_of_session(
+                run_id=RUN_ID,
+                session_plan={"root_business_session_id": "different-root"},
+                session_status="failed",
+            )
+        self.assertEqual(result["reason"], "resume_plan_lineage_root_mismatch")
+        persist.assert_not_called()
+
+    def test_contradictory_attempt_fails_closed_before_write(self) -> None:
+        import supabase_client
+
+        with patch.object(store, "load_resume_plan", return_value=self._existing()), patch.object(
+            supabase_client, "persist_account_session_resume_plan_v1"
+        ) as persist:
+            result = store.record_end_of_session(
+                run_id=RUN_ID,
+                session_plan={"execution_attempt_no": 2},
+                session_status="failed",
+            )
+        self.assertEqual(result["reason"], "resume_plan_lineage_attempt_mismatch")
+        persist.assert_not_called()
+
+    def test_contradictory_parent_fails_closed_before_write(self) -> None:
+        import supabase_client
+
+        with patch.object(store, "load_resume_plan", return_value=self._existing()), patch.object(
+            supabase_client, "persist_account_session_resume_plan_v1"
+        ) as persist:
+            result = store.record_end_of_session(
+                run_id=RUN_ID,
+                session_plan={"parent_request_id": "different-request"},
+                session_status="failed",
+            )
+        self.assertEqual(result["reason"], "resume_plan_lineage_parent_mismatch")
+        persist.assert_not_called()
+
 
 class MarkResumeOutcomeTest(unittest.TestCase):
     def test_success_marks_resume_succeeded(self) -> None:

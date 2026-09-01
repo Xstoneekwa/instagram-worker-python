@@ -273,10 +273,17 @@ def _validate_human_confirmed_resume_at_claim(
         return False, "resume_plan_invalid", None
     if str(embedded.get("account_id") or "").strip() != str(account_id or "").strip():
         return False, "resume_plan_invalid", None
-    if embedded.get("phase_order") != ["welcome", "follow", "unfollow"]:
+    phase_order = embedded.get("phase_order")
+    recovery_first = phase_order == [
+        "post_follow_recovery", "welcome", "follow", "unfollow"
+    ]
+    if phase_order != ["welcome", "follow", "unfollow"] and not recovery_first:
         return False, "resume_plan_invalid", None
     phases = _read_record(embedded.get("phases_to_run"))
-    if any(phases.get(phase) not in (True, False) for phase in ("welcome", "follow", "unfollow")):
+    if any(
+        phases.get(phase) not in (True, False)
+        for phase in ("welcome", "follow", "unfollow")
+    ) or phases.get("post_follow_recovery", False) not in (True, False):
         return False, "resume_plan_invalid", None
     quota = _quota_record(embedded.get("quota_remaining"))
     restriction_preflight_only = embedded.get("restriction_preflight_only") is True
@@ -292,6 +299,15 @@ def _validate_human_confirmed_resume_at_claim(
     else:
         if embedded.get("package_contract_ready") is not True:
             return False, "resume_plan_invalid", None
+        recovery_enabled = phases.get("post_follow_recovery") is True
+        if recovery_enabled and (
+            not recovery_first
+            or str(embedded.get("safe_next_step") or "") != "post_follow_recovery"
+            or (quota.get("follow") or 0) <= 0
+        ):
+            return False, "post_follow_recovery_contract_invalid", None
+        if recovery_first and not recovery_enabled:
+            return False, "post_follow_recovery_contract_invalid", None
         quota_reason = _validate_quota_consistency(phases=phases, quota=quota)
         if quota_reason:
             return False, quota_reason, None
@@ -329,7 +345,15 @@ def _validate_human_confirmed_resume_at_claim(
         "incident_id": incident_id,
         "restriction_preflight_only": restriction_preflight_only,
         "phases_to_run": {
-            phase: bool(phases.get(phase)) for phase in ("welcome", "follow", "unfollow")
+            **{
+                phase: bool(phases.get(phase))
+                for phase in ("welcome", "follow", "unfollow")
+            },
+            **(
+                {"post_follow_recovery": True}
+                if phases.get("post_follow_recovery") is True
+                else {}
+            ),
         },
         "quota_remaining": {k: v for k, v in quota.items() if v is not None},
         "phase_order": list(embedded.get("phase_order") or []),

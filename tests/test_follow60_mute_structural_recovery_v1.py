@@ -10,6 +10,24 @@ from follow_outcome_contract import build_follow_termination_decision
 
 
 class Follow60MuteStructuralRecoveryV1Test(unittest.TestCase):
+    def test_following_transition_recovery_has_no_happy_path_vision_or_sleep(self) -> None:
+        source = Path(navigation.__file__).read_text(encoding="utf-8")
+        start = source.index("def _mute_engine_v2_confirm_following_transition(")
+        end = source.index("\ndef _mute_engine_v2_tap_toggle_short(", start)
+        helper = source[start:end]
+        first_return = helper.index('if level in {"following_options", "mute_toggles"}:')
+        first_probe = helper.index("_mute_engine_v2_detect_sheet_level(d)")
+        self.assertLess(first_return, first_probe)
+        self.assertNotIn("vision", helper.lower())
+        self.assertIn("persistent_unknown_after_guarded_retap", helper)
+
+    def test_unknown_transition_no_longer_searches_mute_row_without_sheet_proof(self) -> None:
+        source = Path(navigation.__file__).read_text(encoding="utf-8")
+        start = source.index("def run_mute_engine_v2(")
+        run_source = source[start:]
+        self.assertIn("mute_following_transition_unconfirmed", run_source)
+        self.assertNotIn("post_enter_subsheet_unknown_fallback", run_source)
+
     @staticmethod
     def _mythyl_field_fixture() -> dict:
         fixture_path = (

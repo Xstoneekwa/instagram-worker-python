@@ -66,6 +66,6 @@ assert.match(projection, /resumeState: reliability\.resumeState/);
 assert.match(projection, /if \(!runActiveProof\.proven\) blockingReasons\.push\(runActiveProof\.reason\)/);
 const tick = read('lib/instagram-dashboard/auto-restart-tick.ts');
 assert.match(tick, /readString\(storedPlan\.resume_state\) !== "awaiting_human_resume_authorization"/);
-assert.match(tick, /consume_resume_authorization_and_create_request_v3/);
+assert.match(tick, /consume_resume_authorization_and_create_request_v4/);
 assert.match(tick, /if \(!forceDryRun && !options\.manual\) \{[\s\S]*reconcile_stale_account_session_resume_plans_v1/);
 console.log(JSON.stringify({status: 'PASS', matrix, source_files: sources}));

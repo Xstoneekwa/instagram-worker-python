@@ -52746,6 +52746,102 @@ def _mute_engine_v2_surface_unstable(
     return False, ""
 
 
+def _mute_engine_v2_confirm_following_transition(
+    d: u2.Device,
+    *,
+    initial_level: str,
+    initial_meta: dict[str, Any] | None,
+    following_cta_tapped: bool,
+    pkg: str,
+    follower_username: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    t_all: float,
+) -> tuple[str, dict[str, Any], str]:
+    """Confirm Following -> options with recovery only after ``unknown``."""
+    level = str(initial_level or "unknown")
+    meta = dict(initial_meta or {})
+    if level in {"following_options", "mute_toggles"}:
+        return level, meta, "first_fresh_classification"
+    if level != "unknown" or not following_cta_tapped:
+        return level, meta, "transition_not_recoverable"
+
+    level, meta = _mute_engine_v2_detect_sheet_level(d)
+    if level in {"following_options", "mute_toggles"}:
+        return level, dict(meta or {}), "bounded_reclassification"
+
+    try:
+        from navigation_engine import NavigationEngineState, observe_instagram_state
+
+        det = _mute_engine_v2_build_lightweight_profile_det(d, det_hint=None, pkg=pkg)
+        action_bar_title = str(det.get("action_bar_title") or "").strip()
+        candidate = str(follower_username or "").strip()
+        nav = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "mute_engine_v2_following_transition_recovery",
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "det": det,
+                "disable_followers_visual_fallback": True,
+            },
+        )
+        candidate_exact = bool(
+            candidate
+            and action_bar_title
+            and _normalize_handle(candidate) == _normalize_handle(action_bar_title)
+        )
+        if (
+            str(nav.get("state") or "") != NavigationEngineState.PROFILE.value
+            or not candidate_exact
+        ):
+            return "unknown", dict(meta or {}), "candidate_profile_retap_guard_failed"
+
+        try:
+            ww, wh = d.window_size()
+        except Exception:
+            ww, wh = 1080, 2400
+        button, method = _mute_engine_v2_pick_following_cta(
+            d,
+            ww=int(ww),
+            wh=int(wh),
+            t0=t_all,
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=candidate,
+            candidate_profile_confirmed=True,
+        )
+        if button is None:
+            return "unknown", dict(meta or {}), "following_cta_retap_guard_failed"
+        button.click()
+        log(
+            "info",
+            "mute_following_transition_guarded_retap",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            method=method,
+            navigation_state=str(nav.get("state") or ""),
+        )
+        wait_s = _mute_engine_v2_pre_toggle_wait_s(
+            remaining_s=_mute_engine_v2_remaining_s(t_all),
+            desired_s=0.12,
+            required_toggle_s=_mute_engine_v2_toggle_required_budget_s(
+                want_posts=bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True)),
+                want_stories=bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True)),
+            ),
+        )
+        if wait_s >= 0.02:
+            time.sleep(wait_s)
+        level, meta = _mute_engine_v2_detect_sheet_level(d)
+        if level in {"following_options", "mute_toggles"}:
+            return level, dict(meta or {}), "guarded_following_retap"
+        return "unknown", dict(meta or {}), "persistent_unknown_after_guarded_retap"
+    except Exception as exc:
+        return "unknown", dict(meta or {}), f"transition_recovery_error:{type(exc).__name__}"
+
+
 def _mute_engine_v2_tap_toggle_short(
     d: u2.Device,
     labels: tuple[str, ...],
@@ -53875,6 +53971,7 @@ def run_mute_engine_v2(
         ww, wh = 1080, 2400
 
     skip_following = False
+    following_options_already_open = False
     sheet_level_pre = "unknown"
     sheet_meta_pre: dict[str, Any] = {}
     following_cta_tapped = bool(following_clicked_fast_path)
@@ -53907,11 +54004,22 @@ def run_mute_engine_v2(
                 sheet_level="mute_toggles",
                 note="mute_toggles_already_visible_skip_following_tap",
             )
+        elif sheet_level_pre == "following_options" and not following_clicked_fast_path:
+            following_options_already_open = True
+            log(
+                "info",
+                "mute_engine_v2_sheet_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="precheck",
+                sheet_level="following_options",
+                note="following_options_already_visible_skip_following_tap",
+            )
     except Exception:
         pass
 
     t_follow = time.perf_counter()
-    if not skip_following and not following_clicked_fast_path:
+    if not skip_following and not following_clicked_fast_path and not following_options_already_open:
         _eff_total = _mute_engine_v2_effective_total_budget_s()
         _obs_cap = max(0.0, _eff_total - float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S))
         _rem_cta = _mute_engine_v2_remaining_s(t_all)
@@ -54020,6 +54128,9 @@ def run_mute_engine_v2(
     sheet_level = "unknown"
     sheet_meta: dict[str, Any] = {}
     fast_mute_row_clicked = False
+    if following_options_already_open:
+        sheet_level = sheet_level_pre
+        sheet_meta = dict(sheet_meta_pre)
     if following_cta_tapped and not skip_following:
         if sheet_level_pre == "following_options" and _mute_engine_v2_sheet_meta_has_exact_mute(
             sheet_meta_pre
@@ -54120,13 +54231,37 @@ def run_mute_engine_v2(
                     sheet_level=sheet_level,
                 )
     if not fast_mute_row_clicked:
-        sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+        if not following_options_already_open:
+            sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
         _mute_engine_v2_log_sheet_detect_timing(
             visual_candidate_id=vcid,
             source_profile_username=src,
             phase="after_following_tap",
             sheet_level=sheet_level,
             meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+        )
+    transition_recovery = "not_needed"
+    if not skip_following and sheet_level == "unknown":
+        sheet_level, sheet_meta, transition_recovery = (
+            _mute_engine_v2_confirm_following_transition(
+                d,
+                initial_level=sheet_level,
+                initial_meta=sheet_meta,
+                following_cta_tapped=following_cta_tapped,
+                pkg=pkg,
+                follower_username=fu2,
+                source_profile_username=src,
+                visual_candidate_id=vcid,
+                t_all=t_all,
+            )
+        )
+        log(
+            "info" if sheet_level in {"following_options", "mute_toggles"} else "warning",
+            "mute_following_transition_confirmation",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            sheet_level=sheet_level,
+            recovery=transition_recovery,
         )
     if not skip_following:
         if fast_mute_row_clicked:
@@ -54165,38 +54300,11 @@ def run_mute_engine_v2(
                 meta=sheet_meta if isinstance(sheet_meta, dict) else {},
             )
         elif sheet_level != "mute_toggles":
-            try:
-                log(
-                    "info",
-                    "mute_following_options_to_enter_subsheet_gap_ms",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    duration_ms=round((time.perf_counter() - t_sheet) * 1000.0, 2),
-                    sheet_level=sheet_level,
-                )
-            except Exception:
-                pass
-            entered, enter_rsn = _mute_engine_v2_enter_mute_subsheet_from_following_options(
-                d,
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                toggle_required_budget_s=float(toggle_required_budget_s),
-                t_all=t_all,
-                sheet_meta=sheet_meta,
-            )
-            if not entered:
-                return _abort(
-                    "mute_sheet_level_unknown_after_following_tap",
-                    fr=str(enter_rsn or "mute_sheet_level_unknown_after_following_tap"),
-                    sheet_level=sheet_level,
-                )
-            sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
-            _mute_engine_v2_log_sheet_detect_timing(
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                phase="post_enter_subsheet_unknown_fallback",
+            return _abort(
+                "mute_following_transition_unconfirmed",
+                fr="mute_following_transition_unconfirmed",
                 sheet_level=sheet_level,
-                meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+                transition_recovery=transition_recovery,
             )
 
     timings["mute_sheet_open_ms"] = round((time.perf_counter() - t_sheet) * 1000, 2)

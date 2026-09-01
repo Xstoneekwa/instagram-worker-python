@@ -45,6 +45,41 @@ class ResumeStateContractTest(unittest.TestCase):
         self.assertEqual(transition.resume_state, "not_recoverable")
         self.assertEqual(transition.auto_restart_decision, "blocked")
 
+    def test_post_follow_recovery_only_is_a_planned_phase(self) -> None:
+        transition = resolve_end_of_session_transition(
+            session_plan={
+                "session_termination_class": "partial_resumable",
+                "restart_allowed": True,
+                "safe_next_step": "post_follow_recovery",
+                "new_follow_blocked_until_recovery": True,
+                "quota_remaining": {"total": 5, "follow": 5},
+                "phases_to_run": {
+                    "post_follow_recovery": True,
+                    "welcome": False,
+                    "follow": False,
+                    "unfollow": False,
+                },
+                "unsafe_markers": [],
+            },
+            session_status="failed",
+        )
+        self.assertEqual(transition.resume_state, "resume_requested")
+
+    def test_post_follow_recovery_without_exact_safe_boundary_fails_closed(self) -> None:
+        transition = resolve_end_of_session_transition(
+            session_plan={
+                "session_termination_class": "partial_resumable",
+                "restart_allowed": True,
+                "safe_next_step": "follow",
+                "new_follow_blocked_until_recovery": True,
+                "quota_remaining": {"total": 5, "follow": 5},
+                "phases_to_run": {"post_follow_recovery": True, "follow": False},
+                "unsafe_markers": [],
+            },
+            session_status="failed",
+        )
+        self.assertEqual(transition.resume_state, "not_recoverable")
+
     def test_loriele_fixture_preserves_90_of_120_and_schedules_natural_resume(self) -> None:
         fixture = json.loads(
             (Path(__file__).parent / "fixtures/loriele_resume_plan_contract_v1.json").read_text()
