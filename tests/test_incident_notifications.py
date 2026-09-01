@@ -11,8 +11,37 @@ from unittest.mock import MagicMock, patch
 import incident_notification_channel_config as channel_config
 import incident_notifications
 
+# Historical formatter/delivery unit tests exercise the retained rollback
+# implementation explicitly. Current runtime delivery is covered separately.
+incident_notifications.NOTIFICATION_ROUTER_V2_INCIDENTS_CANONICAL = False
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI_SCRIPT = REPO_ROOT / "scripts" / "dispatch_incident_notifications.py"
+
+
+class NotificationRouterV2OwnershipTest(unittest.TestCase):
+    def test_current_worker_suppresses_both_legacy_incident_paths(self) -> None:
+        with patch.object(
+            incident_notifications,
+            "NOTIFICATION_ROUTER_V2_INCIDENTS_CANONICAL",
+            True,
+        ), patch.object(
+            incident_notifications.supabase_client,
+            "load_account_incidents_to_notify",
+        ) as load:
+            general = incident_notifications.dispatch_account_incident_notifications()
+            review = incident_notifications.dispatch_operator_review_action_notification(
+                event="created",
+                action_id="action-1",
+                incident_id="incident-1",
+                account_id="account-1",
+                account_username="example",
+                reason="incident",
+                final_status="pending",
+            )
+        self.assertEqual(general["reason"], "notification_router_v2_canonical")
+        self.assertEqual(review["reason"], "notification_router_v2_canonical")
+        load.assert_not_called()
 
 
 def _incident(
@@ -808,7 +837,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
         summary = json.loads(proc.stdout.strip())
-        self.assertEqual(summary["reason"], "disabled")
+        self.assertEqual(summary["reason"], "notification_router_v2_canonical")
         self.assertNotIn("hooks.slack.com", proc.stdout.lower())
         self.assertNotIn("discord.com/api/webhooks", proc.stdout.lower())
 

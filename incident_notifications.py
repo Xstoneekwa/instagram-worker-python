@@ -36,6 +36,7 @@ DRY_RUN_DISPATCHER_VERSION = "orf-4b"
 WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
 ACTION_CTA_LABEL = "Open Incidents/Actions"
 CANONICAL_INCIDENTS_BASE_URL = "https://www.boostmybusinesses.com"
+NOTIFICATION_ROUTER_V2_INCIDENTS_CANONICAL = True
 
 
 def _notifications_enabled() -> bool:
@@ -539,6 +540,16 @@ def dispatch_operator_review_action_notification(
     operator_id: str = "system",
 ) -> dict[str, Any]:
     """Send one idempotent operator-review notification per configured channel."""
+    # Notification Router V2 owns incident lifecycle delivery.  Keep this
+    # callable for historical tooling/tests, but never emit the deprecated
+    # operator-review format from a current Worker.
+    if NOTIFICATION_ROUTER_V2_INCIDENTS_CANONICAL:
+        return {
+            "sent_count": 0,
+            "failed_count": 0,
+            "skipped_count": 1,
+            "reason": "notification_router_v2_canonical",
+        }
     normalized_event = str(event or "").strip().lower()
     if normalized_event not in {"created", "resolved"}:
         return {"sent_count": 0, "failed_count": 0, "reason": "invalid_event"}
@@ -1003,6 +1014,16 @@ def dispatch_account_incident_notifications(
     min_severity: str | None = None,
     max_per_run: int | None = None,
 ) -> dict[str, Any]:
+    if NOTIFICATION_ROUTER_V2_INCIDENTS_CANONICAL:
+        summary = _empty_summary()
+        summary.update(
+            {
+                "dispatched": True,
+                "reason": "notification_router_v2_canonical",
+                "skipped_disabled_count": 1,
+            }
+        )
+        return summary
     if not _notifications_enabled():
         summary = _empty_summary()
         summary.update({"reason": "disabled", "skipped_disabled_count": 1})

@@ -22,6 +22,61 @@ def _successful_unfollow(**overrides):
 
 
 class AccountSessionTerminalContractTest(unittest.TestCase):
+    def test_normal_session_terminal_lineage_uses_request_not_run(self) -> None:
+        lineage = orchestrator._canonical_terminal_lineage(
+            resume_policy=None,
+            run_request_id="request-1",
+            supplied_business_session_id="social-session-1",
+            run_id="run-1",
+            default_attempt_id=1,
+        )
+        self.assertEqual(lineage["root_business_session_id"], "request-1")
+        self.assertEqual(lineage["parent_request_id"], "request-1")
+        self.assertEqual(lineage["execution_attempt_no"], 1)
+
+    def test_resume_capsule_lineage_wins_and_attempt_is_monotone(self) -> None:
+        lineage = orchestrator._canonical_terminal_lineage(
+            resume_policy={
+                "root_business_session_id": "request-root",
+                "parent_request_id": "request-2",
+                "execution_attempt_no": 2,
+            },
+            run_request_id="request-2",
+            supplied_business_session_id="social-session-2",
+            run_id="run-2",
+            default_attempt_id=1,
+        )
+        self.assertEqual(lineage["root_business_session_id"], "request-root")
+        self.assertEqual(lineage["parent_request_id"], "request-2")
+        self.assertEqual(lineage["attempt_id"], 2)
+        self.assertEqual(lineage["retry_index"], 1)
+
+    def test_resume_capsule_request_is_preserved_without_runtime_alias(self) -> None:
+        lineage = orchestrator._canonical_terminal_lineage(
+            resume_policy={
+                "root_business_session_id": "request-root",
+                "request_id": "request-2",
+                "execution_attempt_no": 2,
+            },
+            run_request_id=None,
+            supplied_business_session_id="social-session-2",
+            run_id="run-2",
+            default_attempt_id=1,
+        )
+        self.assertEqual(lineage["request_id"], "request-2")
+        self.assertEqual(lineage["parent_request_id"], "request-2")
+        self.assertEqual(lineage["current_attempt_id"], 2)
+
+    def test_run_id_is_only_legacy_fallback_without_request_lineage(self) -> None:
+        lineage = orchestrator._canonical_terminal_lineage(
+            resume_policy=None,
+            run_request_id=None,
+            supplied_business_session_id=None,
+            run_id="legacy-run",
+            default_attempt_id=1,
+        )
+        self.assertEqual(lineage["root_business_session_id"], "legacy-run")
+
     def test_persisted_summary_exports_backend_auto_restart_contract(self) -> None:
         projection = orchestrator._auto_restart_performance_projection(
             {

@@ -4919,6 +4919,54 @@ def _run_follow_to_unfollow_probe(
         return out
 
 
+def _canonical_terminal_lineage(
+    *,
+    resume_policy: dict[str, Any] | None,
+    run_request_id: str | None,
+    supplied_business_session_id: str | None,
+    run_id: str | None,
+    default_attempt_id: int,
+) -> dict[str, Any]:
+    policy = dict(resume_policy or {})
+    request = str(
+        run_request_id
+        or policy.get("request_id")
+        or policy.get("parent_request_id")
+        or ""
+    ).strip()
+    root = str(
+        policy.get("root_business_session_id")
+        or policy.get("business_session_id")
+        or run_request_id
+        or supplied_business_session_id
+        or policy.get("prior_run_id")
+        or run_id
+        or ""
+    ).strip()
+    parent = str(
+        policy.get("parent_request_id")
+        or policy.get("request_id")
+        or request
+        or ""
+    ).strip()
+    attempt = int(
+        policy.get("execution_attempt_no")
+        or policy.get("attempt_id")
+        or default_attempt_id
+        or 1
+    )
+    return {
+        "root_business_session_id": root,
+        "business_session_id": root,
+        "parent_request_id": parent or None,
+        "request_id": request or None,
+        "execution_attempt_no": attempt,
+        "attempt_id": attempt,
+        "current_attempt_id": attempt,
+        "retry_index": attempt - 1,
+    }
+
+
 def run_account_session(
     d: u2.Device,
     *,
@@ -6041,12 +6089,24 @@ def run_account_session(
         or (retry_generation + 1 if resume_policy else 1)
     )
     retry_index = int(resume_policy.get("retry_index") or max(0, attempt_id - 1))
-    business_session_id = str(
-        resume_policy.get("business_session_id")
-        or resume_policy.get("prior_run_id")
-        or run_id
-        or ""
-    ).strip()
+    # The atomic request capsule owns terminal lineage.  A normal first
+    # attempt is rooted at its request id; a validated resume may carry the
+    # original root.  The social/run ids are legacy fallbacks only when no
+    # canonical request lineage exists.
+    terminal_lineage = _canonical_terminal_lineage(
+        resume_policy=resume_policy,
+        run_request_id=run_request_id,
+        supplied_business_session_id=business_session_id,
+        run_id=run_id,
+        default_attempt_id=attempt_id,
+    )
+    canonical_root_business_session_id = str(terminal_lineage["root_business_session_id"])
+    canonical_parent_request_id = str(terminal_lineage.get("parent_request_id") or "")
+    canonical_request_id = str(terminal_lineage.get("request_id") or "")
+    canonical_execution_attempt_no = int(terminal_lineage["execution_attempt_no"])
+    attempt_id = canonical_execution_attempt_no
+    retry_index = canonical_execution_attempt_no - 1
+    business_session_id = canonical_root_business_session_id
     previous_run_id = str(
         resume_policy.get("previous_run_id")
         or resume_policy.get("prior_run_id")
@@ -6071,9 +6131,13 @@ def run_account_session(
             "restart_eligibility": restart_eligibility,
             "restart_block_reason": restart_block_reason,
             "business_session_id": business_session_id,
-            "attempt_id": attempt_id,
-            "current_attempt_id": attempt_id,
-            "retry_index": retry_index,
+            "root_business_session_id": canonical_root_business_session_id,
+            "parent_request_id": canonical_parent_request_id or None,
+            "request_id": canonical_request_id or None,
+            "execution_attempt_no": canonical_execution_attempt_no,
+            "attempt_id": canonical_execution_attempt_no,
+            "current_attempt_id": canonical_execution_attempt_no,
+            "retry_index": canonical_execution_attempt_no - 1,
             "previous_run_id": previous_run_id or None,
             "welcome_enabled": welcome_enabled,
             "welcome_phase_status": welcome_phase_status,
@@ -6157,8 +6221,21 @@ def run_account_session(
                 ),
                 "current_attempt_id": attempt_id,
                 "business_session_id": business_session_id,
+                "root_business_session_id": canonical_root_business_session_id,
                 "previous_run_id": previous_run_id or None,
             },
+        )
+        auto_restart_resume_plan.update(
+            {
+                "business_session_id": canonical_root_business_session_id,
+                "root_business_session_id": canonical_root_business_session_id,
+                "parent_request_id": canonical_parent_request_id or None,
+                "request_id": canonical_request_id or None,
+                "execution_attempt_no": canonical_execution_attempt_no,
+                "attempt_id": canonical_execution_attempt_no,
+                "current_attempt_id": canonical_execution_attempt_no,
+                "retry_index": canonical_execution_attempt_no - 1,
+            }
         )
         auto_restart_restart_allowed = bool(
             auto_restart_resume_plan.get("restart_allowed")
