@@ -31,7 +31,7 @@ def _normalize(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _surface_values(hierarchy_xml: str) -> tuple[list[str], list[dict[str, str]]]:
+def _surface_values(hierarchy_xml: str) -> tuple[list[str], list[ET.Element]]:
     raw = str(hierarchy_xml or "").strip()
     if not raw:
         return [], []
@@ -43,15 +43,39 @@ def _surface_values(hierarchy_xml: str) -> tuple[list[str], list[dict[str, str]]
     except Exception:
         return [], []
     values: list[str] = []
-    nodes: list[dict[str, str]] = []
+    nodes: list[ET.Element] = []
     for element in root.iter():
         attrs = {str(key): str(value or "") for key, value in element.attrib.items()}
-        nodes.append(attrs)
+        nodes.append(element)
         for key in ("text", "content-desc", "hint"):
             value = html.unescape(attrs.get(key, "")).strip()
             if value and value not in values:
                 values.append(value)
     return values, nodes
+
+
+def _node_is_clickable_or_button(node: ET.Element) -> bool:
+    attrs = node.attrib
+    return (
+        str(attrs.get("clickable") or "").casefold() == "true"
+        or "button" in str(attrs.get("class") or "").casefold()
+    )
+
+
+def _clickable_continue_proof(nodes: list[ET.Element]) -> tuple[bool, str]:
+    """Prove Continue on the actionable node or its direct accessibility child."""
+
+    for node in nodes:
+        if not _node_is_clickable_or_button(node):
+            continue
+        attrs = node.attrib
+        if _normalize(attrs.get("text")) == "continue":
+            return True, "clickable_text"
+        if _normalize(attrs.get("content-desc")) == "continue":
+            return True, "clickable_content_desc"
+        if any(_normalize(child.attrib.get("text")) == "continue" for child in node):
+            return True, "clickable_parent_child_text"
+    return False, ""
 
 
 @dataclass(frozen=True)
@@ -95,6 +119,13 @@ def classify_instagram_human_confirmation(
     )
     cta = next((raw for norm, raw in normalized if norm == "continue"), "")
     account_username = ""
+    embedded_account_match = re.search(
+        r"to use your account[ ,:]+@?([A-Za-z0-9._]{1,30})(?:\b|$)",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if embedded_account_match:
+        account_username = embedded_account_match.group(1)
     non_account_labels = {
         "instagram",
         "continue",
@@ -102,6 +133,8 @@ def classify_instagram_human_confirmation(
         "takes about 30 seconds",
     }
     for norm, raw in normalized:
+        if account_username:
+            break
         if raw in {title, detail, cta}:
             continue
         if norm in non_account_labels:
@@ -113,21 +146,12 @@ def classify_instagram_human_confirmation(
     package_blob = _normalize(
         " ".join(
             [package_name, activity_name]
-            + [attrs.get("package", "") for attrs in nodes]
+            + [str(node.attrib.get("package") or "") for node in nodes]
         )
     )
-    instagram_surface = "instagram" in package_blob or any(
-        norm == "instagram" for norm, _raw in normalized
-    )
+    instagram_surface = "instagram" in package_blob
     challenge_activity = "challengeactivity" in _normalize(activity_name)
-    continue_clickable = any(
-        _normalize(attrs.get("text")) == "continue"
-        and (
-            attrs.get("clickable", "").casefold() == "true"
-            or "button" in attrs.get("class", "").casefold()
-        )
-        for attrs in nodes
-    )
+    continue_clickable, continue_topology = _clickable_continue_proof(nodes)
 
     semantic: list[str] = []
     structural: list[str] = []
@@ -143,6 +167,7 @@ def classify_instagram_human_confirmation(
         structural.append("challenge_activity")
     if continue_clickable:
         structural.append("clickable_continue")
+        structural.append(continue_topology)
 
     detected = bool(
         title
@@ -163,7 +188,7 @@ def classify_instagram_human_confirmation(
         semantic_signals=tuple(semantic),
         structural_signals=tuple(structural),
         confidence=confidence,
-        detection_method="fresh_xml_semantic_structural_v1" if detected else "",
+        detection_method="fresh_xml_semantic_structural_v2" if detected else "",
     )
 
 
@@ -216,6 +241,7 @@ def guard_instagram_human_confirmation(
         "actions_completed": dict(getattr(ctx, "actions_completed", {}) or {}),
         "quotas_remaining": dict(getattr(ctx, "quotas_remaining", {}) or {}),
         "detected_at": detected_at,
+        "request_id": request_id or None,
     }
     incident_id = None
     dedupe_key = f"account:{account_id or 'unknown'}:instagram_human_confirmation"

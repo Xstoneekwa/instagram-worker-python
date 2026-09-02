@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,7 +40,59 @@ def challenge_xml(username: str = "bmybusinesses") -> str:
     </hierarchy>'''
 
 
+LORIEL_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "instagram_human_confirmation"
+    / "loriele_20260902.xml"
+)
+
+
 class HumanConfirmationClassifierTests(unittest.TestCase):
+    def test_exact_loriel_field_xml_topology_is_detected(self) -> None:
+        result = classify_instagram_human_confirmation(
+            LORIEL_FIXTURE.read_text(encoding="utf-8"),
+            package_name="com.instagram.androif",
+        )
+        self.assertTrue(result.detected)
+        self.assertEqual(result.account_username_raw, "lorielebras_autom")
+        self.assertIn("clickable_content_desc", result.structural_signals)
+
+    def test_content_description_continue_is_detected(self) -> None:
+        xml = challenge_xml().replace('text="Continue" clickable="true"', 'text="" content-desc="Continue" clickable="true"')
+        result = classify_instagram_human_confirmation(xml, package_name="com.instagram.android")
+        self.assertTrue(result.detected)
+        self.assertIn("clickable_content_desc", result.structural_signals)
+
+    def test_clickable_parent_with_direct_continue_child_is_detected(self) -> None:
+        xml = challenge_xml().replace(
+            '<node package="com.instagram.android" class="android.widget.Button"\n            text="Continue" clickable="true" bounds="[12,900][700,980]" />',
+            '<node package="com.instagram.android" class="android.view.ViewGroup" text="" clickable="true">\n'
+            '  <node package="com.instagram.android" class="android.view.View" text="Continue" clickable="false" />\n'
+            '</node>',
+        )
+        result = classify_instagram_human_confirmation(xml, package_name="com.instagram.android")
+        self.assertTrue(result.detected)
+        self.assertIn("clickable_parent_child_text", result.structural_signals)
+
+    def test_continue_under_non_clickable_parent_is_rejected(self) -> None:
+        xml = challenge_xml().replace(
+            '<node package="com.instagram.android" class="android.widget.Button"\n            text="Continue" clickable="true" bounds="[12,900][700,980]" />',
+            '<node package="com.instagram.android" class="android.view.ViewGroup" text="" clickable="false">\n'
+            '  <node package="com.instagram.android" class="android.view.View" text="Continue" clickable="false" />\n'
+            '</node>',
+        )
+        self.assertFalse(classify_instagram_human_confirmation(xml, package_name="com.instagram.android").detected)
+
+    def test_semantic_copy_on_non_instagram_surface_is_rejected(self) -> None:
+        xml = challenge_xml().replace("com.instagram.android", "com.example.browser")
+        self.assertFalse(classify_instagram_human_confirmation(xml, package_name="com.example.browser").detected)
+
+    def test_unrelated_instagram_continue_is_rejected(self) -> None:
+        xml = '''<hierarchy><node package="com.instagram.android" text="Save your login info" />
+          <node package="com.instagram.android" class="android.widget.Button" content-desc="Continue" clickable="true" /></hierarchy>'''
+        self.assertFalse(classify_instagram_human_confirmation(xml, package_name="com.instagram.android").detected)
+
     def test_exact_field_surface_is_account_global_and_not_account_literal_bound(self) -> None:
         for username in ("bmybusinesses", "another.account"):
             result = classify_instagram_human_confirmation(
@@ -95,6 +148,7 @@ class HumanConfirmationClassifierTests(unittest.TestCase):
         self.assertFalse(summary["business_actions_allowed"])
         self.assertFalse(summary["auto_restart_allowed"])
         self.assertFalse(summary["automatic_challenge_action_allowed"])
+        self.assertEqual(summary["request_id"], "request-bmy")
 
     def test_still_challenged_authorized_retry_fails_closed_again(self) -> None:
         class Device:

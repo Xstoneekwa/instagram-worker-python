@@ -68,7 +68,10 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
             out["story_or_highlight_method"],
             "snapshot_story_highlight_resource_id",
         )
-        self.assertTrue(out["candidate_username_exact_in_snapshot"])
+        # The active collaborative-owner contract invalidates post identity on
+        # Story/Highlight surfaces even when an exact username is visible.
+        self.assertFalse(out["candidate_username_exact_in_snapshot"])
+        self.assertEqual(out["candidate_username_method"], "")
 
     def test_positive_post_identity_requires_posts_title_and_exact_candidate(self) -> None:
         xml = (

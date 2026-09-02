@@ -2383,6 +2383,27 @@ def _finalize_manual_run_after_subprocess(
                 },
                 session_status="success",
             )
+            try:
+                override = supabase_client.reconcile_operator_canceled_run_v1(
+                    account_id=account_id,
+                    run_id=run_id,
+                    request_id=request_id,
+                )
+                if override.get("ok") is not True:
+                    raise RuntimeError(
+                        str(override.get("reason") or "operator_canceled_override_rejected")
+                    )
+            except Exception as exc:
+                # Terminalization already won. Never create an immediate retry;
+                # a remaining blocker keeps the natural scheduler fail-closed.
+                log(
+                    "error",
+                    "operator_canceled_override_reconciliation_failed",
+                    account_id=account_id,
+                    run_id=run_id,
+                    request_id=request_id,
+                    error_type=type(exc).__name__,
+                )
         _audit(
             account_id=account_id,
             action_type="manual_run_canceled",

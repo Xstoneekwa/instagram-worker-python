@@ -17,6 +17,14 @@ not prove the physical challenge disappeared: the next explicitly authorized
 attempt must run a fresh Identity Guard and is admitted only after the exact
 expected account surface is freshly proved.
 
+An explicit operator Stop is different only after the exact request, run, and
+resume plan are all canonically terminal as `operator_canceled`. At that point
+the Backend may resolve or neutralize blockers proved to have been created by
+that same run/request, while preserving the challenge history and every
+independent or pre-existing blocker. The Worker never creates a replacement
+request here: eligibility is reconsidered only by a later natural scheduler
+tick in the still-open assignment window.
+
 ## Récupération P0C des mutations interrompues
 
 La queue `follow_candidate_recovery_queue` conserve uniquement les mutations

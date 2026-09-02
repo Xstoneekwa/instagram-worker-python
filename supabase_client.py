@@ -3340,6 +3340,22 @@ def call_rpc_once(
     )
 
 
+def reconcile_operator_canceled_run_v1(
+    *, account_id: str, run_id: str, request_id: str
+) -> dict[str, Any]:
+    """Reconcile blockers created by one exactly terminalized canceled run."""
+    out = call_rpc_once(
+        "reconcile_operator_canceled_run_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+        },
+        timeout_seconds=5.0,
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
 def is_transient_control_plane_exception(exc: BaseException) -> bool:
     """Classify only transport/capacity failures as transient."""
     reason = str(getattr(exc, "reason", "") or "").strip().lower()

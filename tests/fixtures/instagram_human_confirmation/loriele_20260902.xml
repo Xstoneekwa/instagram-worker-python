@@ -1,0 +1,11 @@
+<hierarchy rotation="0">
+  <node index="0" text="" class="android.view.ViewGroup" package="com.instagram.androif" clickable="false">
+    <node index="1" text="Confirm you're human to use your account, lorielebras_autom" class="android.view.View" package="com.instagram.androif" content-desc="Confirm you're human to use your account, lorielebras_autom" clickable="false" bounds="[135,809][945,1035]" />
+    <node index="2" text="" class="android.widget.Button" package="com.instagram.androif" content-desc="Continue" clickable="true" bounds="[45,1182][1035,1300]">
+      <node index="0" text="Continue" class="android.view.View" package="com.instagram.androif" content-desc="" clickable="false" bounds="[462,1215][619,1268]" />
+    </node>
+    <node index="3" text="" class="android.view.ViewGroup" package="com.instagram.androif" content-desc="Takes about 30 seconds" clickable="false">
+      <node index="0" text="Takes about 30 seconds" class="android.view.View" package="com.instagram.androif" content-desc="Takes about 30 seconds" clickable="false" />
+    </node>
+  </node>
+</hierarchy>

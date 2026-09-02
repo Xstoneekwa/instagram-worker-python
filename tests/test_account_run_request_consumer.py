@@ -383,6 +383,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch(
                 "account_session_resume_plan_store.record_end_of_session"
             ) as record_end,
+            patch.object(
+                consumer.supabase_client,
+                "reconcile_operator_canceled_run_v1",
+                return_value={"ok": True, "reason": "operator_canceled_override"},
+            ) as reconcile_override,
             patch.object(consumer.supabase_client, "load_run_row") as load_run,
         ):
             consumer._finalize_manual_run_after_subprocess(
@@ -404,6 +409,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             session_status="success",
         )
         load_run.assert_not_called()
+        reconcile_override.assert_called_once_with(
+            account_id=TEST_ACCOUNT_ID,
+            run_id=TEST_RUN_ID,
+            request_id=TEST_REQUEST_ID,
+        )
 
     def test_load_dispatcher_config_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
