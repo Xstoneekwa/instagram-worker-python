@@ -58,6 +58,18 @@ Les flows sensibles (followers, ouverture profil, follow, **post-follow / return
 
 La recovery n’est pas un “catch-all” opaque : chaque tentative doit être **observable** et **justifiée** dans les logs.
 
+## Recovery Story/Highlight et post sans continuité d'identité
+
+Une Story ou un Highlight explicitement prouvé possède au maximum un Android
+Back, puis exige une observation fraîche et la preuve exacte du profil
+candidat. Un popup éducatif Story prouvé peut être fermé une fois avant cette
+reclassification. Aucune action Like, Follow ou Mute n'est autorisée.
+
+Un `POST_PROVED` avec identité candidat non prouvée suit la même limite d'un
+Back navigationnel et doit retrouver le profil exact avant toute continuation.
+Cette permission ne s'étend jamais à `TRUE_UNKNOWN`, qui reste sans Back
+aveugle et échoue fermé après la reclassification bornée.
+
 ## Follow durable, post-Follow incomplet
 
 Quand le Follow canonique est confirmé et persisté mais qu'une étape Mute/Like

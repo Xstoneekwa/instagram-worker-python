@@ -64,6 +64,21 @@ Principes alignés avec le moteur :
 - Croiser **détection liste / profil**, **vérification compte CT** quand applicable, et **état** issu de `observe_instagram_state`.
 - Traiter `UNKNOWN` avec faible confiance comme **signal d’incertitude**, pas comme feu vert implicite.
 
+### Surface post et continuité d'identité
+
+Le type de surface et la continuité d'identité sont deux preuves indépendantes.
+Un viewer peut être `POST_PROVED` (package/activity Instagram, titre Posts,
+contrôle Like exact, absence Story/Highlight) tout en gardant
+`IDENTITY_UNPROVEN` si le candidat n'est pas relié au viewer. Ce cas n'autorise
+aucune action métier, mais autorise une unique navigation Back bornée suivie
+d'une preuve fraîche du profil exact. `TRUE_UNKNOWN` conserve l'interdiction
+du Back aveugle et reste fail-closed.
+
+Le fallback Golden ne peut produire un `PostOpenIntentV2` qu'en réutilisant une
+preuve fraîche du profil exact, de la limite des tabs, de la grille sélectionnée
+et d'une cellule physique dont la lineage grid est prouvée. Un ratio visuel,
+un cercle Highlight ou une région Suggested ne constitue jamais cette preuve.
+
 ## Règle d’or
 
 **Ne jamais agir sur un écran non confirmé** pour une action critique (follow, ouverture DM, navigation profil→followers, retour CT post-follow, etc.) : au minimum **état nav cohérent** + **signaux corroborants** (détection écran, fingerprint, ou vision selon le flow documenté).

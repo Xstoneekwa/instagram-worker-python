@@ -65,9 +65,13 @@ activation gate. The native CLI cannot promote without the external transaction
 and strict physical seal. No CLI test-mode or environment override reaches the
 activation path; legacy physical verifier test options cannot authorize a switch.
 
-Installed signed manifest sidecars and three existing deployment receipts keep
-their existing exact exceptions. No exception is added for the old lock file,
-arbitrary JSON, dotfiles, protected files or other untracked source.
+New releases resolve their signed manifest and signature from
+`/Users/admin/phonefarm-runtime/deployment-evidence/<exact-commit-sha>/`; their
+three deployment receipts are stored beside those sidecars. The sealed release
+therefore remains the exact clean committed tree before, during and after
+physical sealing. Installed sidecars and `.deployment` receipts remain accepted
+only for already-installed rollback releases. No exception is added for the old
+lock file, arbitrary JSON, dotfiles, protected files or other untracked source.
 
 ## Stale recovery
 

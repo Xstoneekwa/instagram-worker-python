@@ -127,6 +127,19 @@ Slack/Discord destinations. Category ownership suppresses a generic incident
 notification when a more specific producer owns the event.
 
 Router V2 is the sole provider-delivery path for incident lifecycle events.
+
+For an account-session failure, the Worker projects business progress from the
+canonical terminal summary first (`follow_quota_target`,
+`follows_completed_count`, `follow_quota_remaining`, and the corresponding
+Unfollow fields). A persisted resume plan is a fallback only; a first natural
+session therefore reports exact progress before any resume plan exists.
+
+Root cause and terminalization are separate evidence. `root_failure_reason`
+and `root_failure_phase` preserve the earliest useful causal boundary;
+`safe_stop_reason` records the fail-closed navigation or business stop; and
+`terminal_reason` retains the downstream technical terminal reason. Router V2
+renders the current concise Situation / Reason / Phase / Progress presentation
+and keeps the existing resolution note and Incidents/Actions deep link.
 Covered Worker ORF-4/operator-review paths are disabled and retained only for
 rollback archaeology. A resolved event projects the persisted safe resolution
 note once to Slack/Discord and to the Backend timeline consumed by BotApp. It

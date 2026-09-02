@@ -89,6 +89,29 @@ Runtime invariants:
   `runtime_root_mismatch`.
 - Logs and PID/lock files live under `/Users/admin/phonefarm-runtime`, outside
   immutable releases.
+- Every service wrapper defaults its env, log and run paths to that same runtime
+  home even when invoked directly; no fallback targets `ROOT_DIR/logs` or
+  `ROOT_DIR/.local`.
+- Worker JSON/XML/screenshots, stop traces, local receipts, visual history and
+  login-provisioner logs resolve through the shared runtime-artifact primitive.
+- Service wrappers export `PYTHONDONTWRITEBYTECODE=1`; imports cannot create
+  release-local `__pycache__` directories.
+- Signed manifest/signature and deployment attestations for new releases live
+  at `/Users/admin/phonefarm-runtime/deployment-evidence/<exact-worker-sha>/`.
+  The runtime selects them from the checked-out SHA, never from a mutable alias.
+
+### Sealed release restart invariant
+
+Release assembly is ordered: clone exact commit, verify final commit/tree and
+clean status, verify the final clone against its exact external signature, then
+publish SHA-bound external evidence. No file is copied into the release after
+that check. Promotion and physical sealing resolve the same external evidence,
+bind the final tree SHA and fail closed on any dirty source namespace.
+
+Consequently a natural run may create diagnostics only under the runtime home;
+the release Git status and tree remain unchanged. A later launchd dispatcher
+restart repeats the integrity gate against the same clean tree. It must start
+one dispatcher only; existing uniqueness and rollback behavior are unchanged.
 
 ### One-time setup
 
@@ -197,6 +220,20 @@ verified consumer. The same shape applies to
 
 The legacy root `/Users/admin/instagram-worker-python` must never appear in
 this chain; the controller refuses to resolve it.
+
+### Heartbeat deadline loop
+
+The persistent device-heartbeat publisher computes one monotonic deadline per
+cycle. Each wait iteration performs exactly one monotonic read, computes
+`remaining = deadline - now`, exits when `remaining <= 0`, and otherwise sleeps
+for `min(1.0, remaining)`. A second clock read must never be used as the sleep
+argument: crossing the deadline between two reads can produce a negative sleep
+and terminate the publisher with `ValueError`.
+
+The loop checks shutdown before every wait and immediately after publication.
+It neither busy-spins at the boundary nor changes the normal 60-second cadence.
+launchd remains the lifecycle supervisor; an unexpected publisher exit is
+restartable through the existing heartbeat service contract.
 
 The wrapper remains the real supervisor. It owns:
 

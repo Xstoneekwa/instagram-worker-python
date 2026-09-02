@@ -84,13 +84,20 @@ sidecars explicitly to `verify-follow60-deployment-candidate-v1.py`.
 CI/package promotion must be supplied the same signed sidecars; missing evidence
 is a blocker, never permission to rebuild/sign/bypass the check.
 
-The existing release installer copies the signed sidecars to fixed installed
-paths `docs/governance/FOLLOW60_MAINLINE_LOCK_V3.{json,sig}`. Verification allows
-only those two overlays and the three existing `.deployment` JSON receipts
-(`candidate-build-receipt`, `migration-attestation`, `lineage-gate-receipt`).
-They must never appear in protected **source** scope. All other source/index
-changes are rejected. Sidecars still require a valid signature and exact commit
-binding. Candidate generation is stricter: it requires a fully clean checkout.
+The release installer must not overlay the clone after validating its source.
+It clones the exact commit, proves the final commit/tree and a completely clean
+worktree, then verifies that final clone against the external signed sidecars.
+The exact manifest, signature, candidate-build receipt, migration attestation
+and lineage receipt are published under the canonical runtime home at
+`deployment-evidence/<candidate_commit_sha>/`. They are not Git-tree exceptions
+and never enter the sealed release. The build receipt binds the final tree SHA
+and `sealed_release_clean=true`; promotion independently rechecks both.
+
+Previously installed releases with the two signed sidecar overlays and three
+`.deployment` receipts remain readable solely for rollback compatibility. New
+release assembly never creates those paths. Sidecars always require a valid
+signature and exact commit binding. Candidate generation remains stricter: it
+requires a fully clean checkout.
 
 No timestamp heuristic substitutes for commit existence. Early/previous manifests
 fail against a later final commit even when both commits have the same tree.

@@ -37,6 +37,7 @@
   "instagram_navigation.py",
   "post_follow_stage_outbox.py",
   "runner.py",
+  "runtime_artifacts.py",
   "runtime_caps.py",
   "scripts/benchmark-follow60-ct-resume-reacquisition.py",
   "scripts/create-certified-phonefarm-release-v1.py",
