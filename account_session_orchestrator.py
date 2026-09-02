@@ -6420,6 +6420,16 @@ def run_account_session(
         "exit_code": exit_code,
         "welcome_phase_status": welcome_phase_status,
         "follow_phase_status": follow_phase_status,
+        "follows_completed_count": follows_completed_count,
+        "follow_quota_target": follow_quota_target,
+        "follow_quota_remaining": follow_quota_remaining,
+        "follow_stop_reason": follow_stop_reason or None,
+        "first_causal_reason": str(
+            follow_engine_summary.get("first_causal_reason")
+            or canonical_follow_outcome.get("first_causal_reason")
+            or follow_stop_reason
+            or ""
+        ) or None,
         "follow_outcome": canonical_follow_outcome,
         "follow_partial": follow_partial,
         "follow_resume_recommended": follow_resume_recommended,
@@ -6445,6 +6455,11 @@ def run_account_session(
         "unfollow_quota_target": unfollow_quota_target,
         "unfollow_actions_verified": int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
         "unfollow_results_persisted_count": int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0),
+        "unfollow_quota_remaining": max(
+            0,
+            int(unfollow_quota_target or 0)
+            - int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
+        ),
         "unfollow_effective_limit": follow_to_unfollow_real.get("unfollow_effective_limit"),
         "last_run_eligible_at_start": follow_to_unfollow_real.get("last_run_eligible_at_start"),
         "last_run_attempted": follow_to_unfollow_real.get("last_run_attempted"),

@@ -92,6 +92,53 @@ class AccountSessionPhaseNotificationTests(unittest.TestCase):
             "actual_logged_in_username_not_detected",
         )
 
+    def test_first_natural_session_uses_canonical_progress_without_resume_plan(self) -> None:
+        out = build_account_session_phase_notification_summary(
+            {
+                "follow_quota_target": 50,
+                "follows_completed_count": 16,
+                "follow_quota_remaining": 34,
+                "unfollow_quota_target": 80,
+                "unfollow_actions_verified": 0,
+                "unfollow_quota_remaining": 80,
+            },
+            {},
+        )
+        self.assertEqual(out["follow_quota_target"], 50)
+        self.assertEqual(out["follows_completed_count"], 16)
+        self.assertEqual(out["follow_quota_remaining"], 34)
+        self.assertEqual(out["unfollow_quota_target"], 80)
+        self.assertEqual(out["unfollow_actions_verified"], 0)
+        self.assertEqual(out["unfollow_quota_remaining"], 80)
+
+    def test_resume_plan_is_fallback_not_authority_over_canonical_progress(self) -> None:
+        out = build_account_session_phase_notification_summary(
+            {
+                "follow_quota_target": 50,
+                "follows_completed_count": 16,
+                "follow_quota_remaining": 34,
+            },
+            {"resume_plan": {"quota_remaining": {"follow": 7, "unfollow": 9}}},
+        )
+        self.assertEqual(out["follow_quota_target"], 50)
+        self.assertEqual(out["follows_completed_count"], 16)
+        self.assertEqual(out["follow_quota_remaining"], 34)
+
+    def test_root_reason_does_not_get_overwritten_by_terminal_reason(self) -> None:
+        out = build_account_session_phase_notification_summary(
+            {
+                "first_causal_reason": "candidate_identity_continuity",
+                "follow_stop_reason": "followers_recovery_surface_unproved",
+                "root_failure_code": "account_session_phase_not_terminal",
+                "failure_phase": "post_recovery_return_ct",
+            },
+            {},
+        )
+        self.assertEqual(out["root_failure_reason"], "candidate_identity_continuity")
+        self.assertEqual(out["root_failure_phase"], "post_recovery_return_ct")
+        self.assertEqual(out["safe_stop_reason"], "followers_recovery_surface_unproved")
+        self.assertEqual(out["terminal_reason"], "account_session_phase_not_terminal")
+
     def test_slack_discord_base_payload_contains_structured_phase_fields(self) -> None:
         payload = incident_notifications.build_incident_notification_payload(
             {
@@ -105,10 +152,20 @@ class AccountSessionPhaseNotificationTests(unittest.TestCase):
                         "requested_phases": {"follow": True, "unfollow": True},
                         "follow_target": 10,
                         "follow_remaining": 10,
+                        "follow_quota_target": 10,
+                        "follows_completed_count": 0,
+                        "follow_quota_remaining": 10,
+                        "unfollow_quota_target": 5,
+                        "unfollow_actions_verified": 0,
+                        "unfollow_quota_remaining": 5,
                         "unfollow_actionable_remaining": 0,
                         "unfollow_candidates_on_hold": 3,
                         "unfollow_terminally_unavailable": 2,
                         "stable_reason": "unfollow_search_surface_consecutive_failure_limit_reached",
+                        "root_failure_reason": "unfollow_search_surface_consecutive_failure_limit_reached",
+                        "root_failure_phase": "unfollow",
+                        "safe_stop_reason": "unfollow_search_surface_consecutive_failure_limit_reached",
+                        "terminal_reason": "account_session_phase_not_terminal",
                         "auto_restart_allowed": False,
                         "auto_restart_blocked": True,
                         "suggested_next_action": "wait_until_next_retry_at",
@@ -116,10 +173,45 @@ class AccountSessionPhaseNotificationTests(unittest.TestCase):
                 },
             }
         )
-        self.assertIn("Phase: unfollow", payload["text"])
-        self.assertIn("Follow: target 10 | remaining 10", payload["text"])
-        self.assertIn("Unfollow: actionable 0 | hold 3 | terminal 2", payload["text"])
+        self.assertIn("Phase: Unfollow", payload["text"])
+        self.assertIn("Situation: Automation paused for account safety.", payload["text"])
+        self.assertIn("Progress: 0 / 10 follows | 0 / 5 unfollows", payload["text"])
+        self.assertNotIn("Follow: target", payload["text"])
         self.assertIn("Auto Restart: blocked", payload["text"])
+
+    def test_router_v2_nab_root_chain_and_progress_wording(self) -> None:
+        summary = build_account_session_phase_notification_summary(
+            {
+                "first_causal_reason": "candidate_identity_continuity",
+                "follow_stop_reason": "followers_recovery_surface_unproved",
+                "root_failure_code": "account_session_phase_not_terminal",
+                "failure_phase": "post_recovery_return_ct",
+                "follow_quota_target": 50,
+                "follows_completed_count": 16,
+                "follow_quota_remaining": 34,
+                "unfollow_quota_target": 80,
+                "unfollow_actions_verified": 0,
+                "unfollow_quota_remaining": 80,
+            },
+            {},
+        )
+        payload = incident_notifications.build_incident_notification_payload(
+            {
+                "id": "incident-1",
+                "incident_type": "runtime_failure",
+                "severity": "warning",
+                "status": "open",
+                "metadata": {"phase_summary": summary},
+            }
+        )
+        self.assertIn(
+            "Reason: Candidate post identity could not be confirmed during post recovery.",
+            payload["text"],
+        )
+        self.assertIn("Phase: Post recovery / Return CT", payload["text"])
+        self.assertIn("Progress: 16 / 50 follows | 0 / 80 unfollows", payload["text"])
+        self.assertIn("Open Incidents/Actions", incident_notifications.build_slack_payload(payload)["text"])
+        self.assertIn("Open Incidents/Actions", incident_notifications.build_discord_payload(payload)["content"])
 
 
 if __name__ == "__main__":

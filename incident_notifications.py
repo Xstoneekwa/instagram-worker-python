@@ -150,6 +150,35 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+def _account_session_reason_label(reason: Any) -> str:
+    normalized = str(reason or "").strip()
+    labels = {
+        "candidate_identity_continuity": (
+            "Candidate post identity could not be confirmed during post recovery."
+        ),
+        "open_surface_unproved_no_back": (
+            "The opened Instagram surface could not be proved safe for navigation recovery."
+        ),
+        "followers_recovery_surface_unproved": (
+            "The Followers surface could not be safely recovered."
+        ),
+    }
+    return labels.get(normalized, normalized.replace("_", " ").strip().capitalize() or "Unknown")
+
+
+def _account_session_phase_label(phase: Any) -> str:
+    normalized = str(phase or "").strip().lower()
+    labels = {
+        "post_recovery_return_ct": "Post recovery / Return CT",
+        "post_recovery": "Post recovery / Return CT",
+        "return_ct": "Post recovery / Return CT",
+        "follow": "Follow / post recovery",
+        "unfollow": "Unfollow",
+        "terminalization": "Terminalization",
+    }
+    return labels.get(normalized, normalized.replace("_", " ").strip().capitalize() or "Unknown")
+
+
 def _operator_date(value: Any) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -437,27 +466,29 @@ def build_incident_notification_payload(incident: dict) -> dict:
         )
         message_parts.extend(
             [
-                (
-                    "Phase: "
-                    f"{_safe_text(phase_summary.get('blocked_phase'), max_len=80) or 'unknown'}"
-                    f" | Requested: {requested_label}"
+                "Situation: Automation paused for account safety.",
+                "Reason: "
+                + _account_session_reason_label(
+                    phase_summary.get("root_failure_reason")
+                    or phase_summary.get("stable_reason")
                 ),
-                (
-                    "Follow: target "
-                    f"{_safe_count(phase_summary.get('follow_target'))}"
-                    f" | remaining {_safe_count(phase_summary.get('follow_remaining'))}"
+                "Phase: "
+                + _account_session_phase_label(
+                    phase_summary.get("root_failure_phase")
+                    or phase_summary.get("blocked_phase")
                 ),
+                "Progress: "
+                f"{_safe_count(phase_summary.get('follows_completed_count'))} / "
+                f"{_safe_count(phase_summary.get('follow_quota_target') or phase_summary.get('follow_target'))} follows"
+                " | "
+                f"{_safe_count(phase_summary.get('unfollow_actions_verified'))} / "
+                f"{_safe_count(phase_summary.get('unfollow_quota_target'))} unfollows",
                 (
-                    "Unfollow: actionable "
-                    f"{_safe_count(phase_summary.get('unfollow_actionable_remaining'))}"
-                    f" | hold {_safe_count(phase_summary.get('unfollow_candidates_on_hold'))}"
-                    f" | terminal {_safe_count(phase_summary.get('unfollow_terminally_unavailable'))}"
-                ),
-                (
-                    "Reason: "
-                    f"{_safe_text(phase_summary.get('stable_reason'), max_len=160) or 'unknown'}"
+                    "Terminal: "
+                    f"{_safe_text(phase_summary.get('terminal_reason'), max_len=160) or 'unknown'}"
                     f" ({_safe_text(phase_summary.get('reason_code'), max_len=160) or 'unclassified'})"
                 ),
+                f"Requested: {requested_label}",
                 f"Auto Restart: {auto_restart_label}",
                 (
                     "Next: "
