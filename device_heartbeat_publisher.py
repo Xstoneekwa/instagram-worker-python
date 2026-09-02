@@ -269,6 +269,29 @@ def _handle_shutdown(signum: int, _frame: object | None) -> None:
     _shutdown_requested = True
 
 
+def _wait_for_publish_deadline(
+    deadline: float,
+    *,
+    monotonic: Any | None = None,
+    sleeper: Any | None = None,
+    shutdown_requested: Any | None = None,
+) -> None:
+    """Wait without ever passing a negative duration to ``sleep``.
+
+    Exactly one monotonic read determines each iteration's remaining budget.
+    The injected callables keep deadline-boundary and shutdown behavior fully
+    deterministic in tests without changing production cadence.
+    """
+    clock = monotonic or time.monotonic
+    sleep = sleeper or time.sleep
+    should_stop = shutdown_requested or (lambda: _shutdown_requested)
+    while not should_stop():
+        remaining = float(deadline) - float(clock())
+        if remaining <= 0:
+            break
+        sleep(min(1.0, remaining))
+
+
 def serve_forever(
     *,
     adb_path: str,
@@ -299,10 +322,8 @@ def serve_forever(
         if _shutdown_requested:
             break
         elapsed = time.monotonic() - started
-        sleep_for = max(1.0, interval - elapsed)
-        deadline = time.monotonic() + sleep_for
-        while time.monotonic() < deadline and not _shutdown_requested:
-            time.sleep(min(1.0, deadline - time.monotonic()))
+        deadline = started + max(float(interval), elapsed + 1.0)
+        _wait_for_publish_deadline(deadline)
     return 0
 
 

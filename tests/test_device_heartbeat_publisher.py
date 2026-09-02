@@ -7,6 +7,105 @@ import device_heartbeat_publisher as publisher
 
 
 class DeviceHeartbeatPublisherTest(unittest.TestCase):
+    def test_deadline_wait_positive_remaining(self) -> None:
+        sleeps: list[float] = []
+        clock = iter([9.0, 10.0])
+        publisher._wait_for_publish_deadline(
+            10.0,
+            monotonic=lambda: next(clock),
+            sleeper=sleeps.append,
+            shutdown_requested=lambda: False,
+        )
+        self.assertEqual(sleeps, [1.0])
+
+    def test_deadline_wait_zero_remaining(self) -> None:
+        sleeps: list[float] = []
+        publisher._wait_for_publish_deadline(
+            10.0,
+            monotonic=lambda: 10.0,
+            sleeper=sleeps.append,
+            shutdown_requested=lambda: False,
+        )
+        self.assertEqual(sleeps, [])
+
+    def test_deadline_wait_negative_remaining(self) -> None:
+        sleeps: list[float] = []
+        publisher._wait_for_publish_deadline(
+            10.0,
+            monotonic=lambda: 10.5,
+            sleeper=sleeps.append,
+            shutdown_requested=lambda: False,
+        )
+        self.assertEqual(sleeps, [])
+
+    def test_deadline_wait_crossing_boundary_never_sleeps_negative(self) -> None:
+        sleeps: list[float] = []
+        clock = iter([9.9, 10.01])
+        publisher._wait_for_publish_deadline(
+            10.0,
+            monotonic=lambda: next(clock),
+            sleeper=sleeps.append,
+            shutdown_requested=lambda: False,
+        )
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreater(sleeps[0], 0.0)
+        self.assertAlmostEqual(sleeps[0], 0.1)
+
+    def test_deadline_wait_has_no_busy_spin(self) -> None:
+        sleeps: list[float] = []
+        publisher._wait_for_publish_deadline(
+            10.0,
+            monotonic=lambda: 0.0,
+            sleeper=sleeps.append,
+            shutdown_requested=lambda: len(sleeps) >= 3,
+        )
+        self.assertEqual(sleeps, [1.0, 1.0, 1.0])
+
+    def test_normal_publication_cadence_uses_cycle_start_deadline(self) -> None:
+        publisher._shutdown_requested = False
+        cycles: list[int] = []
+        deadlines: list[float] = []
+
+        def fake_cycle(**_kwargs):
+            cycles.append(1)
+            publisher._shutdown_requested = len(cycles) >= 2
+            return {"ok": True, "published_count": 1, "observed_count": 1}
+
+        with patch.object(publisher, "run_publish_cycle", side_effect=fake_cycle), patch.object(
+            publisher, "append_rotating_json_log"
+        ), patch.object(
+            publisher, "_wait_for_publish_deadline", side_effect=lambda deadline: deadlines.append(deadline)
+        ), patch.object(
+            publisher.time, "monotonic", side_effect=iter([100.0, 105.0, 200.0, 205.0])
+        ):
+            result = publisher.serve_forever(
+                adb_path="adb", host_label="mac-a", include_battery=False,
+                allowed_serials=None, interval_seconds=60, state_file=None,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(cycles), 2)
+        self.assertEqual(deadlines, [160.0])
+        publisher._shutdown_requested = False
+
+    def test_service_shutdown_after_cycle_does_not_enter_wait(self) -> None:
+        publisher._shutdown_requested = False
+
+        def stop_cycle(**_kwargs):
+            publisher._shutdown_requested = True
+            return {"ok": True, "published_count": 1, "observed_count": 1}
+
+        with patch.object(publisher, "run_publish_cycle", side_effect=stop_cycle), patch.object(
+            publisher, "append_rotating_json_log"
+        ), patch.object(publisher, "_wait_for_publish_deadline") as wait:
+            result = publisher.serve_forever(
+                adb_path="adb", host_label="mac-a", include_battery=False,
+                allowed_serials=None, interval_seconds=60, state_file=None,
+            )
+        self.assertEqual(result, 0)
+        wait.assert_not_called()
+        publisher._shutdown_requested = False
+
     def test_parse_adb_devices_l_keeps_safe_fields_and_states(self) -> None:
         out = """
 List of devices attached
@@ -139,4 +238,3 @@ emulator-5554 offline transport_id:9
 
 if __name__ == "__main__":
     unittest.main()
-
