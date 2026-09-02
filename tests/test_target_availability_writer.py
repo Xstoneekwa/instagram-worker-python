@@ -284,9 +284,14 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
         self.assertEqual(writer.metrics["duplicates"], 1)
         self.assertEqual(writer.metrics["dropped"], 1)
 
-    def test_auto_kill_purges_payloads_and_stops_future_transport_attempts(self):
+    def test_integrity_auto_kill_purges_payloads_and_stops_future_transport_attempts(self):
         with tempfile.TemporaryDirectory() as directory:
             auto_kill = Path(directory) / "auto-kill.json"
+            auto_kill.write_text(json.dumps({
+                "schema_version": "target-availability-auto-kill-v1",
+                "reason": "integrity_violation",
+                "human_reenable_required": True,
+            }), encoding="utf-8")
             transport = RecordingTransport(failures=10)
             writer = FailOpenTargetAvailabilityWriter(
                 transport,
@@ -297,10 +302,9 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
             self.assertEqual(writer.flush_once(), 0)
             self.assertTrue(auto_kill.exists())
             self.assertEqual(writer.queue_size, 0)
-            self.assertEqual(writer.metrics["auto_killed"], 1)
             self.assertTrue(writer._stop.is_set())
             self.assertEqual(writer.flush_once(), 0)
-            self.assertEqual(transport.failures, 9)
+            self.assertEqual(transport.failures, 10)
 
     def test_flush_is_batchable_and_successful(self):
         transport = RecordingTransport()
@@ -332,21 +336,61 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
         self.assertEqual(writer.flush_once(), 1)
         self.assertEqual(writer.queue_size, 0)
 
-    def test_repeated_transport_failure_writes_reversible_local_auto_kill(self):
+    def test_repeated_transport_failure_opens_circuit_without_global_auto_kill(self):
         with tempfile.TemporaryDirectory() as directory:
             auto_kill = Path(directory) / "auto-kill.json"
+            clock = [100.0]
+            transport = RecordingTransport(failures=2)
             writer = FailOpenTargetAvailabilityWriter(
-                RecordingTransport(failures=2),
+                transport,
                 circuit_failure_threshold=2,
+                circuit_cooldown_seconds=5,
                 auto_kill_file=str(auto_kill),
+                clock=lambda: clock[0],
             )
             writer.enqueue(observation())
             self.assertEqual(writer.flush_once(), 0)
             self.assertEqual(writer.flush_once(), 0)
-            payload = json.loads(auto_kill.read_text(encoding="utf-8"))
-            self.assertEqual(payload["reason"], "repeated_backend_pipeline_failure")
-            self.assertTrue(payload["human_reenable_required"])
-            self.assertEqual(writer.metrics["auto_killed"], 1)
+            self.assertFalse(auto_kill.exists())
+            self.assertEqual(writer.queue_size, 1)
+            self.assertFalse(writer._stop.is_set())
+            self.assertEqual(writer.metrics["circuit_breaks"], 1)
+            self.assertEqual(writer.metrics["auto_killed"], 0)
+            clock[0] += 6
+            self.assertEqual(writer.flush_once(), 1)
+
+    def test_legacy_transport_auto_kill_marker_is_audited_but_not_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auto_kill = Path(directory) / "auto-kill.json"
+            auto_kill.write_text(json.dumps({
+                "schema_version": "target-availability-auto-kill-v1",
+                "reason": "repeated_backend_pipeline_failure",
+                "human_reenable_required": True,
+                "failure_count": 3,
+            }), encoding="utf-8")
+            flags = TargetAvailabilityFeatureFlags.from_mapping({
+                "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+                "TARGET_AVAILABILITY_SCOPE_MODE": SCOPE_MODE_ALL_ACTIVE,
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(auto_kill),
+            })
+            self.assertFalse(flags.kill_switch)
+            self.assertTrue(flags.capture_allowed(ACCOUNT_ONE))
+
+    def test_malformed_or_unknown_auto_kill_marker_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auto_kill = Path(directory) / "auto-kill.json"
+            base = {
+                "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+                "TARGET_AVAILABILITY_SCOPE_MODE": SCOPE_MODE_ALL_ACTIVE,
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(auto_kill),
+            }
+            auto_kill.write_text("{broken", encoding="utf-8")
+            self.assertTrue(TargetAvailabilityFeatureFlags.from_mapping(base).kill_switch)
+            auto_kill.write_text(json.dumps({
+                "schema_version": "target-availability-auto-kill-v1",
+                "reason": "integrity_violation",
+            }), encoding="utf-8")
+            self.assertTrue(TargetAvailabilityFeatureFlags.from_mapping(base).kill_switch)
 
     def test_serialization_exception_is_dropped_without_escaping(self):
         class InvalidObservation:

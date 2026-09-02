@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Deque, Iterable, Mapping, Optional, Protocol, Sequence
@@ -103,6 +102,33 @@ def _kill_switch_file_active(path: object) -> bool:
         return True
 
 
+def _auto_kill_file_active(path: object) -> bool:
+    """Honor integrity kills, but retire the legacy transport-failure tombstone.
+
+    Backend transport availability is already protected by the bounded circuit
+    breaker.  A historical ``repeated_backend_pipeline_failure`` marker must
+    therefore remain auditable without permanently disabling every target.
+    Malformed or unknown markers still fail closed.
+    """
+
+    configured = str(path or "").strip()
+    if not configured:
+        return False
+    try:
+        with open(configured, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return False
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return True
+    if not isinstance(payload, dict):
+        return True
+    return not (
+        payload.get("schema_version") == "target-availability-auto-kill-v1"
+        and payload.get("reason") == "repeated_backend_pipeline_failure"
+    )
+
+
 def _read_control_file(values: Mapping[str, object], *, use_default: bool) -> tuple[dict[str, object], bool]:
     configured = str(values.get("TARGET_AVAILABILITY_CONTROL_FILE") or (DEFAULT_CONTROL_FILE if use_default else "")).strip()
     if not configured:
@@ -119,32 +145,6 @@ def _read_control_file(values: Mapping[str, object], *, use_default: bool) -> tu
         return {}, True
 
 
-def _atomic_safe_json(path: str, payload: Mapping[str, object]) -> bool:
-    target = str(path or "").strip()
-    if not target or not os.path.isabs(target):
-        return False
-    temporary: str | None = None
-    try:
-        parent = os.path.dirname(target)
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=".target-availability-auto-kill.", dir=parent)
-        os.fchmod(descriptor, 0o600)
-        encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        temporary = None
-        return True
-    except OSError:
-        return False
-    finally:
-        if temporary:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
 @dataclass(frozen=True)
 class TargetAvailabilityFeatureFlags:
     target_availability_observation_capture_enabled: bool = False
@@ -177,7 +177,7 @@ class TargetAvailabilityFeatureFlags:
             account_allowlist=allowlist,
             kill_switch=_enabled(source.get("TARGET_AVAILABILITY_KILL_SWITCH"))
             or _kill_switch_file_active(kill_switch_file)
-            or _kill_switch_file_active(auto_kill_file)
+            or _auto_kill_file_active(auto_kill_file)
             or control_invalid,
             config_invalid=control_invalid or raw_mode not in {SCOPE_MODE_OFF, SCOPE_MODE_EXPLICIT, SCOPE_MODE_ALL_ACTIVE},
         )
@@ -384,7 +384,7 @@ class FailOpenTargetAvailabilityWriter:
         self._thread: threading.Thread | None = None
         self._failures = 0
         self._circuit_until = 0.0
-        self.metrics = {"accepted": 0, "duplicates": 0, "flushed": 0, "failures": 0, "dropped": 0, "circuit_open": 0, "auto_killed": 0}
+        self.metrics = {"accepted": 0, "duplicates": 0, "flushed": 0, "failures": 0, "dropped": 0, "circuit_open": 0, "circuit_breaks": 0, "auto_killed": 0}
 
     def enqueue(self, observation: TargetAvailabilityObservation) -> bool:
         try:
@@ -407,7 +407,7 @@ class FailOpenTargetAvailabilityWriter:
             return False
 
     def flush_once(self) -> int:
-        if self._auto_kill_file and _kill_switch_file_active(self._auto_kill_file):
+        if self._auto_kill_file and _auto_kill_file_active(self._auto_kill_file):
             with self._lock:
                 dropped = len(self._queue)
                 self._queue.clear()
@@ -433,23 +433,7 @@ class FailOpenTargetAvailabilityWriter:
             self.metrics["failures"] += 1
             if self._failures >= self._threshold:
                 self._circuit_until = now + self._cooldown
-                if _atomic_safe_json(
-                    self._auto_kill_file,
-                    {
-                        "schema_version": "target-availability-auto-kill-v1",
-                        "reason": "repeated_backend_pipeline_failure",
-                        "human_reenable_required": True,
-                        "failure_count": self._failures,
-                        "created_at_epoch_seconds": int(time.time()),
-                    },
-                ):
-                    self.metrics["auto_killed"] += 1
-                    with self._lock:
-                        dropped = len(self._queue)
-                        self._queue.clear()
-                        self._seen.clear()
-                        self.metrics["dropped"] += dropped
-                    self._stop.set()
+                self.metrics["circuit_breaks"] += 1
             return 0
         self._failures = 0
         with self._lock:
