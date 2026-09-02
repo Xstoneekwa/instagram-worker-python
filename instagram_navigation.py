@@ -33174,6 +33174,33 @@ def _is_plausible_ig_username_handle(handle: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9._]+", u))
 
 
+_COLLABORATIVE_POST_OWNER_LABEL_RE = re.compile(
+    r"^\s*@?[a-z0-9._]{1,30}"
+    r"(?:\s+(?:and|&|et|avec|y|und|e)\s+@?[a-z0-9._]{1,30})+\s*$",
+    re.IGNORECASE,
+)
+
+
+def _collaborative_post_owner_handles(value: str) -> tuple[str, ...]:
+    """Return exact handles only from Instagram's collaborative-owner label.
+
+    This deliberately does not search arbitrary text for a username.  A value
+    must consist solely of two or more plausible handles joined by a supported
+    collaborative separator, so captions and substring collisions cannot
+    authorize a Like.
+    """
+    raw = str(value or "").strip()
+    if not raw or not _COLLABORATIVE_POST_OWNER_LABEL_RE.fullmatch(raw):
+        return ()
+    handles = tuple(
+        _normalize_handle(token)
+        for token in re.findall(r"@?([a-z0-9._]{1,30})", raw, flags=re.IGNORECASE)
+        if _is_plausible_ig_username_handle(token)
+        and token.lower() not in {"and", "et", "avec", "y", "und", "e"}
+    )
+    return handles if len(handles) >= 2 else ()
+
+
 def _visual_post_viewer_header_username_from_ui(
     d: u2.Device,
     *,
@@ -33185,11 +33212,7 @@ def _visual_post_viewer_header_username_from_ui(
     if exp:
         probes: list[tuple[str, Callable[[], Any]]] = [
             ("ui_post_header_text_exact", lambda: d(text=exp)),
-            ("ui_post_header_text_contains", lambda: d(textContains=exp)),
-            (
-                "ui_post_header_description_contains",
-                lambda: d(descriptionContains=exp),
-            ),
+            ("ui_post_header_description_exact", lambda: d(description=exp)),
         ]
         for method, pred in probes:
             try:
@@ -33205,8 +33228,16 @@ def _visual_post_viewer_header_username_from_ui(
                     hier = str(d.dump_hierarchy())
                 except Exception:
                     hier = ""
-            if hier and f'text="{exp}"' in hier.lower():
-                return exp, "hierarchy_post_header_text"
+            if hier:
+                identity = _post_open_hierarchy_identity_signals(
+                    hier,
+                    expected_username=exp,
+                )
+                if identity.get("candidate_username_exact_in_snapshot"):
+                    return exp, str(
+                        identity.get("candidate_username_method")
+                        or "hierarchy_post_header_identity"
+                    )
     return "", ""
 
 
@@ -55553,6 +55584,7 @@ def _post_open_hierarchy_identity_signals(
     posts_title = False
     candidate_exact = False
     candidate_method = ""
+    post_action_controls_started = False
     for el in root.iter():
         text_raw = str(el.attrib.get("text") or "").strip()
         desc_raw = str(el.attrib.get("content-desc") or "").strip()
@@ -55577,12 +55609,46 @@ def _post_open_hierarchy_identity_signals(
 
         if any(value.lower() in _POST_VIEWER_ACTION_BAR_TITLES_NORM for value in values):
             posts_title = True
+        if any(
+            marker in rid_lower
+            for marker in ("like_button", "comment_button", "share_button", "row_feed_button")
+        ):
+            post_action_controls_started = True
         if expected:
             for field_name, value in (("text", text_raw), ("content_desc", desc_raw)):
-                if value and _normalize_handle(value) == expected:
+                normalized_value = _normalize_handle(value)
+                collaborative_handles = _collaborative_post_owner_handles(value)
+                owner_field_eligible = bool(
+                    posts_title
+                    and not post_action_controls_started
+                    and not any(
+                        marker in rid_lower
+                        for marker in (
+                            "caption",
+                            "comment",
+                            "audio",
+                            "music",
+                            "reel",
+                            "story",
+                            "highlight",
+                        )
+                    )
+                )
+                if owner_field_eligible and value and (
+                    normalized_value == expected
+                    or expected in collaborative_handles
+                ):
                     candidate_exact = True
-                    candidate_method = f"snapshot_exact_{field_name}"
+                    candidate_method = (
+                        f"snapshot_collaborative_{field_name}_owner_token"
+                        if collaborative_handles
+                        else f"snapshot_exact_{field_name}"
+                    )
                     break
+
+    if story_detected or not posts_title:
+        candidate_exact = False
+        candidate_method = ""
 
     return {
         "snapshot_valid": True,

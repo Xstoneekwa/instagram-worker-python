@@ -1319,6 +1319,83 @@ def _timed_safe_supabase_call(
     return out
 
 
+def _persist_precompleted_like_after_follow_failure(
+    *,
+    precompleted_like_result: dict[str, Any] | None,
+    supabase_mode: bool,
+    account_id: str,
+    candidate_username: str,
+    source_profile_username: str,
+    run_id: str,
+    session_id: str | None,
+    visual_candidate_id: str,
+) -> tuple[bool, int]:
+    """Persist an already-verified post-first Like independently of Follow."""
+    like_result = dict(precompleted_like_result or {})
+    phase_outcome = str(like_result.get("phase_outcome") or "").strip()
+    liked_count = max(0, int(like_result.get("liked_count") or 0))
+    if phase_outcome not in {"success", "partial_success"} or liked_count <= 0:
+        return True, 0
+    if not (supabase_mode and account_id and str(candidate_username or "").strip()):
+        log(
+            "error",
+            "post_like_verified_persist_after_follow_failure_unavailable",
+            account_id=account_id or None,
+            run_id=run_id or None,
+            candidate_username=str(candidate_username or ""),
+            liked_count=liked_count,
+            safe_to_continue_candidate=False,
+        )
+        return False, 0
+    persisted = _timed_safe_supabase_call(
+        "record_post_like_interaction_success_after_follow_failure",
+        "record_post_like_interaction_success",
+        account_id,
+        candidate_username,
+        source_profile_username,
+        run_id=run_id or None,
+        session_id=session_id or None,
+        liked_count=liked_count,
+        target_count=int(like_result.get("target_count") or 0),
+        attempted_count=int(like_result.get("attempted_count") or 0),
+        skipped_already_liked_count=int(
+            like_result.get("skipped_already_liked_count") or 0
+        ),
+        phase_outcome=phase_outcome,
+        post_like_mode=str(like_result.get("post_like_mode") or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        timings_ms=(
+            like_result.get("timings_ms")
+            if isinstance(like_result.get("timings_ms"), dict)
+            else {}
+        ),
+        per_post=(
+            like_result.get("per_post")
+            if isinstance(like_result.get("per_post"), list)
+            else None
+        ),
+        log_run_id=run_id or None,
+        log_account_id=account_id,
+        log_record_count=liked_count,
+        return_status=True,
+    )
+    ok = bool((persisted or {}).get("_supabase_call_ok"))
+    log(
+        "info" if ok else "error",
+        "post_like_verified_persisted_after_follow_failure",
+        account_id=account_id,
+        run_id=run_id or None,
+        candidate_username=str(candidate_username or ""),
+        source_profile_username=str(source_profile_username or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        liked_count=liked_count,
+        follow_count_delta=0,
+        persisted=ok,
+        safe_to_continue_candidate=ok,
+    )
+    return ok, liked_count if ok else 0
+
+
 def _reset_session_counters() -> None:
     global _SESSION_COUNTERS
     _SESSION_COUNTERS = {
@@ -12907,6 +12984,13 @@ def _run_followers_list_engine_session(
         list_identity=f"{_norm_ig_handle(source_profile_username)}:followers",
         list_generation=str(ct_checkpoint.get("created_at") or run_id or ""),
     )
+    from follow_revert_restriction import (
+        DistinctFollowRevertTracker,
+        FollowRevertObservation,
+        apply_preventive_follow_restriction,
+    )
+
+    _follow_revert_tracker = DistinctFollowRevertTracker()
 
     # C+ upstream boundary: P0C is completed once before checkpoint
     # load/claim and before any CT Resume planning.  Only the explicit current
@@ -22603,6 +22687,7 @@ def _run_followers_list_engine_session(
                     return 99
 
                 if _ct_follow_out_is_failed_no_follow_tap(follow_out):
+                    _follow_revert_tracker.reset(reason="candidate_without_follow_tap")
                     log(
                         "error",
                         "visual_followers_failed_no_follow_tap_abandon_candidate",
@@ -22647,6 +22732,9 @@ def _run_followers_list_engine_session(
                         _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.get(fkey, 0) + 1
                     )
                     if _CT_FOLLOW_NO_TAP_AFTER_START_COUNT[fkey] >= 2:
+                        _follow_revert_tracker.reset(
+                            reason="candidate_follow_started_without_tap"
+                        )
                         log(
                             "warning",
                             "visual_followers_candidate_abandoned_follow_no_tap_retries",
@@ -22833,10 +22921,121 @@ def _run_followers_list_engine_session(
                                     visual_candidate_id=pick.get("visual_candidate_id"),
                                 )
                             return 42
+                        _like_persist_ok, _like_persisted_count = (
+                            _persist_precompleted_like_after_follow_failure(
+                                precompleted_like_result=dict(
+                                    _ordering_v2.get("precompleted_like_result") or {}
+                                ),
+                                supabase_mode=supabase_mode,
+                                account_id=account_id,
+                                candidate_username=str(follower_un or ""),
+                                source_profile_username=source_profile_username,
+                                run_id=run_id,
+                                session_id=_SESSION_SOCIAL_ID or None,
+                                visual_candidate_id=str(
+                                    pick.get("visual_candidate_id") or ""
+                                ),
+                            )
+                        )
+                        if not _like_persist_ok:
+                            _publish_followers_session_summary(
+                                exit_code=1,
+                                follow_session_outcome="failed",
+                                follow_stop_reason=(
+                                    "verified_post_like_persistence_failed"
+                                ),
+                                first_causal_reason=(
+                                    "verified_post_like_persistence_failed"
+                                ),
+                                root_failure_code=(
+                                    "verified_post_like_persistence_failed"
+                                ),
+                                failure_category="systemic_persistence_failure",
+                            )
+                            _flush_ct_follow_action_logs_unless_deferred()
+                            return 1
+                        if _like_persisted_count > 0:
+                            _SESSION_COUNTERS["likes"] = int(
+                                _SESSION_COUNTERS.get("likes") or 0
+                            ) + _like_persisted_count
+                            _SESSION_COUNTERS["interactions"] = int(
+                                _SESSION_COUNTERS.get("interactions") or 0
+                            ) + _like_persisted_count
+                            _SESSION_COUNTERS["successful_interactions"] = int(
+                                _SESSION_COUNTERS.get("successful_interactions") or 0
+                            ) + _like_persisted_count
+                        _follow_revert_decision = _follow_revert_tracker.observe(
+                            FollowRevertObservation(
+                                candidate_username=str(follower_un or ""),
+                                tap_sent=bool(_tap_sent_seen),
+                                follow_state_before=str(
+                                    follow_out.get("follow_state_before") or ""
+                                ),
+                                follow_state_after=str(
+                                    follow_out.get("follow_state_after") or ""
+                                ),
+                                failure_code=fc,
+                                exact_candidate_profile_proved=bool(
+                                    _profile_follow_already_open
+                                    and str(follower_un or "").strip()
+                                ),
+                                exact_followers_surface_recovered=True,
+                                follow_persisted=False,
+                                navigation_drift_detected=bool(
+                                    _final_follow_state
+                                    not in {"follow", "following", "requested"}
+                                ),
+                            )
+                        )
+                        log(
+                            "warning",
+                            "follow_action_reverted_candidate_local_observed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=str(follower_un or ""),
+                            source_profile_username=source_profile_username,
+                            streak_count=int(
+                                _follow_revert_decision.get("streak_count") or 0
+                            ),
+                            streak_candidates=list(
+                                _follow_revert_decision.get("candidates") or ()
+                            ),
+                            classification_reason=str(
+                                _follow_revert_decision.get("reason") or ""
+                            ),
+                            restriction_triggered=bool(
+                                _follow_revert_decision.get("triggered")
+                            ),
+                            exact_followers_surface_recovered=True,
+                            follow_count_delta=0,
+                            liked_count_persisted=_like_persisted_count,
+                        )
                         _flush_ct_follow_action_logs_unless_deferred()
+                        if _follow_revert_decision.get("triggered") is True:
+                            from instagram_action_restriction import (
+                                get_restriction_runtime_context,
+                            )
+
+                            _restriction_context = get_restriction_runtime_context()
+                            apply_preventive_follow_restriction(
+                                device=d,
+                                account_id=account_id,
+                                account_username=str(
+                                    _restriction_context.account_username or ""
+                                ),
+                                run_id=run_id,
+                                request_id=str(run_request_id or ""),
+                                candidate_username=str(follower_un or ""),
+                                source_profile_username=source_profile_username,
+                                streak_candidates=tuple(
+                                    _follow_revert_decision.get("candidates") or ()
+                                ),
+                                actions_completed=dict(_SESSION_COUNTERS),
+                            )
                         continue
 
                 fs_af = str(follow_out.get("follow_state_after") or "")
+                _follow_revert_tracker.reset(reason="verified_follow_breaks_streak")
                 if bool(follow_out.get("skipped_tap")):
                     f_st = "already_following"
                 elif fs_af == "requested":
