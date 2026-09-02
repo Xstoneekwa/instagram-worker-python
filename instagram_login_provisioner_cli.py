@@ -27,6 +27,7 @@ from instagram_login_provisioner_orchestrator import (
     run_login_provisioning_flow,
 )
 from instagram_supabase_vault_reader import SupabaseVaultClient
+from runtime_artifacts import runtime_artifact_path
 from supabase_client import _request_json
 
 ConnectFunc = Callable[[Optional[str]], Any]
@@ -34,7 +35,7 @@ CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
 SecretReader = Callable[[str], Any]
 RunFlowFunc = Callable[..., Any]
 StatusPublisher = Callable[..., dict[str, Any]]
-DEFAULT_LOG_JSONL = "logs/instagram_login_provisioner.jsonl"
+DEFAULT_LOG_JSONL = str(runtime_artifact_path("instagram_login_provisioner.jsonl"))
 CREDENTIALS_DIAGNOSTIC_KEYS = (
     "credentials_error_code",
     "credentials_invalid_reason",

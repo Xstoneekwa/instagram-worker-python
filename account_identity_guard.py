@@ -43,6 +43,7 @@ from instagram_human_confirmation_challenge import (
     classify_instagram_human_confirmation,
 )
 from logs import log
+from runtime_artifacts import runtime_logs_root
 from own_profile_navigation import open_own_profile_from_bottom_nav
 
 ACCOUNT_IDENTITY_MISMATCH_REASON = "active_instagram_account_mismatch"
@@ -58,7 +59,7 @@ _KEYGUARD_SWIPE_SETTLE_SECONDS = 1.0
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
-_LOGS_ROOT = Path(__file__).resolve().parent / "logs"
+_LOGS_ROOT = runtime_logs_root()
 _IDENTITY_GUARD_ARTIFACTS_DIR = _LOGS_ROOT / "identity_guard"
 _LOADING_RETRY_SECONDS = 2.5
 

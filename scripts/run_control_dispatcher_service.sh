@@ -5,9 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 CURRENT_RELEASE_LINK="${PHONEFARM_CURRENT_SYMLINK:-/Users/admin/phonefarm-worker-current}"
 
-ENV_FILE="${RUN_CONTROL_DISPATCHER_ENV_FILE:-$ROOT_DIR/.env.run-control-dispatcher}"
-LOG_DIR="${RUN_CONTROL_DISPATCHER_LOG_DIR:-$ROOT_DIR/logs/run-control-dispatcher}"
-RUN_DIR="${RUN_CONTROL_DISPATCHER_RUN_DIR:-$ROOT_DIR/.local/run-control-dispatcher}"
+RUNTIME_HOME="${PHONEFARM_RUNTIME_HOME:-/Users/admin/phonefarm-runtime}"
+ENV_FILE="${RUN_CONTROL_DISPATCHER_ENV_FILE:-$RUNTIME_HOME/env/run-control-dispatcher.env}"
+LOG_DIR="${RUN_CONTROL_DISPATCHER_LOG_DIR:-$RUNTIME_HOME/logs/run-control-dispatcher}"
+RUN_DIR="${RUN_CONTROL_DISPATCHER_RUN_DIR:-$RUNTIME_HOME/run/run-control-dispatcher}"
+export PHONEFARM_RUNTIME_HOME="$RUNTIME_HOME"
+export PYTHONDONTWRITEBYTECODE=1
 LOCK_DIR="$RUN_DIR/dispatcher.lock"
 LOCK_OWNER_FILE="$LOCK_DIR/owner.pid"
 PID_FILE="$RUN_DIR/dispatcher.pid"
@@ -161,6 +164,17 @@ if [[ -z "${RUN_CONTROL_DISPATCHER_HOST_MACHINE:-}" ]]; then
 fi
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
+RUNTIME_HOME_PHYSICAL="$(cd "$RUNTIME_HOME" && pwd -P)"
+ROOT_DIR_PHYSICAL="$(cd "$ROOT_DIR" && pwd -P)"
+case "$RUNTIME_HOME_PHYSICAL/" in
+  "$ROOT_DIR_PHYSICAL/"*)
+    echo "FAIL runtime_home_inside_immutable_release runtime_home=$RUNTIME_HOME_PHYSICAL" >&2
+    exit 5
+    ;;
+esac
+# Make the external runtime-control directory the process working directory.
+# All source and verifier invocations remain bound to absolute ROOT_DIR paths.
+cd "$RUNTIME_HOME_PHYSICAL"
 
 _rotate_dispatcher_log_if_needed() {
   local log_file max_bytes retain_count retain_days current_bytes stamp
@@ -227,7 +241,7 @@ _pid_is_consumer() {
   [[ -n "$pid" ]] || return 1
   local command_line executable_name process_cwd
   command_line="$(_pid_command_line "$pid")"
-  [[ "$command_line" == *"account_run_request_consumer.py"* ]] || return 1
+  [[ "$command_line" == *"$ROOT_DIR/account_run_request_consumer.py"* ]] || return 1
   # Short-lived diagnostic subcommands (status preflight, one-shot cycles)
   # must never be counted as real dispatchers, otherwise a status call can
   # report duplicate_dispatcher_processes about its own child.
@@ -240,7 +254,7 @@ _pid_is_consumer() {
   executable_name="${executable_name##*/}"
   [[ "$executable_name" == *"python"* || "$executable_name" == *"Python"* ]] || return 1
   process_cwd="$(_pid_cwd "$pid")"
-  [[ "$process_cwd" == "$ROOT_DIR" ]]
+  [[ -z "$process_cwd" || "$(cd "$process_cwd" 2>/dev/null && pwd -P)" == "$RUNTIME_HOME_PHYSICAL" ]]
 }
 
 _pid_is_wrapper() {
@@ -711,7 +725,7 @@ _start_foreground() {
   _record_pid "$$"
   _rotate_dispatcher_log_if_needed
   RUN_CONTROL_SIGNAL_ORIGIN="control_plane_service_stop" \
-    "$PYTHON_BIN" account_run_request_consumer.py >>"$LOG_DIR/dispatcher.log" 2>&1 &
+    "$PYTHON_BIN" "$ROOT_DIR/account_run_request_consumer.py" >>"$LOG_DIR/dispatcher.log" 2>&1 &
   consumer_pid="$!"
   _record_pid "$consumer_pid"
   set +e
@@ -772,16 +786,16 @@ done
 case "$cmd" in
   preflight)
     if [[ "$json_mode" == "true" ]]; then
-      "$PYTHON_BIN" account_run_request_consumer.py preflight --json
+      "$PYTHON_BIN" "$ROOT_DIR/account_run_request_consumer.py" preflight --json
     else
-      "$PYTHON_BIN" account_run_request_consumer.py preflight
+      "$PYTHON_BIN" "$ROOT_DIR/account_run_request_consumer.py" preflight
     fi
     ;;
   start)
     _start_foreground
     ;;
   once)
-    "$PYTHON_BIN" account_run_request_consumer.py once
+    "$PYTHON_BIN" "$ROOT_DIR/account_run_request_consumer.py" once
     ;;
   status)
     if [[ "$json_mode" == "true" ]]; then
@@ -870,7 +884,7 @@ case "$cmd" in
     _prepare_auto_restart_startup_skip_once
     ;;
   ct-resume-identity-self-test)
-    "$PYTHON_BIN" ct_resume_runtime_identity_self_test.py --stage consumer
+    "$PYTHON_BIN" "$ROOT_DIR/ct_resume_runtime_identity_self_test.py" --stage consumer
     ;;
   fix-duplicate)
     rm -f "$PAUSE_FILE"

@@ -51,6 +51,7 @@ import deferred_projection_outbox
 import device_action_latch
 import ui_continuity_v1
 import storage_health
+from runtime_artifacts import runtime_artifact_path
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
 from worker_runtime_identity import (
@@ -9735,12 +9736,7 @@ def _followers_try_refresh_injection_screenshot_after_scroll(
     Capture the current followers list after a successful forward scroll so the next loop
     iteration's visual injection path does not reuse a pre-scroll bitmap.
     """
-    out = (
-        Path(__file__).resolve().parent
-        / "logs"
-        / "screenshots"
-        / "followers_after_scroll_latest.png"
-    )
+    out = runtime_artifact_path("screenshots", "followers_after_scroll_latest.png")
     capture_ok = False
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -9918,11 +9914,8 @@ def _followers_try_post_return_picker_injection_refresh(
         time.sleep(settle_s)
     except Exception:
         pass
-    out = (
-        Path(__file__).resolve().parent
-        / "logs"
-        / "screenshots"
-        / "followers_after_post_return_latest.png"
+    out = runtime_artifact_path(
+        "screenshots", "followers_after_post_return_latest.png"
     )
     capture_ok = False
     try:
@@ -10021,7 +10014,7 @@ def _followers_injection_screenshot_path(
         p3 = td.get("followers_after_tap_immediate_screenshot_path")
         if p3 and os.path.isfile(str(p3)):
             return str(p3)
-    p4 = Path(__file__).resolve().parent / "logs" / "screenshots" / "followers_after_tap_immediate.png"
+    p4 = runtime_artifact_path("screenshots", "followers_after_tap_immediate.png")
     if p4.is_file():
         return str(p4)
     return None

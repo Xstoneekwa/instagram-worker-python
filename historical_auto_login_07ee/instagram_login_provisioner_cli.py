@@ -34,7 +34,11 @@ CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
 SecretReader = Callable[[str], Any]
 RunFlowFunc = Callable[..., Any]
 StatusPublisher = Callable[..., dict[str, Any]]
-DEFAULT_LOG_JSONL = "logs/instagram_login_provisioner.jsonl"
+_RUNTIME_ROOT = Path(
+    os.environ.get("PHONEFARM_HISTORICAL_AUTO_LOGIN_RUNTIME_ROOT")
+    or (Path.home() / "phonefarm-runtime" / "historical-auto-login")
+).expanduser().resolve()
+DEFAULT_LOG_JSONL = str(_RUNTIME_ROOT / "instagram_login_provisioner.jsonl")
 CREDENTIALS_DIAGNOSTIC_KEYS = (
     "credentials_error_code",
     "credentials_invalid_reason",

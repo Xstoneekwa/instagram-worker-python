@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import storage_health
+from runtime_artifacts import runtime_logs_root
 
 _RUN_LOG_FILE: TextIO | None = None
 _RUN_LOG_PATH: str | None = None
@@ -33,10 +34,7 @@ _OUTPUT_ERRNOS = frozenset(
 
 
 def _runs_dir() -> Path:
-    runtime_root = Path(
-        str(os.environ.get("PHONEFARM_RUNTIME_ROOT") or (Path.home() / "phonefarm-runtime"))
-    ).expanduser()
-    return runtime_root / "logs" / "runs"
+    return runtime_logs_root() / "runs"
 
 
 def get_run_log_file_path() -> str | None:

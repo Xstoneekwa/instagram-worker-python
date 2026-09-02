@@ -16,6 +16,7 @@ from types import MethodType
 from typing import Any
 
 from logs import log
+from runtime_artifacts import runtime_artifact_path
 import ui_continuity_v1
 
 
@@ -28,7 +29,7 @@ _ENABLED = False
 _STOP_REQUESTED = False
 _ACTIVE_ACTIONS = 0
 _TRACE: dict[str, Any] = {}
-_TRACE_DIR = Path("/tmp/phonefarm-follow60-stop-traces")
+_TRACE_DIR = runtime_artifact_path("follow60-stop-traces")
 
 
 def _now() -> str:

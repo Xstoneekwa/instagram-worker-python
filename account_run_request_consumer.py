@@ -88,6 +88,7 @@ from runtime_incident_matrix import (
     classify_terminal_run_failure,
 )
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
+from runtime_artifacts import runtime_artifact_path, runtime_home
 from cooperative_business_stop import (
     StopContext,
     clear_context as clear_cooperative_stop_context,
@@ -1154,7 +1155,7 @@ def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, A
     safe_run_id = str(run_id or "").strip()
     if not safe_run_id:
         return {}
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "instagram_login_provisioner.jsonl")
+    log_path = runtime_artifact_path("instagram_login_provisioner.jsonl")
     try:
         with open(log_path, "r", encoding="utf-8") as handle:
             matches = [
@@ -1617,7 +1618,7 @@ def _reconcile_linked_run(
                 stage_key = str(row.get("stage_idempotency_key") or "")
                 if stage_key:
                     stages.add(stage_key)
-            trace_path = Path("/tmp/phonefarm-follow60-stop-traces") / f"{run_id}.json"
+            trace_path = runtime_artifact_path("follow60-stop-traces", f"{run_id}.json")
             stop_trace: dict[str, Any] = {}
             if trace_path.is_file():
                 stop_trace = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -3692,6 +3693,14 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     if auto_restart_policy:
         subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
 
+    # Keep the immutable release tree out of the child process working
+    # directory as well as out of every explicitly managed artifact path.
+    # This closes the remaining escape hatch for libraries that create a
+    # relative cache, temporary file, or diagnostic without using our path
+    # helpers.
+    runner_workdir = runtime_home()
+    runner_workdir.mkdir(parents=True, exist_ok=True)
+
     global _last_integration_noop_proof
     _last_integration_noop_proof = None
     if _integration_noop_runner_enabled():
@@ -3704,7 +3713,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         }
         completed = subprocess.run(
             cmd,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=str(runner_workdir),
             env=subprocess_env,
             capture_output=True,
             text=True,
@@ -3729,7 +3738,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             ).isoformat()
         proc = subprocess.Popen(
             cmd,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=str(runner_workdir),
             env=subprocess_env,
         )
         exit_code, timed_out = _wait_for_subprocess(

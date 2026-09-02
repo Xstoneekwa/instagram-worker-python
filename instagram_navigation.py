@@ -377,7 +377,9 @@ _PENDING_FUSED_FAST_IME_ROW: bool = False
 _PENDING_FUSED_FAST_IME_USERNAME: str = ""
 
 # Debug artifacts (relative to this package)
-_LOGS_ROOT = Path(__file__).resolve().parent / "logs"
+from runtime_artifacts import runtime_logs_root
+
+_LOGS_ROOT = runtime_logs_root()
 _SCREENSHOTS_DIR = _LOGS_ROOT / "screenshots"
 _XML_DIR = _LOGS_ROOT / "xml"
 

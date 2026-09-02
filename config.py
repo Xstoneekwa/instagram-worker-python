@@ -2,6 +2,8 @@
 
 import os
 
+from runtime_artifacts import runtime_home
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -741,6 +743,8 @@ LIVE_VIEW_HOST_AGENT_ENABLED = _env_bool("LIVE_VIEW_HOST_AGENT_ENABLED", False)
 LIVE_VIEW_HOST_ID = _env_str("LIVE_VIEW_HOST_ID", "")
 LIVE_VIEW_POLL_INTERVAL_SECONDS = _env_float("LIVE_VIEW_POLL_INTERVAL_SECONDS", 2.0)
 LIVE_VIEW_MAX_SESSION_SECONDS = _env_int("LIVE_VIEW_MAX_SESSION_SECONDS", 600)
-LIVE_VIEW_FRAME_DIR = _env_str("LIVE_VIEW_FRAME_DIR", ".local/live-view-frames")
+LIVE_VIEW_FRAME_DIR = _env_str(
+    "LIVE_VIEW_FRAME_DIR", str(runtime_home() / "live-view-frames")
+)
 LIVE_VIEW_FRAME_UPLOAD_ENABLED = _env_bool("LIVE_VIEW_FRAME_UPLOAD_ENABLED", True)
 LIVE_VIEW_FRAME_STORAGE_BUCKET = _env_str("LIVE_VIEW_FRAME_STORAGE_BUCKET", "live-view-frames")

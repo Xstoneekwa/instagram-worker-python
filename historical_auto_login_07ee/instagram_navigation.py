@@ -260,8 +260,11 @@ ROW_SEARCH_USERNAME_EXACT_RES = "com.instagram.android:id/row_search_user_userna
 _PENDING_FUSED_FAST_IME_ROW: bool = False
 _PENDING_FUSED_FAST_IME_USERNAME: str = ""
 
-# Debug artifacts (relative to this package)
-_LOGS_ROOT = Path(__file__).resolve().parent / "logs"
+# Debug artifacts are mutable runtime evidence, never release content.
+_LOGS_ROOT = Path(
+    os.environ.get("PHONEFARM_HISTORICAL_AUTO_LOGIN_RUNTIME_ROOT")
+    or (Path.home() / "phonefarm-runtime" / "historical-auto-login")
+).expanduser().resolve() / "logs"
 _SCREENSHOTS_DIR = _LOGS_ROOT / "screenshots"
 _XML_DIR = _LOGS_ROOT / "xml"
 
@@ -47728,4 +47731,3 @@ def verify_app_foreground(d: u2.Device, package: str | None = None) -> bool:
     except Exception as e:
         log("error", "app_foreground_check_failed", error=str(e))
         return False
-

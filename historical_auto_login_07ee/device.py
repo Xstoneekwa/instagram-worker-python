@@ -29,8 +29,12 @@ _ime_session_original: str | None = None
 # True after global animation scales are set to 0 for this process.
 _android_animations_disabled_session: bool = False
 
-# Local baseline for strict version lock (per clone / phone farm host).
-LOCK_STATE_PATH = Path(__file__).resolve().parent / "lock_state.json"
+# Mutable strict-version state belongs to runtime, never the sealed engine.
+_RUNTIME_ROOT = Path(
+    os.environ.get("PHONEFARM_HISTORICAL_AUTO_LOGIN_RUNTIME_ROOT")
+    or (Path.home() / "phonefarm-runtime" / "historical-auto-login")
+).expanduser().resolve()
+LOCK_STATE_PATH = _RUNTIME_ROOT / "lock_state.json"
 _PLAY_STORE_PKG = "com.android.vending"
 _VERSION_NAME_RE = re.compile(r"versionName=([^\s\]]+)")
 _VERSION_CODE_RE = re.compile(r"versionCode=(\d+)")

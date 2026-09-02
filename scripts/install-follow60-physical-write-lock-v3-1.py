@@ -24,6 +24,7 @@ from follow60_external_deployment_lock_v2 import (  # noqa: E402
     initialize_store, storage_guard, exact_admission, seal_path, seal_payload,
     atomic_record, verify_seal,
 )
+from runtime_artifacts import follow60_certification_paths  # noqa: E402
 
 
 def _run(*args: str) -> None:
@@ -33,18 +34,19 @@ def _run(*args: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-root", required=True)
-    parser.add_argument("--manifest", default="docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json")
+    parser.add_argument("--manifest")
     parser.add_argument("--verified-revision", required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("root_required_for_follow60_physical_write_lock")
     root = Path(args.target_root).resolve()
-    manifest = (root / args.manifest).resolve()
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if revision != args.verified_revision:
         raise SystemExit("verified_revision_mismatch")
-    if manifest != root / 'docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json':
-        raise SystemExit('canonical_installed_manifest_required')
+    canonical_manifest, _ = follow60_certification_paths(root)
+    manifest = Path(args.manifest).resolve() if args.manifest else canonical_manifest
+    if manifest != canonical_manifest:
+        raise SystemExit('exact_sha_bound_manifest_required')
     before = exact_admission(root)  # Signature/identity/clean source BEFORE OS mutation.
     protected = load_protected_paths(manifest)
     directories = protected_directories(protected)

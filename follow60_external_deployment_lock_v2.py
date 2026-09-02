@@ -20,6 +20,7 @@ import tempfile
 import uuid
 
 from follow60_deployment_gate_v1 import verify_deployment_candidate, MANIFEST_RELATIVE
+from runtime_artifacts import follow60_certification_paths
 
 STORE = Path('/Users/admin/phonefarm-runtime/run/follow60-lock-v2')
 PROTOCOL_VERSION = 'FOLLOW60_EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2'
@@ -160,20 +161,24 @@ def owner_identity(pid=None):
 
 
 def exact_admission(root):
-    value = verify_deployment_candidate(Path(root))
+    manifest, signature = follow60_certification_paths(Path(root))
+    value = verify_deployment_candidate(
+        Path(root), manifest_path=manifest, signature_path=signature
+    )
     if not value.get('ok'):
         raise LockFailure('candidate_gate:' + str(value.get('reason')))
     identity = value['candidate_identity']
     return {key: identity[key] for key in ('candidate_commit_sha', 'candidate_tree_sha', 'canonical_diff_sha256')} | {
         'manifest_sha256': value['manifest_sha256'],
-        'signature_sha256': digest(Path(root) / 'docs/governance/FOLLOW60_MAINLINE_LOCK_V3.sig'),
+        'signature_sha256': digest(signature),
         'candidate_root': str(Path(root).resolve()),
     }
 
 
 def verify_seal(root):
     from follow60_write_lock_v3_1 import verify_physical_write_lock
-    value = verify_physical_write_lock(Path(root), Path(root) / MANIFEST_RELATIVE)
+    manifest, _ = follow60_certification_paths(Path(root))
+    value = verify_physical_write_lock(Path(root), manifest)
     if not value.get('ok'):
         raise LockFailure('physical_seal:' + str(value.get('reason') or value.get('failures')))
     return value

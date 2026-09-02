@@ -4,9 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE="${INCIDENT_NOTIFIER_ENV_FILE:-$ROOT_DIR/.env}"
-LOG_DIR="${INCIDENT_NOTIFIER_LOG_DIR:-$ROOT_DIR/logs/incident-notifier}"
-RUN_DIR="${INCIDENT_NOTIFIER_RUN_DIR:-$ROOT_DIR/.local/incident-notifier}"
+RUNTIME_HOME="${PHONEFARM_RUNTIME_HOME:-/Users/admin/phonefarm-runtime}"
+ENV_FILE="${INCIDENT_NOTIFIER_ENV_FILE:-$RUNTIME_HOME/env/incident-notifier.env}"
+LOG_DIR="${INCIDENT_NOTIFIER_LOG_DIR:-$RUNTIME_HOME/logs/incident-notifier}"
+RUN_DIR="${INCIDENT_NOTIFIER_RUN_DIR:-$RUNTIME_HOME/run/incident-notifier}"
+export PHONEFARM_RUNTIME_HOME="$RUNTIME_HOME"
+export PYTHONDONTWRITEBYTECODE=1
 LOCK_DIR="$RUN_DIR/notifier.lock"
 PID_FILE="$RUN_DIR/notifier.pid"
 STATE_FILE="$RUN_DIR/last_cycle.json"
@@ -39,6 +42,15 @@ _resolve_python_path() {
 PYTHON_BIN="$(_resolve_python_path)"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/verify-follow60-deployment-candidate-v1.py" --target-root "$ROOT_DIR" >/dev/null
 mkdir -p "$LOG_DIR" "$RUN_DIR"
+RUNTIME_HOME_PHYSICAL="$(cd "$RUNTIME_HOME" && pwd -P)"
+ROOT_DIR_PHYSICAL="$(cd "$ROOT_DIR" && pwd -P)"
+case "$RUNTIME_HOME_PHYSICAL/" in
+  "$ROOT_DIR_PHYSICAL/"*)
+    echo "FAIL runtime_home_inside_immutable_release runtime_home=$RUNTIME_HOME_PHYSICAL" >&2
+    exit 5
+    ;;
+esac
+cd "$RUNTIME_HOME_PHYSICAL"
 
 _pid_alive() {
   local pid="${1:-}"

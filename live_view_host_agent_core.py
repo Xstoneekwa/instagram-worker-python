@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from runtime_artifacts import runtime_home
+
 ACTIVE_SESSION_STATUSES = frozenset({"pending", "starting", "active"})
 TERMINAL_SESSION_STATUSES = frozenset({"stopped", "failed", "expired"})
 OPEN_ASSIGNMENT_STATUSES = frozenset({"pending", "reserved", "active"})
@@ -37,7 +39,11 @@ class LiveViewHostConfig:
             host_id=_env_str(source, "LIVE_VIEW_HOST_ID", "").strip(),
             poll_interval_seconds=max(0.5, _env_float(source, "LIVE_VIEW_POLL_INTERVAL_SECONDS", 2.0)),
             max_session_seconds=max(30, _env_int(source, "LIVE_VIEW_MAX_SESSION_SECONDS", 600)),
-            frame_dir=_env_str(source, "LIVE_VIEW_FRAME_DIR", ".local/live-view-frames"),
+            frame_dir=_env_str(
+                source,
+                "LIVE_VIEW_FRAME_DIR",
+                str(runtime_home() / "live-view-frames"),
+            ),
             frame_upload_enabled=_env_bool(source, "LIVE_VIEW_FRAME_UPLOAD_ENABLED", True),
             storage_bucket=_env_str(source, "LIVE_VIEW_FRAME_STORAGE_BUCKET", "live-view-frames"),
             adb_path=_env_str(source, "ADB_PATH", "adb"),

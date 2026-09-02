@@ -22,6 +22,7 @@ from typing import Any
 import config
 import supabase_client
 from logs import log
+from runtime_artifacts import runtime_logs_root
 
 
 STABLE_REASON = "instagram_action_rate_limit"
@@ -31,7 +32,7 @@ PAUSE_POLICY_SOURCE = "bmb_operational_policy_48h"
 RECOMMENDED_PAUSE = timedelta(hours=48)
 EXIT_CODE = 76
 
-_EVIDENCE_ROOT = Path(__file__).resolve().parent / "logs" / "restriction-evidence"
+_EVIDENCE_ROOT = runtime_logs_root() / "restriction-evidence"
 _SAFE_FRAGMENT_MARKERS = (
     "try again later",
     "reessayer plus tard",

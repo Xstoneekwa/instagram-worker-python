@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from logs import log
+from runtime_artifacts import runtime_home
 
 
 OUTBOX_SCHEMA = "FOLLOW_60S_POST_FOLLOW_OUTBOX_V2"
@@ -31,16 +32,7 @@ VALID_STAGES = (
 DEFAULT_PATH = Path(
     os.environ.get(
         "FOLLOW_60S_POST_FOLLOW_OUTBOX_PATH",
-        str(
-            Path(
-                os.environ.get(
-                    "PHONEFARM_RUNTIME_ROOT",
-                    str(Path.home() / "phonefarm-runtime"),
-                )
-            )
-            / "receipts"
-            / "follow_60s_post_follow_outbox_v2.sqlite3"
-        ),
+        str(runtime_home() / "receipts" / "follow_60s_post_follow_outbox_v2.sqlite3"),
     )
 )
 

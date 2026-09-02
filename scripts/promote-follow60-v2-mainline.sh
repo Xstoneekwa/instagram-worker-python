@@ -9,7 +9,8 @@ if test "${1:-}" = "--execute"; then
   python3 "$ROOT/scripts/verify-follow60-physical-write-lock-v3-1.py" --target-root "$ROOT"
 fi
 
-LOCK_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lock_state"])' "$ROOT/docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json" 2>/dev/null || true)"
+MANIFEST="$(PYTHONPATH="$ROOT" python3 -c 'import sys; from pathlib import Path; from runtime_artifacts import follow60_certification_paths; print(follow60_certification_paths(Path(sys.argv[1]))[0])' "$ROOT" 2>/dev/null || true)"
+LOCK_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lock_state"])' "$MANIFEST" 2>/dev/null || true)"
 if test "$LOCK_STATE" = "UNLOCKED"; then
   printf '%s\n' "PACKAGE_WHILE_UNLOCKED=FAIL" >&2
   exit 4

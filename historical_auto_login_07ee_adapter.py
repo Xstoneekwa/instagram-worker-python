@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 from follow_source_rotation_settings import maybe_provision_follow_source_rotation_on_ready
 from logs import log
 import supabase_client
+from runtime_artifacts import historical_auto_login_runtime_root
 
 
 HISTORICAL_ENGINE_ROOT = Path(__file__).resolve().parent / "historical_auto_login_07ee"
@@ -92,7 +93,11 @@ def execute_historical_engine(
     environ: Mapping[str, str] | None = None,
 ) -> int:
     command = build_historical_command(invocation)
-    result = run_process(command, env=dict(os.environ if environ is None else environ), check=False)
+    child_env = dict(os.environ if environ is None else environ)
+    child_env["PHONEFARM_HISTORICAL_AUTO_LOGIN_RUNTIME_ROOT"] = str(
+        historical_auto_login_runtime_root()
+    )
+    result = run_process(command, env=child_env, check=False)
     exit_code = int(getattr(result, "returncode", result))
     if exit_code != 0:
         return exit_code
@@ -101,7 +106,7 @@ def execute_historical_engine(
 
 
 def _read_historical_summary(run_id: str) -> dict[str, Any]:
-    log_path = Path("logs") / "instagram_login_provisioner.jsonl"
+    log_path = historical_auto_login_runtime_root() / "instagram_login_provisioner.jsonl"
     try:
         with log_path.open("r", encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle if line.strip() and f'"run_id":"{run_id}"' in line]

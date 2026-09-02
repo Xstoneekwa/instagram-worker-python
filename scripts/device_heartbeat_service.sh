@@ -4,9 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE="${DEVICE_HEARTBEAT_ENV_FILE:-$ROOT_DIR/.env}"
-LOG_DIR="${DEVICE_HEARTBEAT_LOG_DIR:-$ROOT_DIR/logs/device-heartbeat-service}"
-RUN_DIR="${DEVICE_HEARTBEAT_RUN_DIR:-$ROOT_DIR/.local/device-heartbeat-service}"
+RUNTIME_HOME="${PHONEFARM_RUNTIME_HOME:-/Users/admin/phonefarm-runtime}"
+ENV_FILE="${DEVICE_HEARTBEAT_ENV_FILE:-$RUNTIME_HOME/env/device-heartbeat.env}"
+LOG_DIR="${DEVICE_HEARTBEAT_LOG_DIR:-$RUNTIME_HOME/logs/device-heartbeat-service}"
+RUN_DIR="${DEVICE_HEARTBEAT_RUN_DIR:-$RUNTIME_HOME/run/device-heartbeat-service}"
+export PHONEFARM_RUNTIME_HOME="$RUNTIME_HOME"
+export PYTHONDONTWRITEBYTECODE=1
 LOCK_DIR="$RUN_DIR/heartbeat.lock"
 PID_FILE="$RUN_DIR/heartbeat.pid"
 PAUSE_FILE="$RUN_DIR/paused"
@@ -88,6 +91,15 @@ _resolve_host_label() {
 
 HOST_LABEL="$(_resolve_host_label)"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
+RUNTIME_HOME_PHYSICAL="$(cd "$RUNTIME_HOME" && pwd -P)"
+ROOT_DIR_PHYSICAL="$(cd "$ROOT_DIR" && pwd -P)"
+case "$RUNTIME_HOME_PHYSICAL/" in
+  "$ROOT_DIR_PHYSICAL/"*)
+    echo "FAIL runtime_home_inside_immutable_release runtime_home=$RUNTIME_HOME_PHYSICAL" >&2
+    exit 5
+    ;;
+esac
+cd "$RUNTIME_HOME_PHYSICAL"
 
 _pid_alive() {
   local pid="${1:-}"

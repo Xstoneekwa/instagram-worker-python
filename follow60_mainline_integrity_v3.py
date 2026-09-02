@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from follow60_lock_v3 import verify_runtime
+from runtime_artifacts import follow60_certification_paths
 
 
 MANIFEST_RELATIVE_PATH = "docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json"
@@ -27,16 +28,21 @@ def verify_runtime_integrity(
     binding_kind: str,
     engine: str,
     manifest_path: Path | None = None,
+    signature_path: Path | None = None,
 ) -> dict[str, Any]:
     """Verify the canonical signed manifest before any Follow60 UI action."""
     root = Path(root).resolve()
-    path = manifest_path or (root / MANIFEST_RELATIVE_PATH)
+    if manifest_path is None and signature_path is None:
+        path, signature = follow60_certification_paths(root)
+    else:
+        path = Path(manifest_path or (root / MANIFEST_RELATIVE_PATH)).resolve()
+        signature = Path(signature_path or (root / SIGNATURE_RELATIVE_PATH)).resolve()
     return verify_runtime(
         root,
         runtime_mode=runtime_mode,
         binding_kind=binding_kind,
         engine=engine,
         manifest_path=path,
-        signature_path=root / SIGNATURE_RELATIVE_PATH,
+        signature_path=signature,
         public_key_path=root / PUBLIC_KEY_RELATIVE_PATH,
     )

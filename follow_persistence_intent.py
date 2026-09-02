@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime_artifacts import runtime_home
+
 
 TERMINAL_STAGES = {
     "persisted",
@@ -65,11 +67,10 @@ def preflight_runtime_storage() -> dict[str, Any]:
 
 
 def _root() -> Path:
-    runtime_home = Path(os.getenv("PHONEFARM_RUNTIME_HOME", "/Users/admin/phonefarm-runtime"))
     return Path(
         os.getenv(
             "FOLLOW_PERSISTENCE_INTENT_ROOT",
-            str(runtime_home / "run" / "follow-persistence-intents"),
+            str(runtime_home() / "run" / "follow-persistence-intents"),
         )
     )
 

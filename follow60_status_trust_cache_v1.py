@@ -22,6 +22,7 @@ from follow60_deployment_gate_v1 import (
 from follow60_lock_v3 import canonical_json, verify_detached_signature
 import follow60_external_deployment_lock_v2 as physical
 from follow60_write_lock_v3_1 import load_protected_paths, _verify_physical_metadata
+from runtime_artifacts import follow60_certification_paths
 
 SCHEMA = 'FOLLOW60_STATUS_TRUST_CACHE_V1'
 CURRENT_LINK = Path('/Users/admin/phonefarm-worker-current')
@@ -36,6 +37,7 @@ PROTOCOL_FILES = (
     'scripts/verify-follow60-status-trust-v1.py',
     'scripts/install-follow60-status-trust-cache-v1.py',
     'scripts/run_control_dispatcher_service.sh',
+    'runtime_artifacts.py',
 )
 
 
@@ -114,11 +116,12 @@ def _snapshot(target):
     if target.parent != RELEASES.resolve():
         raise TrustFailure('status_target_not_canonical_release')
     root_info = target.lstat()
-    manifest_raw = _regular_bytes(target / MANIFEST_RELATIVE)
-    signature_raw = _regular_bytes(target / SIGNATURE_RELATIVE)
+    manifest_path, signature_path = follow60_certification_paths(target)
+    manifest_raw = _regular_bytes(manifest_path)
+    signature_raw = _regular_bytes(signature_path)
     public_raw = _regular_bytes(target / PUBLIC_KEY_RELATIVE)
-    signed, reason = verify_detached_signature(target / MANIFEST_RELATIVE,
-                                              target / SIGNATURE_RELATIVE,
+    signed, reason = verify_detached_signature(manifest_path,
+                                              signature_path,
                                               target / PUBLIC_KEY_RELATIVE)
     if not signed:
         raise TrustFailure(reason)
@@ -147,7 +150,7 @@ def _snapshot(target):
     admission.update(manifest_sha256=_hash(manifest_raw), signature_sha256=_hash(signature_raw),
                      candidate_root=str(target))
     metadata = _verify_physical_metadata(target, seal_path, seal,
-                                        load_protected_paths(target / MANIFEST_RELATIVE), admission)
+                                        load_protected_paths(manifest_path), admission)
     if not metadata['ok']:
         raise TrustFailure('status_physical_lock_invalid')
     protected = manifest['protected_entries']
@@ -177,9 +180,9 @@ def _snapshot(target):
         'python_implementation_and_version': [platform.python_implementation(), list(sys.version_info[:3])],
     }
     # Re-read byte identities after the independent signature verifier's reads.
-    for file, raw in ((MANIFEST_RELATIVE, manifest_raw), (SIGNATURE_RELATIVE, signature_raw),
-                      (PUBLIC_KEY_RELATIVE, public_raw)):
-        if _regular_bytes(target / file) != raw:
+    for file, raw in ((manifest_path, manifest_raw), (signature_path, signature_raw),
+                      (target / PUBLIC_KEY_RELATIVE, public_raw)):
+        if _regular_bytes(file) != raw:
             raise TrustFailure('status_certification_changed_during_snapshot')
     if _regular_bytes(REGISTRY) != registry_raw or CURRENT_LINK.resolve() != target:
         raise TrustFailure('status_identity_changed_during_snapshot')
@@ -212,7 +215,10 @@ def verify_status_trust(target):
             cache_state = 'HIT'
         except (OSError, ValueError, KeyError, TypeError, physical.LockFailure):
             # Missing/corrupt data cannot become trust. No cache is written here.
-            full = verify_deployment_candidate(Path(target))
+            manifest, signature = follow60_certification_paths(Path(target))
+            full = verify_deployment_candidate(
+                Path(target), manifest_path=manifest, signature_path=signature
+            )
             if not full.get('ok'):
                 raise TrustFailure('status_full_verification_failed:' + str(full.get('reason')))
         after = _snapshot(target)
@@ -232,7 +238,10 @@ def install_status_attestation(target):
     physical._root_only()
     with physical.storage_guard(Path(target)):
         before = _snapshot(target)
-        full = verify_deployment_candidate(Path(target))
+        manifest, signature = follow60_certification_paths(Path(target))
+        full = verify_deployment_candidate(
+            Path(target), manifest_path=manifest, signature_path=signature
+        )
         if not full.get('ok'):
             raise TrustFailure('status_attestation_full_verification_failed')
         after = _snapshot(target)

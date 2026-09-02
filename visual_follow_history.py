@@ -10,11 +10,12 @@ from typing import Any
 import config
 import social_memory
 from logs import log
+from runtime_artifacts import runtime_artifact_path
 
 # Sentinel returned by the visual picker when the followers engine should iterate again.
 VISUAL_FOLLOW_HISTORY_CONTINUE = -15927
 
-_HISTORY_PATH = Path(__file__).resolve().parent / "logs" / "visual_follow_targets_history.json"
+_HISTORY_PATH = runtime_artifact_path("visual_follow_targets_history.json")
 _MAX_RECORDS = 5000
 
 

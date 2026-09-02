@@ -21,6 +21,8 @@ def test_wrapper_git_identity_uses_exact_process_scoped_safe_directory() -> None
     assert 'export GIT_CONFIG_COUNT="1"' in source
     assert 'export GIT_CONFIG_KEY_0="safe.directory"' in source
     assert 'export GIT_CONFIG_VALUE_0="$ROOT_DIR"' in source
+    assert 'cd "$RUNTIME_HOME_PHYSICAL"' in source
+    assert '== "$RUNTIME_HOME_PHYSICAL"' in source
     assert "safe.directory=*" not in source
     assert "git config --global" not in source
 
@@ -56,11 +58,14 @@ def _event_count(path: Path, marker: str) -> int:
 def _make_harness(tmp_path: Path) -> dict[str, Path]:
     root = tmp_path / "worker"
     scripts = root / "scripts"
-    run_dir = root / "run"
-    logs = root / "logs"
+    test_bin = root / "test-bin"
+    runtime = tmp_path / "runtime-home"
+    run_dir = runtime / "run" / "run-control-dispatcher"
+    logs = runtime / "logs" / "run-control-dispatcher"
     scripts.mkdir(parents=True)
-    run_dir.mkdir()
-    logs.mkdir()
+    test_bin.mkdir()
+    run_dir.mkdir(parents=True)
+    logs.mkdir(parents=True)
     shutil.copy2(WRAPPER_SOURCE, scripts / "run_control_dispatcher_service.sh")
     shutil.copy2(TOKEN_HELPER_SOURCE, root / "startup_tick_skip_token.py")
     (scripts / "run_control_dispatcher_service.sh").chmod(0o755)
@@ -80,6 +85,9 @@ raise SystemExit(2 if os.environ.get("DUMMY_CERTIFICATION_GATE_ACTIVE") == "1" e
         encoding="utf-8",
     )
     deployment_verifier.chmod(0o755)
+    status_verifier = scripts / "verify-follow60-status-trust-v1.py"
+    status_verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    status_verifier.chmod(0o755)
 
     dummy_consumer = root / "account_run_request_consumer.py"
     dummy_consumer.write_text(
@@ -137,6 +145,29 @@ raise SystemExit(2)
     adb = root / "adb"
     adb.write_text("#!/usr/bin/env sh\nexit 0\n")
     adb.chmod(0o755)
+    ps_stub = test_bin / "ps"
+    ps_stub.write_text(
+        "#!/usr/bin/env sh\n"
+        "pid=''\n"
+        "while [ \"$#\" -gt 0 ]; do [ \"$1\" = '-p' ] && { shift; pid=\"$1\"; }; shift || true; done\n"
+        "consumer=$(tr -dc '0-9' < \"$RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.pid\" 2>/dev/null || true)\n"
+        "owner=$(tr -dc '0-9' < \"$RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.lock/owner.pid\" 2>/dev/null || true)\n"
+        "if [ \"$pid\" = \"$consumer\" ]; then printf '%s\\n' \"$RUN_CONTROL_DISPATCHER_PYTHON $DUMMY_WORKER_ROOT/account_run_request_consumer.py\"; exit 0; fi\n"
+        "if [ \"$pid\" = \"$owner\" ]; then printf '%s\\n' \"bash $DUMMY_WORKER_ROOT/scripts/run_control_dispatcher_service.sh start\"; exit 0; fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    ps_stub.chmod(0o755)
+    pgrep_stub = test_bin / "pgrep"
+    pgrep_stub.write_text(
+        "#!/usr/bin/env sh\n"
+        "case \"$*\" in\n"
+        "  *account_run_request_consumer*) tr -dc '0-9' < \"$RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.pid\" 2>/dev/null || true ; echo ;;\n"
+        "  *run_control_dispatcher_service*) tr -dc '0-9' < \"$RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.lock/owner.pid\" 2>/dev/null || true ; echo ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    pgrep_stub.chmod(0o755)
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(
@@ -153,7 +184,15 @@ raise SystemExit(2)
         cwd=root,
         check=True,
     )
-    return {"root": root, "wrapper": scripts / "run_control_dispatcher_service.sh", "run_dir": run_dir, "logs": logs, "adb": adb}
+    return {
+        "root": root,
+        "runtime": runtime,
+        "wrapper": scripts / "run_control_dispatcher_service.sh",
+        "run_dir": run_dir,
+        "logs": logs,
+        "adb": adb,
+        "test_bin": test_bin,
+    }
 
 
 def _env(harness: dict[str, Path], events: Path, **extra: str) -> dict[str, str]:
@@ -169,7 +208,9 @@ def _env(harness: dict[str, Path], events: Path, **extra: str) -> dict[str, str]
             "SUPABASE_SERVICE_ROLE_KEY": "dummy",
             "ADB_PATH": str(harness["adb"]),
             "DUMMY_CONSUMER_EVENTS": str(events),
-            "PHONEFARM_RUNTIME_HOME": str(harness["root"]),
+            "PHONEFARM_RUNTIME_HOME": str(harness["runtime"]),
+            "DUMMY_WORKER_ROOT": str(harness["root"]),
+            "PATH": f'{harness["test_bin"]}:{env.get("PATH", "")}',
         }
     )
     env.update(extra)

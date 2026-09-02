@@ -15,6 +15,7 @@ from typing import Any
 
 from follow60_lock_v3 import sha256_bytes, verify_repository, verify_resume_state_contract_evidence
 from follow60_candidate_identity_v2 import external_path, verify_manifest_identity
+from runtime_artifacts import follow60_certification_paths
 
 
 MANIFEST_RELATIVE = Path("docs/governance/FOLLOW60_MAINLINE_LOCK_V3.json")
@@ -39,8 +40,11 @@ def verify_deployment_candidate(
     revision: str = "HEAD",
 ) -> dict[str, Any]:
     root = Path(root).resolve()
-    manifest_path = Path(manifest_path or root / MANIFEST_RELATIVE).resolve()
-    signature_path = Path(signature_path or root / SIGNATURE_RELATIVE).resolve()
+    if manifest_path is None and signature_path is None:
+        manifest_path, signature_path = follow60_certification_paths(root)
+    else:
+        manifest_path = Path(manifest_path or root / MANIFEST_RELATIVE).resolve()
+        signature_path = Path(signature_path or root / SIGNATURE_RELATIVE).resolve()
     public_key_path = Path(public_key_path or root / PUBLIC_KEY_RELATIVE).resolve()
     try:
         candidate_sha = _git_sha(root, revision)

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from follow60_deployment_gate_v1 import verify_deployment_candidate
+from runtime_artifacts import deployment_evidence_dir
 from startup_tick_skip_token import (
     TOKEN_FILENAME,
     StartupSkipTokenError,
@@ -239,6 +240,24 @@ def _git_full_commit(root: Path) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def _git_tree_sha(root: Path) -> str:
+    try:
+        exact_root = Path(root).expanduser().resolve(strict=True)
+        proc = subprocess.run(
+            [
+                "git", "-c", f"safe.directory={exact_root}", "-C", str(exact_root),
+                "rev-parse", "HEAD^{tree}",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def _canonical_json_hash(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -259,7 +278,14 @@ def _is_user_immutable(path: Path) -> bool:
 def _validate_release_evidence(
     release_root: Path, integrity: dict[str, Any]
 ) -> dict[str, Any]:
-    evidence_dir = release_root / ".deployment"
+    candidate_sha = _git_full_commit(release_root)
+    if not candidate_sha:
+        return {"ok": False, "reason": "release_evidence_candidate_unresolved"}
+    external_dir = deployment_evidence_dir(candidate_sha)
+    # Compatibility only for previously installed releases. New releases are
+    # admitted through SHA-bound external evidence and remain clean Git trees.
+    external_evidence = external_dir.is_dir()
+    evidence_dir = external_dir if external_evidence else release_root / ".deployment"
     paths = {
         "build": evidence_dir / "candidate-build-receipt.json",
         "migration": evidence_dir / "migration-attestation.json",
@@ -276,7 +302,6 @@ def _validate_release_evidence(
     except Exception as exc:
         return {"ok": False, "reason": str(exc)[:240] or type(exc).__name__}
 
-    candidate_sha = _git_full_commit(release_root)
     if not candidate_sha or candidate_sha != integrity.get("candidate_sha"):
         return {"ok": False, "reason": "release_evidence_candidate_unresolved"}
     required_build = {
@@ -292,6 +317,11 @@ def _validate_release_evidence(
         "signature_result": "PASS",
         "lineage_gate_result": "PASS",
     }
+    if external_evidence:
+        required_build.update({
+            "release_tree_sha": _git_tree_sha(release_root),
+            "sealed_release_clean": True,
+        })
     for key, expected in required_build.items():
         if build.get(key) != expected:
             return {"ok": False, "reason": f"candidate_build_receipt_mismatch:{key}"}

@@ -30,6 +30,7 @@ REQUIRED_STATUS_TRUST_SCOPE = {
     "scripts/verify-follow60-status-trust-v1.py",
     "scripts/install-follow60-status-trust-cache-v1.py",
     "scripts/run_control_dispatcher_service.sh",
+    "runtime_artifacts.py",
 }
 
 

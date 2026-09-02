@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,11 @@ _RUN_LOG_PATH: str | None = None
 
 
 def _runs_dir() -> Path:
-    return Path(__file__).resolve().parent / "runs"
+    root = Path(
+        os.environ.get("PHONEFARM_HISTORICAL_AUTO_LOGIN_RUNTIME_ROOT")
+        or (Path.home() / "phonefarm-runtime" / "historical-auto-login")
+    ).expanduser().resolve()
+    return root / "logs" / "runs"
 
 
 def get_run_log_file_path() -> str | None:
