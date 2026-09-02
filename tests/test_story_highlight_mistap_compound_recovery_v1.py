@@ -99,6 +99,90 @@ class StoryHighlightMisTapClassificationTests(unittest.TestCase):
         self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
         self.assertTrue(out["post_bounds"]["grid_lineage_proven"])
 
+
+class GoldenHighlightPreventionTests(unittest.TestCase):
+    def _classify(self, xml: str, *, width: int = 1080, height: int = 2340):
+        return nav._post_follow_post_grid_evidence_from_xml(
+            xml,
+            candidate_username="cand",
+            ww=width,
+            wh=height,
+            profile_identity_exact=True,
+            profile_origin_exact=True,
+        )
+
+    def _proof(self, **overrides: object) -> dict[str, object]:
+        proof: dict[str, object] = {
+            "physical_cells": [{"grid_lineage_proven": True}],
+            "highlights_region_detected": True,
+            "highlights_region_separate": True,
+            "suggested_region_separate": True,
+        }
+        proof.update(overrides)
+        return proof
+
+    def _guard(
+        self,
+        *,
+        proof: dict[str, object] | None = None,
+        existence: bool = True,
+        profile_lock: bool = True,
+        tabs_bottom: int | None = 700,
+        col: int = 0,
+        row: int = 0,
+        top: int = 900,
+        hints: dict[str, object] | None = None,
+    ) -> tuple[bool, str]:
+        return nav._post_follow_golden_post_open_intent_lineage_guard(
+            proof if proof is not None else self._proof(),
+            post_existence_reusable=existence,
+            profile_lock_proved=profile_lock,
+            profile_tabs_bottom_y_px=tabs_bottom,
+            profile_tabs_margin_px=12,
+            selected_col=col,
+            selected_row=row,
+            selected_top_y_px=top,
+            ui_hints=hints,
+        )
+
+    def test_highlights_and_posts_with_separate_grid_lineage_pass(self) -> None:
+        self.assertEqual(
+            self._guard(),
+            (True, "golden_fresh_structural_grid_lineage_proved"),
+        )
+
+    def test_highlights_and_reels_without_reusable_post_proof_fail(self) -> None:
+        ok, _ = self._guard(existence=False)
+        self.assertFalse(ok)
+
+    def test_first_row_overlapping_highlights_fails(self) -> None:
+        ok, reason = self._guard(top=705)
+        self.assertFalse(ok)
+        self.assertIn("overlaps", reason)
+
+    def test_compact_layout_with_proved_boundary_passes(self) -> None:
+        self.assertTrue(self._guard(tabs_bottom=430, top=455)[0])
+
+    def test_partial_scroll_invalidating_profile_lock_fails(self) -> None:
+        self.assertFalse(self._guard(profile_lock=False)[0])
+
+    def test_stale_xml_transport_fails(self) -> None:
+        self.assertFalse(self._guard(profile_lock=False)[0])
+
+    def test_no_post_profile_fails(self) -> None:
+        self.assertFalse(self._guard(existence=False)[0])
+
+    def test_overlapping_bounds_fail(self) -> None:
+        self.assertFalse(self._guard(tabs_bottom=900, top=905)[0])
+
+    def test_suggested_layout_requires_separate_region(self) -> None:
+        ok, reason = self._guard(
+            proof=self._proof(suggested_region_separate=False),
+            hints={"suggested_for_you": True},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "golden_suggested_region_not_separate")
+
     def test_b_field_shape_highlight_descendant_near_grid_is_rejected(self) -> None:
         # Field-faithful structural evidence only: semantic Highlight ancestor,
         # image-shaped child, exact selected Grid boundary.  No unobserved
@@ -255,6 +339,28 @@ class CompoundStoryRecoveryTests(unittest.TestCase):
         self.assertEqual(device.backs, ["back"])
         fast_wait.assert_called_once()
         dump.assert_not_called()
+
+    def test_post_identity_unproven_recovery_is_one_back_without_business_action(self) -> None:
+        device = _Device()
+        with mock.patch.object(
+            nav.config, "INSTAGRAM_PACKAGE", "com.instagram.android"
+        ), mock.patch.object(
+            nav, "_followers_current_pkg_activity",
+            side_effect=lambda _d: self._meta(device),
+        ), mock.patch.object(
+            nav, "_visual_wait_exact_candidate_profile_after_back_fast",
+            return_value={"exact_profile_proved": True},
+        ) as fast_wait:
+            out = nav.visual_return_to_profile_from_post(
+                device,
+                source_profile_username="ct",
+                expected_profile_username="cand",
+                open_surface_kind="post_identity_unproven",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(device.backs, ["back"])
+        self.assertEqual(device.clicks, [])
+        fast_wait.assert_called_once()
 
     def test_h_story_viewer_recovery_is_one_back(self) -> None:
         device = _Device()

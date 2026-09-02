@@ -112,7 +112,46 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
                 like_surface_ok=True,
             )
         self.assertTrue(contract["post_identity_confirmed"])
+        self.assertTrue(contract["post_surface_proved"])
         self.assertEqual(contract["post_identity_missing_signals"], [])
+
+    def test_post_surface_proof_is_independent_from_candidate_identity(self) -> None:
+        device = mock.MagicMock()
+        xml = (
+            '<hierarchy><node text="Posts" />'
+            '<node content-desc="Like" bounds="[50,1700][110,1800]" '
+            'clickable="true" /></hierarchy>'
+        )
+        with mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+            },
+        ), mock.patch.object(
+            nav, "_visual_read_action_bar_username", return_value="Posts"
+        ), mock.patch.object(
+            nav,
+            "_visual_post_viewer_header_username_from_ui",
+            return_value=("", ""),
+        ):
+            contract = nav._post_open_live_positive_identity_contract(
+                device,
+                pkg="com.instagram.android",
+                expected_username="cand",
+                snapshot_xml=xml,
+                story_detected=False,
+                story_method="",
+                like_surface_ok=True,
+                stage_provenance=None,
+            )
+        self.assertTrue(contract["post_surface_proved"])
+        self.assertFalse(contract["post_identity_confirmed"])
+        self.assertEqual(
+            contract["post_identity_missing_signals"],
+            ["candidate_identity_continuity"],
+        )
 
     def test_real_a2_without_header_reuses_fresh_stage_provenance_without_dump_or_screenshot(self) -> None:
         device = mock.MagicMock()
@@ -479,6 +518,7 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
                         "facebook_detected": False,
                         "facebook_method": "",
                         "like_surface_ok": False,
+                        "post_surface_proved": True,
                         "like_surface_method": (
                             "post_identity_contract_failed:posts_action_bar,"
                             "candidate_header_exact"
@@ -535,6 +575,10 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
         like_tap.assert_not_called()
         verify.assert_not_called()
         return_to_profile.assert_called_once()
+        self.assertEqual(
+            return_to_profile.call_args.kwargs["open_surface_kind"],
+            "post_identity_unproven",
+        )
         rejection_capture.assert_called_once()
         self.assertTrue(
             out["per_post"][0]["post_open_rejection_evidence"]["captured_now"]

@@ -36,6 +36,7 @@ def _positive_post_reveal_evidence(**overrides: object) -> dict[str, object]:
                 "top": 1480,
                 "right": 360,
                 "bottom": 1840,
+                "grid_lineage_proven": True,
             }
         ],
         "no_posts_positive": False,

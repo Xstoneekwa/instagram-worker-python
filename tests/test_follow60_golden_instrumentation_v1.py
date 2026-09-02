@@ -369,7 +369,13 @@ class Follow60GoldenInstrumentationV1Tests(unittest.TestCase):
             {
                 "outcome": "POST_GRID_AMBIGUOUS_FINAL",
                 "physical_cells": [
-                    {"left": 0, "top": 900, "right": 360, "bottom": 1260}
+                    {
+                        "left": 0,
+                        "top": 900,
+                        "right": 360,
+                        "bottom": 1260,
+                        "grid_lineage_proven": True,
+                    }
                 ],
                 "no_posts_positive": False,
                 "loading_visible": False,

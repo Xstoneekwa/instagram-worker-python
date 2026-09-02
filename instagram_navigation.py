@@ -28626,6 +28626,60 @@ def _post_follow_golden_can_reuse_exact_profile_lock(
     return True, "fresh_post_reveal_exact_profile_lock_reused"
 
 
+def _post_follow_golden_post_open_intent_lineage_guard(
+    evidence: dict[str, Any] | None,
+    *,
+    post_existence_reusable: bool,
+    profile_lock_proved: bool,
+    profile_tabs_bottom_y_px: int | None,
+    profile_tabs_margin_px: int,
+    selected_col: int,
+    selected_row: int,
+    selected_top_y_px: int,
+    ui_hints: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Authorize Golden PostOpenIntent creation from proved grid lineage only.
+
+    The visual cell detector is not itself structural proof. It may refine the
+    bounds of an already-proved top-left post cell, but it cannot replace the
+    fresh profile/tabs/grid lineage transported from the SAFE branch.
+    """
+    proof = dict(evidence or {})
+    hints = dict(ui_hints or {})
+    if not post_existence_reusable:
+        return False, "golden_post_grid_lineage_not_reusable"
+    if not profile_lock_proved:
+        return False, "golden_exact_profile_lock_unproved"
+    if profile_tabs_bottom_y_px is None:
+        return False, "golden_profile_tabs_boundary_unproved"
+    if int(selected_row) != 0 or int(selected_col) != 0:
+        return False, "golden_absolute_top_left_not_selected"
+    if int(selected_top_y_px) < int(profile_tabs_bottom_y_px) + int(
+        profile_tabs_margin_px
+    ):
+        return False, "golden_selected_cell_overlaps_profile_header_or_highlights"
+    physical_cells = [
+        cell
+        for cell in list(proof.get("physical_cells") or [])
+        if isinstance(cell, dict)
+    ]
+    if not any(bool(cell.get("grid_lineage_proven")) for cell in physical_cells):
+        return False, "golden_physical_cell_grid_lineage_unproved"
+    if bool(
+        hints.get("suggested_for_you")
+        or hints.get("discover_people")
+        or proof.get("suggested_overlay_visible")
+    ) and not bool(proof.get("suggested_region_separate")):
+        return False, "golden_suggested_region_not_separate"
+    if bool(
+        hints.get("highlights")
+        or hints.get("highlights_visible")
+        or proof.get("highlights_region_detected")
+    ) and not bool(proof.get("highlights_region_separate")):
+        return False, "golden_highlights_region_not_separate"
+    return True, "golden_fresh_structural_grid_lineage_proved"
+
+
 _GOLDEN_OBSERVABILITY_TIMING_FIELDS = (
     "golden_no_posts_check_ms",
     "golden_screenshot_capture_ms",
@@ -29864,6 +29918,50 @@ def visual_open_recent_post_from_profile(
             },
             outcome="failed",
             failure_reason="candidate_above_profile_tabs",
+        )
+
+    golden_lineage_ok, golden_lineage_reason = (
+        _post_follow_golden_post_open_intent_lineage_guard(
+            post_grid_existence_evidence,
+            post_existence_reusable=bool(reuse_post_existence),
+            profile_lock_proved=bool(tv_open.get("ok")),
+            profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
+            profile_tabs_margin_px=int(open_profile_tabs_margin_px),
+            selected_col=int(col),
+            selected_row=int(row),
+            selected_top_y_px=int(y0),
+            ui_hints=open_grid_ui_hints,
+        )
+    )
+    if post_follow_fast and not golden_lineage_ok:
+        log(
+            "warning",
+            "visual_recent_post_open_blocked_unproved_grid_lineage",
+            source_profile_username=source_profile_username or "",
+            expected_follower_username=expected_follower_username or "",
+            failure_reason=golden_lineage_reason,
+            selected_col=int(col),
+            selected_row=int(row),
+            selected_top_y_px=int(y0),
+            profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
+            tap_x=None,
+            tap_y=None,
+        )
+        return _po_fin(
+            {
+                "ok": False,
+                "tap_x": None,
+                "tap_y": None,
+                "current_activity": act0,
+                "current_package": pkg0,
+                "profile_detected": prof0,
+                "post_detected": False,
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": golden_lineage_reason,
+                "grid_lineage_proved": False,
+            },
+            outcome="failed",
+            failure_reason=golden_lineage_reason,
         )
 
     if golden_obs is not None:
@@ -35450,7 +35548,11 @@ def visual_return_to_profile_from_post(
             }
     else:
         supported_surface = str(open_surface_kind or "").lower() in {
-            "post", "story", "highlight", "story_or_highlight"
+            "post",
+            "post_identity_unproven",
+            "story",
+            "highlight",
+            "story_or_highlight",
         }
         if not supported_surface:
             return {
@@ -55737,6 +55839,13 @@ def _post_open_live_positive_identity_contract(
     if story_final:
         missing.append("story_highlight_absent")
     confirmed = not missing
+    post_surface_proved = bool(
+        package_exact
+        and instagram_main_activity
+        and posts_action_bar
+        and like_surface_ok
+        and not story_final
+    )
     return {
         "post_identity_confirmed": bool(confirmed),
         "post_identity_missing_signals": missing,
@@ -55756,6 +55865,7 @@ def _post_open_live_positive_identity_contract(
             or ""
         ),
         "like_surface_ok": bool(like_surface_ok),
+        "post_surface_proved": post_surface_proved,
         "snapshot_valid": bool(hierarchy_signals.get("snapshot_valid")),
         "stage_provenance_confirmed": bool(
             provenance_contract.get("stage_provenance_confirmed")
@@ -55844,6 +55954,7 @@ def _post_open_snapshot_audit_signals(
             "facebook_detected": facebook_detected,
             "facebook_method": facebook_method,
             "like_surface_ok": False,
+            "post_surface_proved": False,
             "like_surface_method": "story_highlight_surface_rejected",
             "post_identity_confirmed": False,
             "post_identity_missing_signals": ["story_highlight_absent"],
@@ -55926,6 +56037,7 @@ def _post_open_snapshot_audit_signals(
         "facebook_detected": facebook_detected,
         "facebook_method": facebook_method,
         "like_surface_ok": True,
+        "post_surface_proved": True,
         "like_surface_method": f"reused:{proof_method}",
         "like_signal": "not_liked" if proof_is_not_liked else "like_action_available",
         "story_signal": "detected" if story_detected else "clear",
@@ -56110,6 +56222,9 @@ def _post_open_surface_audits(
             "facebook_detected": facebook_detected,
             "facebook_method": facebook_method,
             "like_surface_ok": like_surface_ok,
+            "post_surface_proved": bool(
+                identity_contract.get("post_surface_proved")
+            ),
             "like_surface_method": like_surface_method,
             "reused_snapshot": False,
             "snapshot_reused": False,
@@ -60347,6 +60462,12 @@ def run_post_follow_post_likes_phase(
                 stable_reason=str(stable_reason or skipped_reason),
             )
             _t_ret_skip0 = time.perf_counter()
+            _post_surface_proved = bool(
+                post_open_audit.get("post_surface_proved")
+            )
+            _post_identity_proved = bool(
+                post_open_audit.get("post_identity_confirmed")
+            )
             _return_surface_kind = (
                 "highlight"
                 if bool(post_open_audit.get("story_detected"))
@@ -60356,7 +60477,9 @@ def run_post_follow_post_likes_phase(
                 else "story"
                 if bool(post_open_audit.get("story_detected"))
                 else "post"
-                if bool(post_open_audit.get("like_surface_ok"))
+                if _post_surface_proved and _post_identity_proved
+                else "post_identity_unproven"
+                if _post_surface_proved
                 else "unknown"
             )
             ret_skip = visual_return_to_profile_from_post(
@@ -60467,6 +60590,9 @@ def run_post_follow_post_likes_phase(
         story_detected = bool(post_open_audit.get("story_detected"))
         story_method = str(post_open_audit.get("story_method") or "")
         like_surface_ok = bool(post_open_audit.get("like_surface_ok"))
+        post_surface_proved = bool(
+            post_open_audit.get("post_surface_proved")
+        )
         like_surface_method = str(post_open_audit.get("like_surface_method") or "")
         post_identity_confirmed = bool(
             post_open_audit.get("post_identity_confirmed")
@@ -60479,7 +60605,7 @@ def run_post_follow_post_likes_phase(
             opened_surface_kind = (
                 "highlight" if "highlight" in str(story_method or "").lower() else "story"
             )
-        elif like_surface_ok:
+        elif post_surface_proved:
             opened_surface_kind = "post"
         if opened_surface_kind != "post":
             try:
@@ -60493,6 +60619,7 @@ def run_post_follow_post_likes_phase(
                     story_or_highlight_detected=bool(story_detected),
                     story_or_highlight_method=str(story_method or ""),
                     like_surface_ok=bool(like_surface_ok),
+                    post_surface_proved=bool(post_surface_proved),
                     like_surface_method=str(like_surface_method or ""),
                     viewer_detect_path=open_out.get("viewer_detect_path"),
                     tap_x=open_out.get("tap_x"),
