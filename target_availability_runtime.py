@@ -7,7 +7,7 @@ unknown and the caller always continues to the next target.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from typing import Any, Mapping, Optional
 
@@ -25,6 +25,10 @@ from target_availability_writer import (
 
 _WRITER: FailOpenTargetAvailabilityWriter | None = None
 _MEMORY_PROBE = None
+
+FOLLOW_SUMMARY_CONTRACT_V1 = "target-availability-follow-summary-v1"
+FOLLOW_SUMMARY_PROOF_MAX_AGE = timedelta(hours=24)
+FOLLOW_SUMMARY_PROOF_FUTURE_SKEW = timedelta(minutes=5)
 
 _SCOPE_REJECTION_REASONS = frozenset(
     {
@@ -49,6 +53,114 @@ def _integer(value: object, default: int = 0) -> int:
         return max(0, int(value or default))
     except (TypeError, ValueError):
         return default
+
+
+def _normalized_username(value: object) -> str:
+    return _text(value).lstrip("@").lower()
+
+
+def _proof_time(value: object) -> datetime | None:
+    raw = _text(value)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def canonical_follow_summary_contract(
+    summary: Mapping[str, Any],
+    *,
+    expected_account_id: str,
+    expected_target_id: str,
+    expected_username: str,
+    expected_run_id: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate the single Follow-engine evidence envelope, fail closed.
+
+    The envelope may represent either an already-proved exact Followers surface
+    or a durable ``follow_verified_persisted_v1`` receipt bound to the same
+    source target.  Neither path creates a stable Instagram ID or accepts a
+    configured username as an observed username without an exact proof token.
+    """
+
+    source = dict(summary or {})
+    account = _text(expected_account_id)
+    target = _text(expected_target_id)
+    username = _normalized_username(expected_username)
+    run = _text(expected_run_id)
+    if (
+        source.get("proof_contract_version") != FOLLOW_SUMMARY_CONTRACT_V1
+        or source.get("target_binding_proved") is not True
+        or not account
+        or _text(source.get("proof_account_id")) != account
+        or not target
+        or _text(source.get("proof_target_id")) != target
+        or _text(source.get("proof_source_target_id")) != target
+        or not username
+        or (run and _text(source.get("proof_run_id")) != run)
+    ):
+        return {}
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    proved_at = _proof_time(source.get("proof_observed_at"))
+    if proved_at is None:
+        return {}
+    age = current - proved_at
+    if age < -FOLLOW_SUMMARY_PROOF_FUTURE_SKEW or age > FOLLOW_SUMMARY_PROOF_MAX_AGE:
+        return {}
+
+    direct_surface = bool(
+        source.get("profile_surface_proved") is True
+        and source.get("followers_surface_proved") is True
+    )
+    durable_follow = bool(
+        source.get("follow_verified_persisted") is True
+        and _text(source.get("follow_verified_source_target_id")) == target
+    )
+    reversible_not_found = bool(
+        source.get("not_found_proved") is True
+        and not direct_surface
+        and not durable_follow
+    )
+    if not direct_surface and not durable_follow and not reversible_not_found:
+        return {}
+
+    observed = _normalized_username(source.get("observed_username"))
+    observed_exact = bool(
+        source.get("observed_username_proved") is True
+        and observed
+        and observed == username
+    )
+    profile_found = False if reversible_not_found else True
+    proof_source = _text(source.get("proof_source"))[:120]
+    if not proof_source:
+        return {}
+
+    return {
+        "profile_found": profile_found,
+        "source_profile_resolved": bool(direct_surface),
+        "lookup_result": "not_found" if reversible_not_found else "found",
+        "observed_username": observed if observed_exact else None,
+        "followers_surface": "normal" if direct_surface else "unknown",
+        "followers_surface_entered": bool(direct_surface),
+        "target_binding_proved": True,
+        "proof_account_id": account,
+        "proof_run_id": run or None,
+        "proof_contract_version": FOLLOW_SUMMARY_CONTRACT_V1,
+        "proof_source": proof_source,
+        "proof_observed_at": proved_at.isoformat(),
+        "proof_age_seconds": max(0.0, age.total_seconds()),
+        "proof_confidence": "medium",
+        "identity_confidence": "medium" if observed_exact else "unknown",
+        "ui_evidence_quality": "high" if direct_surface else "medium",
+        "follow_verified_persisted": durable_follow,
+    }
 
 
 def _scope_rejection_reason(value: object) -> str:
@@ -229,17 +341,23 @@ def observation_from_rotation_summary(
     scope = _scope(tenant_id=tenant_id, account_id=account_id, target_id=target_id, username=username, stable_id=stable_platform_user_id)
     if scope is None:
         return None
+    canonical = canonical_follow_summary_contract(
+        summary,
+        expected_account_id=account_id,
+        expected_target_id=target_id,
+        expected_username=username,
+        expected_run_id=run_id,
+        now=observed_at,
+    )
     reason = _text(summary.get("follow_stop_reason") or summary.get("follow_session_outcome")).lower()
-    profile_found_raw = summary.get("profile_found")
-    if profile_found_raw is None and summary.get("source_profile_resolved") is True:
-        profile_found_raw = True
-    followers_surface = _text(summary.get("followers_surface")).lower()
+    profile_found_raw = canonical.get("profile_found")
+    followers_surface = _text(canonical.get("followers_surface")).lower()
     if followers_surface not in {"normal", "restricted", "terminally_limited"}:
         followers_surface = "unknown"
     terminal = bool(summary.get("terminal_end_detected") is True)
     repeated = bool(summary.get("repeated_first_profiles_detected") is True)
     profile_ambiguous = bool(summary.get("profile_ambiguous") is True)
-    followers_surface_entered = bool(summary.get("followers_surface_entered") is True or followers_surface != "unknown")
+    followers_surface_entered = bool(canonical.get("followers_surface_entered") is True)
     followers_entry_failed = bool(summary.get("followers_entry_failed") is True)
     pagination_stalled = bool(summary.get("pagination_stalled") is True)
     source_profile_mismatch = bool(summary.get("source_profile_mismatch") is True)
@@ -258,7 +376,7 @@ def observation_from_rotation_summary(
     session_state = _text(summary.get("session_state")).lower()
     if session_state not in {"unknown", "healthy", "restricted", "logged_out"}:
         session_state = "unknown"
-    lookup_result = _text(summary.get("lookup_result")).lower()
+    lookup_result = _text(canonical.get("lookup_result")).lower()
     if lookup_result not in {"found", "not_found", "unavailable", "failed", "unknown"}:
         lookup_result = "found" if profile_found_raw is True else "not_found" if profile_found_raw is False else "failed" if timeout else "unknown"
 
@@ -320,11 +438,21 @@ def observation_from_rotation_summary(
         observed_at=observed_at or datetime.now(timezone.utc),
         reason_codes=reasons,
         observation_stage="target_summary_completed",
-        identity_source="existing_runtime_signal" if stable_platform_user_id else "unknown",
-        identity_confidence=_text(summary.get("identity_confidence")) if _text(summary.get("identity_confidence")) in {"low", "medium", "high"} else "unknown",
+        identity_source=(
+            "target_record"
+            if stable_platform_user_id
+            else "profile_surface"
+            if canonical.get("observed_username")
+            else "unknown"
+        ),
+        identity_confidence=(
+            _text(canonical.get("identity_confidence"))
+            if _text(canonical.get("identity_confidence")) in {"low", "medium", "high"}
+            else "unknown"
+        ),
         lookup_result=lookup_result,
         profile_found=profile_found_raw if isinstance(profile_found_raw, bool) else None,
-        observed_username=_text(summary.get("observed_username")) or (username if profile_found_raw is True else None),
+        observed_username=_text(canonical.get("observed_username")) or None,
         observed_stable_platform_user_id=stable_platform_user_id,
         verified_badge=summary.get("verified_badge") if isinstance(summary.get("verified_badge"), bool) else None,
         followers_surface=followers_surface,
@@ -346,7 +474,11 @@ def observation_from_rotation_summary(
         source_profile_mismatch=source_profile_mismatch,
         identity_conflict=identity_conflict,
         recovery_outcome=recovery,
-        ui_evidence_quality=_text(summary.get("ui_evidence_quality")) if _text(summary.get("ui_evidence_quality")) in {"low", "medium", "high"} else "unknown",
+        ui_evidence_quality=(
+            _text(canonical.get("ui_evidence_quality"))
+            if _text(canonical.get("ui_evidence_quality")) in {"low", "medium", "high"}
+            else "unknown"
+        ),
         network_state=network_state,
         session_state=session_state,
         run_id=run_id,
@@ -404,6 +536,8 @@ def observe_rotation_target_summary(**kwargs: Any) -> bool:
 
 
 __all__ = [
+    "FOLLOW_SUMMARY_CONTRACT_V1",
+    "canonical_follow_summary_contract",
     "observe_rotation_target_loaded",
     "observe_rotation_target_summary",
     "observation_from_rotation_summary",

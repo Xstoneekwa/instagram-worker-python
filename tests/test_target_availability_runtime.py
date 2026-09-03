@@ -28,6 +28,28 @@ BASE = dict(
 )
 
 
+def canonical_summary(**updates):
+    payload = {
+        "proof_contract_version": runtime.FOLLOW_SUMMARY_CONTRACT_V1,
+        "proof_account_id": BASE["account_id"],
+        "proof_run_id": BASE["run_id"],
+        "proof_target_id": BASE["target_id"],
+        "proof_source_target_id": BASE["target_id"],
+        "target_binding_proved": True,
+        "profile_surface_proved": True,
+        "followers_surface_proved": True,
+        "observed_username_proved": True,
+        "observed_username": BASE["username"],
+        "follow_verified_persisted": False,
+        "follow_verified_source_target_id": None,
+        "proof_source": "followers_surface_exact_target",
+        "proof_observed_at": "2026-07-29T10:00:00+00:00",
+        "proof_confidence": "medium",
+    }
+    payload.update(updates)
+    return payload
+
+
 class TargetAvailabilityRuntimeTests(unittest.TestCase):
     def tearDown(self):
         writer = runtime._WRITER
@@ -44,12 +66,9 @@ class TargetAvailabilityRuntimeTests(unittest.TestCase):
         item = observation_from_rotation_summary(
             **BASE,
             observed_at=datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
-            summary={
+            summary=canonical_summary(**{
                 "exit_code": 0,
-                "profile_found": True,
-                "observed_username": "target.one",
                 "verified_badge": True,
-                "followers_surface": "restricted",
                 "accessible_profiles_count": 47,
                 "repeated_first_profiles_detected": True,
                 "pagination_stalled": True,
@@ -62,8 +81,7 @@ class TargetAvailabilityRuntimeTests(unittest.TestCase):
                 "identity_conflict": True,
                 "network_state": "healthy",
                 "session_state": "healthy",
-                "ui_evidence_quality": "high",
-            },
+            }),
         )
         self.assertIsNotNone(item)
         self.assertTrue(item.profile_found)
@@ -73,7 +91,24 @@ class TargetAvailabilityRuntimeTests(unittest.TestCase):
         self.assertTrue(item.pagination_stalled)
         self.assertTrue(item.recovery_attempted)
         self.assertEqual(item.observation_stage, "target_summary_completed")
-        self.assertIn("target_followers_surface_restricted", item.reason_codes)
+        self.assertIn("target_followers_surface_normal", item.reason_codes)
+
+    def test_unversioned_positive_fields_fail_closed(self):
+        item = observation_from_rotation_summary(
+            **BASE,
+            observed_at=datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            summary={
+                "profile_found": True,
+                "source_profile_resolved": True,
+                "observed_username": BASE["username"],
+                "lookup_result": "found",
+                "followers_surface": "normal",
+            },
+        )
+        self.assertIsNone(item.profile_found)
+        self.assertIsNone(item.observed_username)
+        self.assertEqual(item.lookup_result, "unknown")
+        self.assertEqual(item.followers_surface, "unknown")
 
     def test_ambiguity_never_becomes_terminal_or_identity_proof(self):
         item = observation_from_rotation_summary(
@@ -197,7 +232,10 @@ assert before == tuple(thread.name for thread in threading.enumerate())
             account_allowlist=frozenset({BASE["account_id"]}),
         )
         self.assertTrue(observe_rotation_target_loaded(**BASE, flags=flags))
-        self.assertTrue(observe_rotation_target_summary(**BASE, summary={"profile_found": True}, flags=flags))
+        summary = canonical_summary(
+            proof_observed_at=datetime.now(timezone.utc).isoformat()
+        )
+        self.assertTrue(observe_rotation_target_summary(**BASE, summary=summary, flags=flags))
         self.assertEqual(len(fake.items), 2)
         self.assertEqual({item.account_id for item in fake.items}, {BASE["account_id"]})
 

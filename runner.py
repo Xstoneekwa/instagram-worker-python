@@ -12798,6 +12798,94 @@ def _followers_wrong_depth_recovery_failure_summary(
     }
 
 
+def _target_availability_existing_proof_fields(
+    detection: dict[str, Any] | None,
+    *,
+    account_id: str,
+    run_id: str,
+    target_id: str | None,
+    source_target_id: str | None,
+    expected_username: str,
+    session_committed: bool = False,
+    follow_verified_persisted: bool = False,
+    follow_verified_source_target_id: str | None = None,
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Publish only existing, exact-target Follow evidence; never acquire it.
+
+    A normal Followers surface is accepted through the already-canonical CT
+    surface proof.  A persisted follow receipt is accepted only when its source
+    target is the exact same bound target.  Counts and configured usernames are
+    deliberately not treated as evidence.
+    """
+
+    bound_target_id = str(target_id or "").strip()
+    source_id = str(source_target_id or "").strip()
+    bound_account_id = str(account_id or "").strip()
+    bound_run_id = str(run_id or "").strip()
+    expected = target_followers_resume_v2.normalize_handle(expected_username)
+    if (
+        not bound_account_id
+        or not bound_run_id
+        or not bound_target_id
+        or source_id != bound_target_id
+        or not expected
+    ):
+        return {}
+
+    det_safe = detection if isinstance(detection, dict) else {}
+    surface_proved = bool(det_safe.get("is_followers_list"))
+    target_proved = target_followers_resume_v2.target_surface_identity_proved(
+        det_safe,
+        expected_target=expected,
+        session_committed=bool(session_committed),
+    )
+    direct_surface = bool(surface_proved and target_proved)
+    durable_follow = bool(
+        follow_verified_persisted
+        and str(follow_verified_source_target_id or "").strip() == bound_target_id
+    )
+    if not direct_surface and not durable_follow:
+        return {}
+
+    observed_username = ""
+    if direct_surface:
+        candidates = [det_safe.get("action_bar_title")]
+        candidates.extend(list(det_safe.get("visible_header_texts") or ())[:30])
+        for value in candidates:
+            normalized = target_followers_resume_v2.normalize_handle(value)
+            if normalized == expected:
+                observed_username = normalized
+                break
+
+    proved_at = observed_at or datetime.now(timezone.utc)
+    if proved_at.tzinfo is None:
+        proved_at = proved_at.replace(tzinfo=timezone.utc)
+    return {
+        "proof_contract_version": "target-availability-follow-summary-v1",
+        "proof_account_id": bound_account_id,
+        "proof_run_id": bound_run_id,
+        "proof_target_id": bound_target_id,
+        "proof_source_target_id": source_id,
+        "target_binding_proved": True,
+        "profile_surface_proved": direct_surface,
+        "followers_surface_proved": direct_surface,
+        "observed_username_proved": bool(observed_username),
+        "observed_username": observed_username or None,
+        "follow_verified_persisted": durable_follow,
+        "follow_verified_source_target_id": bound_target_id if durable_follow else None,
+        "proof_source": (
+            "followers_surface_and_follow_verified_persisted"
+            if direct_surface and durable_follow
+            else "followers_surface_exact_target"
+            if direct_surface
+            else "follow_verified_persisted_v1"
+        ),
+        "proof_observed_at": proved_at.astimezone(timezone.utc).isoformat(),
+        "proof_confidence": "medium",
+    }
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -12967,6 +13055,7 @@ def _run_followers_list_engine_session(
         "follow_stop_reason": "",
         "exit_code": None,
     }
+    _target_availability_existing_proof: dict[str, Any] = {}
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
     scroll_failure_target_rotation_safe = False
     scroll_failure_recovery_attempts = 0
@@ -13222,7 +13311,75 @@ def _run_followers_list_engine_session(
         )
         return surface_confirmed, target_confirmed
 
+    def _record_target_availability_existing_proof(
+        detection: dict[str, Any] | None = None,
+        *,
+        follow_verified_persisted: bool = False,
+    ) -> None:
+        try:
+            evidence = _target_availability_existing_proof_fields(
+                detection,
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_target_id=target_id,
+                expected_username=source_profile_username,
+                session_committed=followers_session_list_committed_open_for(
+                    source_profile_username
+                ),
+                follow_verified_persisted=follow_verified_persisted,
+                follow_verified_source_target_id=(
+                    target_id if follow_verified_persisted else None
+                ),
+            )
+            if not evidence:
+                return
+            previous = dict(_target_availability_existing_proof)
+            _target_availability_existing_proof.update(evidence)
+            for proof_flag in (
+                "profile_surface_proved",
+                "followers_surface_proved",
+                "observed_username_proved",
+                "follow_verified_persisted",
+            ):
+                if previous.get(proof_flag) is True:
+                    _target_availability_existing_proof[proof_flag] = True
+            if previous.get("observed_username_proved") is True:
+                _target_availability_existing_proof["observed_username"] = previous.get(
+                    "observed_username"
+                )
+            if previous.get("follow_verified_persisted") is True:
+                _target_availability_existing_proof[
+                    "follow_verified_source_target_id"
+                ] = str(target_id or "") or None
+            if (
+                _target_availability_existing_proof.get("profile_surface_proved") is True
+                and _target_availability_existing_proof.get("follow_verified_persisted") is True
+            ):
+                _target_availability_existing_proof["proof_source"] = (
+                    "followers_surface_and_follow_verified_persisted"
+                )
+        except Exception:
+            pass
+
     def _publish_followers_session_summary(**updates: Any) -> None:
+        if _target_availability_existing_proof:
+            evidence = dict(_target_availability_existing_proof)
+            try:
+                from target_availability_runtime import (
+                    canonical_follow_summary_contract,
+                )
+
+                canonical = canonical_follow_summary_contract(
+                    evidence,
+                    expected_account_id=str(account_id or ""),
+                    expected_target_id=str(target_id or ""),
+                    expected_username=source_profile_username,
+                    expected_run_id=str(run_id or ""),
+                )
+            except Exception:
+                canonical = {}
+            updates = {**updates, **evidence, **canonical}
         if "rejection_reason_counts" not in updates:
             updates["rejection_reason_counts"] = dict(
                 target_scan_tracker.get("rejection_reason_counts") or {}
@@ -15765,6 +15922,9 @@ def _run_followers_list_engine_session(
             else:
                 det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
                 det_xml_last_for_bypass = det
+            _record_target_availability_existing_proof(
+                det if isinstance(det, dict) else None
+            )
             try:
                 from followers_inter_candidate_perf import (
                     inter_candidate_segment_b_pre_picker_loop_detect_end,
@@ -23463,8 +23623,11 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                 elif supabase_mode and account_id:
-                    if _follow_persistence_intent_enabled_for_account(account_id):
-                        _persist_verified_follow_from_durable_intent(
+                    _follow_persist_uses_durable_intent = (
+                        _follow_persistence_intent_enabled_for_account(account_id)
+                    )
+                    if _follow_persist_uses_durable_intent:
+                        _follow_persist_ok = _persist_verified_follow_from_durable_intent(
                             intent=_follow_persistence_ctx,
                             supabase_mode=supabase_mode,
                             account_id=account_id,
@@ -23479,7 +23642,7 @@ def _run_followers_list_engine_session(
                             defer_source_follow_success=False,
                         )
                     else:
-                        _persist_verified_follow_success_to_supabase(
+                        _follow_persist_ok = _persist_verified_follow_success_to_supabase(
                             supabase_mode=supabase_mode,
                             account_id=account_id,
                             follower_un=str(follower_un or ""),
@@ -23490,6 +23653,17 @@ def _run_followers_list_engine_session(
                             f_st=f_st,
                             target_id=target_id,
                             phase="before_post_follow_skipped",
+                        )
+                    if (
+                        _follow_persist_uses_durable_intent
+                        and _follow_persist_ok is True
+                        and bool(follow_out.get("ok"))
+                        and not bool(follow_out.get("skipped_tap"))
+                        and fs_af == "following"
+                        and str(target_id or "").strip()
+                    ):
+                        _record_target_availability_existing_proof(
+                            follow_verified_persisted=True
                         )
             else:
                 if _vcid_sm and _followers_resolved_continue_to_follow:
@@ -23943,7 +24117,10 @@ def _run_followers_list_engine_session(
                         _f_st_persist = "requested"
                     else:
                         _f_st_persist = "following"
-                    if _follow_persistence_intent_enabled_for_account(account_id):
+                    _follow_persist_uses_durable_intent = (
+                        _follow_persistence_intent_enabled_for_account(account_id)
+                    )
+                    if _follow_persist_uses_durable_intent:
                         _follow_persist_ok = _persist_verified_follow_from_durable_intent(
                             intent=_follow_persistence_ctx,
                             supabase_mode=supabase_mode,
@@ -23976,6 +24153,17 @@ def _run_followers_list_engine_session(
                     _critical_persist_ok = _critical_persistence_chain_ok(
                         _critical_persist_ok, _follow_persist_ok
                     )
+                    if (
+                        _follow_persist_uses_durable_intent
+                        and _follow_persist_ok is True
+                        and bool((follow_out or {}).get("ok"))
+                        and not bool((follow_out or {}).get("skipped_tap"))
+                        and _fs_af_persist == "following"
+                        and str(target_id or "").strip()
+                    ):
+                        _record_target_availability_existing_proof(
+                            follow_verified_persisted=True
+                        )
                     _log_target_budget_check("after_follow_verified")
                     if _target_budget_reached():
                         _mark_target_budget_reached("target_budget_reached_after_follow_verified")
