@@ -228,3 +228,35 @@ coupée. La preuve vient du même XML frais et lie identité exacte, onglet Post
 absence de Suggested/Story/Highlight, package/activity, repère, génération et
 fingerprint. Le tap direct produit ensuite une nouvelle `FreshTapProof` et le
 garde V5 reste obligatoire. Toute ambiguïté conserve un seul fallback Golden.
+
+### Like terminal sans mutation — Latency Gap Closure V1
+
+La fin d'une décision Like n'est pas un succès Like. Chaque sortie de la phase
+porte `like_phase_terminal=true` et une raison, y compris les refus qui restent
+bloquants. Le journal durable conserve ses statuts existants `verified` et
+`safe_skip` : aucun nouvel état permissif n'est ajouté au validateur de l'outbox.
+
+Quand le budget expire avant la première tentative d'ouverture de post,
+`like_budget_exhausted_before_attempt=true`, `attempted_count=0` et
+`skipped/no_verified_likes` devient un skip sûr. Les skips existants de
+configuration, tirage de politique, quota Like et blacklist sont également
+terminalisés sans changer leur décision. Cela ne crée ni tap, ni Like vérifié,
+ni incrément de compteur, ni interaction Like persistée. Un résultat inconnu
+`no_verified_likes` ne reçoit pas globalement `ok=true`.
+
+Le cycle reste admissible uniquement avec son binding exact, le Follow
+persisté, les deux Mutes requis et le Return CT exact acquittés. Un Mute
+partiel, un Return CT absent, une identité de session divergente ou une
+autorisation manquante reste fail-closed. Le runner et le producteur Return CT
+utilisent le même calcul strict du terminal Like.
+
+`real_tap_sent` est conservé même si la vérification échoue. Un tap Like non
+confirmé rend `like_mutation_ambiguous=true` et interdit aussi bien le skip sûr
+que l'acquittement du cycle ; un Like précédent réussi ne masque pas cette
+ambiguïté. `verified` exige toujours une action réelle, sa vérification fraîche
+et son ACK de stage. Les refus d'identité/surface gardent leurs récupérations
+bornées existantes ; aucune preuve visuelle, aucun TTL et aucun seuil de
+sécurité n'est relâché.
+
+Qualification de ce delta : tests locaux uniquement. Le run historique n'est
+ni rejoué, ni réconcilié ; activation et certification naturelle sont séparées.

@@ -114,6 +114,7 @@ from visual_row_mapping import (
     visual_row_mapping_to_follower_engine_candidates,
 )
 from instagram_navigation import (
+    _post_follow_like_terminal_binding,
     cleanup_dm_after_send_button_missing,
     clear_dm_draft,
     detect_unsupported_start_surface,
@@ -24880,23 +24881,10 @@ def _run_followers_list_engine_session(
                                 "mute_stories_verified"
                             )
                         ),
-                        "like_terminal_safe": bool(
-                            (
-                                int((_pf.get("likes") or {}).get("liked_count") or 0)
-                                > 0
-                                and (_pf.get("stage_persist_results") or {}).get(
-                                    "like_verified"
-                                ) is True
-                            )
-                            or (
-                                str(
-                                    (_pf.get("likes") or {}).get("phase_outcome")
-                                    or ""
-                                )
-                                == "skipped"
-                                and (_pf.get("likes") or {}).get("ok") is True
-                            )
-                        ),
+                        "like_terminal_safe": _post_follow_like_terminal_binding(
+                            dict(_pf.get("likes") or {}),
+                            dict(_pf.get("stage_persist_results") or {}),
+                        )[0] in {"verified", "safe_skip"},
                         "return_ct_exact": bool(
                             _pf.get("return_ok") is True
                             and (_pf.get("stage_persist_results") or {}).get(

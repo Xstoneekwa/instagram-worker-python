@@ -126,3 +126,27 @@ Followers list navigation uses `FollowersViewportProof`, `FollowersRowProof` and
 from fresh XML immediately before a tap. Every navigation/scroll generation change makes old
 evidence comparison-only. See
 `docs/runbooks/STALE_VIEWPORT_OR_ROW_EVIDENCE.md` for the operational contract.
+
+## Scroll diagnostics without foreground device probes — Latency Gap Closure V1
+
+`_followers_log_scroll_or_swipe_about_to_run` is diagnostic only. It must not
+call the device or publish an old package/activity as fresh proof. Its stable
+event, source, reason and post-tap-lock fields remain; package/activity are
+explicitly null with `foreground_observation=not_sampled_diagnostic_only` and
+`foreground_device_probe=false`.
+
+The actual foreground/surface guards, navigation and scroll generations,
+post-tap lock, fresh hierarchy, See More veto, target/lease/checkpoint binding,
+continuity proof, overshoot protection and fallback are unchanged. No evidence
+cache is introduced. The logger returns no admission authority. Each real
+navigation still invalidates prior evidence, and the next safety guard may
+read the device normally.
+
+This removes exactly one diagnostic `app_current()` call per invocation,
+including checkpoint-depth replay and ordinary list advance. It does not
+remove a security check, move checkpoint commits, batch business work, or
+change gestures, sleeps, XML/Vision reads or recovery budgets. The internal
+cost of the historical device call is not separately instrumented; measured
+log-to-log envelopes are estimates for trace compression, not field-certified
+performance gains. No additional CT Resume or identity optimization is claimed
+without evidence sufficient to preserve the existing safety contract.

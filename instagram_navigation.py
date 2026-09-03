@@ -12358,29 +12358,24 @@ def _followers_release_post_tap_detection_lock(source_profile_username: str) -> 
     )
 
 
-def _followers_pkg_activity_for_scroll_log(d: u2.Device) -> tuple[Any, Any]:
-    try:
-        meta = _followers_current_pkg_activity(d)
-        return meta.get("current_package"), meta.get("current_activity")
-    except Exception:
-        return None, None
-
-
 def _followers_log_scroll_or_swipe_about_to_run(
     d: u2.Device,
     *,
     source_function: str,
     reason: str,
 ) -> None:
-    pkg, act = _followers_pkg_activity_for_scroll_log(d)
+    # Diagnostic only: admission owns its fresh foreground/surface proof.
+    # Never add a device RPC (or reuse stale evidence) solely to enrich a log.
     log(
         "info",
         "followers_scroll_or_swipe_about_to_run",
         source_function=source_function,
         reason=reason,
         post_tap_lock=POST_TAP_FOLLOWERS_DETECTION_IN_PROGRESS,
-        current_activity=act,
-        current_package=pkg,
+        current_activity=None,
+        current_package=None,
+        foreground_observation="not_sampled_diagnostic_only",
+        foreground_device_probe=False,
     )
 
 
@@ -56390,6 +56385,10 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
         "like_action_state": "LIKE_NOT_PERFORMED",
         "real_tap_sent": False,
         "fresh_like_verified": False,
+        "like_mutation_ambiguous": False,
+        "like_phase_terminal": False,
+        "like_phase_terminal_reason": None,
+        "like_budget_exhausted_before_attempt": False,
         "skipped_already_liked_count": 0,
         "failed_navigation_count": 0,
         "post_like_mode": "profile_grid_single_v1",
@@ -56438,6 +56437,17 @@ def _point_c_follow_mutation_phase(state: Any) -> str:
     return "UNKNOWN"
 
 
+def _post_follow_like_mark_phase_terminal(out: dict[str, Any]) -> dict[str, Any]:
+    """Close the decision, not the cycle; failures retain their original guards."""
+    out["like_phase_terminal"] = True
+    out["like_phase_terminal_reason"] = str(
+        out.get("skipped_reason") or out.get("likes_failure_kind")
+        or out.get("failure_reason") or out.get("phase_outcome")
+        or "like_not_admitted"
+    )
+    return out
+
+
 def _post_follow_like_terminal_binding(
     likes_out: dict[str, Any],
     stage_persist_results: dict[str, Any],
@@ -56449,6 +56459,8 @@ def _post_follow_like_terminal_binding(
     cycle: the physical workflow has safely returned to the exact CT and may be
     ledgered without inventing a Like.
     """
+    if likes_out.get("like_mutation_ambiguous") is True:
+        return "", ""
     liked_count = int(likes_out.get("liked_count") or 0)
     if (
         liked_count > 0
@@ -56462,6 +56474,7 @@ def _post_follow_like_terminal_binding(
     phase_outcome = str(likes_out.get("phase_outcome") or "").strip()
     safe_skip = bool(
         liked_count == 0
+        and likes_out.get("real_tap_sent") is not True
         and (
             (phase_outcome == "skipped" and likes_out.get("ok") is True)
             or (
@@ -56582,6 +56595,11 @@ def run_post_follow_post_likes_phase(
     if account_protection_lists.is_interaction_blocked(cand):
         out["result"] = "skipped"
         out["failure_reason"] = "interaction_blacklist" if cand else "candidate_username_unresolved"
+        out["skipped_reason"] = out["failure_reason"]
+        out["ok"] = bool(
+            cand and follow_success_verified
+            and (expected_stage_binding is None or authoritative_binding is not None)
+        )
         log(
             "info",
             "interaction_blacklist_action_skipped",
@@ -56589,7 +56607,7 @@ def run_post_follow_post_likes_phase(
             username=cand or None,
             reason=out["failure_reason"],
         )
-        return out
+        return _post_follow_like_mark_phase_terminal(out)
     _likes_perf_ctx: dict[str, Any] = {
         "phase_t0": time.perf_counter(),
         "summary_emitted": False,
@@ -56777,7 +56795,13 @@ def run_post_follow_post_likes_phase(
                     )
                 except Exception:
                     pass
-        return out
+        return _post_follow_like_mark_phase_terminal(out)
+
+    if expected_stage_binding is not None and authoritative_binding is None:
+        return _finish(
+            phase_outcome="failed",
+            skipped_reason=authoritative_binding_reason,
+        )
 
     log(
         "info",
@@ -56902,6 +56926,7 @@ def run_post_follow_post_likes_phase(
         return _finish(
             phase_outcome="skipped",
             skipped_reason="likes_disabled_by_config",
+            ok=True,
             log_early_exit=True,
         )
 
@@ -56909,6 +56934,7 @@ def run_post_follow_post_likes_phase(
         return _finish(
             phase_outcome="skipped",
             skipped_reason="real_post_like_disabled_by_config",
+            ok=True,
             log_early_exit=True,
         )
 
@@ -56918,6 +56944,7 @@ def run_post_follow_post_likes_phase(
         return _finish(
             phase_outcome="skipped",
             skipped_reason="likes_percentage_roll_skip",
+            ok=True,
             log_early_exit=True,
         )
 
@@ -56939,6 +56966,7 @@ def run_post_follow_post_likes_phase(
         return _finish(
             phase_outcome="skipped",
             skipped_reason="likes_skipped_session_quota",
+            ok=True,
         )
 
     budget_s = float(_cfg_snap["budget_s"])
@@ -56965,6 +56993,7 @@ def run_post_follow_post_likes_phase(
         return _finish(
             phase_outcome="skipped",
             skipped_reason="likes_skipped_session_quota",
+            ok=True,
         )
 
     log(
@@ -57694,6 +57723,7 @@ def run_post_follow_post_likes_phase(
 
     for post_idx in range(target_count):
         if (time.perf_counter() - t_all) > budget_s:
+            out["like_budget_exhausted_before_attempt"] = attempted_count == 0
             break
         attempted_count += 1
         post_rec: dict[str, Any] = {"index": post_idx, "outcome": "pending"}
@@ -61019,6 +61049,11 @@ def run_post_follow_post_likes_phase(
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
             already_liked_precheck=al_pre,
         )
+        # Preserve physical attempt evidence even when verification later fails.
+        # A failed verification must never look like a no-action safe skip.
+        out["real_tap_sent"] = bool(
+            out.get("real_tap_sent") or like_out.get("real_tap_sent")
+        )
         _likes_perf_ctx["like"] = dict(like_out.get("likes_perf_like") or {})
         _likes_perf_ctx["like"]["runner_visual_like_open_wall_ms"] = round(
             (time.perf_counter() - t_like_wall0) * 1000.0, 2
@@ -61157,8 +61192,11 @@ def run_post_follow_post_likes_phase(
             _likes_perf_ctx["verification_method"] = "skipped_verify_dry_or_config"
             _likes_perf_ctx["like_verify_ms"] = None
 
+        out["like_mutation_ambiguous"] = bool(
+            out.get("like_mutation_ambiguous")
+            or (like_out.get("real_tap_sent") and not liked_verified)
+        )
         if liked_verified:
-            out["real_tap_sent"] = bool(like_out.get("real_tap_sent"))
             out["fresh_like_verified"] = bool(
                 like_out.get("real_tap_sent") and verify_on
             )
@@ -61426,6 +61464,7 @@ def run_post_follow_post_likes_phase(
     return _finish(
         phase_outcome="skipped",
         skipped_reason="no_verified_likes",
+        ok=bool(out["like_budget_exhausted_before_attempt"]),
         attempted_count=attempted_count,
         liked_count=0,
         skipped_already_liked_count=skipped_already,
@@ -62750,6 +62789,7 @@ def run_visual_candidate_post_follow_phase(
             )
             if (
                 int(likes_out.get("liked_count") or 0) > 0
+                and likes_out.get("like_mutation_ambiguous") is not True
                 and likes_out.get("like_action_state")
                 == "LIKE_ACTION_PERFORMED_NOW"
                 and likes_out.get("real_tap_sent") is True
@@ -62769,6 +62809,7 @@ def run_visual_candidate_post_follow_phase(
                         "action_id": vcid,
                     },
                 )
+    _post_follow_like_mark_phase_terminal(likes_out)
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
         or int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0) > 0
