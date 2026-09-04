@@ -51,6 +51,7 @@ from instagram_list_continuation import (
 )
 from screen_fingerprint import build_screen_fingerprint, compare_screen_fingerprints
 from profile_cta_stabilization import (
+    classify_active_profile_overlay,
     classify_music_audio_sheet,
     derive_safe_sheet_dismiss_point,
     parse_android_bounds,
@@ -9572,7 +9573,6 @@ def _follow_pre_tap_live_observation(
     parent_map = {child: owner for owner in root.iter() for child in owner}
     action_bar_identity = ""
     follow_candidates: list[tuple[Any, Any]] = []
-    unknown_modal = False
     for node in root.iter():
         if str(node.get("visible-to-user") or "true").casefold() == "false":
             continue
@@ -9583,11 +9583,6 @@ def _follow_pre_tap_live_observation(
             value = text or desc
             if value:
                 action_bar_identity = _normalize_handle(value)
-        rid_lower = resource_id.casefold()
-        if "bottom_sheet" in rid_lower or "modal" in rid_lower:
-            bounds = parse_android_bounds(node.get("bounds"))
-            if bounds and bounds["bottom"] >= int(screen_height * 0.72):
-                unknown_modal = True
         if not resource_id.endswith("/profile_header_follow_button"):
             continue
         label = _follow_norm(text or desc)
@@ -9605,7 +9600,13 @@ def _follow_pre_tap_live_observation(
 
     result["profile_identity_ok"] = bool(expected and action_bar_identity == expected)
     result["target_binding_ok"] = bool(expected and action_bar_identity == expected)
-    result["overlay_present"] = bool(music.get("proved") or unknown_modal)
+    active_overlay = classify_active_profile_overlay(
+        hierarchy,
+        screen_width=screen_width,
+        screen_height=screen_height,
+    )
+    result["overlay_present"] = bool(music.get("proved") or active_overlay.get("present"))
+    result["active_overlay"] = active_overlay
     if len(follow_candidates) != 1:
         result["reason"] = (
             "follow_pre_tap_cta_missing"

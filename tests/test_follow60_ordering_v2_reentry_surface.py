@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 import inspect
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import follow_action_engine as engine
 import instagram_navigation as navigation
@@ -173,6 +173,36 @@ class Follow60OrderingV2ReentrySurfaceTests(unittest.TestCase):
 
 
 class FollowPreTapStabilizationTests(unittest.TestCase):
+    def test_live_observation_ignores_permanent_bottom_sheet_host(self) -> None:
+        hierarchy = '''<hierarchy>
+          <node resource-id="com.instagram.android:id/action_bar_title"
+                text="stable_user" bounds="[0,100][1080,220]" visible-to-user="true" />
+          <node resource-id="com.instagram.android:id/bottom_sheet_camera_container"
+                class="android.widget.FrameLayout" bounds="[0,100][1080,2205]"
+                visible-to-user="true" />
+          <node resource-id="com.instagram.android:id/profile_header_follow_button"
+                text="Follow" clickable="true" bounds="[33,800][479,890]"
+                visible-to-user="true" />
+        </hierarchy>'''
+        device = MagicMock()
+        device.app_current.return_value = {
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+        }
+        device.dump_hierarchy.return_value = hierarchy
+        device.window_size.return_value = (1080, 2340)
+
+        result = navigation._follow_pre_tap_live_observation(
+            device,
+            expected_username="stable_user",
+            expected_package="com.instagram.android",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["target_binding_ok"])
+        self.assertFalse(result["overlay_present"])
+        self.assertEqual(result["bounds"], {"left": 33, "top": 800, "right": 479, "bottom": 890})
+
     resource_id = "com.instagram.android:id/profile_header_follow_button"
     package = "com.instagram.android"
     activity = "com.instagram.mainactivity.InstagramMainActivity"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from profile_cta_stabilization import (
+    classify_active_profile_overlay,
     classify_music_audio_sheet,
     derive_safe_sheet_dismiss_point,
     validate_profile_cta_transition,
@@ -35,6 +36,34 @@ def music_xml(*, use_audio: str = "Use audio", add_profile: str = "Add to profil
 
 
 class ProfileCtaStabilizationTests(unittest.TestCase):
+    def test_permanent_bottom_sheet_host_is_not_an_active_overlay(self):
+        xml = '''<hierarchy>
+          <node resource-id="com.instagram.android:id/bottom_sheet_camera_container"
+                class="android.widget.FrameLayout" bounds="[0,100][1080,2205]"
+                visible-to-user="true" />
+        </hierarchy>'''
+        result = classify_active_profile_overlay(
+            xml, screen_width=1080, screen_height=2340
+        )
+        self.assertFalse(result["present"])
+        self.assertEqual(result["reason"], "active_profile_overlay_not_proved")
+
+    def test_bounded_unknown_sheet_and_dialog_remain_fail_closed(self):
+        cases = (
+            '''<hierarchy><node resource-id="com.instagram.android:id/unknown_bottom_sheet"
+                 class="android.widget.FrameLayout" bounds="[0,900][1080,2340]"
+                 visible-to-user="true" /></hierarchy>''',
+            '''<hierarchy><node resource-id="com.instagram.android:id/unknown_surface"
+                 class="android.app.Dialog" bounds="[120,500][960,1800]"
+                 visible-to-user="true" /></hierarchy>''',
+        )
+        for xml in cases:
+            with self.subTest(xml=xml):
+                result = classify_active_profile_overlay(
+                    xml, screen_width=1080, screen_height=2340
+                )
+                self.assertTrue(result["present"])
+
     def test_stable_and_tiny_shift_return_fresh_bounds_only(self):
         initial = observation(top=700)
         fresh = observation(top=706)

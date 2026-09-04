@@ -196,6 +196,74 @@ def classify_music_audio_sheet(
     }
 
 
+def classify_active_profile_overlay(
+    hierarchy_xml: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+) -> dict[str, Any]:
+    """Distinguish an active modal surface from a permanent overlay host.
+
+    Instagram keeps near-full-screen containers whose resource ids contain
+    ``bottom_sheet`` in the normal profile hierarchy. Their mere presence is
+    not proof that a sheet is open. Active dialogs are structural proof;
+    modal/sheet containers otherwise need bounded overlay geometry rather than
+    host-container geometry.
+    """
+
+    base = {
+        "present": False,
+        "reason": "active_profile_overlay_not_proved",
+        "resource_id": "",
+        "bounds": {},
+    }
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return {**base, "reason": "hierarchy_unreadable"}
+
+    width = max(1, int(screen_width))
+    height = max(1, int(screen_height))
+    for node in root.iter():
+        if str(node.get("visible-to-user") or "true").casefold() == "false":
+            continue
+        resource_id = str(node.get("resource-id") or "")
+        rid_lower = resource_id.casefold()
+        class_lower = str(node.get("class") or "").casefold()
+        modal_named = "bottom_sheet" in rid_lower or "modal" in rid_lower
+        dialog_structured = "dialog" in class_lower
+        if not modal_named and not dialog_structured:
+            continue
+        bounds = parse_android_bounds(node.get("bounds"))
+        if bounds is None:
+            continue
+        node_width = bounds["right"] - bounds["left"]
+        node_height = bounds["bottom"] - bounds["top"]
+        permanent_host_geometry = (
+            bounds["top"] <= int(height * 0.08)
+            and node_height >= int(height * 0.82)
+            and node_width >= int(width * 0.90)
+        )
+        bounded_overlay_geometry = (
+            bounds["top"] >= int(height * 0.10)
+            and bounds["bottom"] >= int(height * 0.60)
+            and node_width >= int(width * 0.45)
+        )
+        if dialog_structured or (modal_named and bounded_overlay_geometry and not permanent_host_geometry):
+            return {
+                **base,
+                "present": True,
+                "reason": (
+                    "dialog_structure_proved"
+                    if dialog_structured
+                    else "bounded_modal_geometry_proved"
+                ),
+                "resource_id": resource_id,
+                "bounds": bounds,
+            }
+    return base
+
+
 def derive_safe_sheet_dismiss_point(
     hierarchy_xml: str,
     *,
