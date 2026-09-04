@@ -2024,6 +2024,81 @@ class ShadowAccountScopeTests(unittest.TestCase):
         for forbidden in (ACCOUNT_A, TARGET_A, "never-log-this", "invalid"):
             self.assertNotIn(forbidden, observed)
 
+    def test_80_canonical_postgres_timestamp_fraction_widths_parse(self):
+        expected_microseconds = {
+            0: 0,
+            1: 100000,
+            2: 120000,
+            3: 123000,
+            4: 123400,
+            5: 123450,
+            6: 123456,
+        }
+        for width, expected in expected_microseconds.items():
+            suffix = "" if width == 0 else f".{('123456')[:width]}"
+            for offset in ("Z", "+00:00", "+02:30"):
+                with self.subTest(width=width, offset=offset):
+                    parsed = resume._parse_timestamp(
+                        f"2026-09-04T05:07:36{suffix}{offset}"
+                    )
+                    self.assertIsNotNone(parsed)
+                    self.assertEqual(parsed.tzinfo, timezone.utc)
+                    self.assertEqual(parsed.microsecond, expected)
+
+    def test_81_noncanonical_or_ambiguous_timestamps_fail_closed(self):
+        for value in (
+            "2026-09-04 05:07:36+00:00",
+            "2026-09-04T05:07:36",
+            "2026-09-04T05:07:36.1234567+00:00",
+            "2026-09-04T05:07:36+0000",
+            "2026-09-04T05:07:36z",
+            "not-a-timestamp",
+            None,
+        ):
+            with self.subTest(value=value):
+                self.assertIsNone(resume._parse_timestamp(value))
+
+    def test_82_variable_precision_lease_preserves_claim_contract(self):
+        class ClaimRpc:
+            def __init__(self, lease_value):
+                self.lease_value = lease_value
+
+            def __call__(self, rpc_name, _params):
+                if rpc_name.startswith("get_"):
+                    return None
+                if rpc_name.startswith("claim_"):
+                    return {
+                        "ok": True,
+                        "reason": "claimed",
+                        "optimistic_version": 2,
+                        "lease_generation": 1,
+                        "lease_expires_at": self.lease_value,
+                    }
+                raise AssertionError(f"unexpected RPC: {rpc_name}")
+
+        for width in range(1, 7):
+            lease_value = (
+                "2099-09-04T05:07:36."
+                f"{('123456')[:width]}+00:00"
+            )
+            with self.subTest(width=width):
+                controller = resume.ProgressiveResumeController(
+                    repository=resume.ResumeRepository(ClaimRpc(lease_value)),
+                    flags=resume.ResumeFlags(True, False),
+                    account_id=ACCOUNT_A,
+                    target_id=TARGET_A,
+                    target_username="neutral.target",
+                    run_id=RUN_A,
+                    source_request_id=REQUEST_A,
+                    source_attempt_id=1,
+                    release_sha=FULL_RELEASE_SHA,
+                    hmac_secret=TEST_HMAC_SECRET,
+                )
+                controller.load_and_plan()
+                self.assertTrue(controller.claim())
+                self.assertTrue(controller._lease_is_valid())
+                self.assertEqual(controller.claimed_version, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

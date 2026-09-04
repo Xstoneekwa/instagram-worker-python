@@ -263,6 +263,7 @@ def _patch_like_phase_common(
     _patch_post_viewer_like_surface_gates_normal(stack)
     tmock = stack.enter_context(mock.patch.object(nav, "time"))
     tmock.perf_counter = time.perf_counter
+    tmock.monotonic = time.monotonic
     tmock.time = time.time
     tmock.sleep = lambda *_a, **_k: None
 
@@ -1535,6 +1536,76 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
     def test_open_post_budget_constants(self) -> None:
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_OPEN_POST_MAX_S, 4.0)
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_GRID_PREP_MAX_S, 6.0)
+
+    def test_golden_open_expired_budget_has_no_device_read_or_action(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(nav.time, "monotonic", return_value=10.0), mock.patch.object(
+            nav, "_followers_current_pkg_activity"
+        ) as surface_read:
+            out = nav.visual_open_recent_post_from_profile(
+                device,
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                likes_perf_phase_t0=time.perf_counter(),
+                post_follow_stash_open_like_proof=True,
+                monotonic_deadline=9.0,
+            )
+
+        self.assertFalse(out.get("ok"))
+        self.assertFalse(out.get("post_detected"))
+        self.assertTrue(out.get("post_open_budget_exhausted"))
+        self.assertEqual(
+            out.get("failure_reason"),
+            "post_follow_like_open_post_budget_exhausted",
+        )
+        surface_read.assert_not_called()
+        self.assertEqual(device.method_calls, [])
+
+    def test_golden_open_stops_after_blocking_read_crosses_deadline(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        clock = {"now": 0.0}
+
+        def profile_lock(*_args: object, **_kwargs: object) -> dict[str, object]:
+            clock["now"] = 4.0
+            return {"ok": True, "reason": "profile_lock_proved"}
+
+        with mock.patch.object(
+            nav.time, "monotonic", side_effect=lambda: clock["now"]
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_activity": "com.instagram.mainactivity.MainActivity",
+                "current_package": "com.instagram.android",
+            },
+        ), mock.patch.object(
+            nav, "_try_profile_signals_once", return_value=True
+        ), mock.patch.object(
+            nav, "visual_target_profile_lock_verify", side_effect=profile_lock
+        ), mock.patch.object(
+            nav, "visual_profile_has_no_posts"
+        ) as no_posts, mock.patch.object(nav, "log"):
+            out = nav.visual_open_recent_post_from_profile(
+                device,
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                likes_perf_phase_t0=time.perf_counter(),
+                post_follow_stash_open_like_proof=True,
+                monotonic_deadline=3.5,
+            )
+
+        self.assertFalse(out.get("ok"))
+        self.assertTrue(out.get("post_open_budget_exhausted"))
+        self.assertEqual(out.get("post_open_budget_stage"), "after_profile_lock_read")
+        no_posts.assert_not_called()
+        device.screenshot.assert_not_called()
+        device.click.assert_not_called()
+
+    def test_generic_visual_open_keeps_deadline_disabled_by_default(self) -> None:
+        self.assertIsNone(
+            nav.visual_open_recent_post_from_profile.__kwdefaults__["monotonic_deadline"]
+        )
 
     def test_no_posts_tier1_single_signal_defers_to_existing_safe_path(self) -> None:
         device = mock.MagicMock()
@@ -2815,6 +2886,105 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             "post_follow_post_like_open_skipped_no_post_grid",
             [event for event, _ in logs],
         )
+
+    def test_golden_open_budget_exhaustion_skips_deferred_visual_fallback(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[tuple[str, dict[str, object]]] = []
+        configure_canary(
+            canary,
+            account_id=TEST_CANARY_ACCOUNT_ID,
+            account_username=TEST_CANARY_USERNAME,
+            run_id="canary-golden-budget-exhausted",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        try:
+            with ExitStack() as stack:
+                _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_follow_post_grid_evidence_from_xml",
+                        return_value={
+                            "outcome": "ambiguous",
+                            "post_bounds": None,
+                            "viewport_fingerprint": "same-viewport",
+                            "identity_exact": True,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_visual_profile_no_posts_tier1_direct_check",
+                        return_value={
+                            "no_posts_detected": False,
+                            "detection_method": "none",
+                            "confidence": 0.0,
+                        },
+                    )
+                )
+                deferred_no_posts = stack.enter_context(
+                    mock.patch.object(nav, "visual_profile_has_no_posts")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_followers_profile_tabs_bottom_y_px",
+                        return_value=(900, "unit"),
+                    )
+                )
+                golden_open = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_open_recent_post_from_profile",
+                        return_value={
+                            "ok": False,
+                            "post_detected": False,
+                            "post_open_budget_exhausted": True,
+                            "failure_reason": "post_follow_like_open_post_budget_exhausted",
+                            "open_strategy": "golden_direct",
+                            "likes_perf_post_open": {},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "log",
+                        side_effect=lambda _level, event, **kw: logs.append((str(event), kw)),
+                    )
+                )
+                out = nav.run_post_follow_post_likes_phase(
+                    device,
+                    pkg="com.instagram.android",
+                    source_profile_username="ct",
+                    follower_username="cand",
+                    visual_candidate_id="vc-golden-budget-exhausted",
+                    follow_success_verified=True,
+                    follow_state_after="following",
+                    skipped_tap=False,
+                )
+        finally:
+            configure_canary(
+                canary,
+                account_id="other",
+                account_username="other",
+                run_id="reset",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+
+        golden_open.assert_called_once()
+        deferred_no_posts.assert_not_called()
+        self.assertIsInstance(
+            golden_open.call_args.kwargs.get("monotonic_deadline"), float
+        )
+        self.assertEqual(out.get("phase_outcome"), "failed_safe_continue")
+        self.assertEqual(out.get("skipped_reason"), "likes_failed_open_post_safe_continue")
 
     def test_strict_no_post_grid_confirmed_absent_cells_skips_without_grid_probe(self) -> None:
         device = mock.MagicMock()

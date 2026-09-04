@@ -108,6 +108,11 @@ _HANDLE_RE = re.compile(r"^[a-z0-9._]{1,64}$")
 _SAFE_REASON_RE = re.compile(r"^[a-z0-9_:-]{1,120}$")
 _FULL_RELEASE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _LEGACY_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{20}$")
+_CANONICAL_UTC_TIMESTAMP_RE = re.compile(
+    r"^(?P<prefix>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d{1,6}))?"
+    r"(?P<offset>Z|[+-]\d{2}:\d{2})$"
+)
 
 
 def _truthy(value: object) -> bool:
@@ -132,12 +137,19 @@ def _parse_timestamp(value: object) -> datetime | None:
     raw = str(value or "").strip()
     if not raw:
         return None
+    canonical = _CANONICAL_UTC_TIMESTAMP_RE.fullmatch(raw)
+    if canonical is None:
+        return None
+    fraction = canonical.group("fraction")
+    normalized = canonical.group("prefix")
+    if fraction is not None:
+        normalized += f".{(fraction + '000000')[:6]}"
+    offset = canonical.group("offset")
+    normalized += "+00:00" if offset == "Z" else offset
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
 

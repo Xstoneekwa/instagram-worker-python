@@ -29199,6 +29199,7 @@ def visual_open_recent_post_from_profile(
     post_open_intent_binding: dict[str, Any] | None = None,
     post_open_intent_target_username: str = "",
     post_grid_existence_evidence: dict[str, Any] | None = None,
+    monotonic_deadline: float | None = None,
 ) -> dict[str, Any]:
     """
     From an open profile grid: screenshot, pick a grid cell, tap to open the post.
@@ -29211,6 +29212,28 @@ def visual_open_recent_post_from_profile(
     _VISUAL_POST_LIKE_TAPS_RECORDED = 0
     if post_follow_stash_open_like_proof:
         _clear_post_follow_open_like_proof_stash()
+    if monotonic_deadline is not None:
+        try:
+            deadline_expired_before_read = (
+                float(monotonic_deadline) <= 0.0
+                or time.monotonic() >= float(monotonic_deadline)
+            )
+        except (TypeError, ValueError):
+            deadline_expired_before_read = True
+        if deadline_expired_before_read:
+            return {
+                "ok": False,
+                "tap_x": None,
+                "tap_y": None,
+                "current_activity": None,
+                "current_package": None,
+                "profile_detected": False,
+                "post_detected": False,
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "post_follow_like_open_post_budget_exhausted",
+                "post_open_budget_exhausted": True,
+                "post_open_budget_stage": "before_initial_surface_read",
+            }
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     meta0 = _followers_current_pkg_activity(d)
     act0 = meta0.get("current_activity")
@@ -29263,6 +29286,57 @@ def visual_open_recent_post_from_profile(
             out = {**out, "likes_perf_post_open": dict(lperf)}
         return out
 
+    def _deadline_abort(
+        stage: str, *, required_remaining_s: float = 0.0
+    ) -> dict[str, Any] | None:
+        if monotonic_deadline is None:
+            return None
+        try:
+            deadline = float(monotonic_deadline)
+            exhausted = (
+                deadline <= 0.0
+                or time.monotonic() + max(0.0, float(required_remaining_s))
+                >= deadline
+            )
+        except (TypeError, ValueError):
+            exhausted = True
+        if not exhausted:
+            return None
+        try:
+            log(
+                "warning",
+                "post_follow_like_open_post_budget_exhausted",
+                source_profile_username=source_profile_username or "",
+                expected_follower_username=expected_follower_username or "",
+                stage=str(stage or "unknown")[:80],
+                tap_authorized=False,
+            )
+        except Exception:
+            pass
+        return _po_fin(
+            {
+                "ok": False,
+                "tap_x": None,
+                "tap_y": None,
+                "current_activity": act0,
+                "current_package": pkg0,
+                "profile_detected": prof0,
+                "post_detected": False,
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "post_follow_like_open_post_budget_exhausted",
+                "post_open_budget_exhausted": True,
+                "post_open_budget_stage": str(stage or "unknown")[:80],
+            },
+            outcome="failed",
+            failure_reason="post_follow_like_open_post_budget_exhausted",
+            post_open_budget_exhausted=True,
+            post_open_budget_stage=str(stage or "unknown")[:80],
+        )
+
+    deadline_abort = _deadline_abort("after_initial_surface_read")
+    if deadline_abort is not None:
+        return deadline_abort
+
     log(
         "info",
         "visual_recent_post_open_started",
@@ -29279,6 +29353,9 @@ def visual_open_recent_post_from_profile(
         ww, wh = d.window_size()
     except Exception:
         ww, wh = 1080, 2400
+    deadline_abort = _deadline_abort("after_window_size_read")
+    if deadline_abort is not None:
+        return deadline_abort
 
     _reuse_started_at = time.monotonic()
     if golden_obs is not None:
@@ -29364,6 +29441,9 @@ def visual_open_recent_post_from_profile(
         golden_obs["golden_profile_lock_ms"] = round(
             (time.perf_counter() - _t_profile_lock0) * 1000.0, 2
         )
+    deadline_abort = _deadline_abort("after_profile_lock_read")
+    if deadline_abort is not None:
+        return deadline_abort
     if not tv_open.get("ok"):
         meta_tv = _followers_current_pkg_activity(d)
         return _po_fin(
@@ -29420,6 +29500,9 @@ def visual_open_recent_post_from_profile(
         golden_obs["golden_no_posts_check_ms"] = round(
             (time.perf_counter() - _t_no_posts0) * 1000.0, 2
         )
+    deadline_abort = _deadline_abort("after_no_posts_read")
+    if deadline_abort is not None:
+        return deadline_abort
     if np_check.get("no_posts_detected"):
         meta_np = _followers_current_pkg_activity(d)
         log(
@@ -29508,6 +29591,9 @@ def visual_open_recent_post_from_profile(
                 "open_shot_capture_ms"
             ]
             golden_obs["golden_screenshot_captured_at_monotonic"] = time.monotonic()
+    deadline_abort = _deadline_abort("after_screenshot_read")
+    if deadline_abort is not None:
+        return deadline_abort
 
     _t_pil0 = time.perf_counter()
     try:
@@ -29599,6 +29685,9 @@ def visual_open_recent_post_from_profile(
         open_profile_tabs_bottom_y_px,
         open_profile_tabs_margin_px,
     ) = _post_follow_dynamic_first_row_search_y_min_layout(d, ih, open_grid_ui_hints)
+    deadline_abort = _deadline_abort("after_grid_surface_read")
+    if deadline_abort is not None:
+        return deadline_abort
     dynamic_first_row_search_y_min_ratio = round(
         float(dynamic_first_row_search_y_min_px) / float(ih), 5
     )
@@ -29818,6 +29907,9 @@ def visual_open_recent_post_from_profile(
         golden_obs["golden_cell_selection_ms"] = round(
             (time.perf_counter() - _t_sel0) * 1000.0, 2
         )
+    deadline_abort = _deadline_abort("after_cell_selection")
+    if deadline_abort is not None:
+        return deadline_abort
 
     if chosen is None:
         log(
@@ -30194,11 +30286,20 @@ def visual_open_recent_post_from_profile(
         if post_follow_fast
         else float(_VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S)
     )
+    deadline_abort = _deadline_abort(
+        "pre_tap_settle_would_exceed_budget",
+        required_remaining_s=_settle_s,
+    )
+    if deadline_abort is not None:
+        return deadline_abort
     _t_settle0 = time.perf_counter()
     try:
         time.sleep(_settle_s)
     except Exception:
         pass
+    deadline_abort = _deadline_abort("after_pre_tap_settle")
+    if deadline_abort is not None:
+        return deadline_abort
     if lperf is not None:
         lperf["pre_tap_settle_ms"] = round(
             (time.perf_counter() - _t_settle0) * 1000.0, 2
@@ -30251,6 +30352,9 @@ def visual_open_recent_post_from_profile(
         except Exception:
             return False
 
+    deadline_abort = _deadline_abort("before_open_tap")
+    if deadline_abort is not None:
+        return deadline_abort
     if not _send_open_tap(tap_x, tap_y):
         log(
             "error",
@@ -56629,6 +56733,16 @@ def run_post_follow_post_likes_phase(
         "failure_reason": None,
         "likes_failure_kind": None,
     }
+    _golden_post_open_deadline: float | None = None
+
+    def _ensure_golden_post_open_deadline() -> float:
+        nonlocal _golden_post_open_deadline
+        if _golden_post_open_deadline is None:
+            _golden_post_open_deadline = (
+                time.monotonic() + float(_POST_FOLLOW_LIKE_OPEN_POST_MAX_S)
+            )
+        return _golden_post_open_deadline
+
     _post_follow_like_reveal_budget_begin(initial_count=0)
 
     def _likes_cfg_effective() -> dict[str, Any]:
@@ -58518,6 +58632,7 @@ def run_post_follow_post_likes_phase(
                 post_grid_existence_evidence=(
                     _canary_golden_post_existence_evidence
                 ),
+                monotonic_deadline=_ensure_golden_post_open_deadline(),
             )
             log(
                 "info",
@@ -59090,6 +59205,7 @@ def run_post_follow_post_likes_phase(
                         post_open_intent_binding=authoritative_binding,
                         post_open_intent_target_username=src,
                         post_grid_existence_evidence=_canary_grid_evidence,
+                        monotonic_deadline=_ensure_golden_post_open_deadline(),
                     )
                 log(
                     "info",
@@ -60198,6 +60314,7 @@ def run_post_follow_post_likes_phase(
                 post_follow_stash_open_like_proof=True,
                 post_open_intent_binding=authoritative_binding,
                 post_open_intent_target_username=src,
+                monotonic_deadline=_ensure_golden_post_open_deadline(),
             )
 
         if preopened_out is not None:
@@ -60463,9 +60580,34 @@ def run_post_follow_post_likes_phase(
             )
 
         if not open_out.get("ok") or not open_out.get("post_detected"):
-            no_posts_visual = _run_deferred_visual_no_posts_fallback(
-                str(open_out.get("failure_reason") or "post_open_failed")
+            golden_budget_exhausted = bool(
+                open_out.get("post_open_budget_exhausted")
+                or (
+                    _golden_post_open_deadline is not None
+                    and time.monotonic() >= _golden_post_open_deadline
+                )
             )
+            if golden_budget_exhausted:
+                no_posts_visual = {
+                    "no_posts_detected": False,
+                    "detection_method": "skipped_open_post_budget_exhausted",
+                    "confidence": 0.0,
+                }
+                try:
+                    log(
+                        "info",
+                        "visual_profile_no_posts_visual_fallback_skipped",
+                        source_profile_username=src,
+                        follower_username=cand,
+                        visual_candidate_id=vcid,
+                        reason="post_follow_like_open_post_budget_exhausted",
+                    )
+                except Exception:
+                    pass
+            else:
+                no_posts_visual = _run_deferred_visual_no_posts_fallback(
+                    str(open_out.get("failure_reason") or "post_open_failed")
+                )
             if no_posts_visual.get("no_posts_detected") is True:
                 return _skip_no_posts(no_posts_visual)
             failed_nav += 1
