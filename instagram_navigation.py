@@ -50,6 +50,12 @@ from instagram_list_continuation import (
     viewport_fingerprint,
 )
 from screen_fingerprint import build_screen_fingerprint, compare_screen_fingerprints
+from profile_cta_stabilization import (
+    classify_music_audio_sheet,
+    derive_safe_sheet_dismiss_point,
+    parse_android_bounds,
+    validate_profile_cta_transition,
+)
 
 
 def _require_irreversible_social_action_storage(action: str) -> None:
@@ -9497,6 +9503,413 @@ def _follow_state_from_header_button_rid_fast(
     return "unknown", meta
 
 
+_FOLLOW_PRE_TAP_MAX_SHIFT_PX = 140
+_FOLLOW_PRE_TAP_RESELECT_STABLE_SHIFT_PX = 50
+_FOLLOW_PRE_TAP_IMMEDIATE_ACTION_WINDOW_MS = 250.0
+
+
+def _follow_pre_tap_live_observation(
+    d: u2.Device,
+    *,
+    expected_username: str,
+    expected_package: str,
+) -> dict[str, Any]:
+    """Acquire one composite live proof immediately before a Follow tap."""
+
+    started = time.perf_counter()
+    try:
+        current = dict(d.app_current() or {})
+    except Exception:
+        current = {}
+    try:
+        try:
+            hierarchy = str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            hierarchy = str(d.dump_hierarchy() or "")
+    except Exception:
+        hierarchy = ""
+    try:
+        screen_width, screen_height = (int(value) for value in d.window_size())
+    except Exception:
+        screen_width, screen_height = 1080, 2400
+
+    music = classify_music_audio_sheet(
+        hierarchy,
+        screen_width=screen_width,
+        screen_height=screen_height,
+    )
+    result: dict[str, Any] = {
+        "ok": False,
+        "reason": "follow_pre_tap_hierarchy_unreadable",
+        "package": str(current.get("package") or ""),
+        "activity": str(current.get("activity") or ""),
+        "profile_identity_ok": False,
+        "target_binding_ok": False,
+        "overlay_present": bool(music.get("proved")),
+        "music_sheet": music,
+        "hierarchy_xml": hierarchy,
+        "screen_width": screen_width,
+        "screen_height": screen_height,
+        "resource_id": "",
+        "text": "",
+        "content_desc": "",
+        "semantic": "",
+        "clickable": False,
+        "bounds": {},
+        "bounds_source": "fresh_live_profile_header_follow_button",
+        "layout_hash": hashlib.sha256(hierarchy.encode("utf-8")).hexdigest()[:20] if hierarchy else "",
+        "observed_at_monotonic": time.monotonic(),
+        "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+    }
+    if not hierarchy:
+        return result
+    try:
+        root = ET.fromstring(hierarchy)
+    except Exception:
+        return result
+
+    expected = _normalize_handle(str(expected_username or ""))
+    parent_map = {child: owner for owner in root.iter() for child in owner}
+    action_bar_identity = ""
+    follow_candidates: list[tuple[Any, Any]] = []
+    unknown_modal = False
+    for node in root.iter():
+        if str(node.get("visible-to-user") or "true").casefold() == "false":
+            continue
+        resource_id = str(node.get("resource-id") or "")
+        text = str(node.get("text") or "").strip()
+        desc = str(node.get("content-desc") or "").strip()
+        if resource_id.endswith("/action_bar_title"):
+            value = text or desc
+            if value:
+                action_bar_identity = _normalize_handle(value)
+        rid_lower = resource_id.casefold()
+        if "bottom_sheet" in rid_lower or "modal" in rid_lower:
+            bounds = parse_android_bounds(node.get("bounds"))
+            if bounds and bounds["bottom"] >= int(screen_height * 0.72):
+                unknown_modal = True
+        if not resource_id.endswith("/profile_header_follow_button"):
+            continue
+        label = _follow_norm(text or desc)
+        if label not in _FOLLOW_ACCEPT_TEXT:
+            continue
+        tap_node = node
+        if str(tap_node.get("clickable") or "").casefold() != "true":
+            ancestor = parent_map.get(tap_node)
+            while ancestor is not None:
+                if str(ancestor.get("clickable") or "").casefold() == "true":
+                    tap_node = ancestor
+                    break
+                ancestor = parent_map.get(ancestor)
+        follow_candidates.append((node, tap_node))
+
+    result["profile_identity_ok"] = bool(expected and action_bar_identity == expected)
+    result["target_binding_ok"] = bool(expected and action_bar_identity == expected)
+    result["overlay_present"] = bool(music.get("proved") or unknown_modal)
+    if len(follow_candidates) != 1:
+        result["reason"] = (
+            "follow_pre_tap_cta_missing"
+            if not follow_candidates
+            else "follow_pre_tap_cta_not_unique"
+        )
+        return result
+    source_node, tap_node = follow_candidates[0]
+    bounds = parse_android_bounds(tap_node.get("bounds"))
+    if bounds is None:
+        result["reason"] = "follow_pre_tap_bounds_invalid"
+        return result
+    # Semantic identity belongs to the exact Follow CTA.  The physical tap may
+    # be delegated to a clickable parent, whose resource id is incidental.
+    resource_id = str(source_node.get("resource-id") or tap_node.get("resource-id") or "")
+    text = str(source_node.get("text") or "").strip()
+    desc = str(source_node.get("content-desc") or "").strip()
+    result.update(
+        {
+            "ok": True,
+            "reason": "follow_pre_tap_live_observation_ready",
+            "resource_id": resource_id,
+            "text": text,
+            "content_desc": desc,
+            "semantic": text or desc,
+            "clickable": str(tap_node.get("clickable") or "").casefold() == "true",
+            "bounds": bounds,
+        }
+    )
+    result["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+    return result
+
+
+def _dismiss_proved_music_sheet_once(
+    d: u2.Device,
+    observation: dict[str, Any],
+    *,
+    expected_username: str,
+    expected_package: str,
+) -> tuple[bool, dict[str, Any]]:
+    music = dict(observation.get("music_sheet") or {})
+    if not music.get("proved"):
+        return False, observation
+    point = derive_safe_sheet_dismiss_point(
+        str(observation.get("hierarchy_xml") or ""),
+        sheet_bounds=dict(music.get("sheet_bounds") or {}),
+        screen_width=int(observation.get("screen_width") or 1080),
+        screen_height=int(observation.get("screen_height") or 2400),
+    )
+    method = "safe_zone_above_sheet"
+    try:
+        if point is not None:
+            d.click(int(point[0]), int(point[1]))
+        else:
+            method = "bounded_android_back"
+            d.press("back")
+    except Exception:
+        return False, observation
+    fresh = _follow_pre_tap_live_observation(
+        d,
+        expected_username=expected_username,
+        expected_package=expected_package,
+    )
+    dismissed = not bool((fresh.get("music_sheet") or {}).get("proved"))
+    log(
+        "info" if dismissed else "warning",
+        "follow_music_sheet_bounded_recovery_completed",
+        target_username=str(expected_username or ""),
+        dismiss_method=method,
+        dismissed=bool(dismissed),
+        recovery_attempt=1,
+        safe_zone_proved=point is not None,
+    )
+    return bool(dismissed), fresh
+
+
+def _stabilize_follow_cta_immediately_before_tap(
+    d: u2.Device,
+    *,
+    expected_username: str,
+    expected_package: str,
+    expected_activity: str,
+    initial_resource_id: str,
+    initial_text: str,
+    initial_bounds: dict[str, Any],
+) -> dict[str, Any]:
+    """Return only fresh tap authority; one immediate reselect is bounded."""
+
+    initial = {
+        "resource_id": initial_resource_id,
+        "text": initial_text,
+        "semantic": initial_text,
+        "bounds": dict(initial_bounds or {}),
+        "package": expected_package,
+        "activity": expected_activity,
+    }
+    first = _follow_pre_tap_live_observation(
+        d,
+        expected_username=expected_username,
+        expected_package=expected_package,
+    )
+    music_recovery_used = False
+    if bool((first.get("music_sheet") or {}).get("proved")):
+        dismissed, first = _dismiss_proved_music_sheet_once(
+            d,
+            first,
+            expected_username=expected_username,
+            expected_package=expected_package,
+        )
+        music_recovery_used = True
+        if not dismissed:
+            return {
+                "ok": False,
+                "reason": "music_sheet_recovery_failed",
+                "old_bounds_reused": False,
+                "music_recovery_used": True,
+                "probe_count": 1,
+            }
+        # The pre-sheet profile/identity/CTA evidence is intentionally not an
+        # input to recovery authority.  Require two coherent post-dismiss
+        # observations, then consume only the second one's bounds.
+        post_dismiss_second = _follow_pre_tap_live_observation(
+            d,
+            expected_username=expected_username,
+            expected_package=expected_package,
+        )
+        post_dismiss_validation = validate_profile_cta_transition(
+            first,
+            post_dismiss_second,
+            accepted_semantics=_FOLLOW_ACCEPT_TEXT,
+            max_center_shift_px=_FOLLOW_PRE_TAP_RESELECT_STABLE_SHIFT_PX,
+        )
+        post_dismiss_context_ok = (
+            bool(first.get("ok"))
+            and bool(first.get("target_binding_ok"))
+            and bool(post_dismiss_second.get("ok"))
+            and bool(post_dismiss_second.get("target_binding_ok"))
+            and str(post_dismiss_second.get("package") or "") == str(expected_package or "")
+            and (
+                not expected_activity
+                or str(post_dismiss_second.get("activity") or "") == str(expected_activity)
+            )
+            and str(post_dismiss_second.get("resource_id") or "") == str(initial_resource_id or "")
+        )
+        if not post_dismiss_context_ok or not post_dismiss_validation.get("ok"):
+            return {
+                **post_dismiss_validation,
+                "ok": False,
+                "reason": (
+                    "music_sheet_post_dismiss_context_unproved"
+                    if not post_dismiss_context_ok
+                    else str(post_dismiss_validation.get("reason") or "music_sheet_post_dismiss_unstable")
+                ),
+                "old_bounds_reused": False,
+                "music_recovery_used": True,
+                "probe_count": 3,
+                "reselect_used": True,
+            }
+        used_at = time.monotonic()
+        proof_age_ms = (
+            used_at
+            - float(post_dismiss_second.get("observed_at_monotonic") or used_at)
+        ) * 1000.0
+        if proof_age_ms < 0.0 or proof_age_ms > _FOLLOW_PRE_TAP_IMMEDIATE_ACTION_WINDOW_MS:
+            return {
+                "ok": False,
+                "reason": "follow_pre_tap_fresh_proof_expired",
+                "old_bounds_reused": False,
+                "music_recovery_used": True,
+                "probe_count": 3,
+                "reselect_used": True,
+                "proof_age_ms": round(proof_age_ms, 2),
+            }
+        return {
+            **post_dismiss_validation,
+            "observation": post_dismiss_second,
+            "bounds_source": str(
+                post_dismiss_second.get("bounds_source")
+                or "fresh_live_profile_header_follow_button"
+            ),
+            "bounds_observed_at": float(
+                post_dismiss_second.get("observed_at_monotonic") or used_at
+            ),
+            "bounds_used_at": used_at,
+            "proof_age_ms": round(proof_age_ms, 2),
+            "probe_count": 3,
+            "reselect_used": True,
+            "music_recovery_used": True,
+        }
+    first_validation = validate_profile_cta_transition(
+        initial,
+        first,
+        accepted_semantics=_FOLLOW_ACCEPT_TEXT,
+        max_center_shift_px=_FOLLOW_PRE_TAP_MAX_SHIFT_PX,
+    )
+    if first.get("ok") and first.get("target_binding_ok") and first_validation.get("ok"):
+        used_at = time.monotonic()
+        proof_age_ms = (used_at - float(first.get("observed_at_monotonic") or used_at)) * 1000.0
+        if proof_age_ms < 0.0 or proof_age_ms > _FOLLOW_PRE_TAP_IMMEDIATE_ACTION_WINDOW_MS:
+            return {
+                "ok": False,
+                "reason": "follow_pre_tap_fresh_proof_expired",
+                "old_bounds_reused": False,
+                "music_recovery_used": music_recovery_used,
+                "probe_count": 1,
+                "proof_age_ms": round(proof_age_ms, 2),
+            }
+        return {
+            **first_validation,
+            "observation": first,
+            "bounds_source": str(first.get("bounds_source") or "fresh_live_profile_header_follow_button"),
+            "bounds_observed_at": float(first.get("observed_at_monotonic") or used_at),
+            "bounds_used_at": used_at,
+            "proof_age_ms": round(proof_age_ms, 2),
+            "probe_count": 1,
+            "reselect_used": False,
+            "music_recovery_used": music_recovery_used,
+        }
+
+    if bool(first.get("overlay_present")) and not bool((first.get("music_sheet") or {}).get("proved")):
+        return {
+            "ok": False,
+            "reason": "unknown_modal_fail_closed",
+            "old_bounds_reused": False,
+            "music_recovery_used": music_recovery_used,
+            "probe_count": 1,
+        }
+
+    second = _follow_pre_tap_live_observation(
+        d,
+        expected_username=expected_username,
+        expected_package=expected_package,
+    )
+    second_validation = validate_profile_cta_transition(
+        first,
+        second,
+        accepted_semantics=_FOLLOW_ACCEPT_TEXT,
+        max_center_shift_px=_FOLLOW_PRE_TAP_RESELECT_STABLE_SHIFT_PX,
+    )
+    second_expected_context_ok = (
+        str(second.get("package") or "") == str(expected_package or "")
+        and (
+            not expected_activity
+            or str(second.get("activity") or "") == str(expected_activity)
+        )
+        and str(second.get("resource_id") or "") == str(initial_resource_id or "")
+    )
+    if not first.get("ok") or not first.get("target_binding_ok"):
+        return {
+            **second_validation,
+            "ok": False,
+            "reason": str(first.get("reason") or first_validation.get("reason") or "fresh_reselect_unbound"),
+            "old_bounds_reused": False,
+            "probe_count": 2,
+            "reselect_used": True,
+            "music_recovery_used": music_recovery_used,
+        }
+    if (
+        not second.get("ok")
+        or not second.get("target_binding_ok")
+        or not second_expected_context_ok
+        or not second_validation.get("ok")
+    ):
+        return {
+            **second_validation,
+            "ok": False,
+            "reason": str(
+                second.get("reason")
+                if not second.get("ok")
+                else "fresh_reselect_context_changed"
+                if not second_expected_context_ok
+                else second_validation.get("reason")
+                or "fresh_reselect_failed"
+            ),
+            "old_bounds_reused": False,
+            "probe_count": 2,
+            "reselect_used": True,
+            "music_recovery_used": music_recovery_used,
+        }
+    used_at = time.monotonic()
+    proof_age_ms = (used_at - float(second.get("observed_at_monotonic") or used_at)) * 1000.0
+    if proof_age_ms < 0.0 or proof_age_ms > _FOLLOW_PRE_TAP_IMMEDIATE_ACTION_WINDOW_MS:
+        return {
+            "ok": False,
+            "reason": "follow_pre_tap_fresh_proof_expired",
+            "old_bounds_reused": False,
+            "probe_count": 2,
+            "reselect_used": True,
+            "music_recovery_used": music_recovery_used,
+            "proof_age_ms": round(proof_age_ms, 2),
+        }
+    return {
+        **second_validation,
+        "observation": second,
+        "bounds_source": str(second.get("bounds_source") or "fresh_live_profile_header_follow_button"),
+        "bounds_observed_at": float(second.get("observed_at_monotonic") or used_at),
+        "bounds_used_at": used_at,
+        "proof_age_ms": round(proof_age_ms, 2),
+        "probe_count": 2,
+        "reselect_used": True,
+        "music_recovery_used": music_recovery_used,
+    }
+
+
 def _follow_rid_suspicious(rid: str) -> bool:
     r = _follow_norm(rid)
     if not r:
@@ -10847,8 +11260,25 @@ def perform_follow_safe(
     tap_exact = bool(_use_follow_action_v2 and meta.get("exact_follow_fast_path"))
     tap_cx, tap_cy = 0, 0
     tap_coords_ready = False
+    _selected_activity = ""
+    _selected_package = str(pkg or "")
     if tap_exact:
         _eb = _follow_safe_info(btn).get("bounds") or {}
+        _ordering_proof = (
+            (pre_follow_context or {}).get("ordering_v2_reentry")
+            if isinstance(pre_follow_context, dict)
+            else None
+        )
+        if isinstance(_ordering_proof, dict):
+            _selected_activity = str(_ordering_proof.get("activity") or "")
+            _selected_package = str(_ordering_proof.get("package") or pkg or "")
+        if not _selected_activity:
+            try:
+                _selected_current = dict(d.app_current() or {})
+            except Exception:
+                _selected_current = {}
+            _selected_activity = str(_selected_current.get("activity") or "")
+            _selected_package = str(_selected_current.get("package") or pkg or "")
         try:
             l0, t0, r0, b0 = (
                 int(_eb["left"]),
@@ -11054,6 +11484,57 @@ def perform_follow_safe(
     try:
         _require_irreversible_social_action_storage("follow_pre_tap")
         if tap_exact and tap_coords_ready:
+            _stabilized = _stabilize_follow_cta_immediately_before_tap(
+                d,
+                expected_username=str(username or ""),
+                expected_package=_selected_package,
+                expected_activity=_selected_activity,
+                initial_resource_id=str(
+                    _follow_safe_info(btn).get("resourceName")
+                    or f"{_selected_package}:id/profile_header_follow_button"
+                ),
+                initial_text=str(_follow_safe_info(btn).get("text") or "Follow"),
+                initial_bounds=dict(_follow_safe_info(btn).get("bounds") or {}),
+            )
+            _record(
+                "follow_pre_tap_live_revalidation_completed",
+                {
+                    "target_username": str(username or ""),
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "ok": bool(_stabilized.get("ok")),
+                    "reason": str(_stabilized.get("reason") or ""),
+                    "probe_count": int(_stabilized.get("probe_count") or 0),
+                    "reselect_used": bool(_stabilized.get("reselect_used")),
+                    "music_recovery_used": bool(_stabilized.get("music_recovery_used")),
+                    "old_bounds_reused": False,
+                    "bounds_shift_px": int(_stabilized.get("bounds_shift_px") or 0),
+                    "follow_bounds_source": str(_stabilized.get("bounds_source") or ""),
+                    "follow_bounds_observed_at": float(_stabilized.get("bounds_observed_at") or 0.0),
+                    "follow_bounds_used_at": float(_stabilized.get("bounds_used_at") or 0.0),
+                    "proof_age_ms": float(_stabilized.get("proof_age_ms") or 0.0),
+                },
+            )
+            if not _stabilized.get("ok"):
+                return {
+                    "ok": False,
+                    "failure_code": 33,
+                    "failure_reason": str(
+                        _stabilized.get("reason") or "follow_pre_tap_live_revalidation_failed"
+                    ),
+                    "visual_follow_failure_reason": str(
+                        _stabilized.get("reason") or "follow_pre_tap_live_revalidation_failed"
+                    ),
+                    "tapped": False,
+                    "follow_tap_sent": False,
+                    "follow_state_before": state_before,
+                    "follow_state_after": state_before,
+                    "verify_attempts": 0,
+                    "events": events,
+                    "old_bounds_reused": False,
+                }
+            _fresh_bounds = dict(_stabilized.get("fresh_bounds") or {})
+            tap_cx = (int(_fresh_bounds["left"]) + int(_fresh_bounds["right"])) // 2
+            tap_cy = (int(_fresh_bounds["top"]) + int(_fresh_bounds["bottom"])) // 2
             d.click(tap_cx, tap_cy)
         else:
             btn.click()

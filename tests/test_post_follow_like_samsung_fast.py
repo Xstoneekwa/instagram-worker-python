@@ -412,6 +412,71 @@ class PreFollowTapInstrumentationTest(unittest.TestCase):
         self.assertTrue(ready["safe_to_tap"])
         self.assertEqual(sent["reason"], "follow_tap_sent")
 
+    def test_exact_follow_physically_taps_only_the_fresh_revalidated_bounds(self) -> None:
+        device = mock.MagicMock()
+        button = mock.MagicMock()
+        button.info = {
+            "bounds": {"left": 20, "top": 100, "right": 220, "bottom": 180},
+            "text": "Follow",
+            "resourceName": "com.instagram.android:id/profile_header_follow_button",
+        }
+        fresh_bounds = {"left": 60, "top": 820, "right": 540, "bottom": 980}
+        with mock.patch.object(
+            nav, "_follow_ui_state_snapshot", side_effect=["follow", "following"]
+        ), mock.patch(
+            "follow_action_engine.follow_action_surface_wait_and_select_element",
+            return_value=(
+                button,
+                {
+                    "events": [],
+                    "exact_follow_fast_path": True,
+                    "last_ui_state": "follow",
+                },
+            ),
+        ), mock.patch.object(
+            nav,
+            "_stabilize_follow_cta_immediately_before_tap",
+            return_value={
+                "ok": True,
+                "reason": "fresh_profile_cta_valid",
+                "fresh_bounds": fresh_bounds,
+                "old_bounds_reused": False,
+                "probe_count": 1,
+                "bounds_source": "fresh_live_profile_header_follow_button",
+                "bounds_observed_at": time.monotonic(),
+                "bounds_used_at": time.monotonic(),
+            },
+        ), mock.patch.object(
+            nav,
+            "visual_detect_private_profile",
+            return_value={
+                "private_profile_detected": False,
+                "public_profile_proven": True,
+                "public_profile_proof_method": "hierarchy:profile_tabs_container",
+                "detection_method": "none",
+                "confidence": 0.0,
+                "probe_ms": 1.0,
+                "hierarchy_fallback_used": False,
+            },
+        ), mock.patch.object(
+            nav, "_try_review_before_follow_popup_confirm", return_value=False
+        ), mock.patch.object(
+            nav, "_review_before_follow_popup_visible", return_value=False
+        ), mock.patch("instagram_navigation.time.sleep"):
+            out = nav.perform_follow_safe(
+                device,
+                "public_user",
+                "com.instagram.android",
+                profile_already_open=True,
+                source_profile_username="source_ct",
+                visual_candidate_id="vc-fresh",
+                dont_follow_private_accounts=True,
+            )
+
+        self.assertTrue(out["ok"])
+        device.click.assert_called_once_with(300, 900)
+        self.assertNotEqual(device.click.call_args.args, (120, 140))
+
 
 class PostMuteGapTrackingTest(unittest.TestCase):
     def tearDown(self) -> None:

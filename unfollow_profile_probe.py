@@ -20,6 +20,10 @@ import config
 from logs import log
 from instagram_action_restriction import guard_instagram_action_rate_limit
 from own_following_navigation import detect_own_following_list_screen
+from profile_cta_stabilization import (
+    center_shift_metrics as _shared_center_shift_metrics,
+    validate_profile_cta_transition,
+)
 from unfollow_list_harvest import normalize_unfollow_username
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
@@ -110,13 +114,7 @@ def _center_shift_metrics(
     initial_bounds: dict[str, Any],
     refreshed_bounds: dict[str, Any],
 ) -> tuple[int, int, int]:
-    initial_center = _bounds_center(initial_bounds)
-    refreshed_center = _bounds_center(refreshed_bounds)
-    if initial_center is None or refreshed_center is None:
-        return 0, 0, 0
-    delta_x = int(refreshed_center[0] - initial_center[0])
-    delta_y = int(refreshed_center[1] - initial_center[1])
-    return delta_x, delta_y, max(abs(delta_x), abs(delta_y))
+    return _shared_center_shift_metrics(initial_bounds, refreshed_bounds)
 
 
 def _safe_window_size(d: u2.Device) -> tuple[int, int]:
@@ -2028,18 +2026,36 @@ def open_unfollow_actions_sheet_from_profile_probe(
         btn_det.get("first_cta_probe_at") or btn_det.get("probe_at") or ""
     )
     refreshed_bounds = dict(refreshed.get("bounds") or {})
-    delta_x, delta_y, bounds_shift_px = _center_shift_metrics(initial_bounds, refreshed_bounds)
+    shared_revalidation = validate_profile_cta_transition(
+        btn_det,
+        {
+            **refreshed,
+            "semantic": str(refreshed.get("text") or refreshed.get("content_desc") or ""),
+            "profile_identity_ok": profile_exact_confirmed,
+            "overlay_present": False,
+        },
+        accepted_semantics=(
+            str(btn_det.get("text") or ""),
+            str(btn_det.get("content_desc") or ""),
+        ),
+        max_center_shift_px=_FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX,
+        require_profile_identity=True,
+    )
+    delta_x = int(shared_revalidation.get("center_delta_x") or 0)
+    delta_y = int(shared_revalidation.get("center_delta_y") or 0)
+    bounds_shift_px = int(shared_revalidation.get("bounds_shift_px") or 0)
+    shared_failure = str(shared_revalidation.get("reason") or "")
     revalidation_failure = ""
-    initial_resource_id = str(btn_det.get("resource_id") or "")
-    refreshed_resource_id = str(refreshed.get("resource_id") or "")
-    if not refreshed.get("ok"):
+    if not refreshed.get("ok") or shared_failure == "profile_cta_bounds_invalid":
         revalidation_failure = "following_button_pre_tap_revalidation_failed"
-    elif initial_resource_id and refreshed_resource_id and initial_resource_id != refreshed_resource_id:
+    elif shared_failure == "profile_cta_semantic_identity_changed":
         revalidation_failure = "following_button_semantic_identity_changed"
-    elif bool(btn_det.get("clickable")) and not bool(refreshed.get("clickable")):
+    elif shared_failure == "profile_cta_no_longer_clickable":
         revalidation_failure = "following_button_no_longer_clickable"
-    elif bounds_shift_px > _FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX:
+    elif shared_failure == "profile_cta_bounds_shift_too_large":
         revalidation_failure = "following_button_bounds_shift_too_large"
+    elif not shared_revalidation.get("ok"):
+        revalidation_failure = "following_button_pre_tap_revalidation_failed"
 
     if revalidation_failure:
         if revalidation_failure == "following_button_bounds_shift_too_large":

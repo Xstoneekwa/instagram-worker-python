@@ -37,6 +37,25 @@ class _Device:
     def advance(self) -> None:
         self._idx += 1
 
+    def app_current(self) -> dict:
+        return {
+            "package": "com.instagram.android",
+            "activity": "com.instagram.mainactivity.InstagramMainActivity",
+        }
+
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        _ = compressed
+        return """<hierarchy>
+          <node resource-id="com.instagram.android:id/action_bar_title"
+                text="public_user" visible-to-user="true" />
+          <node resource-id="com.instagram.android:id/profile_header_follow_button"
+                text="Follow" clickable="true" visible-to-user="true"
+                bounds="[20,100][220,180]" />
+        </hierarchy>"""
+
+    def window_size(self) -> tuple[int, int]:
+        return 1080, 2400
+
     def __call__(self, **kwargs):
         if kwargs.get("resourceId"):
             return _Selector(self)
