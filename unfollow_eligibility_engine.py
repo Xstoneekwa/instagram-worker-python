@@ -327,7 +327,10 @@ def plan_unfollow_targets(
     availability_by_username = (
         supabase_client.fetch_unfollow_candidate_availability(aid)
     )
-    fetch_cap = max(session_cap * 4, 50) if session_cap > 0 else 200
+    # The requested session result count is not a transport page-size policy.
+    # Keep the exhaustive ledger scan, while avoiding tiny pages for diagnostic
+    # probes (notably the follow-to-unfollow handoff's limit=1 request).
+    fetch_cap = max(session_cap * 4, 320)
     loaded = supabase_client.fetch_unfollow_strict_candidate_rows(
         aid,
         limit=fetch_cap,

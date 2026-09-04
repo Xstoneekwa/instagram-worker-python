@@ -208,6 +208,39 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.availability_patch.stop()
 
+    def test_diagnostic_result_limit_does_not_shrink_transport_page_size(self) -> None:
+        rows = [_row(index) for index in range(772)]
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=(
+                rows,
+                {
+                    "page_size": 320,
+                    "pages_loaded": 3,
+                    "page_requests": 4,
+                    "pagination_used": True,
+                    "pagination_strategy": "stable_offset_snapshot_v1",
+                    "candidate_scan_exhaustive": True,
+                    "scan_as_of": AS_OF.isoformat(),
+                },
+            ),
+        ) as fetch_rows:
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(session_limit=120),
+                limit=1,
+                as_of=AS_OF,
+            )
+
+        self.assertEqual(fetch_rows.call_args.kwargs["limit"], 320)
+        self.assertEqual(plan["source_rows_loaded"], 772)
+        self.assertEqual(plan["eligible_total"], 772)
+        self.assertEqual(plan["candidates_count"], 1)
+        self.assertEqual(plan["unplanned_eligible_count"], 771)
+        self.assertEqual(plan["query_limit"], 320)
+        self.assertTrue(plan["candidate_scan_exhaustive"])
+        self.assertTrue(plan["candidate_funnel_reconciled"])
+
     def test_filters_every_row_before_session_slice(self) -> None:
         rows = [
             _row(index, following_back=True)
