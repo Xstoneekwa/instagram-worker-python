@@ -325,6 +325,27 @@ def _validate_human_confirmed_resume_at_claim(
     if str(plan_row.get("resume_state") or "").strip() != RESUME_STATE_RESUME_REQUESTED:
         return False, "resume_authorization_consumed", None
 
+    durable_plan = _read_record(plan_row.get("plan"))
+    root_business_session_id = str(
+        durable_plan.get("root_business_session_id")
+        or durable_plan.get("business_session_id")
+        or ""
+    ).strip()
+    if not root_business_session_id:
+        return False, "resume_plan_invalid", None
+    declared_lineage_roots = {
+        str(value).strip()
+        for value in (
+            meta.get("root_business_session_id"),
+            meta.get("business_session_id"),
+            embedded.get("root_business_session_id"),
+            embedded.get("business_session_id"),
+        )
+        if str(value or "").strip()
+    }
+    if declared_lineage_roots and declared_lineage_roots != {root_business_session_id}:
+        return False, "resume_plan_invalid", None
+
     window_end = str(plan_row.get("scheduled_window_end") or "").strip()
     if window_end:
         from datetime import datetime, timezone
@@ -340,6 +361,8 @@ def _validate_human_confirmed_resume_at_claim(
         "schema": CANONICAL_RESUME_PLAN_SCHEMA_V2,
         "resume_plan_version": CANONICAL_RESUME_PLAN_VERSION_V2,
         "prior_run_id": original_run_id,
+        "business_session_id": root_business_session_id,
+        "root_business_session_id": root_business_session_id,
         "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
         "resume_plan_id": resume_plan_id,
         "incident_id": incident_id,

@@ -7,11 +7,40 @@ from uuid import UUID
 
 import account_session_resume_state_contract as contract
 import account_session_resume_plan_store as store
+from account_session_orchestrator import _canonical_terminal_lineage
 from auto_restart_runtime import validate_auto_restart_request_at_claim
-from tests.test_human_confirmed_resume_claim import _metadata, _plan_row
+from tests.test_human_confirmed_resume_claim import (
+    ROOT_BUSINESS_SESSION_ID,
+    _metadata,
+    _plan_row,
+)
 
 
 class ResumeStateEndToEndContractGate(unittest.TestCase):
+    def test_s2_runtime_keeps_distinct_execution_id_and_canonical_root(self):
+        s2_request_id = "826b75fe-43da-46db-9948-dad59dee59ce"
+        s2_runtime_session_id = "1e39c1eb-149d-4d34-a3cd-408ac008654e"
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=_plan_row()["account_id"],
+                metadata=_metadata(attempt_id=2, retry_index=1),
+            )
+        self.assertTrue(ok, reason)
+
+        lineage = _canonical_terminal_lineage(
+            resume_policy=policy,
+            run_request_id=s2_request_id,
+            supplied_business_session_id=s2_runtime_session_id,
+            run_id="44082d21-e42e-4e47-bc8a-ae1a6d339581",
+            default_attempt_id=2,
+        )
+        self.assertEqual(lineage["root_business_session_id"], ROOT_BUSINESS_SESSION_ID)
+        self.assertEqual(lineage["business_session_id"], ROOT_BUSINESS_SESSION_ID)
+        self.assertEqual(lineage["request_id"], s2_request_id)
+        self.assertEqual(lineage["parent_request_id"], s2_request_id)
+        self.assertEqual(lineage["execution_attempt_no"], 2)
+        self.assertNotEqual(lineage["root_business_session_id"], s2_runtime_session_id)
+
     def test_exact_lifecycle_and_store_exports(self):
         self.assertEqual(contract.DB_ALLOWED_RESUME_STATES, {
             "run_active", "pre_device_stopped", "recovery_enqueued",

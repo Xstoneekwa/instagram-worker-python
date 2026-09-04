@@ -14,6 +14,7 @@ ACCOUNT_ID = "e9c7462b-fc0e-46c9-8d40-1e07e0f6a41b"
 ORIGINAL_RUN_ID = "9e46c4a5-72c5-4b16-9f0f-96f6f2ff11aa"
 RESUME_PLAN_ID = "5b2f77aa-2222-4222-8222-bbbbbbbbbbbb"
 INCIDENT_ID = "1a2b3c4d-3333-4333-8333-cccccccccccc"
+ROOT_BUSINESS_SESSION_ID = "4c84331e-4444-4444-8444-dddddddddddd"
 
 
 def _metadata(**overrides) -> dict:
@@ -24,6 +25,8 @@ def _metadata(**overrides) -> dict:
         "resume_plan_id": RESUME_PLAN_ID,
         "original_run_id": ORIGINAL_RUN_ID,
         "incident_id": INCIDENT_ID,
+        "root_business_session_id": ROOT_BUSINESS_SESSION_ID,
+        "business_session_id": ROOT_BUSINESS_SESSION_ID,
         "resume_plan_version": 2,
         "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V2",
         "resume_plan": {
@@ -31,6 +34,8 @@ def _metadata(**overrides) -> dict:
             "resume_plan_version": 2,
             "plan_version": 2,
             "account_id": ACCOUNT_ID,
+            "root_business_session_id": ROOT_BUSINESS_SESSION_ID,
+            "business_session_id": ROOT_BUSINESS_SESSION_ID,
             "package_contract_ready": True,
             "phase_order": ["welcome", "follow", "unfollow"],
             "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
@@ -50,6 +55,10 @@ def _plan_row(**overrides) -> dict:
         "account_id": ACCOUNT_ID,
         "resume_state": "resume_requested",
         "scheduled_window_end": future_end,
+        "plan": {
+            "root_business_session_id": ROOT_BUSINESS_SESSION_ID,
+            "business_session_id": ROOT_BUSINESS_SESSION_ID,
+        },
     }
     base.update(overrides)
     return base
@@ -75,12 +84,38 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
         self.assertIsNotNone(policy)
         self.assertEqual(policy["recovery_mode"], "human_confirmed_resume")
         self.assertEqual(policy["prior_run_id"], ORIGINAL_RUN_ID)
+        self.assertEqual(policy["root_business_session_id"], ROOT_BUSINESS_SESSION_ID)
+        self.assertEqual(policy["business_session_id"], ROOT_BUSINESS_SESSION_ID)
         self.assertEqual(policy["incident_id"], INCIDENT_ID)
         self.assertEqual(
             policy["phases_to_run"], {"welcome": False, "follow": True, "unfollow": False}
         )
         self.assertEqual(policy["quota_remaining"]["follow"], 10)
         self.assertEqual(policy["retry_generation"], 1)
+
+    def test_missing_durable_lineage_root_fails_closed(self) -> None:
+        with patch.object(store, "load_resume_plan", return_value=_plan_row(plan={})):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=_metadata(),
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+
+    def test_unrelated_declared_lineage_root_fails_closed(self) -> None:
+        meta = _metadata()
+        meta["resume_plan"]["root_business_session_id"] = (
+            "5d95442f-5555-4555-8555-eeeeeeeeeeee"
+        )
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=meta,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
 
     def test_canonical_request_attempt_is_propagated_for_checkpoint_provenance(self) -> None:
         meta = _metadata(attempt_id=2, retry_index=1)
