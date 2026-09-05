@@ -17078,6 +17078,101 @@ def harvest_follow_list_row_cta_for_follow_flow(
     return rows
 
 
+def _followers_qualified_xml_profile_tabs(
+    d: u2.Device,
+    hierarchy_xml: str | None,
+    *,
+    source_profile_username: str,
+    current_package: str | None,
+    current_activity: str | None,
+) -> dict[str, Any] | None:
+    """D_ONLY diagnostic substitution; never acquire or upgrade UI evidence.
+
+    Bare XML is not provenance. Require the existing scoped proof and explicit
+    identical XML so the later detector resolves exactly the same hierarchy.
+    Missing local bindings (including wrapped/non-USB devices) simply preserve
+    the live path. This grants no navigation, row, CTA or recovery authority.
+    """
+    if not hierarchy_xml or not current_activity:
+        return None
+    try:
+        from follow_60s_canary import runtime_context
+
+        runtime = runtime_context() or {}
+        package = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+        if current_package != package or runtime.get("package") != package:
+            return None
+        # Read stored connection metadata only: d.serial can invoke a shell on
+        # network-connected devices. Do not call it or reconstruct a scope.
+        serial = vars(d).get("_serial")
+        account = runtime.get("account_id")
+        instance = os.environ.get("PHONEFARM_APP_INSTANCE_ID")
+        target = _normalize_handle(source_profile_username)
+        if any(not isinstance(v, str) or not v.strip() or v == "unbound"
+               for v in (serial, account, instance, target)):
+            return None
+        proof, _reason = followers_proof.get_current(mode="same_surface_read")
+        if proof is None:
+            return None
+        scope = proof.scope
+        if (scope.device_serial != serial or scope.account_id != account
+                or scope.app_instance_id != instance or scope.target_id != target
+                or scope.surface_id != "instagram_followers_list"):
+            return None
+        if proof.source not in {
+            "fresh_xml", "fresh_dump", "certify_after_navigation_fresh_dump",
+            "post_scroll_fresh_dump", "post_tap_immediate_fresh_dump",
+            "post_tap_second_pass_fresh_dump", "post_tap_fast_poll_fresh_dump",
+        }:
+            return None
+        xml = str(hierarchy_xml).strip()
+        if (xml != proof.hierarchy_xml
+                or hashlib.sha256(xml.encode("utf-8")).hexdigest() != proof.hierarchy_fingerprint
+                or not 0 <= time.monotonic() - proof.captured_at_monotonic
+                <= followers_proof.DEFAULT_SAME_SURFACE_MAX_AGE_MS / 1000.0):
+            return None
+        elements = list(ET.fromstring(xml).iter())
+        if any("dialog" in el.get("class", "").casefold()
+               or (el.get("package") and el.get("package") != package)
+               for el in elements):
+            return None
+        own = _detect_own_unified_followers_list_from_hierarchy_xml(
+            xml, source_profile_username=source_profile_username,
+        )
+        if (not own.get("detected") or not own.get("selected_followers_tab_text")
+                or _normalize_handle(str(own.get("action_bar_title") or "")) != target):
+            return None
+        rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+            xml, source_profile_username=source_profile_username,
+        )
+        if len(rows) < 2:
+            return None
+        tabs_visible = any(
+            re.fullmatch(r".*:id/(?:profile_tabs_container|profile_tab_layout|profile_tab_icon_view|media_tab)",
+                         el.get("resource-id", ""))
+            or re.fullmatch(r".*:id/profile_tabs[^_].*", el.get("resource-id", ""))
+            or any(label in el.get("content-desc", "") for label in ("Grid", "Reels", "Tagged"))
+            or re.fullmatch(r"(?i).*tagged.*", el.get("content-desc", ""))
+            or re.fullmatch(r"(?i).*posts.*", el.get("text", ""))
+            for el in elements
+        )
+        # Parsing must not extend freshness or survive an intervening epoch.
+        valid, _reason = followers_proof.validate(proof, scope, mode="same_surface_read")
+        if not valid:
+            return None
+        return {
+            "absent": not tabs_visible,
+            "source": "qualified_xml",
+            "hierarchy_fingerprint": proof.hierarchy_fingerprint,
+            "captured_at_monotonic": proof.captured_at_monotonic,
+            "proof_source": proof.source,
+        }
+    except Exception:
+        # Qualification failure is not detection success; run the original
+        # live probes, including their existing error reporting, unchanged.
+        return None
+
+
 def detect_followers_list_screen(
     d: u2.Device,
     *,
@@ -17256,7 +17351,18 @@ def detect_followers_list_screen(
         )
 
         try:
-            out["profile_tabs_absent"] = not _followers_profile_tabs_visible(d)
+            try:
+                tabs_evidence = _followers_qualified_xml_profile_tabs(
+                    d, hierarchy_xml, source_profile_username=source_profile_username,
+                    current_package=cur_pkg, current_activity=cur_act,
+                )
+            except Exception:
+                tabs_evidence = None
+            if tabs_evidence is None:
+                out["profile_tabs_absent"] = not _followers_profile_tabs_visible(d)
+            else:
+                out["profile_tabs_absent"] = tabs_evidence["absent"]
+                out["profile_tabs_evidence"] = tabs_evidence
         except Exception as e:
             _probe_fail("profile_tabs_visible", e)
             out["profile_tabs_absent"] = False
