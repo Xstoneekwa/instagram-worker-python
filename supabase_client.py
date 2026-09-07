@@ -3465,14 +3465,21 @@ def persist_account_session_resume_plan_v1(
 
 
 def begin_device_activity_v1(
-    *, run_id: str, request_id: str, worker_id: str
+    *, run_id: str, request_id: str, worker_id: str, expected_lease_id: str | None = None
 ) -> dict[str, Any]:
+    from uuid import UUID
+    try:
+        if not isinstance(expected_lease_id, str) or str(UUID(expected_lease_id)) != expected_lease_id:
+            raise ValueError("missing expected generation")
+    except (ValueError, TypeError):
+        return {"ok": False, "reason": "device_lock_expected_generation_required"}
     out = call_rpc_once(
         "begin_device_activity_v1",
         {
             "p_run_id": str(run_id),
             "p_request_id": str(request_id),
             "p_worker_id": str(worker_id),
+            "p_expected_lease_id": expected_lease_id,
         },
     )
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
@@ -5731,3 +5738,129 @@ def mark_welcome_baseline_completed(
     if rows and isinstance(rows, list):
         return rows[0]
     return None
+
+
+_FLEET_RUNNER_BOUNDARIES_V1: dict[tuple[str, str, str, str], Any] = {}
+
+
+def fleet_follow_boundary_local_v1(*, account_id: str, request_id: str,
+                                    session_follows: int) -> dict[str, Any] | None:
+    """Local-only cap transport. No channel means the exact historical path.
+
+    Consumer channel provisioning and Backend ACK forwarding are separate
+    integration gates; this adapter must never invent a channel or authority.
+    """
+    token = str(os.environ.get("FLEET_RUNTIME_CHANNEL_V1") or "")
+    if not token:
+        return None
+    from pathlib import Path
+    import stat
+    import tempfile
+    from fleet_runtime_barrier import FleetBlocked, FleetRunnerBoundary, fleet_local_authority_from_journal
+    from runtime_artifacts import runtime_artifact_path
+
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise FleetBlocked("invalid_fleet_channel")
+    boot = str(os.environ.get("FLEET_RUNTIME_OWNER_BOOT_ID") or "")
+    directory = runtime_artifact_path("fleet-control-v1", token)
+
+    def checked_directory():
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or directory.resolve() != directory
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise FleetBlocked("untrusted_fleet_channel_directory")
+
+    def read_record(name, limit):
+        checked_directory()
+        try:
+            fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "r", encoding="utf-8", errors="strict") as handle:
+                info = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_uid != os.getuid() or info.st_mode & 0o077
+                        or info.st_size > limit):
+                    raise FleetBlocked("untrusted_fleet_authority_file")
+                value = handle.read(limit + 1)
+                if len(value.encode("utf-8")) > limit:
+                    raise FleetBlocked("fleet_authority_too_large")
+                parsed = json.loads(value)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise FleetBlocked("missing_or_corrupt_fleet_record:" + name) from exc
+        if not isinstance(parsed, dict):
+            raise FleetBlocked("invalid_fleet_record:" + name)
+        return parsed
+
+    def durable_authority():
+        return fleet_local_authority_from_journal(
+            read_record("journal.json", 262144), token=token,
+            account_id=account_id, request_id=request_id, owner_boot_id=boot)
+
+    def read_local():
+        # The double sample establishes a local snapshot around the transport
+        # read. A concurrent durable policy change fails closed, not to rev zero.
+        before = durable_authority()
+        value = read_record("authority.json", 65536)
+        after = durable_authority()
+        if before != after:
+            raise FleetBlocked("durable_authority_changed_during_reload")
+        if value != after:
+            raise FleetBlocked("channel_durable_authority_mismatch")
+        return value
+
+    def write_ack(value):
+        checked_directory()
+        fd, name = tempfile.mkstemp(prefix=".cap-ack-", dir=str(directory))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, directory / "cap-ack.json")
+            parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    key = (token, account_id, request_id, boot)
+    adapter = _FLEET_RUNNER_BOUNDARIES_V1.get(key)
+    if adapter is None:
+        adapter = FleetRunnerBoundary(account_id=account_id, request_id=request_id,
+                                      owner_boot_id=boot, read_local=read_local, write_ack=write_ack)
+        _FLEET_RUNNER_BOUNDARIES_V1[key] = adapter
+    return adapter.consume(session_follows=session_follows,
+                           business_day=datetime.now(BUSINESS_TIMEZONE).date().isoformat(),
+                           composite_reconciled=True)
+
+
+def fleet_execution_rpc_v1(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Policy-specific ACK/cancel/reconcile traffic, never candidate reads.
+
+    RPC names and response bindings are an explicit V1 contract; unavailable
+    endpoints fail closed. This adapter does not deploy or create those RPCs.
+    """
+    names = {'register': 'fleet_register_execution_attempt_v1',
+             'cancel': 'fleet_cancel_execution_attempt_v1',
+             'reconcile': 'fleet_reconcile_execution_attempt_v1',
+             'runtime_ack': 'fleet_ack_runtime_revision_v1',
+             'cap_ack': 'fleet_ack_cap_revision_v1'}
+    if operation not in names:
+        raise ValueError('unsupported_fleet_rpc')
+    required = ('account_id', 'attempt_id', 'request_id', 'consumer_instance_id', 'consumer_boot_id')
+    if any(not isinstance(payload.get(k), str) or not payload[k] for k in required):
+        raise ValueError('incomplete_fleet_ack_binding')
+    if type(payload.get('revision')) is not int or payload['revision'] < 0:
+        raise ValueError('invalid_fleet_ack_revision')
+    rpc_name = names[operation]
+    if operation == 'register' and payload.get('registration_intent') == 'REGISTER_SUCCESSOR':
+        rpc_name = 'fleet_succeed_execution_owner_v1'
+    response = call_rpc_once(rpc_name, {'p_payload': payload}, timeout_seconds=5.0)
+
+    if (not isinstance(response, dict) or response.get('ok') is not True
+            or response.get('revision') != payload['revision']
+            or any(response.get(k) != payload[k] for k in required)):
+        raise RuntimeError('fleet_rpc_binding_or_revision_rejected')
+    return response

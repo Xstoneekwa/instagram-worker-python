@@ -15,6 +15,16 @@ TEST_ACCOUNT_ID = "00000000-0000-4000-8000-000000000201"
 TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
+def _canonical_device_lease(worker_id, *, transferred=False):
+    token = "00000000-0000-4000-8000-000000000" + ("502" if transferred else "501")
+    return {
+        "device_id": "00000000-0000-4000-8000-000000000401",
+        "account_id": TEST_ACCOUNT_ID, "request_id": TEST_REQUEST_ID,
+        "worker_id": worker_id, "lease_id": token, "generation": token,
+        "lease_seconds": 900,
+    }
+
+
 class AccountRunRequestConsumerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.package_runtime_contract = patch.object(
@@ -940,13 +950,16 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "requested_run_type": "account_session",
             "status": "claimed",
         }
+        binding = _canonical_device_lease(cfg.worker_id)
+        successor = _canonical_device_lease(cfg.worker_id, transferred=True)
+        request.setdefault("metadata_safe", {})["device_lock_binding"] = binding
         dispatch_ctx = {
             "assignment_found": True,
             "assignment_id": "assignment-1",
             "account_id": TEST_ACCOUNT_ID,
             "assignment_type": "full_cycle",
             "slot_kind": "full_cycle_6h",
-            "device_id": "device-1",
+            "device_id": "00000000-0000-4000-8000-000000000401",
             "clone_id": None,
             "app_instance_id": "app-instance-1",
             "app_instance_index": 1,
@@ -960,6 +973,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         }
 
         class FakeProc:
+            pid = 987654321  # Synthetic Popen identity; no process is launched.
             def poll(self) -> int:
                 return 0
 
@@ -986,9 +1000,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                     },
                 ),
             ),
-            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
-            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
-            patch.object(consumer, "release_device_lock", return_value={"released": True}),
+            patch.object(consumer, "transfer_device_lock", return_value={"ok": True, "transferred": True, **successor}),
+            patch.object(consumer, "renew_device_lock", return_value={"ok": True, "renewed": True, **successor}),
+            patch.object(consumer, "release_device_lock", return_value={"ok": True, "released": True, **successor}),
             patch.object(consumer, "_heartbeat"),
             patch.object(consumer, "_runner_runtime_identity_env", return_value={}),
             patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
@@ -1056,20 +1070,23 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "metadata_safe": {
                 "binding_version": "auto_login_app_instance_v1",
                 "assignment_id": "assignment-1",
-                "device_id": "device-1",
+                "device_id": "00000000-0000-4000-8000-000000000401",
                 "app_instance_id": "app-instance-1",
                 "package_name": "com.instagram.androie",
                 "clone_index": 1,
             },
             "status": "claimed",
         }
+        binding = _canonical_device_lease(cfg.worker_id)
+        successor = _canonical_device_lease(cfg.worker_id, transferred=True)
+        request.setdefault("metadata_safe", {})["device_lock_binding"] = binding
         dispatch_ctx = {
             "assignment_found": True,
             "assignment_id": "assignment-1",
             "account_id": TEST_ACCOUNT_ID,
             "assignment_type": "full_cycle",
             "slot_kind": "full_cycle_6h",
-            "device_id": "device-1",
+            "device_id": "00000000-0000-4000-8000-000000000401",
             "clone_id": None,
             "app_instance_id": "app-instance-1",
             "app_instance_index": 1,
@@ -1083,8 +1100,12 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         }
 
         class FakeProc:
-            def poll(self) -> int:
-                return 0
+            pid = 987654321  # Synthetic Popen identity; no process is launched.
+            polls = 0
+
+            def poll(self) -> int | None:
+                self.polls += 1
+                return None if self.polls == 1 else 0
 
         fake_env = {"PATH": "/usr/bin", "ADB_PATH": "/tmp/platform-tools/adb"}
         with (
@@ -1097,9 +1118,10 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 return_value=(True, None, {}),
             ),
             patch.object(consumer, "_heartbeat"),
-            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}) as transfer_lock,
-            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}) as renew_lock,
-            patch.object(consumer, "release_device_lock", return_value={"released": True}) as release_lock,
+            patch.object(consumer.time, "sleep"),
+            patch.object(consumer, "transfer_device_lock", return_value={"ok": True, "transferred": True, **successor}) as transfer_lock,
+            patch.object(consumer, "renew_device_lock", return_value={"ok": True, "renewed": True, **successor}) as renew_lock,
+            patch.object(consumer, "release_device_lock", return_value={"ok": True, "released": True, **successor}) as release_lock,
             patch.object(consumer, "runner_subprocess_env", return_value=fake_env),
             patch.object(consumer, "_runner_runtime_identity_env", return_value={}),
             patch.object(consumer, "_create_and_link_login_run", return_value=TEST_RUN_ID),
@@ -1110,23 +1132,35 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         ):
             consumer._handle_claimed_request(cfg, request)
 
-        self.assertEqual(popen.call_args.kwargs.get("env"), fake_env)
+        import json
+        actual_env = dict(popen.call_args.kwargs["env"])
+        runner_binding = json.loads(actual_env.pop("FLEET_DEVICE_LOCK_BINDING_JSON"))
+        self.assertEqual(actual_env, fake_env)
+        self.assertEqual(runner_binding, {"ok": True, "transferred": True, **successor})
         self.assertEqual(fake_env["ADB_PATH"], "/tmp/platform-tools/adb")
         self.assertEqual(fake_env["LOGIN_PROVISIONER_PUBLISH_ENABLED"], "true")
         transfer_lock.assert_called_once_with(
-            device_id="device-1",
+            device_id="00000000-0000-4000-8000-000000000401",
             request_id=TEST_REQUEST_ID,
             new_worker_id="worker-1",
+            previous_worker_id=binding["worker_id"],
+            expected_lease_id=binding["lease_id"],
+            account_id=TEST_ACCOUNT_ID,
+            lease_seconds=binding["lease_seconds"],
         )
         renew_lock.assert_called_once_with(
-            device_id="device-1",
+            device_id="00000000-0000-4000-8000-000000000401",
             worker_id="worker-1",
             request_id=TEST_REQUEST_ID,
+            expected_lease_id=successor["lease_id"],
+            account_id=TEST_ACCOUNT_ID,
         )
         release_lock.assert_called_once_with(
-            device_id="device-1",
+            device_id="00000000-0000-4000-8000-000000000401",
             worker_id="worker-1",
             request_id=TEST_REQUEST_ID,
+            expected_lease_id=successor["lease_id"],
+            account_id=TEST_ACCOUNT_ID,
         )
 
     def test_build_login_email_code_resume_command(self) -> None:
@@ -1257,19 +1291,22 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 "action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "binding_version": "auto_login_app_instance_v1",
                 "assignment_id": "assignment-1",
-                "device_id": "device-1",
+                "device_id": "00000000-0000-4000-8000-000000000401",
                 "app_instance_id": "app-instance-1",
                 "package_name": "com.instagram.androie",
                 "clone_index": 1,
             },
             "status": "claimed",
         }
+        binding = _canonical_device_lease(cfg.worker_id)
+        successor = _canonical_device_lease(cfg.worker_id, transferred=True)
+        request.setdefault("metadata_safe", {})["device_lock_binding"] = binding
         dispatch_ctx = {
             "assignment_found": True,
             "assignment_id": "assignment-1",
             "account_id": TEST_ACCOUNT_ID,
             "assignment_type": "full_cycle",
-            "device_id": "device-1",
+            "device_id": "00000000-0000-4000-8000-000000000401",
             "app_instance_id": "app-instance-1",
             "app_instance_index": 1,
             "package_name": "com.instagram.androie",
@@ -1289,9 +1326,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 "evaluate_queued_run_commercial_policy",
                 return_value=(True, None, {}),
             ),
-            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
-            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
-            patch.object(consumer, "release_device_lock", return_value={"released": True}) as release_lock,
+            patch.object(consumer, "transfer_device_lock", return_value={"ok": True, "transferred": True, **successor}),
+            patch.object(consumer, "renew_device_lock", return_value={"ok": True, "renewed": True, **successor}),
+            patch.object(consumer, "release_device_lock", return_value={"ok": True, "released": True, **successor}) as release_lock,
             patch.object(consumer.subprocess, "Popen") as popen,
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
             patch.object(consumer, "_audit"),
@@ -1305,9 +1342,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(publish_failure.call_args.kwargs["phase"], "open_instagram")
         self.assertEqual(publish_failure.call_args.kwargs["reason_code"], "login_device_serial_required")
         release_lock.assert_called_once_with(
-            device_id="device-1",
+            device_id="00000000-0000-4000-8000-000000000401",
             worker_id="run-dispatcher:test",
             request_id=TEST_REQUEST_ID,
+            expected_lease_id=successor["lease_id"],
+            account_id=TEST_ACCOUNT_ID,
         )
 
     def test_finalize_subprocess_nonzero_reconciles_linked_run(self) -> None:

@@ -11,7 +11,7 @@ from account_run_control import (
     get_account_run_request,
     normalize_request_uuid,
 )
-from auto_restart_device_lock import release_device_lock_for_request
+from auto_restart_device_lock import device_lock_binding_from_request, release_device_lock_for_request
 from logs import log
 import supabase_client
 
@@ -349,7 +349,12 @@ def terminalize_scheduled_session_preflight_request(
             error_message_safe=f"Scheduled session preflight terminalized: {reason_code}.",
         )
     try:
-        release_device_lock_for_request(request_id=request_id, worker_id=worker_id)
+        binding = device_lock_binding_from_request(
+            request, account_id=account_id, request_id=request_id)
+        release_device_lock_for_request(
+            request_id=request_id, worker_id=binding["worker_id"],
+            device_id=binding["device_id"], expected_lease_id=binding["lease_id"],
+            account_id=account_id)
     except Exception as exc:
         log(
             "warning",

@@ -15552,6 +15552,14 @@ def _run_followers_list_engine_session(
                 boundary="follow60_candidate_cycle_start",
             )
             _log_target_budget_check("before_candidate_selection")
+            _fleet_cap_boundary = supabase_client.fleet_follow_boundary_local_v1(
+                account_id=str(account_id or ""),
+                request_id=str(run_request_id or ""),
+                session_follows=_RUNTIME_FOLLOW_COUNT,
+            )
+            if _fleet_cap_boundary is not None and _fleet_cap_boundary["remaining"] <= 0:
+                _mark_global_follow_cap_reached(phase="before_candidate_selection")
+                break
             if _runtime_follow_cap_exceeded(_follow_max_per_run):
                 _mark_global_follow_cap_reached(phase="before_candidate_selection")
                 break
@@ -26862,6 +26870,8 @@ def _main_impl() -> int:
                 run_id=run_id,
                 request_id=run_request_id,
                 worker_id=_run_control_dispatcher_worker_id(),
+                expected_lease_id=_device_lock_token_for_initial_gate(
+                    account_id, run_request_id, _run_control_dispatcher_worker_id()),
             )
         except Exception as exc:
             # Never replay the gate mutation.  A read after a lost response is
@@ -29295,6 +29305,24 @@ def main() -> int:
         )
         return _return_with_cleanup(exc.device, 76)
 
+
+
+def _device_lock_token_for_initial_gate(account_id, request_id, worker_id):
+    """Use only the exact generation handed to this process at launch."""
+    import json
+    import os
+    from uuid import UUID
+    try:
+        b = json.loads(os.environ.get("FLEET_DEVICE_LOCK_BINDING_JSON", "null"))
+        if (not isinstance(b, dict) or b.get("account_id") != account_id
+            or b.get("request_id") != request_id or b.get("worker_id") != worker_id
+            or not isinstance(b.get("lease_id"), str)
+            or b.get("generation") != b["lease_id"]
+            or str(UUID(b["lease_id"])) != b["lease_id"]):
+            raise ValueError("device_lock_launch_binding_mismatch")
+        return b["lease_id"]
+    except (ValueError, TypeError, KeyError) as exc:
+        raise PreDeviceGateRejected("device_lock_launch_binding_mismatch") from exc
 
 if __name__ == "__main__":
     raise SystemExit(main())

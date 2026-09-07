@@ -49,7 +49,7 @@ from auto_restart_dispatcher_tick import (
     run_auto_restart_dispatcher_tick,
     should_run_auto_restart_tick,
 )
-from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
+from auto_restart_device_lock import device_lock_binding_from_request, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
 from auto_restart_runtime import (
     is_auto_restart_request,
     is_hard_stop_reason,
@@ -116,6 +116,180 @@ _CERTIFIED_RUNTIME_IDENTITY: WorkerRuntimeIdentity | None = None
 _LAST_STORAGE_INCIDENT_AT = 0.0
 _LAST_STORAGE_WARNING_AT = 0.0
 _STORAGE_BLOCK_ACTIVE = False
+
+
+# Fleet V1 uses only existing request/admission responses for authority delivery.
+# No policy adds no RPC or network I/O; isolated launch identity is persisted locally.
+from uuid import uuid4 as _fleet_uuid4
+_FLEET_CONSUMER_BOOT_ID = _fleet_uuid4().hex
+_FLEET_EXECUTIONS: dict[str, Any] = {}
+
+
+def _fleet_bind_authority(request_id, account_id, worker_id, response, child=None):
+    frame = response.get('fleet_runtime_v1') if isinstance(response, dict) else None
+    existing = _FLEET_EXECUTIONS.get(request_id)
+    if frame is None:
+        if existing is not None:
+            raise RuntimeError('fleet_authority_missing_after_enrollment')
+        return None
+    from fleet_runtime_barrier import FleetBlocked, FleetConsumerSession
+    if not isinstance(frame, dict) or frame.get('account_id') != account_id or frame.get('request_id') != request_id:
+        raise FleetBlocked('fleet_request_binding_mismatch')
+    if existing is not None:
+        existing.observe(frame)
+        return existing
+    binding = dict(account_id=account_id, request_id=request_id,
+                   attempt_id=str(frame.get('attempt_id') or ''),
+                   consumer_instance_id=worker_id, consumer_boot_id=_FLEET_CONSUMER_BOOT_ID)
+    registration_state = frame.get('execution_registered')
+    if registration_state is not True and registration_state is not False:
+        raise FleetBlocked('ambiguous_consumer_registration_state')
+    if frame.get('consumer_instance_id') != worker_id:
+        raise FleetBlocked('misbound_consumer_instance_authority')
+    succession = None
+    if registration_state is True:
+        if frame.get('consumer_boot_id') != _FLEET_CONSUMER_BOOT_ID:
+            proposal = frame.get('succession')
+            previous = dict(binding, consumer_boot_id=frame.get('consumer_boot_id'))
+            if (child is not None or not isinstance(proposal, dict)
+                    or proposal.get('schema') != 'FLEET_OWNER_SUCCESSION_V1'
+                    or proposal.get('previous_binding') != previous
+                    or type(proposal.get('previous_generation')) is not int
+                    or proposal['previous_generation'] < 1
+                    or proposal.get('old_owner_reconciled') is not True
+                    or proposal.get('old_attempts_open') != 0
+                    or type(proposal.get('old_attempts_open')) is not int
+                    or proposal.get('old_process_group_quiescent') is not True
+                    or type(proposal.get('process_group_id')) is not int
+                    or proposal['process_group_id'] <= 1
+                    or not isinstance(proposal.get('terminal_evidence_sha256'), str)
+                    or len(proposal['terminal_evidence_sha256']) != 64
+                    or any(c not in '0123456789abcdef' for c in proposal['terminal_evidence_sha256'])
+                    or not isinstance(proposal.get('process_generation'), str)
+                    or not proposal['process_generation']):
+                raise FleetBlocked('stale_consumer_boot_authority')
+            from fleet_runtime_barrier import fleet_process_group_absent
+            if not fleet_process_group_absent(proposal['process_group_id']):
+                raise FleetBlocked('stale_consumer_boot_authority')
+            succession = dict(proposal, observed_process_group_absent=True)
+    elif frame.get('consumer_boot_id') not in (None, ''):
+        raise FleetBlocked('unregistered_authority_contains_boot_identity')
+    expected_revision = frame.get('revision')
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise FleetBlocked('invalid_registration_revision')
+    registered = supabase_client.fleet_execution_rpc_v1('register',
+        dict(binding, registration_intent='REGISTER_SUCCESSOR' if succession is not None else 'REGISTER_OR_RETRY',
+             succession=succession, revision=frame.get('revision'), authority=frame,
+             child_pid=child.pid if child is not None else None))
+    if not isinstance(registered, dict) or registered.get('ok') is not True:
+        raise FleetBlocked('registration_not_accepted')
+    for key, expected in binding.items():
+        if registered.get(key) != expected:
+            raise FleetBlocked('misbound_registration_response')
+    if type(registered.get('revision')) is not int or registered['revision'] != expected_revision:
+        raise FleetBlocked('registration_revision_mismatch')
+    authority = registered.get('authority')
+    if not isinstance(authority, dict) or authority.get('execution_registered') is not True:
+        raise FleetBlocked('registration_authority_not_registered')
+    for key, expected in binding.items():
+        if authority.get(key) != expected:
+            raise FleetBlocked('misbound_registered_authority')
+    if type(authority.get('revision')) is not int or authority['revision'] != expected_revision:
+        raise FleetBlocked('registered_authority_revision_mismatch')
+    if authority.get('tenant_id') != frame.get('tenant_id'):
+        raise FleetBlocked('registered_authority_tenant_mismatch')
+    if succession is not None:
+        generation = succession['previous_generation'] + 1
+        if (type(registered.get('owner_generation')) is not int
+                or registered['owner_generation'] != generation
+                or type(authority.get('owner_generation')) is not int
+                or authority['owner_generation'] != generation):
+            raise FleetBlocked('successor_generation_mismatch')
+    session = FleetConsumerSession(binding=binding, authority=authority,
+        root=runtime_artifact_path('fleet-control-v1'),
+        rpc=supabase_client.fleet_execution_rpc_v1, child=child)
+    if child is not None:
+        session.register_late_child_isolation(child)
+    _FLEET_EXECUTIONS[request_id] = session
+    return session
+
+
+def _fleet_supervise_existing(request_id, account_id, worker_id, latest, proc):
+    from fleet_runtime_barrier import FleetBlocked
+    session = _fleet_bind_authority(request_id, account_id, worker_id, latest, child=proc)
+    if session is None:
+        return latest
+    canonical_cancel = session.request_canonical_cancel()
+    try:
+        session.flush_cap_ack()
+    except FleetBlocked as exc:
+        if canonical_cancel is None or str(exc) != 'stale_or_misbound_cap_ack':
+            raise
+        # Cancellation is already canonical/durable. Deliver it to the existing
+        # child-stop path before surfacing the strict validation failure.
+        # This is not an accepted ACK; finish must fail after safe reconciliation.
+        session.pending_cap_ack_error = exc
+    if canonical_cancel is not None:
+        return dict(latest, **canonical_cancel)
+    return latest
+
+
+def _fleet_spawn_or_legacy(request_id, command, workdir, environment, *,
+                           launch_binding=None, popen_options=None):
+    from fleet_runtime_barrier import FleetBlocked, fleet_spawn_isolated_v1
+    options = dict(popen_options or {})
+    if set(options) - {'stdout', 'stderr', 'text'}:
+        raise FleetBlocked('unsupported_runner_popen_options')
+    session = _FLEET_EXECUTIONS.get(request_id)
+    if session is None:
+        if not isinstance(launch_binding, dict) or launch_binding.get('request_id') != request_id:
+            raise FleetBlocked('missing_isolated_launch_binding')
+        return fleet_spawn_isolated_v1(
+            lambda: subprocess.Popen(command, cwd=str(workdir), env=environment,
+                                     start_new_session=True, **options),
+            binding=launch_binding, root=runtime_artifact_path('runner-isolation-v1'))
+    try:
+        child = session.spawn(lambda: subprocess.Popen(
+            command, cwd=str(workdir), env={**environment, **session.environment()},
+            start_new_session=True, **options))
+    except FleetBlocked:
+        session.reconcile(unstarted=True)
+        return None
+    session.register_child(child)
+    return child
+
+
+def _fleet_session_for_child(proc):
+    from fleet_runtime_barrier import FleetBlocked
+    matches = [session for session in _FLEET_EXECUTIONS.values() if session.child is proc]
+    if len(matches) > 1:
+        raise FleetBlocked('ambiguous_child_execution_binding')
+    return matches[0] if matches else None
+
+
+def _fleet_child_fully_exited(request_id, proc):
+    from fleet_runtime_barrier import FleetBlocked
+    session = _FLEET_EXECUTIONS.get(request_id)
+    if session is None:
+        return True
+    if session.child is not proc:
+        raise FleetBlocked('exited_child_binding_mismatch')
+    if session.is_legacy_unisolated():
+        return True  # Historical leader completion is not a Fleet ACK.
+    return session.process_group_quiescent()
+
+
+def _fleet_finish_execution(request_id):
+    session = _FLEET_EXECUTIONS.get(request_id)
+    if session is None:
+        return
+    # Terminal proof and Hold reconciliation may not be skipped by cap fencing.
+    session.reconcile()
+    pending = getattr(session, 'pending_cap_ack_error', None)
+    if pending is not None:
+        raise pending
+    session.flush_cap_ack()
+    _FLEET_EXECUTIONS.pop(request_id, None)
 
 
 class AtomicAdmissionRejected(RuntimeError):
@@ -1015,8 +1189,18 @@ def _admit_account_session_v1(
     request_id: str,
     worker_id: str,
     dispatch_ctx: dict[str, Any],
+    device_lock_binding: dict[str, Any],
 ) -> str:
     """Atomically create the run + PRE_DEVICE capsule before process spawn."""
+    if device_lock_binding.get("worker_id") != worker_id:
+        raise AtomicAdmissionRejected("device_lock_owner_mismatch")
+    try:
+        device_lock_binding = device_lock_binding_from_request(
+            {"metadata_safe": {"device_lock_binding": device_lock_binding}},
+            account_id=device_lock_binding.get("account_id"), request_id=request_id,
+            device_id=str(dispatch_ctx.get("device_id") or ""))
+    except ValueError as exc:
+        raise AtomicAdmissionRejected(str(exc)) from exc
     expected_package = str(
         dispatch_ctx.get("package_name")
         or dispatch_ctx.get("app_package")
@@ -1035,6 +1219,7 @@ def _admit_account_session_v1(
         "p_scheduled_window_start": dispatch_ctx.get("starts_at"),
         "p_scheduled_window_end": dispatch_ctx.get("ends_at"),
         "p_lease_seconds": 300,
+        "p_expected_lease_id": device_lock_binding["lease_id"],
     }
     try:
         result = supabase_client.call_rpc_once(
@@ -1064,6 +1249,9 @@ def _admit_account_session_v1(
             lease_valid = False
         if (
             canonical_run_id
+            and all((canonical.get("metadata_safe") or {}).get("device_lock_binding", {}).get(k)
+                    == device_lock_binding.get(k)
+                    for k in ("lease_id", "generation", "device_id", "account_id", "request_id", "worker_id"))
             and str(canonical.get("status") or "").strip().lower() == "running"
             and str(canonical.get("claimed_by") or "").strip() == worker_id
             and not canonical.get("cancel_requested_at")
@@ -1081,6 +1269,9 @@ def _admit_account_session_v1(
     run_id = str(result.get("run_id") or "").strip()
     if not run_id:
         raise AtomicAdmissionRejected("atomic_admission_missing_run_id")
+    if result.get('fleet_runtime_v1') is not None:
+        _fleet_bind_authority(request_id, str(result['fleet_runtime_v1'].get('account_id') or ''),
+                              worker_id, result)
     return run_id
 
 
@@ -2215,10 +2406,11 @@ def _finalize_manual_run_after_subprocess(
     lock_released: bool | None = None,
     cooperative_stop: dict[str, Any] | None = None,
 ) -> None:
-    latest = get_account_run_request(
+    canonical_latest = get_account_run_request(
         request_id,
         bounded_pre_device=(int(exit_code) == PRE_DEVICE_SAFE_STOP_EXIT_CODE),
-    ) or request_snapshot or {}
+    )
+    latest = canonical_latest or request_snapshot or {}
     run_id = str(latest.get("run_id") or "").strip() or None
     run_type = str(
         latest.get("requested_run_type")
@@ -2233,6 +2425,47 @@ def _finalize_manual_run_after_subprocess(
     )
     if latest.get("claimed_at"):
         request_metadata.setdefault("claimed_at", latest.get("claimed_at"))
+
+    # Fleet cancellation is NOT an operator override. Only a freshly loaded,
+    # canonical receipt may select this path; malformed Fleet provenance must
+    # never fall through to the historical incident-resolving Stop branch.
+    fleet_marked = (latest.get('cancel_reason') == 'fleet_hold'
+                    or 'fleet_cancellation_v1' in request_metadata)
+    if fleet_marked:
+        from fleet_runtime_barrier import FleetBlocked
+        receipt = request_metadata.get('fleet_cancellation_v1')
+        if (not isinstance(canonical_latest, dict) or not canonical_latest
+                or not canceled or not isinstance(receipt, dict)
+                or latest.get('cancel_reason') != 'fleet_hold'
+                or latest.get('id') != request_id
+                or latest.get('account_id') != account_id
+                or receipt.get('termination_source') != 'fleet_control'
+                or receipt.get('termination_reason') != 'fleet_hold'
+                or type(receipt.get('revision')) is not int
+                or receipt['revision'] < 0):
+            raise FleetBlocked('fleet_cancellation_provenance_unproven')
+        session = _FLEET_EXECUTIONS.get(request_id)
+        expected = dict(account_id=account_id, request_id=request_id,
+                        attempt_id=run_id, consumer_instance_id=cfg.worker_id)
+        if (session is None or not run_id
+                or any(receipt.get(k) != v for k, v in expected.items())
+                or any(session.binding.get(k) != v for k, v in expected.items())
+                or not receipt.get('consumer_boot_id')
+                or receipt['consumer_boot_id'] != session.binding.get('consumer_boot_id')):
+            raise FleetBlocked('fleet_cancellation_owner_unproven')
+        # This path proves group absence, persists canonical reconciliation,
+        # and only then submits the exact-revision ACK. No business incident,
+        # resume authorization, restriction, or account setting is rewritten.
+        session.reconcile()
+        _audit(
+            account_id=account_id, action_type='fleet_run_canceled',
+            status='success', message='Run reconciled for Fleet Hold.',
+            run_id=run_id,
+            payload={'request_id': request_id, 'exit_code': exit_code,
+                     'termination_source': 'fleet_control',
+                     'termination_reason': 'fleet_hold'},
+        )
+        return
 
     if (
         run_type == "account_session"
@@ -2686,6 +2919,10 @@ def _finalize_manual_run_after_subprocess(
 def _terminate_subprocess(
     proc: subprocess.Popen[Any], *, graceful_timeout_seconds: float = 30.0
 ) -> int:
+    fleet_session = _fleet_session_for_child(proc)
+    if fleet_session is not None and not fleet_session.is_legacy_unisolated():
+        return fleet_session.terminate_process_group(
+            graceful_timeout_seconds=graceful_timeout_seconds)
     proc.send_signal(signal.SIGTERM)
     try:
         return int(proc.wait(timeout=max(1.0, float(graceful_timeout_seconds))))
@@ -2702,11 +2939,21 @@ def _wait_for_subprocess(
     account_id: str,
     device_id: str | None = None,
     device_lock_renewal: bool = False,
+    device_lock_binding: dict[str, Any] | None = None,
     stop_context: StopContext | None = None,
     business_action_deadline: str | None = None,
     scheduled_session_end: str | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
+    if device_lock_renewal:
+        try:
+            device_lock_binding = device_lock_binding_from_request(
+                {"metadata_safe": {"device_lock_binding": device_lock_binding}},
+                account_id=account_id, request_id=request_id, device_id=device_id)
+            if device_lock_binding["worker_id"] != cfg.worker_id:
+                raise ValueError("device_lock_owner_mismatch")
+        except ValueError:
+            return _terminate_subprocess(proc), True
     fallback_deadline = time.monotonic() + cfg.subprocess_timeout_seconds
     business_deadline = parse_cooperative_stop_utc(business_action_deadline)
     hard_deadline = parse_cooperative_stop_utc(scheduled_session_end)
@@ -2746,7 +2993,7 @@ def _wait_for_subprocess(
 
     while True:
         exit_code = proc.poll()
-        if exit_code is not None:
+        if exit_code is not None and _fleet_child_fully_exited(request_id, proc):
             # The Worker can request and ACK a preemptive safe stop before the
             # dispatcher reaches the nominal deadline. Capture that terminal
             # proof before cleanup removes the exact-session token.
@@ -2755,6 +3002,7 @@ def _wait_for_subprocess(
 
         try:
             latest = get_account_run_request(request_id)
+            latest = _fleet_supervise_existing(request_id, account_id, cfg.worker_id, latest, proc)
         except Exception as exc:
             # A control-plane read failure must not detach the child.  The old
             # behaviour raised out of this loop, discarded the dispatch Future,
@@ -2869,11 +3117,16 @@ def _wait_for_subprocess(
 
         if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:
             try:
-                renew_device_lock(
+                renewal_result = renew_device_lock(
                     device_id=device_id,
                     worker_id=cfg.worker_id,
                     request_id=request_id,
-                )
+                 expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                if renewal_result.get("ok") is not True or renewal_result.get("renewed") is not True:
+                    log("error", "device_lock_generation_lost_while_child_active",
+                        account_id=account_id, request_id=request_id,
+                        reason=renewal_result.get("reason"))
+                    return _terminate_subprocess(proc), True
             except Exception as exc:
                 log(
                     "warning",
@@ -3362,6 +3615,16 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     device_id = str(dispatch_ctx.get("device_id") or "").strip()
     device_lock_active = False
     lock_owner_worker_id = cfg.worker_id
+    device_lock_binding = None
+    if device_id and (is_auto_restart_request(request_metadata) or _is_device_bound_run_type(run_type)):
+        try:
+            device_lock_binding = device_lock_binding_from_request(
+                request, account_id=account_id, request_id=request_id, device_id=device_id)
+        except ValueError as exc:
+            _safe_complete_account_run_request(
+                request_id, cfg.worker_id, "blocked", error_code=str(exc),
+                error_message_safe="Device lock binding unavailable before Worker spawn.")
+            return
     if is_auto_restart_request(request_metadata):
         ok_resume, resume_reason, auto_restart_policy = validate_auto_restart_request_at_claim(
             account_id=account_id,
@@ -3397,70 +3660,27 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 error_code=resume_reason or "resume_runtime_not_supported",
                 error_message_safe=f"Auto Restart blocked: {resume_reason or 'resume_runtime_not_supported'}.",
             )
-            if device_id:
-                tick_worker = str(request_metadata.get("worker_id") or "").strip() or cfg.worker_id
-                release_device_lock(device_id=device_id, worker_id=tick_worker, request_id=request_id)
-            else:
-                tick_worker = str(request_metadata.get("worker_id") or "").strip() or cfg.worker_id
-                release_device_lock_for_request(request_id=request_id, worker_id=tick_worker)
+            if device_lock_binding is not None:
+                release_device_lock(
+                    device_id=device_lock_binding["device_id"],
+                    worker_id=device_lock_binding["worker_id"], request_id=request_id,
+                    expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
             return
-        if device_id:
-            transfer_device_lock(
-                device_id=device_id,
-                request_id=request_id,
-                new_worker_id=cfg.worker_id,
-            )
-            renew_device_lock(device_id=device_id, worker_id=cfg.worker_id, request_id=request_id)
-            device_lock_active = True
-            lock_owner_worker_id = cfg.worker_id
-    elif device_id and _is_device_bound_run_type(run_type):
+    if device_lock_binding is not None:
         transfer_result = transfer_device_lock(
-            device_id=device_id,
-            request_id=request_id,
-            new_worker_id=cfg.worker_id,
-        )
-        if not bool((transfer_result or {}).get("transferred")):
-            pending_worker = _pending_manual_lock_worker_id(request_id)
-            acquired = acquire_device_lock(
-                device_id=device_id,
-                worker_id=cfg.worker_id,
-                account_id=account_id,
-                app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
-                reason="manual_run",
-            )
-            if not bool((acquired or {}).get("acquired")):
-                _safe_complete_account_run_request(
-                    request_id,
-                    cfg.worker_id,
-                    "blocked",
-                    error_code="device_lock_held",
-                    error_message_safe="Manual run blocked: assigned phone is reserved by another active session.",
-                )
-                _audit(
-                    account_id=account_id,
-                    action_type="manual_run_blocked",
-                    status="blocked",
-                    message="Manual run blocked because the assigned phone is reserved.",
-                    payload={"request_id": request_id, "run_type": run_type, "device_id": device_id},
-                )
-                _publish_auto_login_dispatch_failure(
-                    request=request,
-                    request_id=request_id,
-                    account_id=account_id,
-                    run_type=run_type,
-                    reason_code="device_lock_held",
-                    phase="device_lock",
-                    device_id=device_id,
-                    app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
-                )
-                release_device_lock(device_id=device_id, worker_id=pending_worker, request_id=request_id)
-                return
-            transfer_device_lock(
-                device_id=device_id,
-                request_id=request_id,
-                new_worker_id=cfg.worker_id,
-            )
-        renew_device_lock(device_id=device_id, worker_id=cfg.worker_id, request_id=request_id)
+            device_id=device_id, request_id=request_id, new_worker_id=cfg.worker_id,
+            previous_worker_id=device_lock_binding["worker_id"],
+            expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+            lease_seconds=device_lock_binding["lease_seconds"])
+        if transfer_result.get("ok") is not True or transfer_result.get("transferred") is not True:
+            _safe_complete_account_run_request(
+                request_id, cfg.worker_id, "blocked",
+                error_code=transfer_result.get("reason") or "device_lock_transfer_not_proven",
+                error_message_safe="Device lock transfer rejected before Worker spawn.")
+            return
+        device_lock_binding = dict(transfer_result)
+        request_metadata = {**request_metadata, "device_lock_binding": dict(device_lock_binding)}
+        request = {**request, "metadata_safe": request_metadata}
         device_lock_active = True
         lock_owner_worker_id = cfg.worker_id
 
@@ -3490,7 +3710,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
         )
         if device_lock_active and device_id:
-            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
         return
 
     if _is_scheduled_session_preflight_run_type(run_type) and not adb_serial:
@@ -3517,7 +3737,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             payload={"request_id": request_id, "run_type": run_type, "assignment": safe_dispatch},
         )
         if device_lock_active and device_id:
-            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
         return
 
     if run_type == "login_email_code_resume":
@@ -3549,6 +3769,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 request_id=request_id,
                 worker_id=cfg.worker_id,
                 dispatch_ctx=dispatch_ctx,
+                device_lock_binding=device_lock_binding,
             )
         except AtomicAdmissionRejected as exc:
             reason = str(exc)[:120] or "atomic_admission_rejected"
@@ -3564,7 +3785,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     device_id=device_id,
                     worker_id=lock_owner_worker_id,
                     request_id=request_id,
-                )
+                 expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
             log(
                 "warning",
                 "account_session_atomic_admission_rejected",
@@ -3643,7 +3864,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         else runner_subprocess_env()
     )
     runtime_identity_env = _runner_runtime_identity_env(request_id)
-    subprocess_env = {**subprocess_env, **runtime_identity_env}
+    subprocess_env = {**subprocess_env, **runtime_identity_env,
+                      "FLEET_DEVICE_LOCK_BINDING_JSON": json.dumps(device_lock_binding or {})}
     log(
         "info",
         "worker_runtime_identity_propagated_to_runner",
@@ -3732,13 +3954,23 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             "RUN_CONTROL_INTEGRATION_NOOP_RUNNER": "1",
             "RUN_CONTROL_INTEGRATION_NO_ADB": "1",
         }
-        completed = subprocess.run(
-            cmd,
-            cwd=str(runner_workdir),
-            env=subprocess_env,
-            capture_output=True,
-            text=True,
-        )
+        noop_proc = _fleet_spawn_or_legacy(
+                request_id, cmd, runner_workdir, subprocess_env,
+                launch_binding={
+                    'account_id': account_id, 'request_id': request_id,
+                    'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
+                    'consumer_instance_id': cfg.worker_id,
+                    'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
+                },
+                popen_options={'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'text': True})
+        if noop_proc is None:
+            if device_id and device_lock_active:
+                release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+            if cooperative_stop_context is not None:
+                clear_cooperative_stop_context(cooperative_stop_context)
+            return
+        noop_stdout, noop_stderr = noop_proc.communicate()
+        completed = subprocess.CompletedProcess(cmd, noop_proc.returncode, noop_stdout, noop_stderr)
         for line in (completed.stdout or "").splitlines():
             stripped = line.strip()
             if not stripped.startswith("{"):
@@ -3757,11 +3989,22 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             subprocess_env["ACCOUNT_RUN_WORKER_SPAWNED_AT"] = datetime.now(
                 timezone.utc
             ).isoformat()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(runner_workdir),
-            env=subprocess_env,
-        )
+        if request_id not in _FLEET_EXECUTIONS and request.get('fleet_runtime_v1') is not None:
+            _fleet_bind_authority(request_id, account_id, cfg.worker_id, request)
+        proc = _fleet_spawn_or_legacy(
+                request_id, cmd, runner_workdir, subprocess_env,
+                launch_binding={
+                    'account_id': account_id, 'request_id': request_id,
+                    'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
+                    'consumer_instance_id': cfg.worker_id,
+                    'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
+                })
+        if proc is None:
+            if device_id and device_lock_active:
+                release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+            if cooperative_stop_context is not None:
+                clear_cooperative_stop_context(cooperative_stop_context)
+            return
         exit_code, timed_out = _wait_for_subprocess(
             cfg,
             proc,
@@ -3773,7 +4016,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             business_action_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
             scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
             diagnostics=cooperative_stop_diagnostics,
-        )
+         device_lock_binding=device_lock_binding)
 
     lock_released = False
     if device_id and device_lock_active:
@@ -3782,13 +4025,13 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 device_id=device_id,
                 worker_id=lock_owner_worker_id,
                 request_id=request_id,
-            )
+             expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
         else:
             release_result = release_device_lock(
                 device_id=device_id,
                 worker_id=lock_owner_worker_id,
                 request_id=request_id,
-            )
+             expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
             lock_released = bool((release_result or {}).get("released"))
 
     _finalize_manual_run_after_subprocess(
@@ -3808,6 +4051,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         lock_released=lock_released,
         cooperative_stop=cooperative_stop_diagnostics,
     )
+    _fleet_finish_execution(request_id)
     if cooperative_stop_context is not None:
         clear_cooperative_stop_context(cooperative_stop_context)
 
