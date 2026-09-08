@@ -238,6 +238,8 @@ def record_terminal_failure(
     incident_type: str,
     reason_code: str,
     incident_id: str | None = None,
+    terminal_summary: dict[str, Any] | None = None,
+    existing_resume_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Dispatcher hook: preserve the true terminal reason on the plan.
 
@@ -261,6 +263,42 @@ def record_terminal_failure(
     }
     if incident_id:
         patch["incident_id"] = _clean(incident_id)
+    # Reporting only: preserve admission/lineage fields and the blocked state.
+    # The runner already reconciled receipts; do not replay or recount actions.
+    try:
+        import supabase_client
+        from terminal_summary_projection import terminal_reason
+
+        terminal = (dict(terminal_summary) if terminal_summary is not None else
+                    (supabase_client.load_run_row(run_id, request_timeout=3.0, max_retries=0) or {}).get("performance_summary") or {})
+        if terminal.get("terminal_progress_reconciled") is True:
+            existing = (existing_resume_plan if existing_resume_plan is not None else
+                        load_resume_plan(run_id=run_id, request_timeout=3.0, max_retries=0) or {})
+            if existing:
+                plan = dict(existing.get("plan") or {})
+                for key in ("first_causal_reason", "reason_code", "restriction_evidence",
+                            "session_termination_class", "follows_completed_count",
+                            "follow_quota_target", "follow_quota_remaining",
+                            "terminal_progress_reconciled", "terminal_progress_source", "unsafe_markers"):
+                    if key in terminal:
+                        plan[key] = terminal[key]
+                for field, key in (("quota_done", "follows_completed_count"),
+                                   ("quota_targets", "follow_quota_target"),
+                                   ("quota_remaining", "follow_quota_remaining")):
+                    if key in terminal:
+                        plan[field] = {**dict(plan.get(field) or {}), "follow": terminal[key]}
+                remaining = plan.get("quota_remaining") or {}
+                if isinstance(remaining.get("unfollow"), int) and isinstance(remaining.get("follow"), int):
+                    remaining["total"] = remaining["follow"] + remaining["unfollow"]
+                else:
+                    remaining.pop("total", None)
+                plan["restart_allowed"] = False
+                plan["restart_block_reason"] = patch["restart_block_reason"]
+                patch["plan"] = plan
+                patch["terminal_reason_code"] = terminal_reason(terminal, {"reason_code": reason_code})
+    except Exception as exc:
+        log("error", "resume_plan_terminal_progress_projection_failed",
+            run_id=run_id, error_type=type(exc).__name__)
     result = _patch_plan_by_run_id(run_id, patch)
     log(
         "info",
@@ -567,6 +605,8 @@ def load_resume_plan(
     *,
     resume_plan_id: str | None = None,
     run_id: str | None = None,
+    request_timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> dict[str, Any] | None:
     """Load one resume plan row. Transport errors propagate to the caller."""
     import supabase_client
@@ -578,7 +618,9 @@ def load_resume_plan(
         query["run_id"] = f"eq.{str(run_id).strip()}"
     else:
         return None
-    rows = supabase_client._request_json("GET", _TABLE, query=query) or []
+    rows = supabase_client._request_json("GET", _TABLE, query=query,
+        **({"request_timeout": request_timeout} if request_timeout is not None else {}),
+        **({"max_retries": max_retries} if max_retries is not None else {})) or []
     return dict(rows[0]) if rows else None
 
 

@@ -1116,7 +1116,8 @@ def create_run(account_id: str) -> dict[str, Any]:
     return row[0]
 
 
-def load_run_row(run_id: str) -> dict[str, Any] | None:
+def load_run_row(run_id: str, *, request_timeout: float | None = None,
+                 max_retries: int | None = None) -> dict[str, Any] | None:
     """Load one ig_runs row (status + structured performance_summary) by id."""
     rid = str(run_id or "").strip()
     if not rid:
@@ -1124,8 +1125,10 @@ def load_run_row(run_id: str) -> dict[str, Any] | None:
     rows = _request_json(
         "GET",
         "ig_runs",
+        **({"request_timeout": request_timeout} if request_timeout is not None else {}),
+        **({"max_retries": max_retries} if max_retries is not None else {}),
         query={
-            "select": "id,account_id,status,performance_summary,started_at,updated_at",
+            "select": "id,account_id,status,performance_summary,total_follow,started_at,updated_at",
             "id": f"eq.{rid}",
             "limit": "1",
         },
@@ -3816,6 +3819,40 @@ def count_successful_unfollows_today(account_id: str) -> int:
         if start <= ts.astimezone(timezone.utc) < end:
             total += 1
     return total
+
+
+def count_persisted_run_follows(*, account_id: str, run_id: str) -> int:
+    """Project the receipt source of reconcile_ig_run_canonical_totals_v1.
+
+    Same run/account, event family/status and DISTINCT lower(ltrim(username,
+    '@')) as the existing canonical SQL. One bounded GET, no retries/writes.
+    Exact row count proves completeness despite server-side pagination limits.
+    """
+    import uuid
+    aid, rid = str(uuid.UUID(str(account_id))), str(uuid.UUID(str(run_id)))
+    query = {
+        "select": "username", "account_id": f"eq.{aid}", "run_id": f"eq.{rid}",
+        "event_status": "in.(success,partial)",
+        "event_type": "in.(follow_verified,follow_verified_persisted_v1)",
+        "limit": "1000",
+    }
+    key = _service_key()
+    req = request.Request(
+        url=f"{_base_url()}/rest/v1/ig_interaction_events?{parse.urlencode(query)}",
+        method="GET",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Prefer": "count=exact"},
+    )
+    with request.urlopen(req, timeout=3.0) as response:
+        content_range = str(response.headers.get("Content-Range") or "")
+        rows = json.loads(response.read().decode("utf-8"))
+    if not re.fullmatch(r"(?:[0-9]+-[0-9]+|\*)/[0-9]+", content_range):
+        raise RuntimeError("terminal_follow_receipts_count_unavailable")
+    if not isinstance(rows, list) or len(rows) != int(content_range.rsplit("/", 1)[-1]):
+        raise RuntimeError("terminal_follow_receipts_not_exhaustive")
+    if any(not isinstance(row, dict) or (row.get("username") is not None
+            and not isinstance(row["username"], str)) for row in rows):
+        raise RuntimeError("terminal_follow_receipts_invalid")
+    return len({row["username"].lstrip("@").lower() for row in rows if row.get("username") is not None})
 
 
 def count_successful_follows_today(account_id: str) -> int:

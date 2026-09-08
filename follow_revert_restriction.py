@@ -146,6 +146,7 @@ def apply_preventive_follow_restriction(
         "recommended_pause_until": pause_until.isoformat(),
         "pause_policy_source": "bmb_operational_policy_48h",
         "instagram_exact_expiry_provided": False,
+        "restriction_evidence": "preventive",
     }
     result = supabase_client.apply_instagram_action_restriction(
         {

@@ -476,6 +476,10 @@ def build_incident_dedupe_key(
 
 
 _SAFE_METADATA_KEYS = (
+    "first_causal_reason",
+    "restriction_evidence",
+    "terminal_progress_source",
+    "terminal_progress_error",
     "domain",
     "run_type",
     "phase",
@@ -570,6 +574,21 @@ def _safe_summary_metadata(summary: dict[str, Any]) -> dict[str, Any]:
             text = re.sub(r"/(?:Users|private|var|tmp)/\S+", "[path]", text)
         if text:
             out[key] = text[:200]
+    for key in ("follows_completed_count", "follow_quota_target", "follow_quota_remaining"):
+        value = summary.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            out[key] = value
+    for key in ("actions_completed", "session_counters"):
+        counters = summary.get(key)
+        if isinstance(counters, dict):
+            out[key] = {name: value for name, value in counters.items()
+                        if name in {"follows", "likes", "unfollows", "interactions", "successful_interactions"}
+                        and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+    if isinstance(summary.get("terminal_progress_reconciled"), bool):
+        out["terminal_progress_reconciled"] = summary["terminal_progress_reconciled"]
+    if isinstance(summary.get("unsafe_markers"), list):
+        out["unsafe_markers"] = [m for m in summary["unsafe_markers"]
+                                 if m in {"restriction", "challenge", "account_mismatch", "action_block"}]
     return out
 
 
@@ -595,13 +614,10 @@ def classify_terminal_run_failure(
     status = str(run_status or "").strip().lower()
     normalized_run_type = str(run_type or summary.get("run_type") or "").strip().lower()
     root_failure_code = str(summary.get("root_failure_code") or "").strip()
-    reason = str(
-        root_failure_code
-        or summary.get("reason_code")
-        or summary.get("failure_reason")
-        or summary.get("reason")
-        or ""
-    ).strip()
+    from terminal_summary_projection import terminal_reason, project_terminal_summary
+
+    summary = project_terminal_summary(summary)
+    reason = terminal_reason(summary, {"root_failure_code": root_failure_code}, fallback="")
     phase_terminal_contract = summary.get("phase_terminal_contract")
     if (
         not reason
@@ -701,13 +717,14 @@ def classify_terminal_run_failure(
             metadata_safe=metadata_safe,
         )
 
-    if reason == "instagram_action_rate_limit":
+    if reason in {"instagram_action_rate_limit", "preventive_follow_restriction"}:
         return IncidentDecision(
             should_publish=True,
             incident_type="instagram_account_restriction",
-            reason_code="instagram_action_rate_limit",
+            reason_code=reason,
             severity="error",
-            operator_label="Temporary Instagram action limit",
+            operator_label=("Preventive Follow restriction" if reason == "preventive_follow_restriction"
+                            else "Temporary Instagram action limit"),
             action_required=(
                 "Wait about 48 hours, then resolve this incident manually. Execution may resume "
                 "only on a future natural scheduler tick."
@@ -715,16 +732,53 @@ def classify_terminal_run_failure(
             requires_operator_review=False,
             blocking_campaign=True,
             admin_message=(
-                "Instagram is temporarily limiting actions. A 48-hour operational pause is "
-                "recommended; this open incident is the only blocker created for this reason."
+                ("Repeated unconfirmed follows triggered a preventive restriction. "
+                 if reason == "preventive_follow_restriction"
+                 else "Instagram is temporarily limiting actions. ")
+                + "A 48-hour operational pause is recommended; this open incident is the only blocker created for this reason."
             ),
             notify_channels=True,
             metadata_safe=metadata_safe,
         )
 
+    # Current structured safety reasons, never exit-code-only classifications.
+    if reason == "host_storage_critical":
+        return IncidentDecision(
+            should_publish=True, incident_type="HOST_STORAGE_CRITICAL", reason_code=reason,
+            severity="critical", operator_label="Host storage critical",
+            action_required="Restore safe host storage before resuming.",
+            requires_operator_review=True, blocking_campaign=True,
+            admin_message="The host stopped because runtime state cannot be persisted safely.",
+            notify_channels=True, metadata_safe=metadata_safe,
+        )
+    if (reason == "follow_review_popup_unhandled" or (
+        reason in {"post_follow_return_ct_failed", "already_connected_safe_stop"}
+        and summary.get("session_termination_class") == "partial_safe_stopped"
+    )):
+        return IncidentDecision(
+            should_publish=True, incident_type="runtime_unknown_blocked", reason_code=reason,
+            severity="critical", operator_label="Runtime surface safety stop",
+            action_required="Review the preserved UI stop reason before resuming.",
+            requires_operator_review=True, blocking_campaign=True,
+            admin_message=f"The runtime stopped safely with an unresolved surface ({reason}).",
+            notify_channels=True, metadata_safe=metadata_safe,
+        )
+    # Checkpoint is an authentication challenge, not evidence of another identity.
+    challenge_reason = next((r for r in (identity_reason, reason)
+                             if r in {"checkpoint", "login_challenge"}), None)
+    if challenge_reason:
+        return IncidentDecision(
+            should_publish=True, incident_type="account_login_required", reason_code=challenge_reason,
+            severity="critical", operator_label="Instagram checkpoint or login challenge",
+            action_required="Complete the challenge and freshly verify identity before resuming.",
+            requires_operator_review=True, blocking_campaign=True,
+            admin_message=f"Instagram requires authentication review ({challenge_reason}).",
+            notify_channels=True, metadata_safe=metadata_safe,
+        )
+
     # 1) Identity guard outcomes (concrete, stable causes).
     if reason == "active_instagram_account_mismatch" or identity_reason:
-        if identity_reason in IDENTITY_NOT_PROVEN_REASONS or (
+        if (identity_reason and identity_reason != "active_instagram_account_mismatch") or identity_reason in IDENTITY_NOT_PROVEN_REASONS or (
             not identity_reason and reason in IDENTITY_NOT_PROVEN_REASONS
         ):
             code = identity_reason or reason
@@ -859,6 +913,26 @@ def classify_terminal_run_failure(
             metadata_safe=metadata_safe,
         )
 
+    # A future typed safety outcome owns its incident family. Preserve it
+    # before the generic crash fallback; never infer safety from free text.
+    declared_type = str(summary.get("incident_type") or "").strip()
+    if (
+        reason and declared_type and declared_type != "run_worker_failure"
+        and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", declared_type)
+        and summary.get("session_termination_class") in {
+            "blocked_restriction", "blocked_challenge", "blocked_account_mismatch",
+            "partial_safe_stopped", "scheduled_safe_stop", "phase_handoff_safe_pause",
+        }
+    ):
+        return IncidentDecision(
+            should_publish=True, incident_type=declared_type, reason_code=reason,
+            severity="error", operator_label="Runtime safety stop",
+            action_required="Review the preserved runtime safety reason before resuming.",
+            requires_operator_review=True, blocking_campaign=True,
+            admin_message=f"Runtime safety stop ({reason}).", notify_channels=True,
+            metadata_safe=metadata_safe,
+        )
+
     # 6) Structured runtime error transmitted by the worker.
     if reason:
         return IncidentDecision(
@@ -949,10 +1023,18 @@ def build_run_failure_incident_payload(
             f"account:{aid}:instagram_human_confirmation"
         )
     action_rate_limit_dedupe_key = ""
-    if decision.reason_code == "instagram_action_rate_limit":
+    if decision.reason_code in {"instagram_action_rate_limit", "preventive_follow_restriction"}:
         aid = str(account_id or "").strip() or "unknown"
         action_rate_limit_dedupe_key = f"account:{aid}:instagram_action_rate_limit:v2"
         metadata["incident_only_blocker_v2"] = True
+    # The persisted policy key is consumed by the existing 48h resolve gate.
+    # Keep it stable; the causal subtype is explicit in metadata and labels.
+    policy_reason = decision.reason_code
+    if decision.reason_code == "preventive_follow_restriction":
+        policy_reason = "instagram_action_rate_limit"
+        metadata["trigger_reason"] = decision.reason_code
+        metadata["first_causal_reason"] = decision.reason_code
+        metadata["reason_code"] = decision.reason_code
     return {
         "incident_type": decision.incident_type,
         "dedupe_key": human_confirmation_dedupe_key
@@ -973,8 +1055,8 @@ def build_run_failure_incident_payload(
         "run_id": str(run_id or "").strip() or None,
         "device_id": str(device_id or "").strip() or None,
         "source": source,
-        "reason": decision.reason_code,
-        "failure_reason": decision.reason_code,
+        "reason": policy_reason,
+        "failure_reason": policy_reason,
         "action_required": decision.action_required,
         "safe_client_message": str(
             metadata.get("client_safe_message")

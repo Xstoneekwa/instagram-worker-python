@@ -301,15 +301,29 @@ def build_incident_notification_payload(incident: dict) -> dict:
         return _redact_payload({key: value for key, value in payload.items() if value is not None})
 
     if incident_type == "instagram_account_restriction":
-        if reason_code == "instagram_action_rate_limit":
+        if reason_code in {"instagram_action_rate_limit", "preventive_follow_restriction"}:
+            preventive = (
+                metadata.get("first_causal_reason") == "preventive_follow_restriction"
+                or metadata.get("trigger_reason") == "preventive_follow_restriction"
+                or reason_code == "preventive_follow_restriction"
+            )
+            if preventive:
+                reason_code = "preventive_follow_restriction"
             recommended_pause_until = _safe_text(
                 metadata.get("recommended_pause_until"), max_len=80
             )
-            title = f"[{severity.upper()}] Temporary Instagram action limit"
+            title = (f"[{severity.upper()}] Preventive Follow restriction" if preventive
+                     else f"[{severity.upper()}] Temporary Instagram action limit")
             message_parts = [
                 title,
                 f"Account: @{account_username or 'unknown'}",
                 "Safety: Phone Farm stopped the current run and performed no further business gesture.",
+                "Evidence: repeated unconfirmed follows; no explicit restriction popup is claimed."
+                if preventive else (
+                    "Evidence: explicit Instagram action-limit surface."
+                    if metadata.get("restriction_evidence") == "confirmed_ui"
+                    else "Evidence: action-limit incident; UI evidence not specified in this payload."
+                ),
                 "Policy: A 48h operational pause is recommended by BMB; Instagram did not provide an exact expiry.",
             ]
             if recommended_pause_until:

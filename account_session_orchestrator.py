@@ -1428,7 +1428,23 @@ def _run_follow_target_rotation(
             scope_rejection_reason=target_availability_scope_rejection_reason,
         )
         follow_t0 = time.perf_counter()
-        exit_code = int(run_followers_list_engine_session(d, **call_kwargs))
+        try:
+            exit_code = int(run_followers_list_engine_session(d, **call_kwargs))
+        except Exception as exc:
+            # Preserve this exception/traceback; only attach its terminal scope.
+            try:
+                from terminal_summary_projection import project_terminal_summary
+                terminal = getattr(exc, "summary", None)
+                terminal = dict(terminal) if isinstance(terminal, dict) else {"root_failure_code": "worker_exit_nonzero"}
+                exc.summary = project_terminal_summary({
+                    **terminal, "account_id": account_id, "run_id": run_id,
+                    "follow_quota_target": (global_follow_goal if global_follow_goal is not None
+                                            else terminal.get("follow_quota_target")),
+                })
+            except Exception as projection_exc:
+                log("error", "rotation_exception_projection_failed",
+                    run_id=run_id, error_type=type(projection_exc).__name__)
+            raise
         follow_total_ms = round((time.perf_counter() - follow_t0) * 1000.0, 2)
         summary = _last_follow_engine_summary(run_followers_list_engine_session)
         summary.update(

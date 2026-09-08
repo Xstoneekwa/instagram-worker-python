@@ -43,6 +43,7 @@ import config
 import runtime_events
 import runtime_heartbeat
 import supabase_client
+from terminal_summary_projection import terminal_reason, reconcile_terminal_progress
 import follow_persistence_intent
 import follow_candidate_recovery
 import follow_persistence_receipt_replay
@@ -5711,10 +5712,12 @@ def _update_run_status_safe(
     status: str,
     totals: dict,
     performance_summary: dict,
+    defer_until_cleanup: bool = True,
 ) -> str:
     global _PENDING_TERMINAL_RUN_STATUS
     if (
         status in {"completed", "failed", "stopped"}
+        and defer_until_cleanup
         and _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
         and not _RUNNER_SESSION_CLEANUP_COMPLETE
     ):
@@ -5767,6 +5770,34 @@ def _update_run_status_safe(
                     "terminal_deferred_projection_degraded": False,
                     "terminal_deferred_projection_spooled": spooled,
                 }
+    if (
+        status in {"failed", "stopped", "canceled"}
+        and performance_summary.get("account_id")
+        and ("follow_quota_target" in performance_summary
+             or _ORF_RUNTIME_CONTEXT.get("run_type") == "account_session")
+        and performance_summary.get("run_id") == run_id
+        and "terminal_progress_reconciled" not in performance_summary
+    ):
+        performance_summary = reconcile_terminal_progress(
+            performance_summary, read_count=supabase_client.count_persisted_run_follows,
+        )
+        log(
+            "info" if performance_summary.get("terminal_progress_reconciled") else "error",
+            "account_session_terminal_progress_projection",
+            run_id=run_id,
+            follows_completed_count=performance_summary.get("follows_completed_count"),
+            follow_quota_target=performance_summary.get("follow_quota_target"),
+            follow_quota_remaining=performance_summary.get("follow_quota_remaining"),
+            reconciled=performance_summary.get("terminal_progress_reconciled"),
+            error=performance_summary.get("terminal_progress_error"),
+        )
+        log("info", "account_session_summary",
+            **{key: performance_summary[key] for key in (
+                "account_id", "run_id", "first_causal_reason", "reason_code",
+                "follow_stop_reason", "restriction_evidence", "session_termination_class",
+                "follows_completed_count", "follow_quota_target", "follow_quota_remaining",
+                "terminal_progress_reconciled", "terminal_progress_error", "unsafe_markers",
+            ) if key in performance_summary})
     persist_result = _timed_safe_supabase_call(
         "run_status_updated",
         "update_run_status",
@@ -13818,7 +13849,11 @@ def _run_followers_list_engine_session(
         if target_scan_completed_logged:
             return
         target_scan_completed_logged = True
-        sr = str(stop_reason or _target_scan_stop_reason() or "unknown")
+        sr = terminal_reason(
+            _followers_session_summary,
+            {"stop_reason": stop_reason},
+            {"stop_reason": _target_scan_stop_reason()},
+        )
         payload = _target_rejection_summary_payload(
             target_scan_tracker,
             stop_reason=sr,
@@ -25125,6 +25160,29 @@ def _run_followers_list_engine_session(
                 break
 
     finally:
+        _terminal_exception_summary = getattr(sys.exc_info()[1], "summary", None)
+        _terminal_exception = sys.exc_info()[1]
+        if not isinstance(_terminal_exception_summary, dict):
+            _terminal_exception_summary = ({"root_failure_code": "worker_exit_nonzero"}
+                                           if _terminal_exception is not None else {})
+        if _terminal_exception is not None:
+            # The effective run cap was resolved by the engine, not necessarily
+            # by target rotation yet (notably on its first target).
+            _terminal_exception_summary = dict(_terminal_exception_summary)
+            _terminal_cap = _followers_session_summary.get("global_follows_goal_effective")
+            if isinstance(_terminal_cap, int) and not isinstance(_terminal_cap, bool):
+                _terminal_exception_summary.setdefault("follow_quota_target", _terminal_cap)
+            try:
+                _terminal_exception.summary = _terminal_exception_summary
+            except Exception:
+                pass  # Never replace the original failure with reporting failure.
+        _terminal_report_reason = terminal_reason(_terminal_exception_summary, fallback="") or terminal_reason(
+            _followers_session_summary,
+            {"stop_reason": _followers_loop_finally_stop},
+            {"stop_reason": get_followers_engine_stop_reason()},
+        )
+        if _terminal_report_reason != "unknown":
+            _followers_session_summary["first_causal_reason"] = _terminal_report_reason
         try:
             if target_followers_resume_controller is not None:
                 try:
@@ -25204,19 +25262,13 @@ def _run_followers_list_engine_session(
             _publish_followers_session_summary(
                 follow_processed_count=int(processed),
                 follows_completed_count=int(follows_completed_count),
-                follow_stop_reason=(
-                    _followers_loop_finally_stop
-                    or str(get_followers_engine_stop_reason() or "")[:160]
-                ),
+                follow_stop_reason=_terminal_report_reason,
             )
             log(
                 "info",
                 "followers_engine_session_finished",
                 status=_followers_loop_finally_status,
-                stop_reason=(
-                    _followers_loop_finally_stop
-                    or str(get_followers_engine_stop_reason() or "")[:160]
-                ),
+                stop_reason=_terminal_report_reason,
                 processed=int(processed),
                 follows_completed_count=int(follows_completed_count),
                 source_profile_username=source_profile_username,
@@ -29283,6 +29335,24 @@ def main() -> int:
             )
             return _return_with_cleanup(exc.device, ADS_DATA_CONSENT_EXIT_CODE)
         if not isinstance(exc, InstagramActionRestrictionDetected):
+            # A technical failure must remain a failure, including its traceback.
+            # It cannot rely on the normal cleanup/return path to flush a summary.
+            try:
+                terminal = getattr(exc, "summary", None)
+                terminal = dict(terminal) if isinstance(terminal, dict) else {}
+                terminal.update(account_id=_CURRENT_ACCOUNT_ID, run_id=_CURRENT_RUN_ID)
+                if terminal_reason(terminal) == "unknown":
+                    terminal["root_failure_code"] = "worker_exit_nonzero"
+                terminal["terminal_exception_intercepted"] = True
+                if _CURRENT_RUN_ID:
+                    _update_run_status_safe(
+                        run_id=_CURRENT_RUN_ID, status="failed",
+                        totals={"total": 0, "success": 0, "failed": 1},
+                        performance_summary=terminal, defer_until_cleanup=False,
+                    )
+            except Exception as projection_exc:
+                log("error", "technical_exception_terminal_projection_failed",
+                    run_id=_CURRENT_RUN_ID, error_type=type(projection_exc).__name__)
             raise
         summary = dict(exc.summary)
         run_id = str(summary.get("run_id") or "")
@@ -29291,7 +29361,9 @@ def main() -> int:
             _update_run_status_safe(
                 run_id=run_id,
                 status="failed",
-                totals={"total": 0, "success": 0, "failed": 1},
+                # A restriction is not a failed business action. Follow
+                # progress is projected separately from canonical receipts.
+                totals={"total": 0, "success": 0, "failed": 0},
                 performance_summary=summary,
             )
         log(

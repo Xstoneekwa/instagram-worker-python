@@ -479,6 +479,7 @@ def guard_instagram_action_rate_limit(
         "recommended_pause_until": recommended_pause_until,
         "pause_policy_source": PAUSE_POLICY_SOURCE,
         "instagram_exact_expiry_provided": False,
+        "restriction_evidence": "confirmed_ui",
         "button_policy": "never_click_contact;ok_not_required_for_terminalization",
         "physical_preflight_required": False,
     }
@@ -543,5 +544,6 @@ def guard_instagram_action_rate_limit(
         "recommended_pause_until": recommended_pause_until,
         "pause_policy_source": PAUSE_POLICY_SOURCE,
         "instagram_exact_expiry_provided": False,
+        "restriction_evidence": "confirmed_ui",
     }
     raise InstagramActionRestrictionDetected(device=d, summary=summary)

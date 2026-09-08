@@ -128,7 +128,7 @@ class MythylUnfollowFailureRecoveryTest(unittest.TestCase):
         plan = build_account_session_resume_plan(_mythyl_summary())
         self.assertTrue(plan["restart_allowed"])
         self.assertEqual(plan["restart_block_reason"], "")
-        self.assertEqual(plan["phases_to_run"], {"welcome": False, "follow": False, "unfollow": True})
+        self.assertEqual(plan["phases_to_run"], {"welcome": False, "post_follow_recovery": False, "follow": False, "unfollow": True})
         self.assertEqual(plan["quota_targets"]["unfollow"], 120)
         self.assertEqual(plan["quota_remaining"]["unfollow"], 120)
 
@@ -161,7 +161,7 @@ class MythylUnfollowFailureRecoveryTest(unittest.TestCase):
         self.assertEqual(plan["restart_block_reason"], "")
         self.assertEqual(
             plan["phases_to_run"],
-            {"welcome": False, "follow": False, "unfollow": True},
+            {"welcome": False, "post_follow_recovery": False, "follow": False, "unfollow": True},
         )
         self.assertEqual(plan["quota_remaining"]["follow"], 0)
         self.assertEqual(plan["quota_remaining"]["unfollow"], 3)

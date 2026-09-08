@@ -130,6 +130,11 @@ def _quota_value(
         "done": "quota_done",
         "remaining": "quota_remaining",
     }[field]
+    if phase == "follow" and summary.get("terminal_progress_reconciled") is True:
+        for key in fallback_keys:
+            value = summary.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
     from_plan = _nested(resume_plan, bucket_name, phase)
     if from_plan is not None and from_plan != UNKNOWN:
         return from_plan
@@ -272,6 +277,9 @@ def build_admin_reliability_snapshot(
     unsafe = _unsafe_markers(safe_summary, safe_plan)
 
     snapshot = {
+        "first_causal_reason": _value(safe_summary.get("first_causal_reason")),
+        "restriction_evidence": _value(safe_summary.get("restriction_evidence")),
+        "terminal_progress_reconciled": safe_summary.get("terminal_progress_reconciled"),
         "account_id": _value(safe_summary.get("account_id")),
         "account_username": _value(safe_summary.get("account_username")),
         "package_name": _value(

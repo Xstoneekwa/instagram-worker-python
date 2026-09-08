@@ -95,7 +95,9 @@ def _semantic_safety_text(value: Any) -> list[str]:
 
 def _unsafe_markers(summary: dict[str, Any]) -> list[str]:
     text = " ".join(_semantic_safety_text(summary))
-    markers: list[str] = []
+    structured = summary.get("unsafe_markers")
+    markers = [m for m in structured
+               if m in {"restriction", "challenge", "account_mismatch", "action_block"}] if isinstance(structured, list) else []
     marker_patterns = (
         ("account_mismatch", ("active_instagram_account_mismatch", "account_mismatch")),
         (
@@ -110,7 +112,7 @@ def _unsafe_markers(summary: dict[str, Any]) -> list[str]:
         ("action_block", ("action_block", "action block", "action-block", "feedback_required")),
     )
     for marker, patterns in marker_patterns:
-        if any(pattern in text for pattern in patterns):
+        if marker not in markers and any(pattern in text for pattern in patterns):
             markers.append(marker)
     return markers
 
@@ -552,6 +554,8 @@ def build_account_session_resume_plan(
             else "resume_planned_phases"
         ),
         "phases_to_run": phases_to_run,
+        "first_causal_reason": safe_summary.get("first_causal_reason"),
+        "restriction_evidence": safe_summary.get("restriction_evidence"),
         "quota_targets": quota_targets,
         "quota_done": quota_done,
         "quota_remaining": quota_remaining,

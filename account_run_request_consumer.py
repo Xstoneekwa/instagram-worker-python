@@ -2063,6 +2063,51 @@ def _update_incident_recovery_state(
         )
 
 
+def _project_missing_worker_terminal_summary(*, run_row: dict[str, Any], account_id: str,
+                                             run_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Missing worker terminal output: reuse already-reconciled canonical totals.
+
+    No receipt reread/replay. Unknown quota remains unknown if the worker died
+    before persisting it; never infer it from a different run or current settings.
+    """
+    from terminal_summary_projection import project_terminal_summary, terminal_reason
+    summary = dict(run_row.get("performance_summary") or {})
+    count = run_row.get("total_follow")
+    if (run_row.get("id") != run_id or run_row.get("account_id") != account_id
+        or summary.get("terminal_reconciliation_source") != "canonical_event_reconciliation"
+        or "terminal_progress_reconciled" in summary
+        or summary.get("terminal_exception_intercepted") is True
+        or "follows_completed_count" in summary
+        or not isinstance(count, int) or isinstance(count, bool) or count < 0):
+        return summary, None
+    from account_session_resume_plan_store import load_resume_plan
+    try:
+        existing = load_resume_plan(run_id=run_id, request_timeout=3.0, max_retries=0) or {}
+    except Exception as exc:
+        log("error", "process_death_resume_plan_read_failed", run_id=run_id,
+            error_type=type(exc).__name__)
+        existing = {}
+    plan = existing.get("plan") or {}
+    if "follow_quota_target" not in summary:
+        target = plan.get("follow_quota_target", (plan.get("quota_targets") or {}).get("follow"))
+        if isinstance(target, int) and not isinstance(target, bool) and target >= 0:
+            summary["follow_quota_target"] = target
+    summary.update(account_id=account_id, run_id=run_id)
+    if terminal_reason(summary) == "unknown":
+        summary["root_failure_code"] = "worker_exit_nonzero"
+    summary = project_terminal_summary(summary, persisted_follow_count=count)
+    summary["terminal_progress_source"] = "reconcile_ig_run_canonical_totals_v1"
+    summary["worker_terminal_projection_missing"] = True
+    try:
+        supabase_client._request_json("PATCH", "ig_runs",
+            query={"id": f"eq.{run_id}", "account_id": f"eq.{account_id}"},
+            body={"performance_summary": summary}, request_timeout=3.0, max_retries=0)
+    except Exception as exc:
+        log("error", "process_death_summary_projection_write_failed", run_id=run_id,
+            error_type=type(exc).__name__)
+    return summary, existing
+
+
 def _publish_run_failure_incident(
     *,
     request_id: str,
@@ -2084,6 +2129,7 @@ def _publish_run_failure_incident(
             or (request_snapshot or {}).get("metadata_safe")
             or {}
         )
+        terminal_existing_plan = None
         run_status: str | None = None
         performance_summary: dict[str, Any] | None = dict(worker_summary or {}) or None
         if run_id:
@@ -2093,6 +2139,14 @@ def _publish_run_failure_incident(
                 raw_summary = run_row.get("performance_summary")
                 if performance_summary is None and isinstance(raw_summary, dict):
                     performance_summary = raw_summary
+                if run_type == "account_session" and run_status in {"failed", "aborted"}:
+                    effective_row = {**run_row, "performance_summary": {
+                        **(raw_summary if isinstance(raw_summary, dict) else {}),
+                        **(performance_summary or {}),
+                    }}
+                    performance_summary, terminal_existing_plan = _project_missing_worker_terminal_summary(
+                        run_row=effective_row, account_id=account_id, run_id=run_id,
+                    )
             except Exception as exc:
                 log(
                     "warning",
@@ -2323,6 +2377,9 @@ def _publish_run_failure_incident(
                     incident_type=decision.incident_type,
                     reason_code=decision.reason_code,
                     incident_id=incident_id,
+                    **({"terminal_summary": performance_summary,
+                        "existing_resume_plan": terminal_existing_plan}
+                       if (performance_summary or {}).get("terminal_progress_reconciled") is True else {}),
                 )
         action_id = None
         if (
