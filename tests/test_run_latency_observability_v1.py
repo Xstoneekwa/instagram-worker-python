@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
 
 import run_latency_observability_v1 as obs
 
@@ -236,6 +237,96 @@ class RunLatencyObservabilityTests(unittest.TestCase):
         context = obs.current_context()
         self.assertEqual(context["app_instance_id"], "app-1")
         self.assertNotIn("secret", context)
+
+    def test_first_scroll_segments_are_monotonic_non_negative_and_coherent(self) -> None:
+        fields = obs.first_scroll_segment_fields(
+            {
+                "first_scroll_requested_monotonic_ms": 100.0,
+                "first_scroll_physical_entry_monotonic_ms": 103.0,
+                "first_scroll_physical_complete_monotonic_ms": 111.5,
+                "first_scroll_stabilization_complete_monotonic_ms": 561.5,
+                "first_scroll_verify_complete_monotonic_ms": 575.0,
+            }
+        )
+        self.assertEqual(fields["first_scroll_segmentation_status"], "COMPLETE")
+        self.assertEqual(fields["scroll_request_to_physical_ms"], 3.0)
+        self.assertEqual(fields["scroll_physical_envelope_ms"], 8.5)
+        self.assertEqual(fields["scroll_stabilization_ms"], 450.0)
+        self.assertEqual(fields["scroll_verify_ms"], 13.5)
+        segments = [
+            fields["scroll_request_to_physical_ms"],
+            fields["scroll_physical_envelope_ms"],
+            fields["scroll_stabilization_ms"],
+            fields["scroll_verify_ms"],
+        ]
+        self.assertTrue(fields["first_scroll_monotonic_clock"])
+        self.assertTrue(all(value >= 0 for value in segments))
+        self.assertAlmostEqual(sum(segments), fields["first_scroll_segmented_total_ms"])
+
+    def test_first_scroll_missing_or_invalid_boundary_is_telemetry_safe(self) -> None:
+        missing = obs.first_scroll_segment_fields(
+            {"first_scroll_requested_monotonic_ms": 100.0}
+        )
+        self.assertEqual(missing["first_scroll_segmentation_status"], "BOUNDARY_UNAVAILABLE")
+        self.assertIsNone(missing["scroll_verify_ms"])
+        invalid = obs.first_scroll_segment_fields(
+            {
+                "first_scroll_requested_monotonic_ms": 100.0,
+                "first_scroll_physical_entry_monotonic_ms": 99.0,
+                "first_scroll_physical_complete_monotonic_ms": 101.0,
+                "first_scroll_stabilization_complete_monotonic_ms": 102.0,
+                "first_scroll_verify_complete_monotonic_ms": 103.0,
+            }
+        )
+        self.assertEqual(invalid["first_scroll_segmentation_status"], "BOUNDARY_ORDER_INVALID")
+        self.assertIsNone(invalid["scroll_request_to_physical_ms"])
+
+        class _BrokenBoundaries(dict):
+            def __getitem__(self, _key: str) -> object:
+                raise RuntimeError("telemetry boundary unavailable")
+
+        broken = obs.first_scroll_segment_fields(_BrokenBoundaries())
+        self.assertEqual(broken["first_scroll_segmentation_status"], "BOUNDARY_UNAVAILABLE")
+
+    def test_global_ct_first_scroll_timer_remains_available(self) -> None:
+        obs.observe_runtime_event("ct_resume_first_scroll_started", {"run_id": "resume-1"})
+        rows = obs.observe_runtime_event("ct_resume_first_scroll_completed", {})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["phase"], "ct_first_scroll")
+        self.assertGreaterEqual(rows[0]["duration_ms"], 0)
+
+    def test_existing_first_scroll_wiring_adds_timestamps_not_device_calls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        navigation = (root / "instagram_navigation.py").read_text(encoding="utf-8")
+        start = navigation.index('reason=f"canonical_{attempt_kind}_follow_swipe"')
+        end = navigation.index("attempt_diag = {", start)
+        physical = navigation[start:end]
+        self.assertEqual(physical.count("d.swipe("), 1)
+        self.assertEqual(physical.count("time.sleep("), 1)
+        self.assertEqual(physical.count("followers_refresh_detect_hierarchy_cache("), 1)
+        ordered = [
+            physical.index('"first_scroll_physical_entry_monotonic_ms"'),
+            physical.index("d.swipe("),
+            physical.index('"first_scroll_physical_complete_monotonic_ms"'),
+            physical.index("time.sleep("),
+            physical.index('"first_scroll_stabilization_complete_monotonic_ms"'),
+            physical.index("followers_refresh_detect_hierarchy_cache("),
+            physical.index("compare_instagram_list_viewports("),
+            physical.index('"first_scroll_verify_complete_monotonic_ms"'),
+        ]
+        self.assertEqual(ordered, sorted(ordered))
+
+        runner = (root / "runner.py").read_text(encoding="utf-8")
+        resume = runner[runner.index('"ct_resume_first_scroll_started"') :]
+        resume = resume[: resume.index("_ff_verdict =")]
+        self.assertLess(
+            resume.index('"first_scroll_requested_monotonic_ms"'),
+            resume.index("scroll_followers_list_forward("),
+        )
+        self.assertLess(
+            resume.index("scroll_followers_list_forward("),
+            resume.index("first_scroll_segment_fields(_ff_diag)"),
+        )
 
 
 if __name__ == "__main__":

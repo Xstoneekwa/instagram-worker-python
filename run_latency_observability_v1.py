@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import resource
 import threading
@@ -100,6 +101,52 @@ def current_context() -> dict[str, Any]:
     """Return only the bounded identity currently correlated to the run."""
 
     return dict(_state().context)
+
+
+_FIRST_SCROLL_BOUNDARIES = (
+    "first_scroll_requested_monotonic_ms",
+    "first_scroll_physical_entry_monotonic_ms",
+    "first_scroll_physical_complete_monotonic_ms",
+    "first_scroll_stabilization_complete_monotonic_ms",
+    "first_scroll_verify_complete_monotonic_ms",
+)
+
+
+def first_scroll_segment_fields(boundaries: dict[str, Any] | None) -> dict[str, Any]:
+    """Derive bounded CT Resume first-scroll timings without affecting execution."""
+
+    result: dict[str, Any] = {
+        "scroll_request_to_physical_ms": None,
+        "scroll_physical_envelope_ms": None,
+        "scroll_stabilization_ms": None,
+        "scroll_verify_ms": None,
+        "first_scroll_segmented_total_ms": None,
+        "first_scroll_segmentation_status": "BOUNDARY_UNAVAILABLE",
+        "first_scroll_monotonic_clock": True,
+    }
+    try:
+        source = boundaries if isinstance(boundaries, dict) else {}
+        stamps = [float(source[key]) for key in _FIRST_SCROLL_BOUNDARIES]
+        if not all(math.isfinite(value) for value in stamps):
+            return result
+        if any(later < earlier for earlier, later in zip(stamps, stamps[1:])):
+            result["first_scroll_segmentation_status"] = "BOUNDARY_ORDER_INVALID"
+            return result
+        segments = [max(0.0, later - earlier) for earlier, later in zip(stamps, stamps[1:])]
+        rounded = [round(value, 3) for value in segments]
+        result.update(
+            {
+                "scroll_request_to_physical_ms": rounded[0],
+                "scroll_physical_envelope_ms": rounded[1],
+                "scroll_stabilization_ms": rounded[2],
+                "scroll_verify_ms": rounded[3],
+                "first_scroll_segmented_total_ms": round(sum(segments), 3),
+                "first_scroll_segmentation_status": "COMPLETE",
+            }
+        )
+    except Exception:
+        pass
+    return result
 
 
 def _metric_add(state: _ObserverState, key: str, value: Any) -> None:

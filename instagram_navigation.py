@@ -40635,6 +40635,16 @@ def _followers_scroll_list_forward(
             return
         scroll_diag_out[key] = val
 
+    def _first_scroll_stamp(key: str) -> None:
+        try:
+            if (
+                scroll_diag_out is not None
+                and "first_scroll_requested_monotonic_ms" in scroll_diag_out
+            ):
+                _sd(key, time.monotonic() * 1000.0)
+        except Exception:
+            pass
+
     if _followers_abort_scroll_if_post_tap_lock("_followers_scroll_list_forward"):
         _sd("failure_reason", "post_tap_lock_active")
         _sd("whether_physical_swipe_attempted", False)
@@ -40824,6 +40834,8 @@ def _followers_scroll_list_forward(
                     source_function="_followers_scroll_list_forward",
                     reason=f"canonical_{attempt_kind}_follow_swipe",
                 )
+                if forward_attempt == 1:
+                    _first_scroll_stamp("first_scroll_physical_entry_monotonic_ms")
                 d.swipe(
                     int(geometry["x"]),
                     int(geometry["y_start"]),
@@ -40831,7 +40843,11 @@ def _followers_scroll_list_forward(
                     int(geometry["y_end"]),
                     float(geometry["duration_s"]),
                 )
+                if forward_attempt == 1:
+                    _first_scroll_stamp("first_scroll_physical_complete_monotonic_ms")
                 time.sleep(0.45 if forward_attempt < 3 else 0.60)
+                if forward_attempt == 1:
+                    _first_scroll_stamp("first_scroll_stabilization_complete_monotonic_ms")
                 gesture_ok = True
             except Exception:
                 gesture_ok = False
@@ -40853,6 +40869,8 @@ def _followers_scroll_list_forward(
             )
             after_rows = list(after_surface.get("primary_row_ids") or [])
             continuity = compare_instagram_list_viewports(before_rows, after_rows)
+            if forward_attempt == 1:
+                _first_scroll_stamp("first_scroll_verify_complete_monotonic_ms")
             attempt_diag = {
                 "attempt": forward_attempt,
                 "kind": attempt_kind,

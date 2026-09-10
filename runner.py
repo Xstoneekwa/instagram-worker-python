@@ -46,7 +46,11 @@ import supabase_client
 from follow_target_private_streak_retirement_v1 import (
     PrivateProfileStreakRetirement,
 )
-from run_latency_observability_v1 import instrument_device, observed_wait
+from run_latency_observability_v1 import (
+    first_scroll_segment_fields,
+    instrument_device,
+    observed_wait,
+)
 from terminal_summary_projection import terminal_reason, reconcile_terminal_progress
 import follow_persistence_intent
 import follow_candidate_recovery
@@ -17359,6 +17363,12 @@ def _run_followers_list_engine_session(
                         scroll_index=_ff_scroll_index,
                         existing_scroll_primitive=True,
                     )
+                    try:
+                        _ff_diag["first_scroll_requested_monotonic_ms"] = (
+                            time.monotonic() * 1000.0
+                        )
+                    except Exception:
+                        pass
                     _ff_ok = bool(
                         _ff_surface
                         and _ff_target
@@ -17385,6 +17395,7 @@ def _run_followers_list_engine_session(
                             canonical_attempt_limit=1,
                         )
                     )
+                    _ff_scroll_segments = first_scroll_segment_fields(_ff_diag)
                     log(
                         "info",
                         "ct_resume_first_scroll_completed",
@@ -17401,6 +17412,8 @@ def _run_followers_list_engine_session(
                         new_username_count=int(
                             _ff_diag.get("new_primary_row_count") or 0
                         ),
+                        _include_null_fields=True,
+                        **_ff_scroll_segments,
                     )
                     _ff_verdict = target_followers_resume_controller.note_legacy_scroll_progress(
                         _ff_diag,
