@@ -306,6 +306,8 @@ def _request_json(
     max_retries: int | None = None,
     retry_backoff_cap: float | None = None,
 ) -> Any:
+    latency_started = time.monotonic()
+    latency_status = "failed"
     base = _base_url()
     key = _service_key()
     params = f"?{parse.urlencode(query or {})}" if query else ""
@@ -338,8 +340,11 @@ def _request_json(
             retry_backoff_cap=retry_backoff_cap,
         )
         if not raw:
+            latency_status = "success_empty"
             return None
-        return json.loads(raw.decode("utf-8"))
+        decoded = json.loads(raw.decode("utf-8"))
+        latency_status = "success"
+        return decoded
     except SupabaseRestError:
         raise
     except Exception as e:
@@ -349,6 +354,25 @@ def _request_json(
             path=table,
             detail=str(e)[:200],
         ) from e
+    finally:
+        try:
+            log(
+                "info",
+                "run_latency_rpc_timing_v1",
+                schema_version="RUN_LATENCY_OBSERVABILITY_V1",
+                rpc_method=str(method or "")[:12],
+                rpc_resource=str(table or "")[:120],
+                duration_ms=round(
+                    max(0.0, (time.monotonic() - latency_started) * 1000.0),
+                    2,
+                ),
+                status=latency_status,
+                request_body_bytes=len(data or b""),
+                response_payload_captured=False,
+                extra_rpc_call=False,
+            )
+        except Exception:
+            pass
 
 
 def _strip_one_unknown_column(body: dict[str, Any], err: str) -> dict[str, Any] | None:
@@ -1807,6 +1831,83 @@ def update_target_status(
         body=body,
         prefer_representation=False,
     )
+
+
+def archive_follow_target_private_streak(
+    *,
+    target_id: str,
+    account_id: str,
+    run_id: str,
+    threshold: int,
+    observed_streak: int,
+) -> dict[str, Any]:
+    """Archive one exact CT after the run-local private-streak gate fires.
+
+    The identity predicate and returned representation make a missing or
+    mismatched row fail closed.  Existing ``status``/``archived_at`` fields are
+    reused; this function does not introduce a schema or retry an ambiguous
+    mutation.
+    """
+
+    tid = str(target_id or "").strip()
+    aid = str(account_id or "").strip()
+    rid = str(run_id or "").strip()
+    expected_threshold = int(threshold)
+    streak = int(observed_streak)
+    if not tid:
+        raise ValueError("private_streak_archive_target_id_required")
+    if not aid:
+        raise ValueError("private_streak_archive_account_id_required")
+    if not rid:
+        raise ValueError("private_streak_archive_run_id_required")
+    if expected_threshold <= 0 or streak < expected_threshold:
+        raise ValueError("private_streak_archive_threshold_not_proved")
+
+    now = _utc_now_iso()
+    rows = _request_json(
+        "PATCH",
+        "ig_targets",
+        query={
+            "id": f"eq.{tid}",
+            "account_id": f"eq.{aid}",
+            "status": "in.(valid,active)",
+        },
+        body={
+            "status": "archived",
+            "archived_at": now,
+            "updated_at": now,
+            "last_error": "consecutive_private_opened_profiles",
+        },
+        prefer_representation=True,
+    )
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("private_streak_archive_exact_row_not_updated")
+    row = dict(rows[0])
+    if (
+        str(row.get("id") or "") != tid
+        or str(row.get("account_id") or "") != aid
+        or str(row.get("status") or "").lower() != "archived"
+        or not str(row.get("archived_at") or "").strip()
+    ):
+        raise RuntimeError("private_streak_archive_representation_mismatch")
+    log(
+        "info",
+        "follow_target_private_streak_archived",
+        account_id=aid,
+        run_id=rid,
+        target_id=tid,
+        observed_streak=streak,
+        threshold=expected_threshold,
+        reason="consecutive_private_opened_profiles",
+        archived_at=str(row.get("archived_at")),
+    )
+    return {
+        "ok": True,
+        "target_id": tid,
+        "account_id": aid,
+        "status": "archived",
+        "archived_at": str(row.get("archived_at")),
+    }
 
 
 def increment_target_retry_count(target_id: str) -> None:

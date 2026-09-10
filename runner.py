@@ -43,6 +43,10 @@ import config
 import runtime_events
 import runtime_heartbeat
 import supabase_client
+from follow_target_private_streak_retirement_v1 import (
+    PrivateProfileStreakRetirement,
+)
+from run_latency_observability_v1 import instrument_device, observed_wait
 from terminal_summary_projection import terminal_reason, reconcile_terminal_progress
 import follow_persistence_intent
 import follow_candidate_recovery
@@ -13059,6 +13063,7 @@ def _run_followers_list_engine_session(
             )
             return 96
     reset_follow_target_rotation_pending()
+    d = instrument_device(d, emit=log)
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
     processed = 0
@@ -13088,6 +13093,15 @@ def _run_followers_list_engine_session(
     }
     _target_availability_existing_proof: dict[str, Any] = {}
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
+    private_streak_retirement = PrivateProfileStreakRetirement(
+        account_id=str(account_id or ""),
+        target_id=str(target_id or ""),
+        target_username=str(source_profile_username or ""),
+        run_id=str(run_id or ""),
+        worker_sha=str(getattr(worker_runtime_identity, "worker_sha", "") or os.environ.get("WORKER_GIT_SHA") or ""),
+    )
+    private_streak_archive_failed = False
+    private_streak_archive_attempted = False
     scroll_failure_target_rotation_safe = False
     scroll_failure_recovery_attempts = 0
     see_more_status = "not_seen"
@@ -13098,6 +13112,56 @@ def _run_followers_list_engine_session(
         run_id=str(run_id or ""),
     )
     target_scan_tracker["_ct_checkpoint"] = ct_checkpoint
+
+    def _observe_private_profile_classification(
+        *,
+        candidate_key: str,
+        is_private: bool,
+        opened_and_confirmed: bool,
+        proof_source: str,
+    ) -> dict[str, Any]:
+        before_pending = bool(private_streak_retirement.retire_pending)
+        state = private_streak_retirement.observe_opened_profile(
+            candidate_key=str(candidate_key or ""),
+            is_private=bool(is_private),
+            opened_and_confirmed=bool(opened_and_confirmed),
+        )
+        log(
+            "info",
+            "follow_target_private_streak_observed",
+            account_id=str(account_id or "") or None,
+            run_id=str(run_id or "") or None,
+            target_id=str(target_id or "") or None,
+            source_profile_username=source_profile_username,
+            candidate_key=str(candidate_key or "")[:160],
+            is_private=bool(is_private),
+            opened_and_confirmed=bool(opened_and_confirmed),
+            proof_source=str(proof_source or "")[:120],
+            **state,
+        )
+        if state.get("private_streak_retire_pending") and not before_pending:
+            set_follow_target_rotation_pending(
+                target_username=source_profile_username,
+                reason="target_exhausted_private_streak_retired",
+                target_follow_count=int(follows_completed_count),
+                max_follows_per_target_per_run=int(target_follow_budget or 0),
+                global_follow_remaining=max(
+                    0,
+                    int(session_global_follow_cap or 0) - int(follows_completed_count),
+                ),
+                candidate_username=str(candidate_key or ""),
+            )
+            log(
+                "warning",
+                "follow_target_private_streak_retire_pending",
+                account_id=str(account_id or "") or None,
+                run_id=str(run_id or "") or None,
+                target_id=str(target_id or "") or None,
+                source_profile_username=source_profile_username,
+                safe_boundary_required=True,
+                **state,
+            )
+        return state
     _followers_continuation_memory = FollowersContinuationMemory()
     _followers_continuation_memory.bind(
         account_id=str(account_id or ""),
@@ -13151,6 +13215,13 @@ def _run_followers_list_engine_session(
         )
         if str(_resume_policy.get(key) or "").strip()
     ]
+    log(
+        "info",
+        "p0c_recovery_before_ct_resume_started",
+        account_id=account_id,
+        run_id=run_id,
+        attempt_id=int(follow60_attempt_id or 1),
+    )
     _p0c_state = _recover_verified_follow_persistence_intents(
         d,
         account_id=account_id,
@@ -13311,6 +13382,13 @@ def _run_followers_list_engine_session(
                 ),
             )
     if target_followers_resume_controller is not None:
+        log(
+            "info",
+            "ct_resume_checkpoint_load_claim_started",
+            account_id=account_id,
+            run_id=run_id,
+            target_id=str(target_id or "") or None,
+        )
         try:
             target_followers_resume_controller.load_and_plan()
         except Exception as exc:
@@ -13327,6 +13405,15 @@ def _run_followers_list_engine_session(
                 },
             )
             target_followers_resume_controller = None
+        finally:
+            log(
+                "info",
+                "ct_resume_checkpoint_load_claim_completed",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=str(target_id or "") or None,
+                controller_ready=bool(target_followers_resume_controller is not None),
+            )
 
     def _target_followers_resume_v2_surface_proof(
         detection: dict[str, Any] | None,
@@ -13428,6 +13515,8 @@ def _run_followers_list_engine_session(
                 int(v or 0)
                 for v in (target_scan_tracker.get("rejection_reason_counts") or {}).values()
             )
+        for key, value in private_streak_retirement.summary().items():
+            updates.setdefault(key, value)
         _followers_session_summary.update(updates)
         try:
             setattr(
@@ -14674,7 +14763,11 @@ def _run_followers_list_engine_session(
             inter_candidate_on_profile_settle_before_observe()
         except Exception:
             pass
-        time.sleep(_settle_s)
+        observed_wait(
+            _settle_s,
+            reason="candidate_profile_settle_before_observe",
+            emit=log,
+        )
         try:
             from followers_inter_candidate_perf import (
                 inter_candidate_on_profile_observe_after_settle,
@@ -14919,6 +15012,27 @@ def _run_followers_list_engine_session(
                     visual_candidate_id=pick_ctx.get("visual_candidate_id"),
                 )
                 _priv = {}
+        _private_classification_proved = bool(
+            isinstance(_priv, dict)
+            and "private_profile_detected" in _priv
+            and (
+                _private_profile_detected
+                or bool(_priv.get("public_profile_proven"))
+                or bool((_pre_follow_mono_capture or {}).get("ok"))
+            )
+        )
+        if _private_classification_proved:
+            _observe_private_profile_classification(
+                candidate_key=str(
+                    follower_un_so_far
+                    or pick_ctx.get("resolved_username_hint")
+                    or pick_ctx.get("visual_candidate_id")
+                    or ""
+                ),
+                is_private=bool(_private_profile_detected),
+                opened_and_confirmed=True,
+                proof_source=str(_priv.get("detection_method") or "mono_capture"),
+            )
         if not _xml_list_fast_trace:
             if _private_profile_detected:
                 log(
@@ -15477,6 +15591,7 @@ def _run_followers_list_engine_session(
     _followers_loop_finally_error = ""
     _target_followers_resume_claimed = False
     _target_followers_resume_enforce_done = False
+    _target_followers_resume_release_safe = target_followers_resume_controller is None
     try:
         if target_followers_resume_controller is not None:
             try:
@@ -15515,6 +15630,29 @@ def _run_followers_list_engine_session(
             # Mute/Like/Return-CT/persistence) is terminal and no new physical
             # mutation has started.  A local token check is the only added
             # happy-path work.
+            if private_streak_retirement.retire_pending:
+                _followers_loop_finally_status = "target_retire_pending"
+                _followers_loop_finally_stop = "target_exhausted_private_streak_retired"
+                _publish_followers_session_summary(
+                    exit_code=0,
+                    follow_session_outcome="target_exhausted_private_streak_retired",
+                    follow_stop_reason="target_exhausted_private_streak_retired",
+                    target_rotation_safe_after_scroll_failure=True,
+                    safe_next_step="rotate_next_ct",
+                    no_new_candidate_started=True,
+                    **private_streak_retirement.summary(),
+                )
+                log(
+                    "info",
+                    "follow_target_private_streak_safe_boundary_reached",
+                    account_id=str(account_id or "") or None,
+                    run_id=str(run_id or "") or None,
+                    target_id=str(target_id or "") or None,
+                    source_profile_username=source_profile_username,
+                    no_new_candidate_started=True,
+                    **private_streak_retirement.summary(),
+                )
+                break
             from cooperative_business_stop import (
                 StopContext as _StopContext,
                 acknowledge_stop as _acknowledge_stop,
@@ -17211,6 +17349,16 @@ def _run_followers_list_engine_session(
                     _ff_scroll_index = int(scroll_used) + 1
                     if _ff_surface and _ff_target:
                         _followers_continuation_memory.note_own_forward_scroll()
+                    log(
+                        "info",
+                        "ct_resume_first_scroll_started",
+                        account_id=account_id,
+                        run_id=run_id,
+                        target_id=str(target_id or "") or None,
+                        source_profile_username=source_profile_username,
+                        scroll_index=_ff_scroll_index,
+                        existing_scroll_primitive=True,
+                    )
                     _ff_ok = bool(
                         _ff_surface
                         and _ff_target
@@ -17236,6 +17384,23 @@ def _run_followers_list_engine_session(
                             ),
                             canonical_attempt_limit=1,
                         )
+                    )
+                    log(
+                        "info",
+                        "ct_resume_first_scroll_completed",
+                        account_id=account_id,
+                        run_id=run_id,
+                        target_id=str(target_id or "") or None,
+                        source_profile_username=source_profile_username,
+                        scroll_index=_ff_scroll_index,
+                        scroll_ok=bool(_ff_ok),
+                        physical_swipe_attempted=bool(
+                            _ff_diag.get("whether_physical_swipe_attempted")
+                        ),
+                        overlap_count=int(_ff_diag.get("overlap_count") or 0),
+                        new_username_count=int(
+                            _ff_diag.get("new_primary_row_count") or 0
+                        ),
                     )
                     _ff_verdict = target_followers_resume_controller.note_legacy_scroll_progress(
                         _ff_diag,
@@ -18640,7 +18805,7 @@ def _run_followers_list_engine_session(
                         followers_force_hierarchy_refresh(
                             d, source_profile_username=source_profile_username
                         )
-                        time.sleep(0.45)
+                        observed_wait(0.45, reason="followers_sparse_scroll_settle", emit=log)
                         candidates = _collect_follower_candidates()
                         if isinstance(candidates, list):
                             target_scan_tracker["candidates_seen_count"] = int(
@@ -20840,6 +21005,21 @@ def _run_followers_list_engine_session(
                         },
                     )
                 if bool(_private_fast_path.get("handled")):
+                    _observe_private_profile_classification(
+                        candidate_key=str(
+                            follower_un
+                            or _private_fast_path.get("visual_candidate_id")
+                            or _vcid_sm
+                            or ""
+                        ),
+                        is_private=True,
+                        opened_and_confirmed=True,
+                        proof_source=str(
+                            _private_fast_path.get("proof_method")
+                            or _private_fast_path.get("private_signal")
+                            or "private_skip_fast_path"
+                        ),
+                    )
                     _target_rejection_record(
                         target_scan_tracker,
                         reason="private_account",
@@ -21609,6 +21789,19 @@ def _run_followers_list_engine_session(
                     _g_final = _g_pre
                     if not _guard_ok:
                         if str(_g_pre.get("reason") or "") == "private_account":
+                            _observe_private_profile_classification(
+                                candidate_key=str(
+                                    follower_un
+                                    or pick.get("visual_candidate_id")
+                                    or ""
+                                ),
+                                is_private=True,
+                                opened_and_confirmed=True,
+                                proof_source=str(
+                                    _g_pre.get("private_gate_reason")
+                                    or "pre_follow_screen_guard_private"
+                                ),
+                            )
                             _pre_follow_gap_log(
                                 "pre_follow_screen_guard_completed",
                                 target_username=source_profile_username,
@@ -21847,6 +22040,27 @@ def _run_followers_list_engine_session(
                 _pre_follow_private_detected = bool(
                     _pre_follow_priv.get("private_profile_detected")
                 )
+                if isinstance(_pre_follow_priv, dict) and (
+                    "private_profile_detected" in _pre_follow_priv
+                    and (
+                        _pre_follow_private_detected
+                        or bool(_pre_follow_priv.get("public_profile_proven"))
+                        or bool(_pre_follow_priv.get("probe_reused"))
+                    )
+                ):
+                    _observe_private_profile_classification(
+                        candidate_key=str(
+                            follower_un
+                            or _pre_follow_terminal_vcid
+                            or ""
+                        ),
+                        is_private=bool(_pre_follow_private_detected),
+                        opened_and_confirmed=True,
+                        proof_source=str(
+                            _pre_follow_priv.get("detection_method")
+                            or "pre_follow_private_gate"
+                        ),
+                    )
                 _pre_follow_gap_log(
                     "pre_follow_private_gate_completed",
                     target_username=source_profile_username,
@@ -22845,7 +23059,7 @@ def _run_followers_list_engine_session(
                     if bool(getattr(config, "HOME_AFTER_RUN", True)):
                         try:
                             press_home(d)
-                            time.sleep(0.2)
+                            observed_wait(0.2, reason="follow_reconcile_settle", emit=log)
                         except Exception as e_h:
                             log(
                                 "warning",
@@ -23471,7 +23685,7 @@ def _run_followers_list_engine_session(
                             follower_username=follower_un,
                             source_profile_username=source_profile_username,
                         )
-                    time.sleep(0.18)
+                    observed_wait(0.18, reason="post_follow_stage_settle", emit=log)
                     _ok_after, _surf_after = followers_surface_quick_revalidate(
                         d,
                         source_profile_username=source_profile_username,
@@ -23560,7 +23774,7 @@ def _run_followers_list_engine_session(
                     if bool(getattr(config, "HOME_AFTER_RUN", True)):
                         try:
                             press_home(d)
-                            time.sleep(0.2)
+                            observed_wait(0.2, reason="post_follow_return_settle", emit=log)
                         except Exception as e_h:
                             log(
                                 "warning",
@@ -24802,7 +25016,7 @@ def _run_followers_list_engine_session(
                             if bool(getattr(config, "HOME_AFTER_RUN", True)):
                                 try:
                                     press_home(d)
-                                    time.sleep(0.2)
+                                    observed_wait(0.2, reason="checkpoint_revalidation_settle", emit=log)
                                 except Exception as e_h:
                                     log(
                                         "warning",
@@ -25185,6 +25399,7 @@ def _run_followers_list_engine_session(
             _followers_session_summary["first_causal_reason"] = _terminal_report_reason
         try:
             if target_followers_resume_controller is not None:
+                _target_followers_resume_release_safe = False
                 try:
                     if target_followers_resume_controller.current_viewport is not None:
                         target_followers_resume_controller.note_first_pass_evaluated_prefix(
@@ -25244,6 +25459,7 @@ def _run_followers_list_engine_session(
                     )
                 try:
                     target_followers_resume_controller.release()
+                    _target_followers_resume_release_safe = True
                 except Exception as exc:
                     _target_followers_resume_v2_emit(
                         "v2_failed_open",
@@ -25257,12 +25473,66 @@ def _run_followers_list_engine_session(
                             "enforce": False,
                         },
                     )
+            _private_streak_state = locals().get("private_streak_retirement")
+            if (
+                _private_streak_state is not None
+                and _private_streak_state.retire_pending
+            ):
+                private_streak_archive_attempted = True
+                if not _target_followers_resume_release_safe:
+                    _private_streak_state.mark_persistence_failed(
+                        "private_streak_archive_blocked_lease_release_unproved"
+                    )
+                    private_streak_archive_failed = True
+                elif not supabase_mode:
+                    _private_streak_state.mark_persistence_failed(
+                        "private_streak_archive_requires_supabase_mode"
+                    )
+                    private_streak_archive_failed = True
+                else:
+                    try:
+                        _archive_receipt = supabase_client.archive_follow_target_private_streak(
+                            target_id=str(target_id or ""),
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            threshold=int(_private_streak_state.threshold),
+                            observed_streak=int(_private_streak_state.current_streak),
+                        )
+                        _private_streak_state.mark_archived(
+                            archived_at=str(_archive_receipt.get("archived_at") or "") or None
+                        )
+                    except Exception as exc:
+                        _private_streak_state.mark_persistence_failed(str(exc))
+                        private_streak_archive_failed = True
+                        log(
+                            "error",
+                            "follow_target_private_streak_archive_failed",
+                            account_id=str(account_id or "") or None,
+                            run_id=str(run_id or "") or None,
+                            target_id=str(target_id or "") or None,
+                            source_profile_username=source_profile_username,
+                            error_type=type(exc).__name__,
+                            reason=str(exc)[:300],
+                            run_fail_closed=True,
+                            instagram_incident_created=False,
+                            pause_48h_created=False,
+                            fleet_hold_created=False,
+                        )
             if is_follow_target_rotation_pending(target_username=source_profile_username):
                 _complete_post_return_idle_gap(reason="followers_engine_session_finished")
+            _private_streak_summary = (
+                _private_streak_state.summary()
+                if _private_streak_state is not None
+                else {}
+            )
             _publish_followers_session_summary(
                 follow_processed_count=int(processed),
                 follows_completed_count=int(follows_completed_count),
                 follow_stop_reason=_terminal_report_reason,
+                private_streak_archive_attempted=bool(
+                    locals().get("private_streak_archive_attempted", False)
+                ),
+                **_private_streak_summary,
             )
             log(
                 "info",
@@ -25277,6 +25547,20 @@ def _run_followers_list_engine_session(
             _emit_target_scan_completed()
         except Exception:
             pass
+
+    if private_streak_archive_failed:
+        _followers_loop_finally_status = "private_streak_archive_failed"
+        _followers_loop_finally_stop = "private_streak_archive_failed"
+        _publish_followers_session_summary(
+            exit_code=1,
+            follow_session_outcome="partial_not_resumable",
+            follow_stop_reason="private_streak_archive_failed",
+            first_causal_reason="private_streak_archive_failed",
+            safe_next_step="manual_review",
+            run_fail_closed=True,
+            **private_streak_retirement.summary(),
+        )
+        return 1
 
     stop_final = get_followers_engine_stop_reason()
     if stop_final in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS:

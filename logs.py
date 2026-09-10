@@ -177,8 +177,16 @@ def _reset_logging_state_for_tests() -> None:
 
 
 def log(level: str, event: str, **fields: Any) -> None:
-    """Emit one JSON object per line and feed the CPU-only Ordering V2 observer."""
+    """Emit one JSON object and feed failure-isolated CPU-only observers."""
     include_null = bool(fields.pop("_include_null_fields", False))
+    if str(event or "").startswith("run_latency_"):
+        try:
+            from run_latency_observability_v1 import current_context
+
+            for key, value in current_context().items():
+                fields.setdefault(key, value)
+        except Exception:
+            pass
     payload: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "level": level,
@@ -210,6 +218,30 @@ def log(level: str, event: str, **fields: Any) -> None:
                     "level": "info",
                     "event": PUBLIC_EVENT,
                     **terminal,
+                }
+            )
+    except Exception:
+        pass
+
+    # Latency V1 consumes only operations that V1 already emitted.  Derived
+    # records bypass ``log`` so instrumentation can neither recurse nor affect
+    # Instagram behavior when it fails.
+    try:
+        from run_latency_observability_v1 import (
+            PUBLIC_EVENT as LATENCY_PUBLIC_EVENT,
+            observe_runtime_event as observe_latency_event,
+        )
+
+        latency_events = observe_latency_event(event, observed_fields)
+        for latency_event in latency_events:
+            if not isinstance(latency_event, dict):
+                continue
+            _write_payload(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "level": "info",
+                    "event": LATENCY_PUBLIC_EVENT,
+                    **latency_event,
                 }
             )
     except Exception:

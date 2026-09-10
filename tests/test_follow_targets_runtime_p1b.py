@@ -13,6 +13,7 @@ import account_session_orchestrator as session
 import instagram_navigation as nav
 import navigation_engine
 import runner
+import supabase_client
 from tests.follow60_generic_fixtures import TEST_CANARY_ACCOUNT_ID
 
 
@@ -5137,6 +5138,65 @@ class FollowVisibleWindowScrollPatchScopeTests(unittest.TestCase):
         lock_idx = scroll_src.index("_followers_abort_scroll_if_post_tap_lock")
         gate_idx = scroll_src.index("if not bypass_post_tap_capture_gate")
         self.assertLess(lock_idx, gate_idx)
+
+
+class FollowTargetPrivateStreakRuntimeIntegrationTests(unittest.TestCase):
+    def test_archived_target_is_ineligible_for_future_selection(self) -> None:
+        ok, reason = supabase_client._is_eligible_follow_target_row(
+            {
+                "id": "target-1",
+                "target_username": "travel.antwerpen",
+                "status": "archived",
+                "archived_at": "2026-09-10T00:00:00+00:00",
+            }
+        )
+        self.assertFalse(ok)
+        self.assertIn(reason, {"status_not_active", "status_blocked", "archived"})
+
+    def test_archive_uses_exact_account_target_predicate(self) -> None:
+        returned = [{
+            "id": "target-1",
+            "account_id": "account-1",
+            "status": "archived",
+            "archived_at": "2026-09-10T00:00:00+00:00",
+        }]
+        with patch.object(supabase_client, "_request_json", return_value=returned) as request_json:
+            out = supabase_client.archive_follow_target_private_streak(
+                target_id="target-1",
+                account_id="account-1",
+                run_id="run-1",
+                threshold=8,
+                observed_streak=8,
+            )
+        self.assertTrue(out["ok"])
+        kwargs = request_json.call_args.kwargs
+        self.assertEqual(kwargs["query"]["id"], "eq.target-1")
+        self.assertEqual(kwargs["query"]["account_id"], "eq.account-1")
+        self.assertEqual(kwargs["body"]["status"], "archived")
+        self.assertEqual(
+            kwargs["body"]["last_error"],
+            "consecutive_private_opened_profiles",
+        )
+        self.assertTrue(kwargs["prefer_representation"])
+
+    def test_archive_fails_closed_when_exact_row_is_missing(self) -> None:
+        with patch.object(supabase_client, "_request_json", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "exact_row_not_updated"):
+                supabase_client.archive_follow_target_private_streak(
+                    target_id="target-1",
+                    account_id="account-1",
+                    run_id="run-1",
+                    threshold=8,
+                    observed_streak=8,
+                )
+
+    def test_runner_archives_only_after_resume_lease_release(self) -> None:
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        release_index = source.index("target_followers_resume_controller.release()")
+        archive_index = source.index("supabase_client.archive_follow_target_private_streak")
+        self.assertLess(release_index, archive_index)
+        self.assertIn("target_exhausted_private_streak_retired", source)
+        self.assertIn("no_new_candidate_started=True", source)
 
 
 if __name__ == "__main__":
