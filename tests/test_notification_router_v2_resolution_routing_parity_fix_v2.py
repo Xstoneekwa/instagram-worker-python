@@ -73,6 +73,7 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.sql = MIGRATION.read_text(encoding="utf-8")
         cls.predecessor = PREDECESSOR.read_text(encoding="utf-8")
+        cls.auto_login = _function(cls.sql, "notification_router_auto_login_failure_v2")
         cls.general = _function(cls.sql, "notification_router_general_incident_v2")
 
     def test_new_forward_migration_leaves_frozen_predecessor_as_evidence(self) -> None:
@@ -103,6 +104,24 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
                     _production_general_route(incident, "resolved"),
                 )
                 self.assertEqual(_corrected_general_route(incident, "resolved"), "incident.resolved")
+
+    def test_email_code_is_explicit_challenge_but_generic_identity_failure_is_not(self) -> None:
+        self.assertRegex(
+            self.auto_login,
+            r"lower\(coalesce\(new\.incident_type, ''\)\) in \(\s*"
+            r"'auto_login_verification_required',\s*"
+            r"'email_verification_code_required'\s*\)",
+        )
+        self.assertIn("(challenge|checkpoint)", self.auto_login)
+        self.assertNotIn("(challenge|checkpoint|verification)", self.auto_login)
+        self.assertRegex(
+            self.auto_login,
+            r"elsif explicit_challenge then\s+routed_type := 'auto_login\.challenge'",
+        )
+        self.assertIn(
+            "elsif combined_reason ~ '(identity|verification|what_happened|connectivity|loading)'",
+            self.auto_login,
+        )
 
     def test_complete_transition_matrix_preserves_production_except_active_ownership_delta(self) -> None:
         scenarios = (
@@ -167,18 +186,24 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
                 self.assertIn(expression, self.general)
 
     def test_function_security_and_grant_contract_is_unchanged(self) -> None:
-        self.assertRegex(self.general, r"returns trigger\s+language plpgsql")
-        self.assertRegex(self.general, r"security definer\s+set search_path = ''")
-        self.assertIn(
-            "revoke all on function public.notification_router_general_incident_v2()\n"
-            "  from public, anon, authenticated;",
-            self.sql,
-        )
-        self.assertIn(
-            "grant execute on function public.notification_router_general_incident_v2()\n"
-            "  to service_role;",
-            self.sql,
-        )
+        for function in (self.auto_login, self.general):
+            with self.subTest(function=function.splitlines()[0]):
+                self.assertRegex(function, r"returns trigger\s+language plpgsql")
+                self.assertRegex(function, r"security definer\s+set search_path = ''")
+        for name in (
+            "notification_router_auto_login_failure_v2",
+            "notification_router_general_incident_v2",
+        ):
+            self.assertIn(
+                f"revoke all on function public.{name}()\n"
+                "  from public, anon, authenticated;",
+                self.sql,
+            )
+            self.assertIn(
+                f"grant execute on function public.{name}()\n"
+                "  to service_role;",
+                self.sql,
+            )
 
 
 if __name__ == "__main__":
