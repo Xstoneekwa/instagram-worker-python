@@ -14,8 +14,7 @@ PRODUCTION_OWNERSHIP = re.compile(
     r"password|challenge|identity|checkpoint|device.*login|provision"
 )
 CORRECTED_OWNERSHIP = re.compile(
-    r"password|challenge|identity|checkpoint|device.*login|provision|"
-    r"verification|mismatch|wrong_account|what_happened|connectivity|loading"
+    r"password|challenge|identity|checkpoint|device.*login|provision"
 )
 
 
@@ -79,18 +78,18 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
     def test_new_forward_migration_leaves_frozen_predecessor_as_evidence(self) -> None:
         self.assertIn("-- Notification Router V2 forward fix.", self.predecessor)
         self.assertIn("production_auto_login_owned boolean", self.general)
-        self.assertIn("corrected_auto_login_owned boolean", self.general)
+        self.assertNotIn("corrected_auto_login_owned boolean", self.general)
 
     def test_terminal_branch_uses_only_production_ownership(self) -> None:
         terminal = self.general.index("if new.status in ('resolved','ignored') then")
         production_guard = self.general.index("if production_auto_login_owned then return new; end if;")
         resolved_emit = self.general.index("'incident.resolved:'")
         active_status = self.general.index("if new.status not in ('open','acknowledged') then")
-        corrected_guard = self.general.index("if corrected_auto_login_owned then return new; end if;")
+        active_guard = self.general.rindex("if production_auto_login_owned then return new; end if;")
         self.assertLess(terminal, production_guard)
         self.assertLess(production_guard, resolved_emit)
         self.assertLess(resolved_emit, active_status)
-        self.assertLess(active_status, corrected_guard)
+        self.assertLess(active_status, active_guard)
 
     def test_proved_resolved_regressions_match_production(self) -> None:
         for incident_type in (
@@ -105,25 +104,31 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
                 )
                 self.assertEqual(_corrected_general_route(incident, "resolved"), "incident.resolved")
 
-    def test_email_code_is_explicit_challenge_but_generic_identity_failure_is_not(self) -> None:
+    def test_only_admitted_explicit_challenge_evidence_uses_challenge_route(self) -> None:
         self.assertRegex(
             self.auto_login,
             r"lower\(coalesce\(new\.incident_type, ''\)\) in \(\s*"
             r"'auto_login_verification_required',\s*"
-            r"'email_verification_code_required'\s*\)",
+            r"'login_verification_code_required'\s*\)",
         )
+        self.assertNotIn("'email_verification_code_required'", self.auto_login)
         self.assertIn("(challenge|checkpoint)", self.auto_login)
         self.assertNotIn("(challenge|checkpoint|verification)", self.auto_login)
+        self.assertNotIn(
+            "password|challenge|identity|checkpoint|device|provision|verification",
+            self.auto_login,
+        )
         self.assertRegex(
             self.auto_login,
             r"elsif explicit_challenge then\s+routed_type := 'auto_login\.challenge'",
         )
         self.assertIn(
-            "elsif combined_reason ~ '(identity|verification|what_happened|connectivity|loading)'",
+            "elsif combined_reason ~ '(^|[^a-z])verification([^a-z]|$)'",
             self.auto_login,
         )
+        self.assertIn("elsif combined_reason ~ '(identity|mismatch|wrong_account)'", self.auto_login)
 
-    def test_complete_transition_matrix_preserves_production_except_active_ownership_delta(self) -> None:
+    def test_complete_general_transition_matrix_preserves_production_exactly(self) -> None:
         scenarios = (
             Incident("active_instagram_account_mismatch"),
             Incident("email_verification_code_required"),
@@ -140,12 +145,20 @@ class NotificationRouterResolutionRoutingParityFixV2Test(unittest.TestCase):
         for incident in scenarios:
             for status in ("open", "acknowledged", "resolved"):
                 with self.subTest(incident=incident.incident_type, reason=incident.reason, status=status):
-                    production = _production_general_route(incident, status)
-                    corrected = _corrected_general_route(incident, status)
-                    if status in {"open", "acknowledged"} and not _owned(incident, PRODUCTION_OWNERSHIP) and _owned(incident, CORRECTED_OWNERSHIP):
-                        self.assertIsNone(corrected)
-                    else:
-                        self.assertEqual(corrected, production)
+                    self.assertEqual(
+                        _corrected_general_route(incident, status),
+                        _production_general_route(incident, status),
+                    )
+
+    def test_historical_mismatch_and_email_open_routes_remain_generic(self) -> None:
+        for incident_type in (
+            "active_instagram_account_mismatch",
+            "email_verification_code_required",
+        ):
+            incident = Incident(incident_type)
+            with self.subTest(incident_type=incident_type):
+                self.assertEqual(_production_general_route(incident, "open"), "incident.opened")
+                self.assertEqual(_corrected_general_route(incident, "open"), "incident.opened")
 
     def test_existing_login_owned_resolutions_remain_suppressed(self) -> None:
         for incident_type in (

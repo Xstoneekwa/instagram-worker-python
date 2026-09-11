@@ -13,13 +13,9 @@ declare
   explicit_challenge boolean := (
     lower(coalesce(new.incident_type, '')) in (
       'auto_login_verification_required',
-      'email_verification_code_required'
+      'login_verification_code_required'
     )
     or combined_reason ~ '(^|[^a-z])(challenge|checkpoint)([^a-z]|$)'
-  );
-  confirmed_mismatch boolean := (
-    lower(coalesce(new.incident_type, '')) in ('active_instagram_account_mismatch', 'auto_login_identity_mismatch')
-    or combined_reason ~ '(^|[^a-z])(mismatch|wrong_account)([^a-z]|$)'
   );
   routed_type text;
   business_problem text;
@@ -27,7 +23,7 @@ declare
 begin
   if new.status not in ('open','acknowledged') or not (
     lower(new.incident_type) like '%login%'
-    or combined_reason ~ '(password|challenge|identity|checkpoint|device|provision|verification|mismatch|wrong_account|what_happened|connectivity|loading)'
+    or combined_reason ~ '(password|challenge|identity|checkpoint|device|provision)'
   ) then return new; end if;
 
   if combined_reason ~ '(password|credential.*reject)' then
@@ -38,7 +34,11 @@ begin
     routed_type := 'auto_login.challenge';
     business_problem := 'Instagram demande une vérification supplémentaire.';
     business_action := 'Une intervention est nécessaire avant de poursuivre.';
-  elsif confirmed_mismatch then
+  elsif combined_reason ~ '(^|[^a-z])verification([^a-z]|$)' then
+    routed_type := 'auto_login.failure';
+    business_problem := 'L’identité Instagram n’a pas pu être vérifiée.';
+    business_action := 'Consulter BotApp et vérifier l’état du compte avant de poursuivre.';
+  elsif combined_reason ~ '(identity|mismatch|wrong_account)' then
     routed_type := 'auto_login.identity_mismatch';
     business_problem := 'Le compte Instagram ouvert ne correspond pas au compte attendu.';
     business_action := 'Vérifier l’identité du compte avant de poursuivre.';
@@ -46,14 +46,6 @@ begin
     routed_type := 'auto_login.device_unavailable';
     business_problem := 'Le téléphone ou l’application Instagram n’est pas disponible.';
     business_action := 'Vérifier la disponibilité du téléphone dans BotApp.';
-  elsif combined_reason ~ '(login_required|logged_out|unexpected_login_surface)' then
-    routed_type := 'auto_login.failure';
-    business_problem := 'Instagram demande une nouvelle connexion.';
-    business_action := 'Reconnecter le compte Instagram avant de poursuivre.';
-  elsif combined_reason ~ '(identity|verification|what_happened|connectivity|loading)' then
-    routed_type := 'auto_login.failure';
-    business_problem := 'L’identité Instagram n’a pas pu être vérifiée.';
-    business_action := 'Consulter BotApp et vérifier l’état du compte avant de poursuivre.';
   else
     routed_type := 'auto_login.failure';
     business_problem := 'La connexion Instagram n’a pas pu être terminée.';
@@ -88,10 +80,6 @@ declare
     lower(new.incident_type) like '%login%'
     or combined_reason ~ '(password|challenge|identity|checkpoint|device.*login|provision)'
   );
-  corrected_auto_login_owned boolean := (
-    production_auto_login_owned
-    or combined_reason ~ '(verification|mismatch|wrong_account|what_happened|connectivity|loading)'
-  );
 begin
   -- Terminal routing remains byte-for-byte equivalent in outcome to the
   -- production router. Only categories already owned by Auto Login in
@@ -120,9 +108,9 @@ begin
 
   if new.status not in ('open','acknowledged') then return new; end if;
 
-  -- For active incidents, the corrected Auto Login router owns the expanded
-  -- identity/network set, preventing a duplicate generic notification.
-  if corrected_auto_login_owned then return new; end if;
+  -- Active ownership remains identical to production. The only routing delta
+  -- is the explicit-challenge decision inside Auto Login.
+  if production_auto_login_owned then return new; end if;
 
   perform public.emit_notification_business_event_v2(
     'incident.opened:' || new.id::text || ':' || new.lifecycle_version::text,
