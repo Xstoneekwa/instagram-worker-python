@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Lifecycle is owned by the invoking candidate, including quiescing an older release.
+if [[ "${1:-}" == "pause" || "${1:-}" == "resume" ]]; then
+  exec /usr/bin/python3 -B "$ROOT_DIR/promotion_service_control_v2.py" dispatcher "$1"
+fi
 cd "$ROOT_DIR"
 CURRENT_RELEASE_LINK="${PHONEFARM_CURRENT_SYMLINK:-/Users/admin/phonefarm-worker-current}"
 

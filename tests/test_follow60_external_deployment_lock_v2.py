@@ -148,6 +148,39 @@ class ExternalPhysicalLockV2Tests(unittest.TestCase):
         with lock.DeploymentTransaction(self.root) as transaction:
             self.assertTrue(transaction.recheck()['ok'])
 
+    def test_H2_dead_owner_transaction_is_reowned_without_archival(self):
+        with lock.DeploymentTransaction(self.root):
+            pass
+        active = self.store / 'transactions/active.json'
+        old_hash = lock.digest(active)
+        new_owner = {'pid': 5678, 'process_start_and_uid': 'new-start 0', 'boot_session': 'synthetic-boot'}
+
+        def identity(pid=None):
+            return None if pid == self.owner['pid'] else new_owner
+
+        with mock.patch.object(lock, 'owner_identity', side_effect=identity):
+            transaction = lock.resume_stale_transaction(self.root, old_hash)
+            try:
+                self.assertTrue(transaction.recheck()['ok'])
+                self.assertTrue(active.exists())
+                self.assertEqual(json.loads(active.read_text())['owner'], new_owner)
+                self.assertFalse(any((self.store / 'history').iterdir()))
+            finally:
+                transaction.__exit__(None, None, None)
+
+    def test_H3_exact_completed_lock_can_resume_journal_finalization(self):
+        with lock.DeploymentTransaction(self.root) as transaction:
+            record_hash = transaction.record_hash
+        archived = lock._archive_active(record_hash, 'promoted')
+        resumed = lock.resume_completed_transaction(self.root, record_hash)
+        try:
+            proof = resumed.recheck()
+            self.assertEqual(proof['status'], 'EXTERNAL_DEPLOYMENT_ALREADY_FINISHED')
+            self.assertEqual(proof['archive'], str(archived))
+            self.assertFalse((self.store / 'transactions/active.json').exists())
+        finally:
+            resumed.__exit__(None, None, None)
+
     def test_I_lock_creation_does_not_dirty_candidate(self):
         before = git(self.root, 'status', '--porcelain')
         with lock.DeploymentTransaction(self.root):

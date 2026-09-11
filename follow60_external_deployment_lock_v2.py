@@ -25,6 +25,7 @@ from runtime_artifacts import follow60_certification_paths
 STORE = Path('/Users/admin/phonefarm-runtime/run/follow60-lock-v2')
 PROTOCOL_VERSION = 'FOLLOW60_EXTERNAL_PHYSICAL_DEPLOYMENT_LOCK_V2'
 IMMUTABLE = getattr(stat, 'UF_IMMUTABLE', 2)
+ROLLBACK_COMPLETE = 'ROLLED_BACK_AFTER_PARTIAL_PROMOTION'
 
 
 class LockFailure(RuntimeError):
@@ -260,6 +261,157 @@ def recover_stale(root, expected_sha256):
         return _archive_active(expected_sha256, 'stale-owner-proved-dead')
 
 
+def _replace_active_owner(active, payload):
+    """Durably replace only the dead owner while retaining the active lock."""
+    data = (json.dumps(payload, indent=2, sort_keys=True) + '\n').encode()
+    fd, name = tempfile.mkstemp(prefix='.recovery-', dir=active.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o444)
+        os.chflags(temporary, IMMUTABLE)
+        os.chflags(active, 0)
+        try:
+            os.replace(temporary, active)
+        except BaseException:
+            if active.exists():
+                os.chflags(active, IMMUTABLE)
+            raise
+        _sync_directory(active.parent)
+        _trusted(active)
+    finally:
+        if temporary.exists():
+            try:
+                os.chflags(temporary, 0)
+            except OSError:
+                pass
+            temporary.unlink(missing_ok=True)
+
+
+def resume_stale_transaction(root, expected_sha256):
+    """Re-own, never archive, one proved-dead durable promotion transaction."""
+    root = Path(root).resolve()
+    guard = storage_guard(root)
+    guard.__enter__()
+    try:
+        active = STORE / 'transactions' / 'active.json'
+        value = read_record(active)
+        validate_lease(value)
+        if value['candidate_root'] != str(root):
+            raise LockFailure('stale_lock_candidate_root_mismatch')
+        if digest(active) != expected_sha256:
+            raise LockFailure('stale_lock_expected_hash_mismatch')
+        if owner_identity(value['owner']['pid']) == value['owner']:
+            raise LockFailure('stale_lock_owner_still_alive')
+        value['owner'] = owner_identity()
+        _replace_active_owner(active, value)
+        transaction = DeploymentTransaction(root)
+        transaction.expected = exact_admission(root)
+        verify_seal(root)
+        transaction.fd_guard = guard
+        transaction.owner = value['owner']
+        transaction.payload = value
+        transaction.record_hash = digest(active)
+        transaction.recheck()
+        return transaction
+    except BaseException:
+        guard.__exit__(None, None, None)
+        raise
+
+
+def completed_lease(expected_sha256):
+    """Return one exact immutable archived lease; never select by recency."""
+    if not isinstance(expected_sha256, str) or not re.fullmatch('[0-9a-f]{64}', expected_sha256):
+        raise LockFailure('completed_lock_expected_hash_invalid')
+    matches = []
+    for path in (STORE / 'history').glob('*-' + expected_sha256 + '-*.json'):
+        try:
+            _trusted(path)
+            if digest(path) != expected_sha256:
+                continue
+            value = read_record(path)
+            validate_lease(value)
+            matches.append((path, value))
+        except (OSError, ValueError, LockFailure):
+            continue
+    if len(matches) != 1:
+        raise LockFailure('completed_lock_archive_cardinality_invalid')
+    return matches[0]
+
+
+class CompletedDeploymentTransaction:
+    """Read-only authority for finalizing a journal after lock archival."""
+    def __init__(self, root, archive_path, payload, expected_sha256, guard):
+        self.root = Path(root).resolve()
+        self.archive_path = Path(archive_path)
+        self.payload = payload
+        self.record_hash = expected_sha256
+        self.fd_guard = guard
+        self.expected = exact_admission(self.root)
+
+    def recheck(self):
+        if self.fd_guard is None:
+            raise LockFailure('completed_deployment_lock_not_acquired')
+        active = STORE / 'transactions' / 'active.json'
+        if active.exists() or active.is_symlink():
+            raise LockFailure('completed_deployment_lock_replaced_by_active_transaction')
+        _trusted(self.archive_path)
+        value = read_record(self.archive_path)
+        validate_lease(value)
+        if (digest(self.archive_path) != self.record_hash or value != self.payload
+                or value.get('candidate_root') != str(self.root)):
+            raise LockFailure('completed_deployment_lock_archive_changed')
+        if exact_admission(self.root) != self.expected:
+            raise LockFailure('candidate_changed_after_completed_lock')
+        verify_seal(self.root)
+        return {'ok': True, 'status': 'EXTERNAL_DEPLOYMENT_ALREADY_FINISHED',
+                'archive': str(self.archive_path), **self.expected}
+
+    def _verify_transactional_terminal(self, receipt, evidence):
+        return DeploymentTransaction._verify_transactional_terminal(self, receipt, evidence)
+
+    def finish(self, receipt_path, terminal_evidence=None):
+        self.recheck()
+        path = Path(receipt_path)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not info.st_flags & IMMUTABLE:
+            raise LockFailure('promotion_receipt_not_immutable')
+        receipt = json.loads(path.read_text())
+        if (receipt.get('schema') != 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V2'
+                or receipt.get('receipt_state') not in ('PROMOTED', 'ROLLBACK_COMPLETE')):
+            raise LockFailure('completed_transaction_receipt_invalid')
+        self._verify_transactional_terminal(receipt, terminal_evidence)
+        return self.archive_path
+
+    def __exit__(self, *exc):
+        if self.fd_guard is not None:
+            self.fd_guard.__exit__(*exc)
+            self.fd_guard = None
+
+
+def resume_completed_transaction(root, expected_sha256):
+    """Reopen only finalization after the exact external lease was archived."""
+    root = Path(root).resolve()
+    guard = storage_guard(root)
+    guard.__enter__()
+    try:
+        active = STORE / 'transactions' / 'active.json'
+        if active.exists() or active.is_symlink():
+            raise LockFailure('completed_recovery_blocked_by_active_transaction')
+        archive, value = completed_lease(expected_sha256)
+        if value.get('candidate_root') != str(root):
+            raise LockFailure('completed_lock_candidate_root_mismatch')
+        transaction = CompletedDeploymentTransaction(root, archive, value, expected_sha256, guard)
+        transaction.recheck()
+        return transaction
+    except BaseException:
+        guard.__exit__(None, None, None)
+        raise
+
+
 class DeploymentTransaction:
     """Same-process lease held across zero-gate, switch and immutable receipt."""
     def __init__(self, root):
@@ -268,6 +420,44 @@ class DeploymentTransaction:
         self.expected = None
         self.record_hash = None
         self.owner = None
+        self._rollback_binding = None
+
+    def bind_rollback_context(self, pending_path, staged_path, current_link):
+        """Bind the pre-switch receipt once; never adopt another process's lease."""
+        self.recheck()
+        binding = (str(Path(pending_path).absolute()), digest(Path(staged_path)),
+                   str(Path(current_link).absolute()))
+        if self._rollback_binding is not None:
+            raise LockFailure('rollback_context_already_bound')
+        self._rollback_binding = binding
+
+    def rollback_context(self):
+        self.recheck()
+        if self._rollback_binding is None:
+            raise LockFailure('rollback_context_missing')
+        pending_path, pending_hash, current_link = self._rollback_binding
+        path = Path(pending_path)
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or not info.st_flags & IMMUTABLE
+                or digest(path) != pending_hash):
+            raise LockFailure('rollback_pending_receipt_untrusted')
+        pending = json.loads(path.read_text())
+        if (pending.get('schema') != 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1'
+                or pending.get('receipt_state') != 'SWITCHED_PENDING_SERVICE_VERIFICATION'
+                or pending.get('candidate_sha') != self.expected['candidate_commit_sha']
+                or pending.get('manifest_sha256') != self.expected['manifest_sha256']
+                or pending.get('runtime_root') != str(self.root)):
+            raise LockFailure('rollback_pending_binding_mismatch')
+        previous = pending.get('previous_release_path')
+        previous_sha = pending.get('previous_release_sha')
+        if (not isinstance(previous, str) or not Path(previous).is_absolute()
+                or previous == str(self.root) or not isinstance(previous_sha, str)
+                or not re.fullmatch('[0-9a-f]{40}', previous_sha)):
+            raise LockFailure('rollback_previous_identity_unknown')
+        return {'pending': pending, 'pending_receipt': pending_path,
+                'pending_receipt_sha256': pending_hash, 'current_link': current_link,
+                'transaction_sha256': self.record_hash,
+                'previous_active_root': previous, 'previous_active_sha': previous_sha}
 
     def __enter__(self):
         self.expected = exact_admission(self.root)
@@ -310,13 +500,138 @@ class DeploymentTransaction:
         return {'ok': True, 'status': 'EXTERNAL_DEPLOYMENT_PREFLIGHT_PASS', **self.expected,
                 'physical_write_lock': 'PASS', 'toctou_recheck_after_lock': True}
 
-    def finish(self, receipt_path):
+    def _verify_transactional_terminal(self, receipt, evidence):
+        """Independently reject mixed service/token/pointer/fence evidence."""
+        if not isinstance(evidence, dict) or receipt.get('terminal_evidence') != evidence:
+            raise LockFailure('transactional_terminal_evidence_binding_mismatch')
+        promoted = receipt.get('receipt_state') == 'PROMOTED'
+        expected_root = str(self.root) if promoted else receipt.get('runtime_root')
+        expected_sha = self.expected['candidate_commit_sha'] if promoted else receipt.get('release_sha')
+        expected_status = 'NEW_RELEASE_FULLY_ACTIVE' if promoted else 'OLD_RELEASE_FULLY_ACTIVE'
+        if (receipt.get('schema') != 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V2'
+                or receipt.get('candidate_sha') != self.expected['candidate_commit_sha']
+                or evidence.get('status') != expected_status
+                or evidence.get('runtime_root') != expected_root
+                or evidence.get('release_sha') != expected_sha):
+            raise LockFailure('transactional_terminal_identity_mismatch')
+        release = Path(str(expected_root))
+        admission = exact_admission(release)
+        verify_seal(release)
+        if admission.get('candidate_commit_sha') != expected_sha:
+            raise LockFailure('transactional_terminal_release_changed')
+        current = Path(os.environ.get('PHONEFARM_RUNTIME_CURRENT_LINK',
+                                      '/Users/admin/phonefarm-worker-current'))
+        if not current.is_symlink() or current.resolve() != release.resolve():
+            raise LockFailure('transactional_terminal_pointer_mismatch')
+        convergence = evidence.get('services') or {}
+        if convergence.get('ok') is not True:
+            raise LockFailure('transactional_terminal_convergence_failed')
+        services = convergence.get('services') or {}
+        if set(services) != {'dispatcher', 'heartbeat', 'notifier'}:
+            raise LockFailure('transactional_terminal_service_set_invalid')
+        for name, service in services.items():
+            processes = service.get('processes') or []
+            if (service.get('ok') is not True or service.get('process_count') != 1
+                    or len(processes) != 1
+                    or processes[0].get('module_root') != str(release)
+                    or processes[0].get('runtime_sha') != expected_sha):
+                raise LockFailure('transactional_terminal_service_invalid:' + name)
+        token = convergence.get('startupTokenGate') or {}
+        if (token.get('ok') is not True or not token.get('token_id')
+                or not isinstance(token.get('binding'), dict)
+                or token['binding'].get('candidate_sha') != expected_sha
+                or token['binding'].get('transaction_id') != receipt.get('transaction_id')
+                or token['binding'].get('phase') != ('PROMOTE' if promoted else 'ROLLBACK')):
+            raise LockFailure('transactional_terminal_token_invalid')
+        fence = evidence.get('fence') or {}
+        completed = isinstance(self, CompletedDeploymentTransaction)
+        terminal = 'PROMOTED' if promoted else 'ROLLED_BACK'
+        if (fence.get('ok') is not True
+                or fence.get('transaction_id') != receipt.get('transaction_id')
+                or not (fence.get('active') is True
+                        or (completed and fence.get('active') is False
+                            and fence.get('terminal_state') == terminal))):
+            raise LockFailure('transactional_terminal_fence_state_invalid')
+        registry_path = Path(str(evidence.get('registry_path') or ''))
+        try:
+            registry = json.loads(registry_path.read_text())
+            worker = registry['components']['worker']
+        except Exception as exc:
+            raise LockFailure('transactional_terminal_registry_unreadable') from exc
+        worker_hash = hashlib.sha256(
+            json.dumps(worker, sort_keys=True, separators=(',', ':'),
+                       ensure_ascii=True).encode()
+        ).hexdigest()
+        if (worker != evidence.get('registry_worker')
+                or worker_hash != evidence.get('registry_worker_sha256')):
+            raise LockFailure('transactional_terminal_registry_hash_mismatch')
+        production = worker.get('production') or {}
+        rollback = worker.get('rollback') or {}
+        if promoted:
+            if (production.get('sha') != self.expected['candidate_commit_sha']
+                    or production.get('runtime_root') != str(self.root)
+                    or production.get('committed_by_transaction') != receipt.get('transaction_id')
+                    or rollback.get('sha') != receipt.get('previous_release_sha')):
+                raise LockFailure('transactional_terminal_committed_generation_mismatch')
+        elif (production.get('sha') != expected_sha
+              or production.get('runtime_root') != str(release)):
+            raise LockFailure('transactional_terminal_rollback_generation_mismatch')
+
+    def finish(self, receipt_path, terminal_evidence=None):
         self.recheck()
         path = Path(receipt_path)
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or not info.st_flags & IMMUTABLE:
             raise LockFailure('promotion_receipt_not_immutable')
         receipt = json.loads(path.read_text())
+        if receipt.get('schema') == 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V2':
+            if receipt.get('receipt_state') not in ('PROMOTED', 'ROLLBACK_COMPLETE'):
+                raise LockFailure('transactional_receipt_state_invalid')
+            self._verify_transactional_terminal(receipt, terminal_evidence)
+            return _archive_active(
+                self.record_hash,
+                'promoted' if receipt.get('receipt_state') == 'PROMOTED' else 'rolled-back',
+            )
+        if receipt.get('receipt_state') == ROLLBACK_COMPLETE:
+            context = self.rollback_context()
+            previous = Path(context['previous_active_root'])
+            admission = exact_admission(previous)
+            verify_seal(previous)
+            convergence = receipt.get('service_convergence') or {}
+            zero = receipt.get('final_zero_gate') or {}
+            if (receipt.get('schema') != 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1'
+                    or receipt.get('candidate_sha') != self.expected['candidate_commit_sha']
+                    or receipt.get('manifest_sha256') != self.expected['manifest_sha256']
+                    or receipt.get('failed_candidate_root') != str(self.root)
+                    or receipt.get('runtime_root') != str(previous)
+                    or receipt.get('release_sha') != context['previous_active_sha']
+                    or receipt.get('transaction_sha256') != self.record_hash
+                    or receipt.get('pending_receipt_sha256') != context['pending_receipt_sha256']
+                    or receipt.get('pending_receipt') != context['pending_receipt']
+                    or admission['candidate_commit_sha'] != context['previous_active_sha']
+                    or receipt.get('restored_admission') != admission
+                    or Path(context['current_link']).resolve() != previous.resolve()
+                    or convergence.get('ok') is not True
+                    or convergence.get('active_root') != str(previous)
+                    or convergence.get('active_sha') != context['previous_active_sha']
+                    or convergence.get('old_root_process_count') != 0
+                    or (convergence.get('startupTokenGate') or {}).get('ok') is not True
+                    or (receipt.get('smoke') or {}).get('ok') is not True
+                    or not receipt.get('failure_status')
+                    or not receipt.get('rollback_started_at') or not receipt.get('rollback_completed_at')
+                    or set(zero) != {'account_run_requests', 'ig_runs', 'auto_restart_device_locks', 'auto_restart_tick_locks'}
+                    or any(type(v) is not int or v != 0 for v in zero.values())):
+                raise LockFailure('rollback_receipt_lock_binding_mismatch')
+            services = convergence.get('services') or {}
+            if set(services) != {'dispatcher', 'heartbeat', 'notifier'}:
+                raise LockFailure('rollback_service_proof_missing')
+            for service in services.values():
+                processes = service.get('processes') or []
+                if (service.get('ok') is not True or service.get('process_count') != 1
+                        or len(processes) != 1 or processes[0].get('module_root') != str(previous)
+                        or processes[0].get('runtime_sha') != context['previous_active_sha']):
+                    raise LockFailure('rollback_service_proof_invalid')
+            return _archive_active(self.record_hash, 'rolled-back')
         if (receipt.get('schema') != 'PHONE_FARM_IMMUTABLE_PROMOTION_RECEIPT_V1'
                 or receipt.get('receipt_state') != 'PROMOTED'
                 or receipt.get('candidate_sha') != self.expected['candidate_commit_sha']

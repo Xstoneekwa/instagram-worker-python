@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Lifecycle is owned by the invoking candidate, including quiescing an older release.
+if [[ "${1:-}" == "pause" || "${1:-}" == "resume" ]]; then
+  exec /usr/bin/python3 -B "$ROOT_DIR/promotion_service_control_v2.py" notifier "$1"
+fi
 cd "$ROOT_DIR"
 
 RUNTIME_HOME="${PHONEFARM_RUNTIME_HOME:-/Users/admin/phonefarm-runtime}"
@@ -12,6 +16,7 @@ export PHONEFARM_RUNTIME_HOME="$RUNTIME_HOME"
 export PYTHONDONTWRITEBYTECODE=1
 LOCK_DIR="$RUN_DIR/notifier.lock"
 PID_FILE="$RUN_DIR/notifier.pid"
+PAUSE_FILE="$RUN_DIR/paused"
 STATE_FILE="$RUN_DIR/last_cycle.json"
 PLIST_SOURCE="$ROOT_DIR/ops/launchd/com.boost.phonefarm.incident-notifier.plist"
 PLIST_TARGET="$HOME/Library/LaunchAgents/com.boost.phonefarm.incident-notifier.plist"
@@ -95,6 +100,21 @@ _notifier_process_count() {
   printf '%s' "$count"
 }
 
+_kill_all_notifier_processes() {
+  local pid
+  while read -r pid; do
+    if _pid_is_notifier "$pid"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done < <(pgrep -f "incident_notification_service\\.py.*--serve" 2>/dev/null || true)
+  sleep 1
+  while read -r pid; do
+    if _pid_is_notifier "$pid" && _pid_alive "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done < <(pgrep -f "incident_notification_service\\.py.*--serve" 2>/dev/null || true)
+}
+
 _clear_pid_and_lock() {
   rm -f "$PID_FILE"
   rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -124,12 +144,15 @@ _require_start_preconditions() {
 }
 
 _status_json() {
+  local paused="false"
   local existing_pid=""
   local process_count launchd_loaded="false"
   if existing_pid="$(_existing_notifier_pid)"; then :; else existing_pid=""; fi
+  if [[ -f "$PAUSE_FILE" ]]; then paused="true"; fi
   process_count="$(_notifier_process_count)"
   if _launchd_loaded; then launchd_loaded="true"; fi
   INCIDENT_NOTIFIER_STATUS_PID="$existing_pid" \
+  INCIDENT_NOTIFIER_STATUS_PAUSED="$paused" \
   INCIDENT_NOTIFIER_STATUS_PROCESS_COUNT="$process_count" \
   INCIDENT_NOTIFIER_STATUS_LAUNCHD_LOADED="$launchd_loaded" \
   INCIDENT_NOTIFIER_STATUS_STATE_FILE="$STATE_FILE" \
@@ -166,9 +189,14 @@ pid = os.environ.get("INCIDENT_NOTIFIER_STATUS_PID", "").strip()
 process_count = as_int(os.environ.get("INCIDENT_NOTIFIER_STATUS_PROCESS_COUNT", "0"))
 process_running = bool(pid)
 launchd_loaded = as_bool(os.environ.get("INCIDENT_NOTIFIER_STATUS_LAUNCHD_LOADED", "false"))
+paused = as_bool(os.environ.get("INCIDENT_NOTIFIER_STATUS_PAUSED", "false"))
 last_cycle_ok = state.get("ok") is True
 
-if process_running and process_count > 1:
+if paused and process_running:
+    status = "unhealthy"
+elif paused:
+    status = "paused"
+elif process_running and process_count > 1:
     status = "unhealthy"
 elif process_running and last_cycle_ok:
     status = "running"
@@ -180,7 +208,7 @@ else:
     status = "stopped"
 
 payload = {
-    "ok": status in {"running", "stopped", "starting", "degraded"},
+    "ok": status in {"running", "stopped", "starting", "degraded", "paused"},
     "status": status,
     "service_id": "incident-notifier",
     "processRunning": process_running,
@@ -188,6 +216,7 @@ payload = {
     "processCount": process_count,
     "duplicateProcess": process_count > 1,
     "launchdLoaded": launchd_loaded,
+    "paused": paused,
     "intervalSeconds": as_int(os.environ.get("INCIDENT_NOTIFIER_STATUS_INTERVAL_SECONDS", "60"), 60),
     "lastCycleAt": state.get("at"),
     "lastCycleOk": last_cycle_ok,
@@ -205,6 +234,10 @@ PY
 
 _start_foreground() {
   _require_start_preconditions
+  if [[ -f "$PAUSE_FILE" ]]; then
+    echo "incident_notifier_paused path=$PAUSE_FILE"
+    exit 0
+  fi
   if existing_pid="$(_existing_notifier_pid)"; then
     if [[ -n "$existing_pid" && "$existing_pid" != "$$" ]]; then
       echo "incident_notifier_already_running pid=$existing_pid"
@@ -264,18 +297,49 @@ case "$cmd" in
     else
       echo "process=stopped"
     fi
+    if [[ -f "$PAUSE_FILE" ]]; then
+      echo "paused=true"
+    else
+      echo "paused=false"
+    fi
     ;;
   stop)
     launchctl stop "$LAUNCHD_LABEL" 2>/dev/null || true
-    while read -r pid; do
-      if _pid_is_notifier "$pid"; then
-        kill "$pid" 2>/dev/null || true
-      fi
-    done < <(pgrep -f "incident_notification_service\\.py.*--serve" 2>/dev/null || true)
+    _kill_all_notifier_processes
     _clear_pid_and_lock
     echo "incident_notifier_stop_requested"
     ;;
+  pause)
+    touch "$PAUSE_FILE"
+    launchctl bootout "gui/$(id -u)" "$PLIST_TARGET" >/dev/null 2>&1 || true
+    _kill_all_notifier_processes
+    _clear_pid_and_lock
+    echo "incident_notifier_paused"
+    ;;
+  resume)
+    rm -f "$PAUSE_FILE"
+    process_count="$(_notifier_process_count)"
+    if [[ "$process_count" == "1" ]] && _launchd_loaded; then
+      echo "incident_notifier_already_healthy process_count=1"
+      exit 0
+    fi
+    if [[ "$process_count" != "0" ]]; then
+      echo "incident_notifier_recovery_refused inconsistent_process_count=$process_count" >&2
+      exit 5
+    fi
+    if [[ ! -f "$PLIST_TARGET" ]]; then
+      echo "incident_notifier_provisioning_required plist_missing=$PLIST_TARGET" >&2
+      exit 4
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/dev/null || true
+    launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+    launchctl kickstart "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null \
+      || launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null \
+      || true
+    echo "incident_notifier_resumed label=$LAUNCHD_LABEL"
+    ;;
   restart)
+    rm -f "$PAUSE_FILE"
     "$0" stop
     sleep 1
     if [[ ! -f "$PLIST_TARGET" ]]; then
@@ -306,7 +370,7 @@ case "$cmd" in
     ;;
   *)
     echo "Unknown command: $cmd" >&2
-    echo "Usage: scripts/incident_notifier_service.sh {start|once|status|stop|restart|install|launchd|logs}" >&2
+    echo "Usage: scripts/incident_notifier_service.sh {start|once|status|stop|pause|resume|restart|install|launchd|logs}" >&2
     exit 2
     ;;
 esac

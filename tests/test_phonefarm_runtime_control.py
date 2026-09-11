@@ -127,7 +127,7 @@ class PhoneFarmRuntimeControlTest(TestCase):
             self.assertEqual(rejected.reason, "active_root_not_in_releases_dir")
             git_commit.assert_not_called()
 
-    def test_switch_release_atomically_updates_current_link(self) -> None:
+    def test_switch_release_delegates_to_transactional_controller(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as raw:
@@ -141,108 +141,37 @@ class PhoneFarmRuntimeControlTest(TestCase):
             _worker_release(new)
             legacy.mkdir()
             current.symlink_to(old)
-            with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
-                with mock.patch.object(ctl, "_git_commit", return_value="newsha"):
-                    with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
-                        ctl, "deployment_zero_gate", return_value={
-                            "ok": True,
-                            "counts": {
-                                "account_run_requests": 0,
-                                "ig_runs": 0,
-                                "auto_restart_device_locks": 0,
-                                "auto_restart_tick_locks": 0,
-                            },
-                        }
-                    ), mock.patch.object(
-                        ctl,
-                        "_validate_release_evidence",
-                        return_value={
-                            "ok": True,
-                            "candidate_sha": "newsha",
-                            "build": {"protected_diff_status": "PASS"},
-                            "migration": {"applied_versions": ["v1"]},
-                            "lineage": {"validated_migrations": [{"version": "v1"}]},
-                        },
-                    ), mock.patch.object(ctl, "_git_full_commit", return_value="oldsha"), mock.patch.object(
-                        ctl, "_stage_receipt", side_effect=[tmp / "pending.stage", tmp / "final.stage"]
-                    ), mock.patch.object(ctl, "_publish_immutable_receipt"), mock.patch.object(
-                        ctl, "_receipt_sha256", return_value="a" * 64
-                    ), mock.patch.object(ctl, "_atomic_update_worker_registry"), mock.patch.object(
-                        ctl, "prepare_startup_skip_token", return_value={"token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}}
-                    ), mock.patch.object(
-                        ctl, "_run_canonical_controller", return_value={"ok": True}
-                    ), mock.patch.object(
-                        ctl, "_wait_for_service_convergence", return_value={"ok": True, "services": {}}
-                    ):
-                        result = ctl.switch_release("new")
-            self.assertTrue(result["ok"])
-            self.assertEqual(current.resolve(), new.resolve())
-            self.assertEqual(result["previousRoot"], str(old.resolve()))
-            self.assertEqual(result["receiptState"], "PROMOTED")
-            self.assertGreaterEqual(self.transaction.recheck.call_count, 2)
-            self.transaction.finish.assert_called_once()
-
-    def test_switch_release_refuses_non_zero_production_gate(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            releases = tmp / "releases"
-            old = releases / "old"
-            new = releases / "new"
-            legacy = tmp / "legacy"
-            current = tmp / "current"
-            _worker_release(old)
-            _worker_release(new)
-            legacy.mkdir()
-            current.symlink_to(old)
-            with mock.patch.dict(
-                os.environ, self._env(tmp, current, releases, legacy), clear=False
-            ):
-                with mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), mock.patch.object(
-                    ctl,
-                    "_validate_release_evidence",
-                    return_value={"ok": True},
-                ), mock.patch.object(
-                    ctl,
-                    "deployment_zero_gate",
-                    return_value={
-                        "ok": False,
-                        "status": "deployment_gate_blocked",
-                        "reason": "active_runtime_work_present",
-                        "counts": {"account_run_requests": 1},
-                    },
-                ):
-                    result = ctl.switch_release("new")
-            self.assertFalse(result["ok"])
+            expected = {"ok": True, "status": "PROMOTED", "transactionJournal": "/journal.json"}
+            with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False), \
+                 mock.patch.object(ctl, "_git_commit", return_value="newsha"), \
+                 mock.patch("promotion_runtime_adapter_v1.run_transactional_switch", return_value=expected) as run:
+                result = ctl.switch_release("new")
+            self.assertEqual(result, expected)
+            run.assert_called_once_with(ctl, "new", self.transaction)
             self.assertEqual(current.resolve(), old.resolve())
 
-    def test_switch_release_refuses_missing_immutable_promotion_evidence(self) -> None:
+    def test_switch_release_rejects_target_before_transaction(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             releases = tmp / "releases"
             old = releases / "old"
-            new = releases / "new"
             legacy = tmp / "legacy"
             current = tmp / "current"
             _worker_release(old)
-            _worker_release(new)
             legacy.mkdir()
             current.symlink_to(old)
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False), \
-                 mock.patch.object(ctl, "_git_commit", return_value="newsha"), \
-                 mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), \
-                 mock.patch.object(ctl, "_validate_release_evidence", return_value={"ok": False, "reason": "promotion_evidence_missing"}), \
-                 mock.patch.object(ctl, "deployment_zero_gate") as zero_gate:
-                result = ctl.switch_release("new")
+                 mock.patch.object(ctl, "_git_commit", return_value="oldsha"), \
+                 mock.patch("promotion_runtime_adapter_v1.run_transactional_switch") as run:
+                result = ctl.switch_release("missing")
             self.assertFalse(result["ok"])
-            self.assertEqual(result["status"], "promotion_evidence_blocked")
-            self.assertEqual(current.resolve(), old.resolve())
-            zero_gate.assert_not_called()
+            self.assertEqual(result["status"], "runtime_root_invalid")
+            run.assert_not_called()
+            self.transaction_factory.assert_not_called()
 
-    def test_receipt_publish_failure_rolls_back_switch(self) -> None:
+    def test_switch_release_fails_closed_when_external_transaction_cannot_open(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as raw:
@@ -256,35 +185,15 @@ class PhoneFarmRuntimeControlTest(TestCase):
             _worker_release(new)
             legacy.mkdir()
             current.symlink_to(old)
-            evidence = {
-                "ok": True,
-                "candidate_sha": "newsha",
-                "build": {"protected_diff_status": "PASS"},
-                "migration": {"applied_versions": ["v1"]},
-                "lineage": {"validated_migrations": [{"version": "v1"}]},
-            }
-            zero = {
-                "ok": True,
-                "counts": {
-                    "account_run_requests": 0,
-                    "ig_runs": 0,
-                    "auto_restart_device_locks": 0,
-                    "auto_restart_tick_locks": 0,
-                },
-            }
+            self.transaction_factory.return_value.__enter__.side_effect = RuntimeError("active_transaction_present")
             with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False), \
                  mock.patch.object(ctl, "_git_commit", return_value="newsha"), \
-                 mock.patch.object(ctl, "_git_full_commit", return_value="oldsha"), \
-                 mock.patch.object(ctl, "verify_deployment_candidate", return_value={"ok": True}), \
-                 mock.patch.object(ctl, "_validate_release_evidence", return_value=evidence), \
-                 mock.patch.object(ctl, "deployment_zero_gate", return_value=zero), \
-                 mock.patch.object(ctl, "_stage_receipt", return_value=tmp / "receipt.pending"), \
-                 mock.patch.object(ctl, "prepare_startup_skip_token", return_value={"token": {"device": 1, "inode": 2, "uid": 501, "gid": 20, "mode": 0o600}}), \
-                 mock.patch.object(ctl, "cancel_prepared_startup_skip_token"), \
-                 mock.patch.object(ctl, "_publish_immutable_receipt", side_effect=OSError("denied")):
+                 mock.patch("promotion_runtime_adapter_v1.run_transactional_switch") as run:
                 result = ctl.switch_release("new")
             self.assertFalse(result["ok"])
-            self.assertEqual(result["status"], "promotion_receipt_publish_failed_rolled_back")
+            self.assertEqual(result["status"], "external_deployment_lock_blocked")
+            self.assertEqual(result["reason"], "active_transaction_present")
+            run.assert_not_called()
             self.assertEqual(current.resolve(), old.resolve())
 
     def test_deployment_zero_gate_is_fail_closed_and_generic(self) -> None:

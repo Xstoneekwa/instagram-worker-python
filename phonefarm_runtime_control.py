@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -18,9 +20,12 @@ from typing import Any
 
 from follow60_deployment_gate_v1 import verify_deployment_candidate
 from runtime_artifacts import deployment_evidence_dir
+# Include the candidate-owned subprocess helper in the certified import graph.
+from promotion_service_control_v2 import SERVICES as PROMOTION_SERVICE_CONTROL_CONTRACT
 from startup_tick_skip_token import (
     TOKEN_FILENAME,
     StartupSkipTokenError,
+    canonical_runtime_identity,
     cancel_prepared_startup_skip_token,
     prepare_startup_skip_token,
     verify_startup_skip_consumed,
@@ -582,15 +587,54 @@ def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int 
         parsed.setdefault("lastError", proc.stderr.strip()[:600])
     enriched = _with_root(root, parsed)
     if command == "status":
-        enriched = _detect_component_mismatch(component, enriched, root)
+        enriched = _detect_component_mismatch(component, enriched, root, paths=paths)
     return enriched
 
 
+def _promotion_service_context(paths: RuntimePaths) -> dict[str, Any]:
+    """Read-only user/domain proof; never trust sudo/USER/HOME environment claims."""
+    runtime = paths.runtime_home
+    run_dir = paths.run_dir / "run-control-dispatcher"
+    if (not runtime.is_absolute() or runtime.resolve() != runtime
+            or run_dir.resolve() != run_dir
+            or runtime == paths.releases_dir.resolve()
+            or paths.releases_dir.resolve() in runtime.parents):
+        raise ValueError("promotion_runtime_identity_path_invalid")
+    identity = canonical_runtime_identity(runtime, run_dir)
+    if identity.uid <= 0:
+        raise ValueError("promotion_runtime_user_must_be_non_root")
+    account = pwd.getpwuid(identity.uid)
+    home = Path(account.pw_dir)
+    if (account.pw_uid != identity.uid or account.pw_gid != identity.gid
+            or not account.pw_name or account.pw_name.startswith("-")
+            or home != runtime.parent or home.resolve() != home
+            or home.stat().st_uid != identity.uid):
+        raise ValueError("promotion_runtime_user_identity_mismatch")
+    if os.geteuid() not in (0, identity.uid):
+        raise ValueError("promotion_caller_user_mismatch")
+    domain = f"gui/{identity.uid}"
+    # Only a domain lookup; never bootstrap, kickstart or create a GUI session.
+    result = subprocess.run(
+        ["/bin/launchctl", "print", domain],
+        cwd=str(runtime), env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        text=True, capture_output=True, timeout=10, check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("promotion_runtime_gui_domain_unavailable")
+    return {"uid": identity.uid, "gid": identity.gid, "user": account.pw_name,
+            "home": str(home), "launchd_domain": domain}
+
+
 def _run_canonical_controller(
-    component: str, command: str, *, paths: RuntimePaths, timeout: int = 60
+    component: str, command: str, *, paths: RuntimePaths, timeout: int = 60,
+    expected_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Invoke the stable runtime controller, never a release-specific script."""
-    controller = paths.runtime_home / "bin" / "phonefarm-runtimectl"
+    """Keep the transaction root-owned; dispatch restart in the runtime user domain."""
+    if component not in PROMOTION_SERVICES or command not in {"pause", "resume", "restart"}:
+        return {"ok": False, "status": "promotion_service_command_not_allowed"}
+    controller = (Path(__file__).resolve().parent / "promotion_service_control_v2.py"
+                  if command in {"pause", "resume"}
+                  else paths.runtime_home / "bin" / "phonefarm-runtimectl")
     if not controller.is_file():
         return {
             "ok": False,
@@ -598,14 +642,31 @@ def _run_canonical_controller(
             "component": component,
             "controller": str(controller),
         }
-    env = os.environ.copy()
-    env["PHONEFARM_RUNTIME_CURRENT_LINK"] = str(paths.current_link)
-    env["PHONEFARM_RUNTIME_RELEASES_DIR"] = str(paths.releases_dir)
-    env["PHONEFARM_RUNTIME_HOME"] = str(paths.runtime_home)
-    env["PHONEFARM_RUNTIME_LEGACY_ROOT"] = str(paths.legacy_root)
     try:
+        context = _promotion_service_context(paths)
+        if expected_context is not None and context != {
+            key: expected_context.get(key)
+            for key in ("uid", "gid", "user", "home", "launchd_domain")
+        }:
+            raise ValueError("promotion_runtime_user_changed")
+        # No inherited root HOME, Python injection, secrets, or sudo identity hints.
+        env = {
+            "HOME": context["home"], "USER": context["user"], "LOGNAME": context["user"],
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHON": "/usr/bin/python3",
+            "PHONEFARM_RUNTIME_CURRENT_LINK": str(paths.current_link),
+            "PHONEFARM_RUNTIME_RELEASES_DIR": str(paths.releases_dir),
+            "PHONEFARM_RUNTIME_HOME": str(paths.runtime_home),
+            "PHONEFARM_RUNTIME_LEGACY_ROOT": str(paths.legacy_root),
+        }
+        argv = ["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in sorted(env.items())],
+                *(["/usr/bin/python3", "-B"] if controller.suffix == ".py" else []),
+                str(controller), component, command, "--json"]
+        if os.geteuid() == 0:
+            argv = ["/bin/launchctl", "asuser", str(context["uid"]),
+                    "/usr/bin/sudo", "-n", "-H", "-u", f"#{context['uid']}", *argv]
         proc = subprocess.run(
-            [str(controller), component, command, "--json"],
+            argv,
             cwd=str(paths.runtime_home),
             env=env,
             text=True,
@@ -618,18 +679,19 @@ def _run_canonical_controller(
             "ok": False,
             "status": "canonical_runtime_controller_failed",
             "component": component,
-            "reason": type(exc).__name__,
+            "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
         }
     parsed = _json_line(proc.stdout)
     if parsed is None:
         parsed = {
             "ok": False,
             "status": "canonical_runtime_controller_invalid_output",
-            "message": (proc.stdout or proc.stderr or "")[:600],
+            "message": "Service controller did not return a JSON result.",
         }
     parsed["exitCode"] = proc.returncode
     parsed["canonicalController"] = str(controller)
     parsed["currentLink"] = str(paths.current_link)
+    parsed["runtimeUserContext"] = context
     if proc.returncode != 0:
         parsed["ok"] = False
     return parsed
@@ -971,6 +1033,64 @@ def _release_sha_for_process_root(paths: RuntimePaths, root: Path | None) -> str
     return _git_full_commit(resolved).lower()
 
 
+def _canonical_service_cwd_allowed(
+    paths: RuntimePaths, cwd_root: Path | None, target_root: Path
+) -> bool:
+    """Accept only the sealed code root or the canonical external runtime root."""
+    if cwd_root is None:
+        return False
+    resolved_cwd = _safe_resolve(cwd_root)
+    resolved_target = _safe_resolve(target_root)
+    if resolved_cwd == resolved_target:
+        return True
+    resolved_runtime = _safe_resolve(paths.runtime_home)
+    resolved_releases = _safe_resolve(paths.releases_dir)
+    try:
+        resolved_runtime.relative_to(resolved_releases)
+    except ValueError:
+        return resolved_cwd == resolved_runtime
+    return False
+
+
+def _canonical_component_process_convergence(
+    *,
+    component: str,
+    paths: RuntimePaths,
+    target_root: Path,
+    target_sha: str,
+    rows: list[tuple[int, int, str]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Apply one module-root/SHA/CWD identity contract to a service process."""
+    needle = _component_process_needle(component)
+    exact_root = _safe_resolve(target_root)
+    exact_sha = str(target_sha or "").lower()
+    matches: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for pid, ppid, command in rows if rows is not None else _ps_rows():
+        if needle not in command:
+            continue
+        cwd = _pid_cwd(pid)
+        module_root = _resolved_process_module_root(command, cwd, needle)
+        cwd_root = _safe_resolve(Path(cwd)) if cwd else None
+        module_root_path = _safe_resolve(Path(module_root)) if module_root else None
+        runtime_sha = _release_sha_for_process_root(paths, module_root_path)
+        matches.append({
+            "pid": pid,
+            "ppid": ppid,
+            "cwd": str(cwd_root) if cwd_root else "",
+            "module_root": str(module_root_path) if module_root_path else "",
+            "runtime_sha": runtime_sha,
+            "command": command[:240],
+        })
+        if not _canonical_service_cwd_allowed(paths, cwd_root, exact_root):
+            failures.append("cwd_old_or_unknown_root")
+        if module_root_path is None or module_root_path != exact_root:
+            failures.append("module_old_or_unknown_root")
+        if runtime_sha != exact_sha:
+            failures.append("runtime_sha_mismatch")
+    return matches, sorted(set(failures))
+
+
 def canonical_service_snapshot(
     *,
     paths: RuntimePaths | None = None,
@@ -989,36 +1109,17 @@ def canonical_service_snapshot(
     services: dict[str, Any] = {}
     rows = _ps_rows()
     for component in PROMOTION_SERVICES:
-        needle = _component_process_needle(component)
-        matches: list[dict[str, Any]] = []
-        for pid, ppid, command in rows:
-            if needle not in command:
-                continue
-            cwd = _pid_cwd(pid)
-            module_root = _resolved_process_module_root(command, cwd, needle)
-            cwd_root = _safe_resolve(Path(cwd)) if cwd else None
-            module_root_path = _safe_resolve(Path(module_root)) if module_root else None
-            runtime_sha = _release_sha_for_process_root(paths, cwd_root)
-            matches.append({
-                "pid": pid,
-                "ppid": ppid,
-                "cwd": str(cwd_root) if cwd_root else "",
-                "module_root": str(module_root_path) if module_root_path else "",
-                "runtime_sha": runtime_sha,
-                "command": command[:240],
-            })
-        component_failures: list[str] = []
+        matches, component_failures = _canonical_component_process_convergence(
+            component=component,
+            paths=paths,
+            target_root=target_root,
+            target_sha=target_sha,
+            rows=rows,
+        )
         if not matches:
             component_failures.append("missing_service")
         elif len(matches) != 1:
             component_failures.append("duplicate_service")
-        for row in matches:
-            if not row["cwd"] or _safe_resolve(Path(row["cwd"])) != target_root:
-                component_failures.append("cwd_old_or_unknown_root")
-            if not row["module_root"] or _safe_resolve(Path(row["module_root"])) != target_root:
-                component_failures.append("module_old_or_unknown_root")
-            if row["runtime_sha"] != target_sha:
-                component_failures.append("runtime_sha_mismatch")
         component_failures = sorted(set(component_failures))
         services[component] = {
             "ok": not component_failures,
@@ -1035,7 +1136,8 @@ def canonical_service_snapshot(
         1
         for service in services.values()
         for row in service["processes"]
-        if row.get("cwd") and _safe_resolve(Path(row["cwd"])) != target_root
+        if row.get("module_root")
+        and _safe_resolve(Path(row["module_root"])) != target_root
     )
     return {
         "ok": not failures,
@@ -1076,26 +1178,27 @@ def _wait_for_service_convergence(
             if token_gate.get("ok"):
                 return last
         if time.monotonic() >= deadline:
-            return {**last, "status": "SERVICE_CONVERGENCE_TIMEOUT"}
+            return {**last, "ok": False, "status": "SERVICE_CONVERGENCE_TIMEOUT"}
         time.sleep(max(0.01, interval_seconds))
 
 
-def _detect_component_mismatch(component: str, payload: dict[str, Any], root: RuntimeRoot) -> dict[str, Any]:
-    needle = _component_process_needle(component)
-    matching: list[dict[str, Any]] = []
-    for pid, ppid, command in _ps_rows():
-        if needle not in command:
-            continue
-        cwd = _pid_cwd(pid)
-        matching.append({"pid": pid, "ppid": ppid, "cwd": cwd, "command": command[:240]})
-
+def _detect_component_mismatch(
+    component: str,
+    payload: dict[str, Any],
+    root: RuntimeRoot,
+    *,
+    paths: RuntimePaths | None = None,
+) -> dict[str, Any]:
+    paths = paths or runtime_paths()
     active_root = _safe_resolve(Path(root.resolved_root))
-    foreign = [
-        row
-        for row in matching
-        if row.get("cwd") and _safe_resolve(Path(str(row["cwd"]))) != active_root
-    ]
-    if foreign:
+    active_sha = _git_full_commit(active_root).lower()
+    matching, failures = _canonical_component_process_convergence(
+        component=component,
+        paths=paths,
+        target_root=active_root,
+        target_sha=active_sha,
+    )
+    if matching and failures:
         return {
             **payload,
             "ok": False,
@@ -1108,7 +1211,11 @@ def _detect_component_mismatch(component: str, payload: dict[str, Any], root: Ru
             "lastError": "service_running_from_non_active_root",
             "message": "Service process exists, but not from the active runtime root.",
             "processes": matching,
+            "runtimeIdentityFailures": failures,
         }
+
+    if matching:
+        return {**payload, "processes": matching}
 
     if payload.get("processRunning"):
         real_root = str(payload.get("processRoot") or "")
@@ -1173,6 +1280,18 @@ def scheduler_status() -> dict[str, Any]:
     )
 
 
+def _atomic_switch_runtime_root(current_link: Path, target: str) -> None:
+    staged = current_link.with_name(f".{current_link.name}.{os.getpid()}.{time.monotonic_ns()}.pending")
+    staged.unlink(missing_ok=True)
+    staged.symlink_to(target)
+    os.replace(staged, current_link)
+    directory_fd = os.open(current_link.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def switch_release(target: str) -> dict[str, Any]:
     from follow60_external_deployment_lock_v2 import DeploymentTransaction
     paths = runtime_paths()
@@ -1184,10 +1303,26 @@ def switch_release(target: str) -> dict[str, Any]:
         return _runtime_root_payload(validation, command='switch-release')
     try:
         with DeploymentTransaction(Path(validation.resolved_root)) as transaction:
-            return _switch_release_locked(target, transaction)
+            from promotion_runtime_adapter_v1 import run_transactional_switch
+            return run_transactional_switch(sys.modules[__name__], target, transaction)
     except Exception as exc:
         return {'ok': False, 'status': 'external_deployment_lock_blocked',
                 'reason': str(exc), 'command': 'switch-release'}
+
+
+def recover_promotion(expected_lock_sha256: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", str(expected_lock_sha256 or "")):
+        return {"ok": False, "status": "promotion_recovery_blocked", "reason": "expected_lock_sha256_invalid"}
+    try:
+        from promotion_runtime_adapter_v1 import recover_transactional_switch
+        return recover_transactional_switch(sys.modules[__name__], expected_lock_sha256)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "promotion_recovery_blocked",
+            "reason": str(exc)[:300] or type(exc).__name__,
+            "command": "recover-promotion",
+        }
 
 
 def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
@@ -1214,6 +1349,12 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
             "status": "promotion_evidence_blocked",
             "message": "Release switch refused: immutable promotion evidence is incomplete.",
         }
+    try:
+        service_context = _promotion_service_context(paths)
+    except Exception as exc:
+        return {"ok": False, "status": "promotion_runtime_user_preflight_failed",
+                "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
+                "runtimeSwitched": False, "command": "switch-release"}
     promotion_clock_started = time.monotonic()
     promotion_started_at = datetime.now(timezone.utc).isoformat()
     gate = deployment_zero_gate(paths)
@@ -1269,6 +1410,7 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
         "runtime_root": validation.resolved_root,
         "previous_release_sha": previous_sha,
         "previous_release_path": str(previous) if previous else None,
+        "runtime_service_context": service_context,
     }
     pending_receipt = {
         **base_receipt,
@@ -1307,7 +1449,9 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
             "receiptState": "SEALED",
         }
     try:
-        transaction.recheck()  # Same owner, identity, signature and seal AFTER zero-gate.
+        if _promotion_service_context(paths) != service_context:
+            raise ValueError("promotion_runtime_user_changed_before_switch")
+        transaction.recheck()  # Same owner, identity, signature and seal AFTER domain/zero-gate.
         tmp = paths.current_link.with_name(f"{paths.current_link.name}.tmp")
         if tmp.exists() or tmp.is_symlink():
             tmp.unlink()
@@ -1404,7 +1548,9 @@ def _switch_release_locked(target: str, transaction) -> dict[str, Any]:
 
     restart_results: dict[str, Any] = {}
     for component in PROMOTION_SERVICES:
-        result = _run_canonical_controller(component, "restart", paths=paths, timeout=60)
+        result = _run_canonical_controller(
+            component, "restart", paths=paths, timeout=60, expected_context=service_context
+        )
         restart_results[component] = result
         if not result.get("ok"):
             return _with_root(validation, {
@@ -1537,7 +1683,7 @@ def _print(payload: dict[str, Any], json_mode: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical Phone Farm runtime controller.")
-    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "deployment-gate", "dispatcher", "heartbeat", "notifier", "scheduler", "switch-release"])
+    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "deployment-gate", "dispatcher", "heartbeat", "notifier", "scheduler", "switch-release", "recover-promotion"])
     parser.add_argument("command", nargs="?", default="status")
     parser.add_argument("extra", nargs="*")
     parser.add_argument("--json", action="store_true")
@@ -1562,6 +1708,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.command or args.command == "status":
             return _print({"ok": False, "status": "runtime_root_invalid", "lastError": "missing_release_target"}, args.json)
         return _print(switch_release(args.command), args.json)
+    if args.target == "recover-promotion":
+        if not args.command or args.command == "status":
+            return _print({"ok": False, "status": "promotion_recovery_blocked", "reason": "missing_expected_lock_sha256"}, args.json)
+        return _print(recover_promotion(args.command), args.json)
     return _print({"ok": False, "status": "unknown", "lastError": "unsupported_command"}, args.json)
 
 
