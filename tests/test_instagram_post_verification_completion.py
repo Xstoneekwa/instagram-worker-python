@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -9,14 +11,24 @@ from instagram_post_verification_completion import (
     prepare_post_verification_identity_surface,
 )
 from own_profile_navigation import (
+    NetworkContextState,
     OwnProfileNavigationOutcome,
     classify_own_profile_destination,
+    extract_canonical_profile_username_from_hierarchy,
     navigate_to_own_profile_from_bottom_nav,
     open_own_profile_from_bottom_nav,
 )
 
 
 PACKAGE = "com.instagram.androig"
+REX_REAL_XML = Path(
+    "/Users/admin/phonefarm-runtime/logs/identity_guard/identity_guard_b024e94e_1789164066556.xml"
+)
+BMY_REAL_XML = Path(
+    "/Users/admin/phonefarm-runtime/logs/identity_guard/identity_guard_2cd8e47f_1789164059575.xml"
+)
+REX_REAL_XML_SHA256 = "28779cde4203a48297a9fc8d6da087eb5a1db99bfee32893b47c74298b294c97"
+BMY_REAL_XML_SHA256 = "8273acc31f409397daebbff9032cf7f1fe1ea7d1fa16afccb6e3dacb68ccd48c"
 HOME_XML = (
     '<hierarchy><node package="com.instagram.androig" resource-id="com.instagram.androig:id/tab_bar">'
     '<node package="com.instagram.androig" resource-id="com.instagram.androig:id/feed_tab" content-desc="Home" />'
@@ -612,6 +624,101 @@ class PostVerificationCompletionTests(unittest.TestCase):
             expected_username="bmybusinesses",
         )
         self.assertEqual(outcome, OwnProfileNavigationOutcome.UNKNOWN_SCREEN)
+
+    def test_real_rex_hierarchy_is_immutable_and_classifies_profile(self) -> None:
+        xml = REX_REAL_XML.read_bytes()
+        self.assertEqual(hashlib.sha256(xml).hexdigest(), REX_REAL_XML_SHA256)
+        username, method, _ = extract_canonical_profile_username_from_hierarchy(
+            xml.decode("utf-8")
+        )
+        outcome, evidence = classify_own_profile_destination(
+            xml.decode("utf-8"),
+            expected_username="rex_gen_boost_ai",
+        )
+        self.assertEqual((username, method), ("rex_gen_boost_ai", "action_bar_title"))
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.PROFILE_OPENED)
+        self.assertTrue(evidence["own_profile_control_present"])
+
+    def test_real_bmy_hierarchy_is_immutable_and_classifies_loading_profile(self) -> None:
+        xml = BMY_REAL_XML.read_bytes()
+        self.assertEqual(hashlib.sha256(xml).hexdigest(), BMY_REAL_XML_SHA256)
+        username, method, _ = extract_canonical_profile_username_from_hierarchy(
+            xml.decode("utf-8")
+        )
+        outcome, evidence = classify_own_profile_destination(
+            xml.decode("utf-8"),
+            expected_username="bmybusinesses",
+        )
+        self.assertEqual((username, method), ("bmybusinesses", "action_bar_title"))
+        self.assertEqual(
+            outcome,
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
+        )
+        self.assertTrue(evidence["loading_present"])
+        self.assertEqual(
+            evidence["network_context"],
+            NetworkContextState.SUSPECTED_UNAVAILABLE.value,
+        )
+
+    def test_suggested_for_you_alone_is_never_home_proof(self) -> None:
+        outcome, _ = classify_own_profile_destination(
+            '<hierarchy><node text="Suggested for you" /></hierarchy>'
+        )
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.UNKNOWN_SCREEN)
+
+    def test_selected_feed_tab_is_true_home_structural_proof(self) -> None:
+        outcome, _ = classify_own_profile_destination(
+            '<hierarchy><node resource-id="com.instagram.androig:id/feed_tab" selected="true" />'
+            '<node text="Suggested for you" /></hierarchy>'
+        )
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.HOME_FEED)
+
+    def test_android_view_refresh_spinner_is_loading_without_text(self) -> None:
+        outcome, evidence = classify_own_profile_destination(
+            '<hierarchy><node resource-id="com.instagram.androig:id/action_bar_large_title_auto_size" '
+            'text="example_profile" /><node resource-id="com.instagram.androig:id/profile_tab" '
+            'selected="true" /><node class="android.view.View" '
+            'resource-id="com.instagram.androig:id/swipe_refresh_animated_progressbar_container" />'
+            '</hierarchy>',
+            expected_username="example_profile",
+        )
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE)
+        self.assertEqual(evidence["network_context"], "network_suspected_unavailable")
+
+    def test_loading_profile_retry_is_single_and_bounded(self) -> None:
+        xml = BMY_REAL_XML.read_text(encoding="utf-8")
+        device = FakeDevice([xml, xml])
+        with (
+            patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", PACKAGE),
+            patch("own_profile_navigation.verify_app_foreground", return_value=True),
+            patch("own_profile_navigation.time.sleep") as sleep,
+        ):
+            result = navigate_to_own_profile_from_bottom_nav(
+                device,
+                expected_username="bmybusinesses",
+            )
+        self.assertFalse(result.ok)
+        self.assertTrue(result.loading_retry_used)
+        self.assertEqual(
+            result.outcome,
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
+        )
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_network_context_cannot_hide_explicit_alternate_username(self) -> None:
+        xml = (
+            '<hierarchy><node resource-id="com.instagram.androig:id/action_bar_large_title_auto_size" '
+            'text="different_account" /><node resource-id="com.instagram.androig:id/profile_tab" '
+            'selected="true" /><node class="android.view.View" '
+            'resource-id="com.instagram.androig:id/swipe_refresh_animated_progressbar_container" />'
+            '</hierarchy>'
+        )
+        outcome, evidence = classify_own_profile_destination(
+            xml,
+            expected_username="expected_account",
+        )
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.PROFILE_OPENED)
+        self.assertEqual(evidence["destination_proof"], "confirmed_own_profile_alternate_title")
 
 
 if __name__ == "__main__":

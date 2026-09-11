@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -119,6 +120,32 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
         sleep.assert_called_once_with(guard._LOADING_RETRY_SECONDS)
         open_profile.assert_not_called()
 
+    def test_profile_loading_network_context_is_unverifiable_not_mismatch(self) -> None:
+        loading_profile = (
+            '<hierarchy><node resource-id="com.instagram.androig:id/action_bar_large_title_auto_size" '
+            'text="cinema_catchup" /><node resource-id="com.instagram.androig:id/profile_tab" '
+            'selected="true" /><node class="android.view.View" '
+            'resource-id="com.instagram.androig:id/swipe_refresh_animated_progressbar_container" />'
+            '</hierarchy>'
+        )
+        device = Mock()
+        with (
+            patch.object(guard, "_dump_hierarchy", side_effect=[HOME_XML, loading_profile]),
+            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=False),
+            patch.object(
+                guard,
+                "_capture_identity_failure_artifacts",
+                return_value={"screenshot_captured": True, "xml_dump_captured": True},
+            ),
+        ):
+            result = self._verify(device)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.actual_logged_in_username, "")
+        self.assertEqual(result.failure_reason, "instagram_connectivity_unverified")
+        self.assertNotEqual(result.failure_reason, guard.ACCOUNT_IDENTITY_MISMATCH_REASON)
+        self.assertEqual(result.meta["network_context"], "network_suspected_unavailable")
+
     def test_active_home_screen_continues_to_open_own_profile(self) -> None:
         device = Mock()
         with (
@@ -180,12 +207,13 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
     def test_identity_failure_captures_screenshot_and_xml(self) -> None:
         device = Mock()
         device.screenshot = Mock()
-        with (
-            patch.object(guard, "_dump_hierarchy", return_value=LOGIN_XML),
-            patch.object(guard, "open_own_profile_from_bottom_nav") as open_profile,
-            patch.object(guard, "_IDENTITY_GUARD_ARTIFACTS_DIR", guard._LOGS_ROOT / "identity_guard_test"),
-        ):
-            result = self._verify(device)
+        with tempfile.TemporaryDirectory(prefix="identity-guard-test-") as directory:
+            with (
+                patch.object(guard, "_dump_hierarchy", return_value=LOGIN_XML),
+                patch.object(guard, "open_own_profile_from_bottom_nav") as open_profile,
+                patch.object(guard, "_IDENTITY_GUARD_ARTIFACTS_DIR", guard.Path(directory)),
+            ):
+                result = self._verify(device)
 
         self.assertFalse(result.ok)
         self.assertTrue(result.meta.get("screenshot_captured"))

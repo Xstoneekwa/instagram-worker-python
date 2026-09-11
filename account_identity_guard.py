@@ -47,6 +47,7 @@ from runtime_artifacts import runtime_logs_root
 from own_profile_navigation import (
     OwnProfileNavigationOutcome,
     classify_own_profile_destination,
+    extract_canonical_profile_username_from_hierarchy,
     open_own_profile_from_bottom_nav,
 )
 
@@ -302,40 +303,7 @@ def _looks_like_handle(raw: str) -> bool:
 
 
 def _extract_own_profile_username_from_hierarchy(hierarchy_xml: str) -> tuple[str, str, dict[str, Any]]:
-    root = _parse_xml_root(hierarchy_xml)
-    meta: dict[str, Any] = {
-        "action_bar_title": "",
-        "candidate_texts": [],
-        "hierarchy_xml_len": len(str(hierarchy_xml or "")),
-    }
-    if root is None:
-        return "", "hierarchy_xml_parse_failed", meta
-
-    candidates: list[tuple[int, str, str]] = []
-    for el in root.iter():
-        rid = str(el.get("resource-id") or "")
-        rid_l = rid.lower()
-        text = str(el.get("text") or el.get("content-desc") or "").strip().lstrip("@")
-        if not text or not _looks_like_handle(text):
-            continue
-        if "action_bar_title" in rid_l:
-            meta["action_bar_title"] = text
-            candidates.append((0, text, "action_bar_title"))
-        elif "profile_header" in rid_l and "username" in rid_l:
-            candidates.append((1, text, "profile_header_username"))
-        elif "username" in rid_l and "row_search" not in rid_l:
-            candidates.append((2, text, "username_resource_id"))
-        elif "title" in rid_l:
-            candidates.append((3, text, "title_resource_id"))
-    if candidates:
-        candidates.sort(key=lambda item: item[0])
-        meta["candidate_texts"] = [
-            {"username": value, "method": method, "rank": rank}
-            for rank, value, method in candidates[:8]
-        ]
-        _, username, method = candidates[0]
-        return username, method, meta
-    return "", "own_profile_username_not_found", meta
+    return extract_canonical_profile_username_from_hierarchy(hierarchy_xml)
 
 
 def _screen_classification_meta(
@@ -356,6 +324,7 @@ def _screen_classification_meta(
         "hierarchy_xml_len": int(signals.get("hierarchy_xml_len") or 0),
         "transition_loading": bool(signals.get("transition_loading")),
         "loading_retry_used": loading_retry_used,
+        "network_context": str(signals.get("network_context") or "network_unknown"),
     }
 
 
@@ -1483,6 +1452,7 @@ def verify_active_instagram_account_matches_expected(
         failure_reason = {
             OwnProfileNavigationOutcome.WHAT_HAPPENED_SCREEN: "own_profile_navigation_what_happened_screen",
             OwnProfileNavigationOutcome.LOADING_INTERMEDIATE: "own_profile_navigation_loading",
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE: "instagram_connectivity_unverified",
             OwnProfileNavigationOutcome.HOME_FEED: "own_profile_navigation_stayed_on_home",
             OwnProfileNavigationOutcome.LOGIN_CHALLENGE: "login_challenge",
         }.get(destination_outcome, "own_profile_open_failed")

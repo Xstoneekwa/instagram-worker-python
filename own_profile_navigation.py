@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -43,9 +44,19 @@ class OwnProfileNavigationOutcome(str, Enum):
     WHAT_HAPPENED_SCREEN = "what_happened_screen"
     RESTRICTION_SCREEN = "restriction_screen"
     LOADING_INTERMEDIATE = "loading_intermediate"
+    LOADING_INTERMEDIATE_ON_PROFILE = "loading_intermediate_on_profile"
     HOME_FEED = "home_feed"
     LOGIN_CHALLENGE = "login_challenge"
     UNKNOWN_SCREEN = "unknown_screen"
+
+
+class NetworkContextState(str, Enum):
+    """Diagnostic-only connectivity context derived from already-captured UI."""
+
+    OK = "network_ok"
+    SUSPECTED_UNAVAILABLE = "network_suspected_unavailable"
+    DEGRADED = "network_degraded"
+    UNKNOWN = "network_unknown"
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,10 @@ _PROFILE_STRUCTURE_RID_MARKERS = (
 _OWN_PROFILE_CONTROL_MARKERS = frozenset(
     {"edit profile", "share profile", "modifier le profil", "partager le profil"}
 )
+_PROFILE_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+_LOADING_SPINNER_RID_MARKERS = (
+    "swipe_refresh_animated_progressbar_container",
+)
 
 
 def _normalize_surface_text(value: str) -> str:
@@ -112,6 +127,80 @@ def _parse_destination_nodes(hierarchy_xml: str) -> list[dict[str, str]]:
     ]
 
 
+def _looks_like_profile_handle(raw: str) -> bool:
+    value = str(raw or "").strip().lstrip("@")
+    return bool(value and _PROFILE_HANDLE_RE.fullmatch(value))
+
+
+def _extract_canonical_profile_username_from_nodes(
+    nodes: list[dict[str, str]],
+    *,
+    hierarchy_xml_len: int,
+) -> tuple[str, str, dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "action_bar_title": "",
+        "candidate_texts": [],
+        "hierarchy_xml_len": hierarchy_xml_len,
+    }
+    if not nodes:
+        return "", "hierarchy_xml_parse_failed", meta
+
+    candidates: list[tuple[int, str, str]] = []
+    for node in nodes:
+        rid = node["resource_id"].casefold()
+        value = str(node["text"] or "").strip().lstrip("@")
+        if not _looks_like_profile_handle(value):
+            continue
+        if "action_bar_title" in rid or "action_bar_large_title" in rid:
+            meta["action_bar_title"] = value
+            candidates.append((0, value, "action_bar_title"))
+        elif "profile_header" in rid and "username" in rid:
+            candidates.append((1, value, "profile_header_username"))
+        elif "username" in rid and "row_search" not in rid:
+            candidates.append((2, value, "username_resource_id"))
+        elif "title" in rid:
+            candidates.append((3, value, "title_resource_id"))
+    if not candidates:
+        return "", "own_profile_username_not_found", meta
+    candidates.sort(key=lambda item: item[0])
+    meta["candidate_texts"] = [
+        {"username": value, "method": method, "rank": rank}
+        for rank, value, method in candidates[:8]
+    ]
+    _, username, method = candidates[0]
+    return username, method, meta
+
+
+def extract_canonical_profile_username_from_hierarchy(
+    hierarchy_xml: str,
+) -> tuple[str, str, dict[str, Any]]:
+    """Extract the strongest profile title/username from one hierarchy.
+
+    This is shared by destination classification and Identity Guard so the
+    same Instagram resource-id variants cannot be interpreted differently.
+    """
+    raw = str(hierarchy_xml or "")
+    return _extract_canonical_profile_username_from_nodes(
+        _parse_destination_nodes(raw),
+        hierarchy_xml_len=len(raw),
+    )
+
+
+def _loading_signal_present(nodes: list[dict[str, str]], text_set: set[str]) -> bool:
+    return (
+        any(
+            value in {"loading", "loading...", "chargement", "chargement..."}
+            for value in text_set
+        )
+        or any("progressbar" in node["class_name"].casefold() for node in nodes)
+        or any(
+            marker in node["resource_id"].casefold()
+            for node in nodes
+            for marker in _LOADING_SPINNER_RID_MARKERS
+        )
+    )
+
+
 def classify_own_profile_destination(
     hierarchy_xml: str,
     *,
@@ -128,6 +217,7 @@ def classify_own_profile_destination(
         "profile_structure_present": False,
         "own_profile_control_present": False,
         "profile_tab_selected": False,
+        "network_context": NetworkContextState.UNKNOWN.value,
     }
 
     if _RESTRICTION_TITLE in text_set or any(value in _RESTRICTION_DETAILS for value in text_set):
@@ -137,14 +227,14 @@ def classify_own_profile_destination(
     if any(marker in value for value in texts for marker in _LOGIN_CHALLENGE_MARKERS):
         return OwnProfileNavigationOutcome.LOGIN_CHALLENGE, evidence
 
-    action_bar_title = ""
+    action_bar_title, title_method, title_meta = _extract_canonical_profile_username_from_nodes(
+        nodes,
+        hierarchy_xml_len=len(str(hierarchy_xml or "")),
+    )
     profile_structure_present = False
     profile_tab_selected = False
     for node in nodes:
         rid = node["resource_id"].casefold()
-        value = str(node["text"] or "").strip().lstrip("@")
-        if "action_bar_title" in rid and value:
-            action_bar_title = value
         if any(marker in rid for marker in _PROFILE_STRUCTURE_RID_MARKERS):
             profile_structure_present = True
         if rid.endswith("/profile_tab") and node["selected"] == "true":
@@ -153,6 +243,8 @@ def classify_own_profile_destination(
     evidence.update(
         {
             "action_bar_title": action_bar_title,
+            "profile_title_method": title_method,
+            "profile_title_candidate_count": len(title_meta.get("candidate_texts") or []),
             "profile_structure_present": profile_structure_present,
             "own_profile_control_present": own_profile_control_present,
             "profile_tab_selected": profile_tab_selected,
@@ -166,16 +258,39 @@ def classify_own_profile_destination(
         action_bar_title
         and (profile_structure_present or own_profile_control_present or profile_tab_selected)
     )
+    loading_present = _loading_signal_present(nodes, text_set)
+    evidence["loading_present"] = loading_present
+    evidence["network_context"] = (
+        NetworkContextState.SUSPECTED_UNAVAILABLE.value
+        if loading_present
+        else NetworkContextState.OK.value
+        if exact_expected_title or generic_profile_proof
+        else NetworkContextState.UNKNOWN.value
+    )
+
+    confirmed_alternate_title = bool(
+        expected and actual and actual != expected and generic_profile_proof
+    )
+    if confirmed_alternate_title:
+        # A positively detected alternate username remains authoritative even
+        # if a spinner is also visible. Connectivity context cannot suppress a
+        # confirmed mismatch at the later Identity Guard boundary.
+        evidence["destination_proof"] = "confirmed_own_profile_alternate_title"
+        return OwnProfileNavigationOutcome.PROFILE_OPENED, evidence
+
+    profile_ready_despite_refresh = bool(
+        own_profile_control_present and (exact_expected_title or generic_profile_proof)
+    )
+    if loading_present and (exact_expected_title or generic_profile_proof) and not profile_ready_despite_refresh:
+        evidence["destination_proof"] = "profile_surface_loading"
+        return OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE, evidence
+
     if exact_expected_title or generic_profile_proof:
         evidence["destination_proof"] = (
             "exact_expected_action_bar_title" if exact_expected_title else "profile_surface_composite"
         )
         return OwnProfileNavigationOutcome.PROFILE_OPENED, evidence
 
-    loading_present = any(
-        value in {"loading", "loading...", "chargement", "chargement..."}
-        for value in text_set
-    ) or any("progressbar" in node["class_name"].casefold() for node in nodes)
     if loading_present:
         return OwnProfileNavigationOutcome.LOADING_INTERMEDIATE, evidence
 
@@ -184,7 +299,7 @@ def classify_own_profile_destination(
         node["resource_id"].casefold().endswith("/feed_tab") and node["selected"] == "true"
         for node in nodes
     )
-    if home_marker_count or feed_tab_selected:
+    if feed_tab_selected or "your story" in text_set:
         evidence["home_marker_count"] = home_marker_count
         return OwnProfileNavigationOutcome.HOME_FEED, evidence
     return OwnProfileNavigationOutcome.UNKNOWN_SCREEN, evidence
@@ -340,7 +455,10 @@ def navigate_to_own_profile_from_bottom_nav(
         expected_username=expected_username,
     )
     loading_retry_used = False
-    if outcome is OwnProfileNavigationOutcome.LOADING_INTERMEDIATE:
+    if outcome in {
+        OwnProfileNavigationOutcome.LOADING_INTERMEDIATE,
+        OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
+    }:
         loading_retry_used = True
         retry_s = float(getattr(config, "OWN_PROFILE_DESTINATION_LOADING_RETRY_S", 1.0) or 1.0)
         if retry_s > 0:
