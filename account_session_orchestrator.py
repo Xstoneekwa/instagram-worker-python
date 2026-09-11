@@ -3857,7 +3857,7 @@ def _prepare_follow_to_unfollow_probe_surface(
         if not verify_app_foreground(d, pkg):
             return _finish(False, "instagram_not_foreground_after_app_start")
 
-        if not open_own_profile_from_bottom_nav(d):
+        if not open_own_profile_from_bottom_nav(d, expected_username=uname):
             return _finish(False, "own_profile_open_failed")
 
         verified, meta = verify_own_profile(d, uname)

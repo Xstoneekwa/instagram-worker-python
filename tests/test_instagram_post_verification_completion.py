@@ -8,7 +8,12 @@ from instagram_post_verification_completion import (
     classify_post_verification_surface,
     prepare_post_verification_identity_surface,
 )
-from own_profile_navigation import open_own_profile_from_bottom_nav
+from own_profile_navigation import (
+    OwnProfileNavigationOutcome,
+    classify_own_profile_destination,
+    navigate_to_own_profile_from_bottom_nav,
+    open_own_profile_from_bottom_nav,
+)
 
 
 PACKAGE = "com.instagram.androig"
@@ -426,7 +431,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
                 stage="login_provisioning_post_login_identity",
             )
         self.assertFalse(result.ok)
-        self.assertEqual(result.failure_reason, "own_profile_open_failed")
+        self.assertEqual(result.failure_reason, "own_profile_navigation_stayed_on_home")
 
     def test_modern_home_wrong_package_never_enters_identity_handoff(self) -> None:
         wrong = MODERN_HOME_XML.replace(PACKAGE, "com.instagram.android")
@@ -495,13 +500,18 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(result.failure_reason, "active_instagram_account_mismatch")
 
     def test_home_xml_proves_foreground_when_app_current_is_temporarily_blank(self) -> None:
-        device = FakeDevice([HOME_XML], current_package="")
+        device = FakeDevice([HOME_XML, PROFILE_XML], current_package="")
         with (
             patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", PACKAGE),
             patch("own_profile_navigation.verify_app_foreground", return_value=False),
             patch("own_profile_navigation.time.sleep"),
         ):
-            self.assertTrue(open_own_profile_from_bottom_nav(device))
+            self.assertTrue(
+                open_own_profile_from_bottom_nav(
+                    device,
+                    expected_username="bmybusinesses",
+                )
+            )
         self.assertEqual(device.selector.click.call_count, 1)
 
     def test_nonempty_foreground_package_mismatch_never_uses_hierarchy_fallback(self) -> None:
@@ -516,7 +526,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
 
     def test_bound_clone_package_is_used_for_foreground_and_profile_resource_lookup(self) -> None:
         clone_package = "com.instagram.androig"
-        device = FakeDevice([HOME_XML], current_package=clone_package)
+        device = FakeDevice([PROFILE_XML], current_package=clone_package)
         with (
             patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", "com.instagram.android"),
             patch("own_profile_navigation.verify_app_foreground", return_value=True) as foreground,
@@ -526,6 +536,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
                 open_own_profile_from_bottom_nav(
                     device,
                     expected_package_name=clone_package,
+                    expected_username="bmybusinesses",
                 )
             )
         foreground.assert_called_once_with(device, clone_package)
@@ -547,6 +558,60 @@ class PostVerificationCompletionTests(unittest.TestCase):
             )
         foreground.assert_called_once_with(device, clone_package)
         self.assertEqual(device.selector.click.call_count, 0)
+
+    def test_profile_tab_click_without_destination_proof_is_not_success(self) -> None:
+        device = FakeDevice([HOME_XML])
+        with (
+            patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", PACKAGE),
+            patch("own_profile_navigation.verify_app_foreground", return_value=True),
+            patch("own_profile_navigation.time.sleep"),
+        ):
+            result = navigate_to_own_profile_from_bottom_nav(
+                device,
+                expected_username="bmybusinesses",
+            )
+        self.assertFalse(result.ok)
+        self.assertNotEqual(result.outcome, OwnProfileNavigationOutcome.PROFILE_OPENED)
+
+    def test_loading_after_click_retries_once_and_requires_profile_proof(self) -> None:
+        loading = '<hierarchy><node class="android.widget.ProgressBar" /></hierarchy>'
+        device = FakeDevice([loading, PROFILE_XML])
+        with (
+            patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", PACKAGE),
+            patch("own_profile_navigation.verify_app_foreground", return_value=True),
+            patch("own_profile_navigation.time.sleep") as sleep,
+        ):
+            result = navigate_to_own_profile_from_bottom_nav(
+                device,
+                expected_username="bmybusinesses",
+            )
+        self.assertTrue(result.ok)
+        self.assertTrue(result.loading_retry_used)
+        self.assertEqual(result.outcome, OwnProfileNavigationOutcome.PROFILE_OPENED)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_what_happened_and_restriction_surfaces_are_distinct_destinations(self) -> None:
+        what_happened = '<hierarchy><node text="What happened" /><node class="android.widget.ProgressBar" /></hierarchy>'
+        restriction = (
+            '<hierarchy><node text="We added a restriction to your account" />'
+            '<node text="You can\'t send messages" /></hierarchy>'
+        )
+        self.assertEqual(
+            classify_own_profile_destination(what_happened)[0],
+            OwnProfileNavigationOutcome.WHAT_HAPPENED_SCREEN,
+        )
+        self.assertEqual(
+            classify_own_profile_destination(restriction)[0],
+            OwnProfileNavigationOutcome.RESTRICTION_SCREEN,
+        )
+
+    def test_wrong_profile_title_never_proves_own_profile(self) -> None:
+        wrong = PROFILE_XML.replace("bmybusinesses", "different_account")
+        outcome, _ = classify_own_profile_destination(
+            wrong,
+            expected_username="bmybusinesses",
+        )
+        self.assertEqual(outcome, OwnProfileNavigationOutcome.UNKNOWN_SCREEN)
 
 
 if __name__ == "__main__":

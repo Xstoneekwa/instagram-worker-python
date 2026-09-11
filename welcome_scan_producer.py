@@ -525,7 +525,7 @@ def run_welcome_scan_producer(
         log("info", "welcome_scan_skipped", account_id=aid, reason="welcome_day_limit_reached")
         return _finish("skipped", 0, "welcome_day_limit_reached")
 
-    if not open_own_profile_from_bottom_nav(d):
+    if not open_own_profile_from_bottom_nav(d, expected_username=uname):
         log("error", "welcome_scan_aborted", reason="own_profile_open_failed")
         return _finish("failed", 1, "own_profile_open_failed")
 

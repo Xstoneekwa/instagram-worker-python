@@ -211,12 +211,17 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
             ),
             patch.object(runtime_incidents, "publish_account_incident") as publish,
             patch.object(instagram_account_status_publisher, "publish_instagram_account_status") as status_publish,
+            patch.object(guard, "log") as guard_log,
         ):
             result = self._verify()
 
         self.assertTrue(result.ok)
         publish.assert_not_called()
         status_publish.assert_not_called()
+        self.assertNotIn(
+            "active_instagram_account_mismatch",
+            [call.args[1] for call in guard_log.call_args_list if len(call.args) > 1],
+        )
 
     def test_expected_account_username_missing_does_not_publish(self) -> None:
         with (
@@ -254,6 +259,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
             ),
             patch.object(runtime_incidents, "publish_account_incident") as publish,
             patch.object(instagram_account_status_publisher, "publish_instagram_account_status") as status_publish,
+            patch.object(guard, "log") as guard_log,
         ):
             result = self._verify()
 
@@ -261,6 +267,10 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
         self.assertEqual(result.failure_reason, "actual_logged_in_username_not_detected")
         publish.assert_not_called()
         status_publish.assert_not_called()
+        self.assertNotIn(
+            "active_instagram_account_mismatch",
+            [call.args[1] for call in guard_log.call_args_list if len(call.args) > 1],
+        )
 
     def test_status_publish_helper_skips_non_mismatch_failure_reason(self) -> None:
         result = guard.AccountIdentityCheckResult(

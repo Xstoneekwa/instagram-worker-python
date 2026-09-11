@@ -77,6 +77,13 @@ class NabIdentityGuardReplayTest(unittest.TestCase):
         self.assertEqual(result.identity_evidence, "unavailable_due_to_restriction_surface")
         self.assertEqual(result.meta["identity_proof"], "unavailable_due_to_restriction_surface")
         self.assertEqual(result.meta["safety_scope"], "account_global")
+        self.assertEqual(result.meta["restriction_signal_scope"], "dm_only")
+        self.assertEqual(result.meta["restricted_capabilities"], ["direct_messages"])
+        self.assertEqual(
+            result.meta["global_block_reason"],
+            "identity_unavailable_due_to_occluding_restriction_surface",
+        )
+        self.assertTrue(result.meta["capability_scope_enforcement_deferred"])
         self.assertFalse(result.meta["business_actions_allowed"])
         self.assertEqual(result.meta["restriction_end_date"], "2026-09-22")
         capture.assert_not_called()
@@ -85,6 +92,14 @@ class NabIdentityGuardReplayTest(unittest.TestCase):
         self.assertEqual(payload["reason"], MESSAGES_DISABLED_REASON)
         self.assertIn("2026-09-22", payload["admin_message"])
         self.assertEqual(payload["metadata"]["restriction_detail_raw"], "You can't send messages")
+        self.assertEqual(payload["metadata"]["restriction_signal_scope"], "dm_only")
+        self.assertEqual(payload["metadata"]["restricted_capabilities"], ["direct_messages"])
+        self.assertEqual(payload["metadata"]["safety_scope"], "account_global")
+        self.assertEqual(
+            payload["metadata"]["global_block_reason"],
+            "identity_unavailable_due_to_occluding_restriction_surface",
+        )
+        self.assertTrue(payload["metadata"]["capability_scope_enforcement_deferred"])
 
     def test_restriction_already_occluding_pre_profile_surface_stops_without_navigation(self) -> None:
         with (

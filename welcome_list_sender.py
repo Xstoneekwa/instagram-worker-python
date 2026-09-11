@@ -1697,7 +1697,10 @@ def _restore_followers_after_job(
         method="own_profile_canonical_reopen",
     )
     followers_session_clear_list_committed_open(src)
-    profile_ok = own_profile_ok or open_own_profile_from_bottom_nav(d)
+    profile_ok = own_profile_ok or open_own_profile_from_bottom_nav(
+        d,
+        expected_username=src,
+    )
     opened = False
     open_meta: dict[str, Any] = {}
     if profile_ok:

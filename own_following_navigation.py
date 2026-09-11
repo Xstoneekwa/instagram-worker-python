@@ -873,7 +873,7 @@ def open_own_following_list_from_own_profile(
     del pkg  # kept for symmetry with existing own profile helpers.
     account_username = str(account_username or "").strip()
     log("info", "unfollow_open_own_profile_started", account_username=account_username)
-    if not open_own_profile_from_bottom_nav(d):
+    if not open_own_profile_from_bottom_nav(d, expected_username=account_username):
         log("info", "unfollow_open_following_list_failed", reason="own_profile_open_failed")
         return False, {"failure_reason": "own_profile_open_failed"}
 

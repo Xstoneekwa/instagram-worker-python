@@ -174,6 +174,7 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
         open_profile.assert_called_once_with(
             device,
             expected_package_name="com.instagram.androig",
+            expected_username="cinema_catchup",
         )
 
     def test_identity_failure_captures_screenshot_and_xml(self) -> None:
@@ -202,8 +203,8 @@ class AccountIdentityGuardRecoveryTest(unittest.TestCase):
             result = self._verify(device)
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.failure_reason, "own_profile_open_failed")
-        self.assertEqual(result.meta.get("screen_type"), "own_profile_open_failed")
+        self.assertEqual(result.failure_reason, "own_profile_navigation_stayed_on_home")
+        self.assertEqual(result.meta.get("screen_type"), "home_feed")
 
     def test_preflight_runner_propagates_identity_screen_metadata(self) -> None:
         identity = Mock(

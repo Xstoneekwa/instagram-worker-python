@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import uiautomator2 as u2
@@ -32,6 +36,170 @@ _PROFILE_TAB_RID_SUFFIXES: tuple[str, ...] = (
 )
 
 
+class OwnProfileNavigationOutcome(str, Enum):
+    """Fresh destination observed after the own-profile tab click."""
+
+    PROFILE_OPENED = "profile_opened"
+    WHAT_HAPPENED_SCREEN = "what_happened_screen"
+    RESTRICTION_SCREEN = "restriction_screen"
+    LOADING_INTERMEDIATE = "loading_intermediate"
+    HOME_FEED = "home_feed"
+    LOGIN_CHALLENGE = "login_challenge"
+    UNKNOWN_SCREEN = "unknown_screen"
+
+
+@dataclass(frozen=True)
+class OwnProfileNavigationResult:
+    outcome: OwnProfileNavigationOutcome
+    clicked: bool
+    selector: str = ""
+    hierarchy_xml: str = ""
+    loading_retry_used: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is OwnProfileNavigationOutcome.PROFILE_OPENED
+
+
+_WHAT_HAPPENED_TITLES = frozenset({"what happened", "ce qui s'est passe", "ce qui s’est passe"})
+_RESTRICTION_TITLE = "we added a restriction to your account"
+_RESTRICTION_DETAILS = frozenset({"you can't send messages", "you cannot send messages"})
+_LOGIN_CHALLENGE_MARKERS = (
+    "log in to instagram",
+    "enter security code",
+    "authentication code",
+    "help us confirm it's you",
+    "help us confirm it’s you",
+    "verify your account",
+)
+_HOME_MARKERS = frozenset({"your story", "suggested for you"})
+_PROFILE_STRUCTURE_RID_MARKERS = (
+    "profile_header",
+    "profile_tabs_container",
+    "profile_tab_layout",
+    "profile_tab_icon_view",
+    "media_tab",
+)
+_OWN_PROFILE_CONTROL_MARKERS = frozenset(
+    {"edit profile", "share profile", "modifier le profil", "partager le profil"}
+)
+
+
+def _normalize_surface_text(value: str) -> str:
+    return " ".join(html.unescape(str(value or "")).strip().casefold().split())
+
+
+def _parse_destination_nodes(hierarchy_xml: str) -> list[dict[str, str]]:
+    raw = str(hierarchy_xml or "").strip()
+    if not raw:
+        return []
+    try:
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{raw}</wrap>")
+    except Exception:
+        return []
+    return [
+        {
+            "text": str(node.get("text") or node.get("content-desc") or "").strip(),
+            "resource_id": str(node.get("resource-id") or "").strip(),
+            "class_name": str(node.get("class") or "").strip(),
+            "selected": str(node.get("selected") or "").strip().casefold(),
+        }
+        for node in root.iter()
+    ]
+
+
+def classify_own_profile_destination(
+    hierarchy_xml: str,
+    *,
+    expected_username: str = "",
+) -> tuple[OwnProfileNavigationOutcome, dict[str, Any]]:
+    """Classify one fresh post-click hierarchy without treating the click as proof."""
+    nodes = _parse_destination_nodes(hierarchy_xml)
+    texts = [_normalize_surface_text(node["text"]) for node in nodes if node["text"]]
+    text_set = set(texts)
+    evidence: dict[str, Any] = {
+        "hierarchy_xml_len": len(str(hierarchy_xml or "")),
+        "action_bar_title": "",
+        "expected_username": str(expected_username or "").strip().lstrip("@"),
+        "profile_structure_present": False,
+        "own_profile_control_present": False,
+        "profile_tab_selected": False,
+    }
+
+    if _RESTRICTION_TITLE in text_set or any(value in _RESTRICTION_DETAILS for value in text_set):
+        return OwnProfileNavigationOutcome.RESTRICTION_SCREEN, evidence
+    if any(value in _WHAT_HAPPENED_TITLES for value in text_set):
+        return OwnProfileNavigationOutcome.WHAT_HAPPENED_SCREEN, evidence
+    if any(marker in value for value in texts for marker in _LOGIN_CHALLENGE_MARKERS):
+        return OwnProfileNavigationOutcome.LOGIN_CHALLENGE, evidence
+
+    action_bar_title = ""
+    profile_structure_present = False
+    profile_tab_selected = False
+    for node in nodes:
+        rid = node["resource_id"].casefold()
+        value = str(node["text"] or "").strip().lstrip("@")
+        if "action_bar_title" in rid and value:
+            action_bar_title = value
+        if any(marker in rid for marker in _PROFILE_STRUCTURE_RID_MARKERS):
+            profile_structure_present = True
+        if rid.endswith("/profile_tab") and node["selected"] == "true":
+            profile_tab_selected = True
+    own_profile_control_present = any(value in _OWN_PROFILE_CONTROL_MARKERS for value in text_set)
+    evidence.update(
+        {
+            "action_bar_title": action_bar_title,
+            "profile_structure_present": profile_structure_present,
+            "own_profile_control_present": own_profile_control_present,
+            "profile_tab_selected": profile_tab_selected,
+        }
+    )
+
+    expected = _normalize_handle(expected_username or "")
+    actual = _normalize_handle(action_bar_title)
+    exact_expected_title = bool(expected and actual and actual == expected)
+    generic_profile_proof = bool(
+        action_bar_title
+        and (profile_structure_present or own_profile_control_present or profile_tab_selected)
+    )
+    if exact_expected_title or generic_profile_proof:
+        evidence["destination_proof"] = (
+            "exact_expected_action_bar_title" if exact_expected_title else "profile_surface_composite"
+        )
+        return OwnProfileNavigationOutcome.PROFILE_OPENED, evidence
+
+    loading_present = any(
+        value in {"loading", "loading...", "chargement", "chargement..."}
+        for value in text_set
+    ) or any("progressbar" in node["class_name"].casefold() for node in nodes)
+    if loading_present:
+        return OwnProfileNavigationOutcome.LOADING_INTERMEDIATE, evidence
+
+    home_marker_count = len(_HOME_MARKERS.intersection(text_set))
+    feed_tab_selected = any(
+        node["resource_id"].casefold().endswith("/feed_tab") and node["selected"] == "true"
+        for node in nodes
+    )
+    if home_marker_count or feed_tab_selected:
+        evidence["home_marker_count"] = home_marker_count
+        return OwnProfileNavigationOutcome.HOME_FEED, evidence
+    return OwnProfileNavigationOutcome.UNKNOWN_SCREEN, evidence
+
+
+def _dump_fresh_hierarchy(d: u2.Device) -> str:
+    try:
+        try:
+            return str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            return str(d.dump_hierarchy() or "")
+    except Exception:
+        return ""
+
+
 def _instagram_package_candidates(
     d: u2.Device,
     expected_package_name: str | None = None,
@@ -54,12 +222,13 @@ def _instagram_package_candidates(
     return pkgs
 
 
-def open_own_profile_from_bottom_nav(
+def navigate_to_own_profile_from_bottom_nav(
     d: u2.Device,
     *,
     expected_package_name: str | None = None,
-) -> bool:
-    """Open own profile via bottom navigation profile tab."""
+    expected_username: str = "",
+) -> OwnProfileNavigationResult:
+    """Click own profile and return a bounded, fresh destination verdict."""
     log("info", "welcome_baseline_own_profile_open_started")
     pkg = str(
         expected_package_name
@@ -88,7 +257,11 @@ def open_own_profile_from_bottom_nav(
                 actual_package=actual_package,
                 hierarchy_foreground_proof=False,
             )
-            return False
+            return OwnProfileNavigationResult(
+                outcome=OwnProfileNavigationOutcome.UNKNOWN_SCREEN,
+                clicked=False,
+                evidence={"failure_reason": "not_foreground"},
+            )
         log(
             "info",
             "welcome_baseline_foreground_proved_by_fresh_hierarchy",
@@ -149,20 +322,78 @@ def open_own_profile_from_bottom_nav(
         except Exception:
             pass
 
+    if not clicked:
+        log("info", "welcome_baseline_own_profile_open_failed", reason="profile_tab_not_found")
+        return OwnProfileNavigationResult(
+            outcome=OwnProfileNavigationOutcome.UNKNOWN_SCREEN,
+            clicked=False,
+            evidence={"failure_reason": "profile_tab_not_found"},
+        )
+
     settle = float(getattr(config, "WELCOME_BASELINE_OWN_PROFILE_SETTLE_S", 1.2) or 1.2)
     if settle > 0:
         time.sleep(settle)
 
-    if not clicked:
-        log("info", "welcome_baseline_own_profile_open_failed", reason="profile_tab_not_found")
-        return False
+    hierarchy = _dump_fresh_hierarchy(d)
+    outcome, evidence = classify_own_profile_destination(
+        hierarchy,
+        expected_username=expected_username,
+    )
+    loading_retry_used = False
+    if outcome is OwnProfileNavigationOutcome.LOADING_INTERMEDIATE:
+        loading_retry_used = True
+        retry_s = float(getattr(config, "OWN_PROFILE_DESTINATION_LOADING_RETRY_S", 1.0) or 1.0)
+        if retry_s > 0:
+            time.sleep(retry_s)
+        hierarchy = _dump_fresh_hierarchy(d)
+        outcome, evidence = classify_own_profile_destination(
+            hierarchy,
+            expected_username=expected_username,
+        )
+
+    result = OwnProfileNavigationResult(
+        outcome=outcome,
+        clicked=True,
+        selector=click_name,
+        hierarchy_xml=hierarchy,
+        loading_retry_used=loading_retry_used,
+        evidence=evidence,
+    )
+
+    if not result.ok:
+        log(
+            "info",
+            "welcome_baseline_own_profile_open_failed",
+            reason="destination_not_proved",
+            selector=click_name,
+            destination_outcome=result.outcome.value,
+            loading_retry_used=loading_retry_used,
+            destination_evidence=evidence,
+        )
+        return result
 
     log(
         "info",
         "welcome_baseline_own_profile_open_success",
         selector=click_name,
+        destination_outcome=result.outcome.value,
+        destination_evidence=evidence,
     )
-    return True
+    return result
+
+
+def open_own_profile_from_bottom_nav(
+    d: u2.Device,
+    *,
+    expected_package_name: str | None = None,
+    expected_username: str = "",
+) -> bool:
+    """Compatibility wrapper that is true only after own-profile destination proof."""
+    return navigate_to_own_profile_from_bottom_nav(
+        d,
+        expected_package_name=expected_package_name,
+        expected_username=expected_username,
+    ).ok
 
 
 def _header_has_follow_others_cta(d: u2.Device) -> bool:

@@ -44,7 +44,11 @@ from instagram_human_confirmation_challenge import (
 )
 from logs import log
 from runtime_artifacts import runtime_logs_root
-from own_profile_navigation import open_own_profile_from_bottom_nav
+from own_profile_navigation import (
+    OwnProfileNavigationOutcome,
+    classify_own_profile_destination,
+    open_own_profile_from_bottom_nav,
+)
 
 ACCOUNT_IDENTITY_MISMATCH_REASON = "active_instagram_account_mismatch"
 POSSIBLE_USERNAME_RENAME_REASON = "possible_username_rename_detected"
@@ -1154,7 +1158,19 @@ def verify_active_instagram_account_matches_expected(
             "detection_reason": restriction.reason_code,
             "identity_guard_stage": "account_restriction_surface",
             "identity_proof": "unavailable_due_to_restriction_surface",
+            "restriction_signal_scope": (
+                "dm_only"
+                if restriction.reason_code == MESSAGES_DISABLED_REASON
+                else "unknown"
+            ),
+            "restricted_capabilities": (
+                ["direct_messages"]
+                if restriction.reason_code == MESSAGES_DISABLED_REASON
+                else []
+            ),
             "safety_scope": "account_global",
+            "global_block_reason": "identity_unavailable_due_to_occluding_restriction_surface",
+            "capability_scope_enforcement_deferred": True,
             "fail_closed": True,
             "business_actions_allowed": False,
             "operator_action_required": True,
@@ -1175,7 +1191,7 @@ def verify_active_instagram_account_matches_expected(
             payload = runtime_incidents.build_instagram_account_restriction_incident(
                 account_id=account_id,
                 account_username=expected_raw,
-                restriction=restriction.to_dict(),
+                restriction=restriction_meta,
                 run_id=run_id,
                 run_type=run_type,
                 stage=stage,
@@ -1203,6 +1219,13 @@ def verify_active_instagram_account_matches_expected(
             restriction_state=restriction.restriction_state,
             restriction_start_date=restriction.restriction_start_date,
             restriction_end_date=restriction.restriction_end_date,
+            restriction_signal_scope=restriction_meta["restriction_signal_scope"],
+            restricted_capabilities=restriction_meta["restricted_capabilities"],
+            safety_scope=restriction_meta["safety_scope"],
+            global_block_reason=restriction_meta["global_block_reason"],
+            capability_scope_enforcement_deferred=restriction_meta[
+                "capability_scope_enforcement_deferred"
+            ],
             identity_proof="unavailable_due_to_restriction_surface",
             business_actions_allowed=False,
         )
@@ -1430,16 +1453,51 @@ def verify_active_instagram_account_matches_expected(
             or getattr(config, "INSTAGRAM_PACKAGE", "")
             or ""
         ),
+        expected_username=expected_raw,
     ):
         hierarchy = _dump_hierarchy(d)
+        challenge_identity = _human_confirmation_identity_boundary(hierarchy)
+        if challenge_identity is not None:
+            _log_identity_failure(
+                challenge_identity,
+                account_id=account_id,
+                run_type=run_type,
+                run_id=run_id,
+                stage=stage,
+            )
+            return challenge_identity
+        restriction_identity = _account_restriction_identity_boundary(hierarchy)
+        if restriction_identity is not None:
+            _log_identity_failure(
+                restriction_identity,
+                account_id=account_id,
+                run_type=run_type,
+                run_id=run_id,
+                stage=stage,
+            )
+            return restriction_identity
+        destination_outcome, destination_evidence = classify_own_profile_destination(
+            hierarchy,
+            expected_username=expected_raw,
+        )
+        failure_reason = {
+            OwnProfileNavigationOutcome.WHAT_HAPPENED_SCREEN: "own_profile_navigation_what_happened_screen",
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE: "own_profile_navigation_loading",
+            OwnProfileNavigationOutcome.HOME_FEED: "own_profile_navigation_stayed_on_home",
+            OwnProfileNavigationOutcome.LOGIN_CHALLENGE: "login_challenge",
+        }.get(destination_outcome, "own_profile_open_failed")
         result = _identity_failure_result(
             expected_raw=expected_raw,
             expected_stable_id=expected_stable_id,
-            failure_reason="own_profile_open_failed",
+            failure_reason=failure_reason,
             verification_method="open_own_profile_from_bottom_nav",
             meta={
                 **_screen_classification_meta(
-                    {"screen_type": "own_profile_open_failed", "detection_reason": "profile_tab_not_found"},
+                    {
+                        "screen_type": destination_outcome.value,
+                        "detection_reason": failure_reason,
+                        **destination_evidence,
+                    },
                     identity_guard_stage="open_own_profile_from_bottom_nav",
                 ),
                 **post_verification_metadata,
@@ -1556,19 +1614,28 @@ def verify_active_instagram_account_matches_expected(
             }
             identity_stage = PREFLIGHT_KEYGUARD_STAGE
             method = "preflight_keyguard_check"
+    identity_evidence = (
+        "username_mismatch_stable_id_unavailable"
+        if actual
+        else "username_not_detected"
+    )
     result = AccountIdentityCheckResult(
         ok=False,
         expected_account_username=expected_raw,
         actual_logged_in_username=actual_raw,
         expected_instagram_user_id=expected_stable_id,
         failure_reason=reason,
-        identity_evidence="username_mismatch_stable_id_unavailable",
+        identity_evidence=identity_evidence,
         rename_disambiguation_status=(
             "stable_instagram_user_id_not_available"
             if not expected_stable_id
             else "expected_stable_id_available_but_actual_stable_id_not_detected"
         ),
-        verification_method=f"own_profile_username_exact_mismatch:{method}",
+        verification_method=(
+            f"own_profile_username_exact_mismatch:{method}"
+            if actual
+            else f"own_profile_username_unavailable:{method}"
+        ),
         meta={
             **meta,
             **post_verification_metadata,
@@ -1585,27 +1652,12 @@ def verify_active_instagram_account_matches_expected(
             ),
         },
     )
-    log(
-        "error",
-        "active_instagram_account_mismatch",
+    _log_identity_failure(
+        result,
         account_id=account_id,
-        expected_account_username=expected_raw,
-        expected_instagram_user_id=expected_stable_id,
-        actual_logged_in_username=actual_raw,
-        actual_instagram_user_id="",
         run_type=run_type,
         run_id=run_id,
         stage=stage,
-        reason=ACCOUNT_IDENTITY_MISMATCH_REASON,
-        failure_reason=result.failure_reason,
-        identity_evidence=result.identity_evidence,
-        rename_disambiguation_status=result.rename_disambiguation_status,
-        future_possible_failure_reason=POSSIBLE_USERNAME_RENAME_REASON,
-        verification_method=result.verification_method,
-        screen_type=result.meta.get("screen_type"),
-        detection_reason=result.meta.get("detection_reason"),
-        identity_guard_stage=result.meta.get("identity_guard_stage"),
-        meta=meta,
     )
     if result.failure_reason == ACCOUNT_IDENTITY_MISMATCH_REASON:
         _publish_identity_mismatch_incident(

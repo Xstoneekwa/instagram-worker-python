@@ -437,7 +437,7 @@ def run_welcome_baseline_scan(
         log("error", "welcome_baseline_aborted", reason="ensure_dm_settings_failed", error=str(e))
         return _finish("failed", 1, "ensure_dm_settings_failed")
 
-    if not open_own_profile_from_bottom_nav(d):
+    if not open_own_profile_from_bottom_nav(d, expected_username=uname):
         log("error", "welcome_baseline_aborted", reason="own_profile_open_failed")
         return _finish("failed", 1, "own_profile_open_failed")
     own_profile_open_ok = True
