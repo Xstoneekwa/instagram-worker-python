@@ -1841,13 +1841,7 @@ def archive_follow_target_private_streak(
     threshold: int,
     observed_streak: int,
 ) -> dict[str, Any]:
-    """Archive one exact CT after the run-local private-streak gate fires.
-
-    The identity predicate and returned representation make a missing or
-    mismatched row fail closed.  Existing ``status``/``archived_at`` fields are
-    reused; this function does not introduce a schema or retry an ambiguous
-    mutation.
-    """
+    """Archive one exact CT through the canonical transactional transition."""
 
     tid = str(target_id or "").strip()
     aid = str(account_id or "").strip()
@@ -1863,33 +1857,55 @@ def archive_follow_target_private_streak(
     if expected_threshold <= 0 or streak < expected_threshold:
         raise ValueError("private_streak_archive_threshold_not_proved")
 
-    now = _utc_now_iso()
-    rows = _request_json(
-        "PATCH",
-        "ig_targets",
-        query={
-            "id": f"eq.{tid}",
-            "account_id": f"eq.{aid}",
-            "status": "in.(valid,active)",
+    ownership = get_active_client_instagram_account_ownership_rows(aid)
+    if len(ownership) != 1:
+        raise RuntimeError("private_streak_archive_tenant_scope_ambiguous")
+    tenant_id = str(ownership[0].get("client_id") or "").strip()
+    if not tenant_id or str(ownership[0].get("account_id") or "").strip() != aid:
+        raise RuntimeError("private_streak_archive_tenant_scope_invalid")
+
+    import uuid
+
+    intent_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "phonefarm:archive-transition-v1:private-streak:"
+        f"{tenant_id}:{aid}:{tid}:{rid}:threshold-{expected_threshold}",
+    ))
+    response = call_rpc(
+        "archive_targets_transition_batch_v1",
+        {
+            "p_request": {
+                "contract": "archive_transition_v1",
+                "tenant_id": tenant_id,
+                "account_id": aid,
+                "archive_intent_id": intent_id,
+                "target_ids": [tid],
+                "reason": "consecutive_private_opened_profiles",
+                "source": "private_streak",
+                "actor_type": "system",
+                "actor_id": None,
+                "evidence_reference": (
+                    f"private-streak/run/{rid}/threshold/{expected_threshold}/proved"
+                ),
+            }
         },
-        body={
-            "status": "archived",
-            "archived_at": now,
-            "updated_at": now,
-            "last_error": "consecutive_private_opened_profiles",
-        },
-        prefer_representation=True,
     )
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
-        raise RuntimeError("private_streak_archive_exact_row_not_updated")
-    row = dict(rows[0])
+    if not isinstance(response, dict):
+        raise RuntimeError("private_streak_archive_rpc_contract_invalid")
+    items = response.get("items")
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        raise RuntimeError("private_streak_archive_rpc_result_invalid")
+    item = dict(items[0])
+    outcome = str(item.get("outcome") or "").strip().lower()
+    archived_at = str(item.get("archived_at") or "").strip()
     if (
-        str(row.get("id") or "") != tid
-        or str(row.get("account_id") or "") != aid
-        or str(row.get("status") or "").lower() != "archived"
-        or not str(row.get("archived_at") or "").strip()
+        response.get("contract") != "archive_transition_v1"
+        or str(response.get("account_id") or "") != aid
+        or str(item.get("target_id") or "") != tid
+        or outcome not in {"archived", "already_archived"}
+        or not archived_at
     ):
-        raise RuntimeError("private_streak_archive_representation_mismatch")
+        raise RuntimeError("private_streak_archive_rpc_result_mismatch")
     log(
         "info",
         "follow_target_private_streak_archived",
@@ -1899,14 +1915,18 @@ def archive_follow_target_private_streak(
         observed_streak=streak,
         threshold=expected_threshold,
         reason="consecutive_private_opened_profiles",
-        archived_at=str(row.get("archived_at")),
+        archive_intent_id=intent_id,
+        outcome=outcome,
+        archived_at=archived_at,
     )
     return {
         "ok": True,
         "target_id": tid,
         "account_id": aid,
         "status": "archived",
-        "archived_at": str(row.get("archived_at")),
+        "archived_at": archived_at,
+        "archive_intent_id": intent_id,
+        "outcome": outcome,
     }
 
 

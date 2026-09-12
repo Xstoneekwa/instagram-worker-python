@@ -5153,14 +5153,18 @@ class FollowTargetPrivateStreakRuntimeIntegrationTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn(reason, {"status_not_active", "status_blocked", "archived"})
 
-    def test_archive_uses_exact_account_target_predicate(self) -> None:
-        returned = [{
-            "id": "target-1",
+    def test_archive_uses_canonical_transactional_rpc(self) -> None:
+        returned = {
+            "contract": "archive_transition_v1",
             "account_id": "account-1",
-            "status": "archived",
-            "archived_at": "2026-09-10T00:00:00+00:00",
-        }]
-        with patch.object(supabase_client, "_request_json", return_value=returned) as request_json:
+            "items": [{
+                "target_id": "target-1",
+                "outcome": "archived",
+                "archived_at": "2026-09-10T00:00:00+00:00",
+            }],
+        }
+        ownership = [{"client_id": "tenant-1", "account_id": "account-1"}]
+        with patch.object(supabase_client, "get_active_client_instagram_account_ownership_rows", return_value=ownership), patch.object(supabase_client, "call_rpc", return_value=returned) as call_rpc, patch.object(supabase_client, "_request_json") as request_json:
             out = supabase_client.archive_follow_target_private_streak(
                 target_id="target-1",
                 account_id="account-1",
@@ -5169,19 +5173,21 @@ class FollowTargetPrivateStreakRuntimeIntegrationTests(unittest.TestCase):
                 observed_streak=8,
             )
         self.assertTrue(out["ok"])
-        kwargs = request_json.call_args.kwargs
-        self.assertEqual(kwargs["query"]["id"], "eq.target-1")
-        self.assertEqual(kwargs["query"]["account_id"], "eq.account-1")
-        self.assertEqual(kwargs["body"]["status"], "archived")
-        self.assertEqual(
-            kwargs["body"]["last_error"],
-            "consecutive_private_opened_profiles",
-        )
-        self.assertTrue(kwargs["prefer_representation"])
+        request_json.assert_not_called()
+        self.assertEqual(call_rpc.call_args.args[0], "archive_targets_transition_batch_v1")
+        request_body = call_rpc.call_args.args[1]["p_request"]
+        self.assertEqual(request_body["tenant_id"], "tenant-1")
+        self.assertEqual(request_body["account_id"], "account-1")
+        self.assertEqual(request_body["target_ids"], ["target-1"])
+        self.assertEqual(request_body["source"], "private_streak")
+        self.assertEqual(request_body["reason"], "consecutive_private_opened_profiles")
+        self.assertEqual(request_body["actor_type"], "system")
+        self.assertEqual(out["archive_intent_id"], request_body["archive_intent_id"])
 
-    def test_archive_fails_closed_when_exact_row_is_missing(self) -> None:
-        with patch.object(supabase_client, "_request_json", return_value=[]):
-            with self.assertRaisesRegex(RuntimeError, "exact_row_not_updated"):
+    def test_archive_fails_closed_when_rpc_result_is_missing(self) -> None:
+        ownership = [{"client_id": "tenant-1", "account_id": "account-1"}]
+        with patch.object(supabase_client, "get_active_client_instagram_account_ownership_rows", return_value=ownership), patch.object(supabase_client, "call_rpc", return_value={"contract": "archive_transition_v1", "account_id": "account-1", "items": []}):
+            with self.assertRaisesRegex(RuntimeError, "rpc_result_invalid"):
                 supabase_client.archive_follow_target_private_streak(
                     target_id="target-1",
                     account_id="account-1",
@@ -5189,6 +5195,24 @@ class FollowTargetPrivateStreakRuntimeIntegrationTests(unittest.TestCase):
                     threshold=8,
                     observed_streak=8,
                 )
+
+    def test_archive_retry_reuses_deterministic_intent(self) -> None:
+        ownership = [{"client_id": "tenant-1", "account_id": "account-1"}]
+        returned = {
+            "contract": "archive_transition_v1",
+            "account_id": "account-1",
+            "items": [{"target_id": "target-1", "outcome": "archived", "archived_at": "2026-09-10T00:00:00+00:00"}],
+        }
+        with patch.object(supabase_client, "get_active_client_instagram_account_ownership_rows", return_value=ownership), patch.object(supabase_client, "call_rpc", return_value=returned):
+            first = supabase_client.archive_follow_target_private_streak(target_id="target-1", account_id="account-1", run_id="run-1", threshold=8, observed_streak=8)
+            retry = supabase_client.archive_follow_target_private_streak(target_id="target-1", account_id="account-1", run_id="run-1", threshold=8, observed_streak=9)
+        self.assertEqual(first["archive_intent_id"], retry["archive_intent_id"])
+
+    def test_archive_fails_closed_on_ambiguous_tenant_scope(self) -> None:
+        with patch.object(supabase_client, "get_active_client_instagram_account_ownership_rows", return_value=[]), patch.object(supabase_client, "call_rpc") as call_rpc:
+            with self.assertRaisesRegex(RuntimeError, "tenant_scope_ambiguous"):
+                supabase_client.archive_follow_target_private_streak(target_id="target-1", account_id="account-1", run_id="run-1", threshold=8, observed_streak=8)
+        call_rpc.assert_not_called()
 
     def test_runner_archives_only_after_resume_lease_release(self) -> None:
         source = inspect.getsource(runner._run_followers_list_engine_session)
