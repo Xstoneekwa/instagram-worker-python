@@ -8,8 +8,16 @@ from auto_restart_runtime import (
     _canonical_request_attempt_context,
     is_auto_restart_request,
     phase_enabled,
-    validate_auto_restart_request_at_claim,
+    validate_claimed_auto_restart_request as validate_auto_restart_request_at_claim,
 )
+
+
+def _claimed_fixture(account_id, attempt):
+    """Independent SQL-row fixture for the claim boundary; no prior-run fallback."""
+    return {"id": "33333333-3333-4333-8333-333333333333",
+            "account_id": account_id,
+            "root_business_session_id": "44444444-4444-4444-8444-444444444444",
+            "execution_attempt_no": attempt, "retry_index": attempt - 1}
 
 
 class AutoRestartRuntimeTests(unittest.TestCase):
@@ -74,6 +82,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             "auto_restart_resume_plan": embedded,
         }
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture(account_id, 1),
             account_id=account_id,
             metadata={
                 "auto_restart": True,
@@ -172,6 +181,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
 
     def test_validate_blocks_missing_prior_run(self) -> None:
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 1),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={"auto_restart": True, "source": "auto_restart_tick", "resume_plan_version": 1},
         )
@@ -192,6 +202,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         }
         load_summary.return_value = summary
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 2),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,
@@ -202,7 +213,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
                 "prior_run_id": "22222222-2222-4222-8222-222222222222",
                 "resume_plan": {
                     "schema": "AUTO_RESTART_RESUME_PLAN_V1",
-                    "attempt_id": 1,
+                    "attempt_id": 2,
                     "restart_allowed": True,
                     "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
                 },
@@ -226,6 +237,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         }
         load_summary.return_value = summary
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 1),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,
@@ -269,6 +281,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         manual = build_manual_resume_command(summary, resume_plan=summary["auto_restart_resume_plan"])
         self.assertTrue(manual["manual_resume_allowed"])
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 2),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,
@@ -318,6 +331,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             },
         }
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture(account_id, 2),
             account_id=account_id,
             metadata={
                 "auto_restart": True,
@@ -368,6 +382,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             "follow_quota_target": 10,
         }
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture(account_id, 2),
             account_id=account_id,
             metadata={
                 "auto_restart": True,
@@ -379,7 +394,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
                 "prior_run_id": prior_run_id,
                 "resume_plan": {
                     "schema": "AUTO_RESTART_RESUME_PLAN_V1",
-                    "attempt_id": 1,
+                    "attempt_id": 2,
                     "restart_allowed": True,
                     "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
                     "quota_remaining": {"follow": 2, "unfollow": 0, "total": 2},
@@ -393,6 +408,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
     @patch("auto_restart_runtime.load_prior_run_summary")
     def test_auto_restart_request_without_canonical_attempt_fails_closed(self, load_summary) -> None:
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 1),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,
@@ -414,6 +430,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
     @patch("auto_restart_runtime.load_prior_run_summary")
     def test_conflicting_request_attempt_fields_fail_closed(self, load_summary) -> None:
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 2),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,
@@ -430,7 +447,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             },
         )
         self.assertFalse(ok)
-        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertEqual(reason, "resume_claim_lineage_mismatch")
         self.assertIsNone(policy)
         load_summary.assert_not_called()
 
@@ -438,6 +455,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
     def test_explicit_invalid_source_lineage_fails_before_prior_run_load(self, load_summary) -> None:
         prior_run_id = "22222222-2222-4222-8222-222222222222"
         ok, reason, policy = validate_auto_restart_request_at_claim(
+            claimed_request=_claimed_fixture("11111111-1111-4111-8111-111111111111", 2),
             account_id="11111111-1111-4111-8111-111111111111",
             metadata={
                 "auto_restart": True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from typing import Any
 
 from account_session_manual_resume import UNKNOWN, UNSUPPORTED_RUNTIME_STATUS, build_manual_resume_command
@@ -81,6 +82,85 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _claimed_request_lineage(
+    account_id: str, request: dict[str, Any] | None, meta: dict[str, Any],
+) -> dict[str, Any]:
+    """The claimed SQL row owns identity; metadata is only a checked projection.
+
+    Source parent is ancestry. Terminal parent is the *current* request, as in
+    the atomic admission capsule. Never carry a prior request into that slot.
+    """
+    row = _read_record(request)
+
+    def identity(value: Any) -> str:
+        raw = str(value or "").strip()
+        try:
+            parsed = str(uuid.UUID(raw))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("resume_claim_lineage_missing_or_invalid") from exc
+        if raw != parsed:
+            raise ValueError("resume_claim_lineage_missing_or_invalid")
+        return parsed
+
+    def number(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise ValueError("resume_claim_lineage_mismatch")
+        raw = str(value)
+        if not raw.isascii() or not raw.isdecimal():
+            raise ValueError("resume_claim_lineage_mismatch")
+        return int(raw)
+
+    request_id = identity(row.get("id"))
+    root = identity(row.get("root_business_session_id"))
+    if identity(row.get("account_id")) != identity(account_id):
+        raise ValueError("resume_claim_account_mismatch")
+    attempt = number(row.get("execution_attempt_no"))
+    retry = number(row.get("retry_index"))
+    if attempt not in (1, 2, 3) or retry != attempt - 1:
+        raise ValueError("resume_claim_lineage_mismatch")
+    source = str(meta.get("source_request_id") or "").strip()
+    prior = str(meta.get("prior_run_id") or "").strip()
+    if source:
+        identity(source)
+    for record in (meta, _read_record(meta.get("resume_plan"))):
+        for key in ("attempt_id", "current_attempt_id", "execution_attempt_no"):
+            if record.get(key) not in (None, "") and number(record[key]) != attempt:
+                raise ValueError("resume_claim_lineage_mismatch")
+        if record.get("retry_index") not in (None, "") and number(record["retry_index"]) != retry:
+            raise ValueError("resume_claim_lineage_mismatch")
+        if record.get("root_business_session_id") not in (None, ""):
+            if identity(record["root_business_session_id"]) != root:
+                raise ValueError("resume_claim_lineage_mismatch")
+        # Historical schedule labels are not UUID lineage authority. They
+        # cannot win over the row and are never propagated as terminal root.
+        business = str(record.get("business_session_id") or "").strip()
+        if business and not business.startswith("scheduled:") and business != root:
+            raise ValueError("resume_claim_lineage_mismatch")
+        parent = str(record.get("parent_request_id") or "").strip()
+        if parent and parent not in (request_id, source):
+            raise ValueError("resume_claim_lineage_mismatch")
+        if record.get("source_request_id") not in (None, "", source):
+            raise ValueError("resume_claim_lineage_mismatch")
+        for key in ("prior_run_id", "source_run_id", "previous_run_id"):
+            if record.get(key) not in (None, "", prior):
+                raise ValueError("resume_claim_lineage_mismatch")
+        if record.get("account_id") not in (None, "", account_id):
+            raise ValueError("resume_claim_account_mismatch")
+    return {
+        "request_id": request_id, "parent_request_id": request_id,
+        "root_business_session_id": root, "business_session_id": root,
+        "execution_attempt_no": attempt, "attempt_id": attempt,
+        "current_attempt_id": attempt, "retry_index": retry,
+    }
+
+
+def _bind_claimed_lineage(policy: dict[str, Any], lineage: dict[str, Any]) -> dict[str, Any]:
+    # Keep frozen business plans and checkpoints untouched. Only the runtime
+    # identity envelope is bound to the same tuple used by admission.
+    return {**policy, **lineage,
+            "request_metadata": {**_read_record(policy.get("request_metadata")), **lineage}}
 
 
 def _canonical_request_attempt_context(
@@ -395,20 +475,44 @@ def _validate_human_confirmed_resume_at_claim(
     return True, "", policy
 
 
-def validate_auto_restart_request_at_claim(
+def validate_claimed_auto_restart_request(
     *,
     account_id: str,
     metadata: dict[str, Any] | None,
+    claimed_request: dict[str, Any] | None,
 ) -> tuple[bool, str, dict[str, Any] | None]:
+    """Production claim boundary: SQL identity is mandatory before policy IO."""
     meta = dict(metadata or {})
     if not is_auto_restart_request(meta):
         return True, "", None
 
+    # The new INSERT lineage contract concerns account-session continuations.
+    # Outreach keeps its existing independent request/policy contract.
+    if _read_record(claimed_request).get("requested_run_type") == "outreach_session":
+        return validate_auto_restart_request_at_claim(account_id=account_id, metadata=meta)
+
+    try:
+        lineage = _claimed_request_lineage(account_id, claimed_request, meta)
+    except ValueError as exc:
+        return False, str(exc), None
+
+    ok, reason, policy = validate_auto_restart_request_at_claim(account_id=account_id, metadata=meta)
+    return ok, reason, _bind_claimed_lineage(policy, lineage) if ok and policy else policy
+
+
+def validate_auto_restart_request_at_claim(
+    *, account_id: str, metadata: dict[str, Any] | None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Existing metadata/policy validator; does not establish SQL claim identity.
+
+    The dispatcher must use validate_claimed_auto_restart_request, which first
+    validates the full claimed row and then binds this policy to that identity.
+    """
+    meta = dict(metadata or {})
+    if not is_auto_restart_request(meta):
+        return True, "", None
     if is_human_confirmed_resume_request(meta):
-        return _validate_human_confirmed_resume_at_claim(
-            account_id=account_id,
-            meta=meta,
-        )
+        return _validate_human_confirmed_resume_at_claim(account_id=account_id, meta=meta)
 
     embedded = _read_record(meta.get("resume_plan"))
     failure_category = str(

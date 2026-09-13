@@ -55,7 +55,7 @@ from auto_restart_runtime import (
     is_hard_stop_reason,
     log_auto_restart_claim_validation,
     runner_env_for_resume_policy,
-    validate_auto_restart_request_at_claim,
+    validate_claimed_auto_restart_request,
 )
 from logs import log
 import incident_notifications
@@ -3683,9 +3683,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 error_message_safe="Device lock binding unavailable before Worker spawn.")
             return
     if is_auto_restart_request(request_metadata):
-        ok_resume, resume_reason, auto_restart_policy = validate_auto_restart_request_at_claim(
+        ok_resume, resume_reason, auto_restart_policy = validate_claimed_auto_restart_request(
             account_id=account_id,
             metadata=request_metadata,
+            claimed_request=request,
         )
         log_auto_restart_claim_validation(
             account_id=account_id,
