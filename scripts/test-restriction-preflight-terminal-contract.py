@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Replay real migrations in a disposable PG17 + PostgREST; no production DSN.
+
+The Backend is a read-only schema dependency, pinned below. The HTTP adapter
+only strips Supabase's /rest/v1 prefix. No application RPC is mocked.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+PG = Path('/opt/homebrew/opt/postgresql@17/bin')
+BACKEND_SHA = 'e8419c560f3623a50cbdefdb9c3a9b56235725ea'
+MIGRATION = '20260914122213_operator_stop_natural_tick_lineage_v1.sql'
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--backend-root', type=Path, required=True)
+    ap.add_argument('--output', type=Path, required=True)
+    ap.add_argument('--test-name', help='Run one named isolated contract after full migration replay.')
+    ap.add_argument('--lineage-only', action='store_true',
+                    help='Run the existing terminal-lineage SQL tests with this migration installed.')
+    ap.add_argument('--restriction-only', action='store_true', help='Run inherited restriction/readiness real SQL tests with the new trigger.')
+    ap.add_argument('--operator-only', action='store_true')
+    args = ap.parse_args()
+    human = not (args.operator_only or args.lineage_only or args.restriction_only)
+    if human: args.restriction_only = True
+    if args.lineage_only and args.restriction_only: ap.error('select one contract group')
+    backend = args.backend_root.resolve()
+    if subprocess.check_output(['git', '-C', str(backend), 'rev-parse', 'HEAD'], text=True).strip() != BACKEND_SHA:
+        raise RuntimeError('schema_dependency_sha_mismatch')
+    if subprocess.check_output(['git', '-C', str(backend), 'status', '--porcelain'], text=True).strip():
+        raise RuntimeError('schema_dependency_dirty')
+    output = args.output.resolve()
+    output.relative_to(ROOT.parent)  # Task-owned evidence, never a runtime path.
+    if output.is_relative_to(ROOT) or output.exists():
+        raise RuntimeError('new_external_evidence_path_required')
+    output.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('PG', 'SUPABASE', 'PGRST', 'PHONEFARM_', 'WORKER_', 'AUTO_RESTART_'))}
+    env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env['RUNTIME_INCIDENTS_ENABLED'] = 'true'
+    migrations = []
+    port = '55483' if args.lineage_only else '55484'
+    prefix = 'auto-restart-lineage-pg17-' if args.lineage_only else 'restriction-resume-pg17-'
+    with tempfile.TemporaryDirectory(prefix=prefix, dir='/private/tmp') as tmp:
+        task = Path(tmp)
+        env['PHONEFARM_RUNTIME_ROOT'] = str(task / 'runtime')
+        command = lambda cmd, **kw: subprocess.run([str(x) for x in cmd], env=env, check=True, **kw)
+        try:
+            command([PG / 'initdb', '-D', task / 'db', '-A', 'trust', '-U', 'postgres', '--no-locale'], capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError('isolated_initdb_failed:' + exc.stderr) from exc
+        pglog = (output / 'postgres.log').open('w')
+        server = subprocess.Popen([str(PG / 'postgres'), '-D', str(task / 'db'), '-k', tmp,
+                                   '-p', port, '-c', 'listen_addresses='], env=env, stdout=pglog, stderr=subprocess.STDOUT)
+        rest = None
+        adapter = None
+        try:
+            for _ in range(100):
+                if (task / ('.s.PGSQL.' + port)).exists():
+                    break
+                if server.poll() is not None:
+                    raise RuntimeError('isolated_postgres_start_failed')
+                time.sleep(.05)
+            psql = [PG / 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', tmp, '-p', port, '-U', 'postgres', '-d', 'postgres']
+            def sql(query):
+                r = command(psql, input=query, text=True, capture_output=True)
+                return r.stdout.strip()
+            def replay(path):
+                raw = path.read_bytes()
+                try:
+                    sql(raw.decode())
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError(f'migration_failed:{path.name}:{exc.stderr[-3000:]}') from exc
+                migrations.append({'name': path.name, 'sha256': hashlib.sha256(raw).hexdigest()})
+            for name in ('0000_local_platform_compatibility.sql', '20260728001632_public_schema.sql'):
+                replay(backend / 'supabase/baseline' / name)
+            sql("INSERT INTO auth.users(id,email) VALUES ('580d7856-d60f-4838-a5f9-3b405d6ae79b','synthetic-owner@example.invalid'); INSERT INTO public.tenant_users(user_id,role) VALUES ('580d7856-d60f-4838-a5f9-3b405d6ae79b','superadmin');")
+            files = [p for p in (backend / 'supabase/migrations').glob('*.sql')
+                     if p.name[0].isdigit() and p.name > '20260728001632' and 'rollback' not in p.name.lower()]
+            files += [ROOT / 'supabase/migrations' / n for n in (
+                '20260826021814_control_plane_reliability_v1.sql',
+                '20260826134332_fast_recovery_active_state_v1.sql',
+                '20260826222059_resume_plan_contract_v1.sql',
+                '20260911140247_worker_promotion_admission_fence_v1.sql')]
+            for path in sorted(files, key=lambda p: p.name):
+                if path.name == '20260815024500_pre_run_incident_resume_not_null_v1.sql':
+                    definition = sql("select pg_get_functiondef(oid) from pg_proc where proname='reconcile_resolved_pre_run_incident_authorizations_v1'")
+                    import re
+                    if not re.search(r"restart_block_reason\s*=\s*''", definition):
+                        raise RuntimeError('historical_preapplied_fix_not_proven')
+                    continue
+                replay(path)
+            replay(ROOT / 'supabase/migrations/20260913100519_auto_restart_terminal_lineage_v1.sql')
+            for name in ('seed.sql', 'ready.sql', 'settings.sql', 'package.sql'):
+                replay(backend / 'tests/auto-restart-real-pg17-v2' / name)
+            if args.restriction_only:
+                replay(ROOT / 'tests/restriction_resume_natural_tick_v1.sql')
+                replay(ROOT / 'supabase/migrations/20260914021526_restriction_resume_natural_tick_v1.sql')
+                overlays = ROOT.parent / 'worker-restriction-resume-natural-tick-v1-activation/pg17-rollout-final/production-definition-overlays.json'
+                expected = json.loads(overlays.read_text())
+                catalog = json.loads((overlays.parents[1] / 'production-catalog-before.json').read_text())
+                for name, digest in expected.items():
+                    value = next(v for v in catalog if v['proname'] == name)
+                    if hashlib.sha256(value['definition'].encode()).hexdigest() != digest:
+                        raise RuntimeError('production_overlay_evidence_changed')
+                    sql(value['definition'] + ';')
+                replay(ROOT / 'supabase/migrations/20260914104008_resolved_incident_growth_ready_v1.sql')
+                replay(ROOT / 'supabase/migrations' / MIGRATION)
+                replay(ROOT / 'tests/resolved_incident_growth_ready_v1.sql')
+            else:
+                replay(ROOT / 'tests/auto_restart_terminal_lineage_v1.sql')
+                replay(ROOT / 'supabase/migrations/20260914021526_restriction_resume_natural_tick_v1.sql')
+                replay(ROOT / 'supabase/migrations/20260914104008_resolved_incident_growth_ready_v1.sql')
+                # Preserve exact predecessor for the required fail-before/pass-after
+                # test and isolated rollback. Production is never contacted.
+                (output / 'predecessor.sql').write_text(sql(
+                    "select pg_get_functiondef(to_regprocedure('public.apply_ordinary_auto_restart_lineage_v1()'))") + ';\n')
+                if args.lineage_only:
+                    replay(ROOT / 'supabase/migrations' / MIGRATION)
+                else:
+                    replay(ROOT / 'tests/operator_stop_natural_tick_lineage_v1.sql')
+            if human:
+                (output / 'predecessor.sql').write_text(sql("select pg_get_functiondef('public.reconcile_stale_account_session_resume_plans_v1(integer)'::regprocedure)")+';\n')
+                replay(ROOT / 'tests/human_resume_terminal_plan_v1.sql')
+            if True:
+                replay(ROOT / 'supabase/migrations/20260914223102_human_resume_terminal_plan_v1.sql')
+            (output / 'migration-replay.json').write_text(json.dumps(migrations, indent=2) + '\n')
+            def free_port():
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', 0))
+                    return sock.getsockname()[1]
+            rest_port = free_port()
+            secret = 'local-only-terminal-lineage-fixture-not-a-production-key'
+            encode = lambda x: base64.urlsafe_b64encode(json.dumps(x).encode()).rstrip(b'=').decode()
+            content = encode({'alg': 'HS256', 'typ': 'JWT'}) + '.' + encode({'role': 'service_role', 'exp': int(time.time()) + 3600})
+            token = content + '.' + base64.urlsafe_b64encode(hmac.new(secret.encode(), content.encode(), hashlib.sha256).digest()).rstrip(b'=').decode()
+            restenv = {**env, 'PGRST_DB_URI': f'postgresql://postgres@/postgres?host={tmp}&port={port}',
+                       'PGRST_DB_SCHEMAS': 'public', 'PGRST_DB_ANON_ROLE': 'anon',
+                       'PGRST_SERVER_HOST': '127.0.0.1', 'PGRST_SERVER_PORT': str(rest_port),
+                       'PGRST_JWT_SECRET': secret}
+            restlog = (output / 'postgrest.log').open('w')
+            rest = subprocess.Popen(['/opt/homebrew/bin/postgrest'], env=restenv, stdout=restlog, stderr=subprocess.STDOUT)
+            for _ in range(100):
+                try:
+                    with socket.create_connection(('127.0.0.1', rest_port), .1):
+                        break
+                except OSError:
+                    if rest.poll() is not None:
+                        raise RuntimeError('isolated_postgrest_start_failed')
+                    time.sleep(.05)
+            class Adapter(BaseHTTPRequestHandler):
+                def log_message(self, *_):
+                    pass
+                def handle_rpc(self):
+                    if not self.path.startswith('/rest/v1/'):
+                        self.send_error(404)
+                        return
+                    body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                    headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection')}
+                    connection = http.client.HTTPConnection('127.0.0.1', rest_port, timeout=10)
+                    connection.request(self.command, self.path[len('/rest/v1'):], body, headers)
+                    response = connection.getresponse()
+                    data = response.read()
+                    self.send_response(response.status)
+                    for k, v in response.getheaders():
+                        if k.lower() not in ('transfer-encoding', 'connection', 'content-length'):
+                            self.send_header(k, v)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    connection.close()
+                do_GET = do_POST = do_PATCH = do_HEAD = handle_rpc
+            adapter = ThreadingHTTPServer(('127.0.0.1', 0), Adapter)
+            threading.Thread(target=adapter.serve_forever, daemon=True).start()
+            testenv = {**env, 'SUPABASE_URL': f'http://127.0.0.1:{adapter.server_port}',
+                       'SUPABASE_SERVICE_ROLE_KEY': token, 'RESTRICTION_TEST_SOCKET': tmp,
+                       'RESTRICTION_TEST_BACKEND_ROOT': str(backend), 'RESTRICTION_TEST_OUTPUT': str(output), 'OPERATOR_STOP_TEST_SOCKET': tmp,
+                       'OPERATOR_STOP_TEST_PORT': port, 'OPERATOR_STOP_TEST_OUTPUT': str(output),
+                       'OPERATOR_STOP_BACKEND_ROOT': str(backend)}
+            test_file = 'test_operator_stop_natural_tick_lineage_v1.py'
+            if args.restriction_only:
+                test_file = 'test_resolved_incident_growth_ready_v1.py'
+            if args.lineage_only:
+                testenv.update(LINEAGE_TEST_SOCKET=tmp, LINEAGE_TEST_OUTPUT=str(output))
+                test_file = 'test_auto_restart_terminal_lineage_v1.py'
+            if human: test_file = 'test_restriction_preflight_terminal_contract.py'
+            selection = ['-k', args.test_name] if args.test_name else []
+            entry = ['-m', 'unittest', 'discover', '-s', 'tests', '-p', test_file, '-v', *selection]
+            if args.restriction_only and not human:
+                # The inherited two rollback tests locate an external receipt
+                # via ROOT.name. Bind only that evidence location to its actual
+                # owner; code, MIGRATION, RPCs and assertions remain unchanged.
+                historical = ROOT.parent / 'worker-resolved-incident-growth-ready-v1'
+                rollback = historical.parent / (historical.name + '-approval1') / 'rollback.sql'
+                if (not rollback.is_file() or hashlib.sha256(rollback.read_bytes()).hexdigest()
+                        != 'ad95bb4a57c9147295111d7b2a6a1de31910484371857d49504ba86006eaf8a5'):
+                    raise RuntimeError('historical_restriction_rollback_evidence_missing')
+                (output / 'historical-rollback-evidence.json').write_text(json.dumps({
+                    'path': str(rollback), 'sha256': hashlib.sha256(rollback.read_bytes()).hexdigest()}))
+                entry = ['-c', "import sys,unittest;from pathlib import Path;sys.path.insert(0,'tests');"
+                    "import test_resolved_incident_growth_ready_v1 as cases;"
+                    "cases.ROOT=Path(sys.argv[1]);unittest.main(module=cases,argv=['qualified','-v']+sys.argv[2:])",
+                    str(historical), *selection]
+            result = subprocess.run(['/usr/bin/python3', '-B', *entry], cwd=ROOT,
+                                    env=testenv, capture_output=True, text=True)
+            (output / 'tests.log').write_text(result.stdout + result.stderr)
+            print(result.stderr[-12000:])
+            print(json.dumps({'integration_exit_code': result.returncode, 'migration_count': len(migrations), 'evidence': str(output)}))
+            return result.returncode
+        finally:
+            if adapter:
+                adapter.shutdown()
+                adapter.server_close()
+            if rest:
+                rest.terminate()
+                rest.wait(timeout=15)
+                restlog.close()
+            server.terminate()
+            server.wait(timeout=15)
+            pglog.close()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

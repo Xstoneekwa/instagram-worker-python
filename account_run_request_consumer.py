@@ -2737,8 +2737,35 @@ def _finalize_manual_run_after_subprocess(
                 if isinstance(performance_summary, dict)
                 else None
             )
-            if not isinstance(contract, dict) or contract.get("ok") is not True:
-                reason = "account_session_phase_not_terminal"
+            # A physical restriction preflight has no business phases. Its
+            # success must be proven from the current persisted run and hold;
+            # neither exit 0 nor a reason string can bypass the business gate.
+            from restriction_preflight_terminal_contract import validate_terminal, load_terminal_evidence
+            preflight_marked = (
+                request_metadata.get("restriction_preflight_only") is True
+                or isinstance(performance_summary, dict)
+                and performance_summary.get("restriction_preflight_only") is True
+            )
+            preflight = {"ok": False}
+            if preflight_marked:
+                try:
+                    run_row, hold = load_terminal_evidence(run_id=run_id,
+                        account_id=account_id, incident_id=str(request_metadata.get("incident_id") or ""))
+                except Exception:
+                    hold = {}  # Missing authoritative evidence cannot grant success.
+                preflight = validate_terminal(request=canonical_latest or {}, run=run_row, hold=hold,
+                    cleanup_completed=cleanup_completed, lock_released=lock_released)
+                if preflight["ok"]:
+                    from account_session_resume_plan_store import complete_restriction_preflight
+                    stored = complete_restriction_preflight(
+                        run_id=run_id, request_id=request_id, account_id=account_id,
+                        terminal_summary=performance_summary)
+                    if stored.get("persisted") is not True:
+                        preflight = {"ok": False, "reason": "resume_plan_reconciliation_required"}
+            terminal_ok = (preflight["ok"] if preflight_marked else
+                           isinstance(contract, dict) and contract.get("ok") is True)
+            if not terminal_ok:
+                reason = preflight.get("reason", "account_session_phase_not_terminal")
                 _safe_complete_account_run_request(
                     request_id,
                     cfg.worker_id,

@@ -628,3 +628,35 @@ def _utc_now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def complete_restriction_preflight(*, run_id: str, request_id: str,
+                                   account_id: str, terminal_summary: dict) -> dict:
+    """Terminalize only this physical verification, preserving business quotas.
+
+    Compare-and-set the exact run/request/account and verify by reread even if
+    the transport reply is ambiguous. A missing or conflicting plan fails closed.
+    """
+    from restriction_preflight_terminal_contract import REASON
+    import supabase_client
+    proof = terminal_summary.get("restriction_preflight_terminal_contract") or {}
+    if (proof.get("run_id") != run_id or proof.get("request_id") != request_id
+            or proof.get("account_id") != account_id):
+        return {"persisted": False, "reason": "preflight_plan_binding_invalid"}
+    body = {"resume_stage": "completed", "resume_state": "completed",
+            "restart_allowed": False, "restart_block_reason": REASON,
+            "terminal_reason_code": REASON, "last_updated_at": _utc_now_iso()}
+    query = {"run_id": f"eq.{run_id}", "run_request_id": f"eq.{request_id}",
+             "account_id": f"eq.{account_id}", "resume_state": "in.(run_active,completed)"}
+    try:
+        supabase_client._request_json("PATCH", _TABLE, query=query, body=body,
+                                      prefer_representation=True)
+    except Exception:
+        pass  # Only the canonical reread below may confirm success.
+    try:
+        row = load_resume_plan(run_id=run_id) or {}
+        ok = (row.get("run_request_id") == request_id and row.get("account_id") == account_id
+              and all(row.get(k) == v for k, v in body.items() if k != "last_updated_at"))
+    except Exception:
+        ok = False
+    return {"persisted": ok, "reason": REASON if ok else "resume_plan_reconciliation_required"}

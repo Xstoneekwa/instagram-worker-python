@@ -1,0 +1,202 @@
+"""Real dispatcher boundary and runner cleanup; no device or network."""
+import copy
+from contextlib import ExitStack
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import account_run_request_consumer as consumer
+import account_session_resume_plan_store as store
+import restriction_preflight_terminal_contract as contract
+
+
+def fixture():
+    policy=dict(incident_id='incident',account_id='account',authorization_id='auth',
+        resume_plan_id='source-plan',restriction_preflight_only=True,
+        phases_to_run=dict(welcome=False,follow=False,unfollow=False))
+    summary=contract.success_summary(account_id='account',request_id='request',run_id='run',
+        policy=policy,released=dict(ok=True,hold_status='cleared',hold_id='hold'))
+    summary['preflight_cleanup_completed']=True
+    request=dict(id='request',run_id='run',account_id='account',status='completed',
+        requested_run_type='account_session',metadata_safe=dict(recovery_mode='human_confirmed_resume',
+        restriction_preflight_only=True,incident_id='incident',authorization_id='auth',
+        resume_plan_id='source-plan',resume_plan=policy))
+    run=dict(id='run',account_id='account',status='completed',finished_at='2026-09-15T00:00:00Z',
+        performance_summary=summary,total_follow=0,total_like=0,total_dm=0,total_story=0)
+    hold=dict(id='hold',account_id='account',incident_id='incident',status='cleared',
+              verified_by_run_id='run',verified_cleared_at='2026-09-15T00:00:00Z')
+    return request,run,hold
+
+
+class DispatcherBoundaryTests(unittest.TestCase):
+    def finalize(self, request,run,hold,*,cleanup=True,released=True,persisted=True):
+        with ExitStack() as s:
+            mocks={}
+            for obj,name,value in [(consumer,'get_account_run_request',request),
+                (consumer.supabase_client,'load_run_row',run),
+                (contract,'load_terminal_evidence',(run,hold)),
+                (store,'complete_restriction_preflight',dict(persisted=persisted)),
+                (consumer,'_safe_complete_account_run_request',True),
+                (consumer,'_reconcile_linked_run',{}),(consumer,'_audit',None),
+                (consumer,'_publish_run_failure_incident',None),
+                (consumer,'_safe_login_provisioner_summary_for_audit',{})]:
+                mocks[name]=s.enter_context(patch.object(obj,name,return_value=value))
+            consumer._finalize_manual_run_after_subprocess(SimpleNamespace(worker_id='worker'),
+                request_id=request['id'],account_id=request['account_id'],exit_code=0,
+                cleanup_completed=cleanup,lock_released=released)
+            return mocks
+
+    def test_success_is_not_a_business_phase_completion(self):
+        q,r,h=fixture();m=self.finalize(q,r,h)
+        self.assertNotIn('phase_terminal_contract',r['performance_summary'])
+        m['_publish_run_failure_incident'].assert_not_called()
+        self.assertEqual(m['_safe_complete_account_run_request'].call_args.args[2],'completed')
+        self.assertEqual(m['complete_restriction_preflight'].call_args.kwargs['run_id'],'run')
+
+    def test_old_reason_only_success_cannot_bypass(self):
+        q,r,h=fixture();r['performance_summary'].pop('restriction_preflight_terminal_contract')
+        self.assert_rejected(q,r,h)
+
+    def assert_rejected(self,q,r,h,**kw):
+        m=self.finalize(q,r,h,**kw)
+        self.assertEqual(m['_safe_complete_account_run_request'].call_args.args[2],'failed')
+        m['_publish_run_failure_incident'].assert_called_once()
+
+    def test_cross_binding_and_missing_proofs_rejected(self):
+        for field in ('run_id','request_id','account_id','incident_id','authorization_id','resume_plan_id','hold_id'):
+            with self.subTest(field=field):
+                q,r,h=fixture();r['performance_summary']['restriction_preflight_terminal_contract'][field]='other'
+                self.assert_rejected(q,r,h)
+
+    def test_nonzero_or_unknown_actions_rejected(self):
+        for value in (1,None,False,'0'):
+            with self.subTest(value=value):
+                q,r,h=fixture();r['performance_summary']['business_actions_executed']=value
+                self.assert_rejected(q,r,h)
+        for field in ('total_follow','total_like','total_dm','total_story'):
+            q,r,h=fixture();r[field]=1;self.assert_rejected(q,r,h)
+
+    def test_physical_hold_and_status_failure_rejected(self):
+        for change in (lambda q,r,h:h.update(status='active'),
+                       lambda q,r,h:h.update(verified_by_run_id='old'),
+                       lambda q,r,h:r.update(status='failed'),
+                       lambda q,r,h:r['performance_summary'].update(physical_preflight_passed=False),
+                       lambda q,r,h:q['metadata_safe']['resume_plan']['phases_to_run'].update(follow=True)):
+            q,r,h=fixture();change(q,r,h);self.assert_rejected(q,r,h)
+
+    def test_cleanup_lock_or_plan_persistence_failure_rejected(self):
+        for kw in ({'cleanup':False},{'released':False},{'persisted':False}):
+            self.assert_rejected(*fixture(),**kw)
+
+    def test_ordinary_business_contract_is_still_required(self):
+        q,r,h=fixture();q['metadata_safe']={};r['performance_summary']={}
+        self.assert_rejected(q,r,h)
+        r['performance_summary']['phase_terminal_contract']={'ok':True}
+        m=self.finalize(q,r,h);m['_publish_run_failure_incident'].assert_not_called()
+        m['complete_restriction_preflight'].assert_not_called()
+
+    def test_preflight_cannot_use_a_forged_business_phase_contract(self):
+        q,r,h=fixture();r['performance_summary']['phase_terminal_contract']={'ok':True}
+        h['status']='active';self.assert_rejected(q,r,h)
+
+
+    def test_malformed_structures_fail_closed(self):
+        for field in ('restriction_preflight_terminal_contract','physical_preflight_passed'):
+            q,r,h=fixture();r['performance_summary'][field]=['invalid'];self.assert_rejected(q,r,h)
+        q,r,h=fixture();r['performance_summary']['preflight_cleanup_completed']=False
+        self.assert_rejected(q,r,h)
+
+
+class PlanPersistenceTests(unittest.TestCase):
+    def test_exact_plan_patch_preserves_quotas_and_original_plan(self):
+        import supabase_client
+        q,r,h=fixture();writes=[]
+        row=dict(run_id='run',run_request_id='request',account_id='account')
+        def write(*args,**kwargs):
+            writes.append(kwargs);row.update(kwargs['body']);return [row]
+        with patch.object(supabase_client,'_request_json',side_effect=write),patch.object(store,'load_resume_plan',return_value=row):
+            result=store.complete_restriction_preflight(run_id='run',request_id='request',account_id='account',terminal_summary=r['performance_summary'])
+        self.assertTrue(result['persisted'])
+        self.assertEqual(writes[0]['query']['run_request_id'],'eq.request')
+        self.assertNotIn('plan',writes[0]['body']);self.assertNotIn('quota_done',writes[0]['body'])
+
+    def test_ambiguous_transport_requires_matching_canonical_reread(self):
+        import supabase_client
+        q,r,h=fixture()
+        with patch.object(supabase_client,'_request_json',side_effect=OSError),patch.object(store,'load_resume_plan',return_value={}):
+            self.assertFalse(store.complete_restriction_preflight(run_id='run',request_id='request',account_id='account',terminal_summary=r['performance_summary'])['persisted'])
+
+
+class RunnerCleanupTests(unittest.TestCase):
+    def test_actual_cleanup_persists_bound_summary_before_request_completion(self):
+        import runner
+        q,r,h=fixture();events=[]
+        with ExitStack() as s:
+            for name,val in [('_DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP',True),('_RUNNER_SESSION_CLEANUP_COMPLETE',False),('_PENDING_TERMINAL_RUN_STATUS',None)]:
+                s.enter_context(patch.object(runner,name,val))
+            s.enter_context(patch.object(runner,'set_wait_event_callback'))
+            s.enter_context(patch.object(runner,'_cleanup_session_apps',side_effect=lambda d:events.append('cleanup') or True))
+            s.enter_context(patch.object(runner,'_terminalize_run_request_after_cleanup',side_effect=lambda status:events.append(status)))
+            s.enter_context(patch.object(runner,'_orf_publish_event'))
+            s.enter_context(patch.object(runner,'_orf_heartbeat_worker'))
+            s.enter_context(patch.object(runner,'log'))
+            def persist(*a,**k):
+                events.append(k['performance_summary']);return {'_supabase_call_ok':True}
+            s.enter_context(patch.object(runner,'_timed_safe_supabase_call',side_effect=persist))
+            runner._update_run_status_safe(run_id='run',status='completed',totals={},performance_summary=r['performance_summary'])
+            self.assertEqual(events,[])
+            self.assertEqual(runner._return_with_cleanup(None,0),0)
+        self.assertEqual(events[0],'cleanup');self.assertEqual(events[1],r['performance_summary']);self.assertEqual(events[2],'completed')
+
+
+    def test_failed_cleanup_never_publishes_preflight_success(self):
+        import runner
+        q,r,h=fixture()
+        pending=dict(run_id='run',status='completed',totals={},performance_summary=r['performance_summary'])
+        with patch.object(runner,'_PENDING_TERMINAL_RUN_STATUS',pending),patch.object(runner,'_cleanup_session_apps',return_value=False),patch.object(runner,'_update_run_status_safe',return_value='failed') as update,patch.object(runner,'_terminalize_run_request_after_cleanup'),patch.object(runner,'set_wait_event_callback'),patch.object(runner,'log'):
+            self.assertEqual(runner._return_with_cleanup(None,0),1)
+        self.assertEqual(update.call_args.kwargs['status'],'failed')
+        self.assertEqual(update.call_args.kwargs['performance_summary']['reason'],'restriction_preflight_cleanup_failed')
+
+
+import os
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import test_restriction_resume_natural_tick_v1 as previous
+
+@unittest.skipUnless(os.environ.get('RESTRICTION_TEST_SOCKET'), 'isolated PG17 required')
+class PreflightDatabaseTests(previous.RealDatabaseTests):
+    def setUp(self):self.sql('select restriction_test.reset_ready()')
+
+    def test_current_plan_terminalizes_and_business_eligibility_survives(self):
+        first=previous.run_backend(self)
+        self.assertEqual(first['result']['enqueued_count'],1,first)
+        q=self.claim();admitted=self.admit(q);self.assertTrue(admitted['ok'],admitted)
+        run_id=admitted['run_id'];q=self.row(q['id'])
+        release=self.rpc('release_instagram_action_restriction_hold_v1',dict(
+            p_account_id=previous.A,p_incident_id=previous.INCIDENT,p_preflight_run_id=run_id))
+        summary=contract.success_summary(account_id=previous.A,request_id=q['id'],run_id=run_id,
+            policy=q['metadata_safe']['resume_plan'],released=release)
+        summary['preflight_cleanup_completed']=True
+        self.sql(f"update ig_runs set status='completed',finished_at=now(),performance_summary='{json.dumps(summary)}',total_follow=0,total_like=0,total_dm=0,total_story=0 where id='{run_id}'")
+        self.rpc('complete_account_run_request',dict(p_request_id=q['id'],p_worker_id=previous.WORKER,p_status='completed'))
+        from auto_restart_device_lock import release_device_lock
+        result=release_device_lock(device_id=previous.DEVICE,worker_id=previous.WORKER,
+            request_id=q['id'],expected_lease_id=q['metadata_safe']['device_lock_binding']['lease_id'],account_id=previous.A)
+        self.assertTrue(result['released'],result)
+        before=self.sql(f"select plan from account_session_resume_plans where run_id='{run_id}'")
+        with patch.object(consumer,'_publish_run_failure_incident') as incident,patch.object(consumer,'_audit'):
+            consumer._finalize_manual_run_after_subprocess(SimpleNamespace(worker_id=previous.WORKER),
+                request_id=q['id'],account_id=previous.A,exit_code=0,cleanup_completed=True,lock_released=True)
+        incident.assert_not_called()
+        self.assertEqual(self.sql(f"select status from ig_runs where id='{run_id}'"),'completed')
+        self.assertEqual(self.row(q['id'])['status'],'completed')
+        self.assertEqual(self.sql(f"select resume_state from account_session_resume_plans where run_id='{run_id}'"),'completed')
+        self.assertEqual(self.sql(f"select plan from account_session_resume_plans where run_id='{run_id}'"),before)
+        eligible=previous.run_backend(self,'eligibility');self.assertTrue(eligible['ok'],eligible)
+        self.assertEqual(self.rpc('restore_restriction_admission_credit_v1')['restriction_admission_credits_restored'],0)
+
+for _name in dir(previous.RealDatabaseTests):
+    if _name.startswith('test_'):
+        setattr(PreflightDatabaseTests,_name,None)

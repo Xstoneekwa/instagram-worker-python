@@ -250,3 +250,7 @@ Recovery actions invalidate all actionable Followers viewport and row evidence b
 mutation. A successful recovery must reacquire and recertify the list before candidate
 selection. A CT Resume gesture with unproved continuity also discards pre-gesture candidates;
 it cannot fall through to legacy evaluation with old row coordinates.
+
+## Restriction preflight terminal success
+
+The dedicated [terminal contract](restriction-preflight-terminal-contract.md) separates a successful zero-action physical verification from business phase completion. Require exact persisted run/request/hold bindings and successful cleanup; preserve normal phase gates, plan quotas and natural-tick authority.

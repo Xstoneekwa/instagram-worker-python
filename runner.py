@@ -5384,9 +5384,9 @@ def _recover_verified_follow_persistence_intents(
     return "RECOVERY_RESOLVED"
 
 
-def _cleanup_session_apps(d) -> None:
+def _cleanup_session_apps(d) -> bool:
     if d is None or not bool(getattr(config, "CLOSE_APPS_AFTER_RUN", True)):
-        return
+        return True
     pkg = config.INSTAGRAM_PACKAGE
     force_stop_ok = False
     home_pressed = False
@@ -5408,6 +5408,7 @@ def _cleanup_session_apps(d) -> None:
         force_stop_ok=force_stop_ok,
         home_pressed=home_pressed,
     )
+    return force_stop_ok and (not bool(getattr(config, "HOME_AFTER_RUN", True)) or home_pressed)
 
 
 _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
@@ -5485,11 +5486,18 @@ def _return_with_cleanup(d, code: int) -> int:
             )
     except Exception:
         pass
-    _cleanup_session_apps(d)
+    cleanup_ok = _cleanup_session_apps(d)
     _RUNNER_SESSION_CLEANUP_COMPLETE = True
     pending = _PENDING_TERMINAL_RUN_STATUS
     _PENDING_TERMINAL_RUN_STATUS = None
     if pending:
+        summary = pending.get("performance_summary") or {}
+        if "restriction_preflight_terminal_contract" in summary:
+            summary["preflight_cleanup_completed"] = cleanup_ok is True
+            if cleanup_ok is not True:
+                pending["status"] = "failed"
+                summary["reason"] = "restriction_preflight_cleanup_failed"
+                code = 1
         persisted_status = _update_run_status_safe(**pending)
         if persisted_status:
             _terminalize_run_request_after_cleanup(persisted_status)
@@ -27921,18 +27929,16 @@ def _main_impl() -> int:
                 run_id=run_id or None,
                 incident_id=restriction_incident_id,
             )
+            from restriction_preflight_terminal_contract import success_summary
             if run_id:
                 _update_run_status_safe(
                     run_id=run_id,
                     status="completed",
                     totals={"total": 0, "success": 0, "failed": 0},
-                    performance_summary={
-                        "reason": "restriction_physical_preflight_passed",
-                        "incident_id": restriction_incident_id,
-                        "physical_preflight_passed": True,
-                        "restriction_preflight_only": True,
-                        "business_actions_executed": 0,
-                    },
+                    performance_summary=success_summary(
+                        account_id=account_id, request_id=run_request_id, run_id=run_id,
+                        policy=restriction_resume_policy, released=released,
+                    ),
                 )
             reset_perf_counters()
             _emit_performance_summary(
