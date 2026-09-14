@@ -2369,18 +2369,25 @@ def _publish_run_failure_incident(
                     original_run_id=original_run_id,
                     resume_run_id=run_id,
                 )
-            else:
-                from account_session_resume_plan_store import record_terminal_failure
+            # Original outcome/dedupe is history; the actual failed run owns
+            # the current plan and the next human authorization. Do this last
+            # so updating the original plan cannot hide the current terminal.
+            from account_session_resume_plan_store import record_terminal_failure
 
-                record_terminal_failure(
-                    run_id=run_id,
-                    incident_type=decision.incident_type,
-                    reason_code=decision.reason_code,
-                    incident_id=incident_id,
-                    **({"terminal_summary": performance_summary,
-                        "existing_resume_plan": terminal_existing_plan}
-                       if (performance_summary or {}).get("terminal_progress_reconciled") is True else {}),
-                )
+            terminal_result = record_terminal_failure(
+                run_id=run_id,
+                incident_type=decision.incident_type,
+                reason_code=decision.reason_code,
+                incident_id=incident_id,
+                **({"terminal_summary": performance_summary,
+                    "existing_resume_plan": terminal_existing_plan}
+                   if (performance_summary or {}).get("terminal_progress_reconciled") is True else {}),
+            )
+            if not terminal_result.get("persisted"):
+                log("error", "resume_plan_terminal_reconciliation_required",
+                    account_id=account_id, request_id=request_id, run_id=run_id,
+                    incident_id=incident_id, reason_code=decision.reason_code,
+                    persist_reason=terminal_result.get("reason"))
         action_id = None
         if (
             incident_id

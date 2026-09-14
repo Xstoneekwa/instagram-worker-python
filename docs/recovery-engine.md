@@ -176,6 +176,20 @@ Toute sortie d’échec ou d’abandon doit porter une **reason** lisible et sta
   nouvel échec enrichit l'incident original (« Nouvelle intervention
   requise ») sans boucle ni spam de notifications.
 
+Le run physique de reprise possède aussi son propre plan terminal. Après un
+nouvel échec, le dispatcher conserve l'outcome de l'ancien run, puis lie le
+plan du run courant à l'incident effectivement publié et à sa raison causale.
+La mise à jour de l'ancien plan ne remplace jamais celle du nouveau.
+`restart_allowed` reste faux jusqu'à une nouvelle autorisation canonique.
+
+La réconciliation bornée d'un plan historique `run_active` peut constater ce
+même échec humain uniquement avec run/request terminaux, identités exactes,
+autorisation précédente consommée par cette request, dernier run réel,
+incident lié et absence d'exécution ou de lease active. Elle restaure seulement
+`awaiting_human_resume_authorization` ; elle ne crée ni autorisation ni request.
+Les RPC de résolution existantes restent responsables de la reprise suivante,
+avec contrôle physique de restriction. Une preuve ambiguë reste bloquée.
+
 ## Contrat de reprise terminale Golden V1
 
 `partial_resumable` est une issue métier conservée dans le plan JSON, jamais
