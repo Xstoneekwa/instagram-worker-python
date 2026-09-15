@@ -411,7 +411,12 @@ def _validate_human_confirmed_resume_at_claim(
         or durable_plan.get("business_session_id")
         or ""
     ).strip()
-    if not root_business_session_id:
+    # A restriction-only preflight is a fresh zero-business request. Older
+    # durable plans intentionally contain only the frozen authorization plan;
+    # their new request root is owned by the claimed SQL row and is bound by
+    # _claimed_request_lineage immediately after this validation. Business
+    # resumes still require the durable source root here.
+    if not root_business_session_id and not restriction_preflight_only:
         return False, "resume_plan_invalid", None
     declared_lineage_roots = {
         str(value).strip()
@@ -423,7 +428,10 @@ def _validate_human_confirmed_resume_at_claim(
         )
         if str(value or "").strip()
     }
-    if declared_lineage_roots and declared_lineage_roots != {root_business_session_id}:
+    if declared_lineage_roots and (
+        not root_business_session_id
+        or declared_lineage_roots != {root_business_session_id}
+    ):
         return False, "resume_plan_invalid", None
 
     window_end = str(plan_row.get("scheduled_window_end") or "").strip()
@@ -446,6 +454,9 @@ def _validate_human_confirmed_resume_at_claim(
         "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
         "resume_plan_id": resume_plan_id,
         "incident_id": incident_id,
+        # The canonical request owns this binding. Preserve it across the
+        # policy/env boundary; terminal proof must not reconstruct authority.
+        "authorization_id": meta.get("authorization_id"),
         "restriction_preflight_only": restriction_preflight_only,
         "phases_to_run": {
             **{

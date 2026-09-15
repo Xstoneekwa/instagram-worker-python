@@ -2108,6 +2108,109 @@ def _project_missing_worker_terminal_summary(*, run_row: dict[str, Any], account
     return summary, existing
 
 
+def _proven_preflight_binding_error(*, request: dict, run: dict, hold: dict) -> bool:
+    """A cleared hold proves physical success; a summary flag alone never does."""
+    record = lambda value: value if isinstance(value, dict) else {}
+    metadata = record(request.get("metadata_safe"))
+    policy = record(metadata.get("resume_plan"))
+    summary = record(run.get("performance_summary"))
+    from instagram_action_restriction import validate_restriction_preflight_policy
+    valid, _, incident = validate_restriction_preflight_policy(policy)
+    present = lambda value: isinstance(value, str) and bool(value.strip())
+    return bool(
+        valid and request.get("requested_run_type") == "account_session"
+        and metadata.get("recovery_mode") == "human_confirmed_resume"
+        and metadata.get("restriction_preflight_only") is True
+        and all(present(request.get(k)) for k in ("id", "account_id", "run_id"))
+        and request.get("run_id") == run.get("id")
+        and request.get("account_id") == run.get("account_id") == hold.get("account_id")
+        and policy.get("account_id") == request.get("account_id")
+        and present(metadata.get("authorization_id"))
+        and policy.get("authorization_id") == metadata.get("authorization_id")
+        and present(metadata.get("resume_plan_id"))
+        and policy.get("resume_plan_id") == metadata.get("resume_plan_id")
+        and incident == metadata.get("incident_id") == hold.get("incident_id")
+        and summary.get("physical_preflight_passed") is True
+        and summary.get("restriction_preflight_only") is True
+        and type(summary.get("business_actions_executed")) is int
+        and summary["business_actions_executed"] == 0
+        and all(type(run.get(k)) is int and run[k] == 0
+                for k in ("total_follow", "total_like", "total_dm", "total_story"))
+        and hold.get("status") == "cleared"
+        and hold.get("verified_by_run_id") == run.get("id")
+        and present(hold.get("verified_cleared_at"))
+    )
+
+
+def _authoritative_success_before_internal_failure(
+    *, request: dict, run: dict, hold: dict | None,
+    failure_summary: dict, cleanup_completed: bool | None,
+    lock_released: bool | None,
+) -> tuple[bool, str]:
+    """Recognize existing durable success; never infer it from an error flag."""
+    if cleanup_completed is not True or lock_released is not True:
+        return False, "cleanup_or_lock_unproved"
+    if not all(isinstance(value, dict) for value in (request, run, failure_summary)):
+        return False, "record_invalid"
+    if not request.get("id") or not request.get("run_id") or not request.get("account_id"):
+        return False, "request_binding_missing"
+    if request.get("run_id") != run.get("id") or request.get("account_id") != run.get("account_id"):
+        return False, "request_run_binding_mismatch"
+    metadata = request.get("metadata_safe") if isinstance(request.get("metadata_safe"), dict) else {}
+    if metadata.get("restriction_preflight_only") is True:
+        if not isinstance(hold, dict):
+            return False, "preflight_hold_missing"
+        from restriction_preflight_terminal_contract import validate_terminal
+        validated = validate_terminal(
+            request=request, run=run, hold=hold,
+            cleanup_completed=cleanup_completed, lock_released=lock_released,
+        )
+        if validated.get("ok") is True:
+            return True, "restriction_preflight_terminal_success"
+        summary = run.get("performance_summary") if isinstance(run.get("performance_summary"), dict) else {}
+        # The canonical proof is the authority whenever it is present.  A
+        # malformed, stale or foreign proof must remain rejected; the legacy
+        # physical-evidence fallback exists only for the historical serializer
+        # failure that produced no terminal-proof field at all.
+        if "restriction_preflight_terminal_contract" in summary:
+            return False, "restriction_preflight_terminal_proof_rejected"
+        # Compatibility for the already-observed failure shape where the
+        # internal serializer replaced the successful summary. The separate
+        # cleared hold and exact zero-action bindings remain mandatory.
+        candidate = dict(run)
+        candidate["performance_summary"] = {**(run.get("performance_summary") or {}), **failure_summary}
+        return (_proven_preflight_binding_error(request=request, run=candidate, hold=hold),
+                "restriction_preflight_terminal_success")
+
+    persisted = run.get("performance_summary") if isinstance(run.get("performance_summary"), dict) else {}
+    incoming_contract = (failure_summary.get("phase_terminal_contract")
+                         if isinstance(failure_summary.get("phase_terminal_contract"), dict) else {})
+    if (failure_summary.get("session_status") in {"failed", "aborted"}
+            or failure_summary.get("exit_code") not in (None, 0)
+            or incoming_contract.get("ok") is False):
+        # A later operation's explicit terminal failure cannot be hidden by a
+        # previously persisted success snapshot from another causal boundary.
+        return False, "incoming_terminal_failure_contradicts_persisted_success"
+    contract = persisted.get("phase_terminal_contract") if isinstance(persisted.get("phase_terminal_contract"), dict) else {}
+    phases = contract.get("phases") if isinstance(contract.get("phases"), dict) else {}
+    from account_session_orchestrator import _TERMINAL_PHASE_STATUSES
+    proven = bool(
+        request.get("requested_run_type") == "account_session"
+        and run.get("status") == "completed" and bool(run.get("finished_at"))
+        and persisted.get("session_status") == "success"
+        and persisted.get("exit_code") == 0
+        and contract.get("ok") is True
+        and contract.get("reason") == "all_planned_phases_terminal"
+        and set(phases) == {"welcome", "follow", "unfollow", "outreach"}
+        and all(value in _TERMINAL_PHASE_STATUSES for value in phases.values())
+        and contract.get("terminal_statuses") == sorted(_TERMINAL_PHASE_STATUSES)
+        and isinstance(contract.get("non_terminal_phases"), dict)
+        and not contract["non_terminal_phases"]
+    )
+    return proven, ("account_session_phase_terminal_success" if proven
+                    else "account_session_success_unproved")
+
+
 def _publish_run_failure_incident(
     *,
     request_id: str,
@@ -2137,6 +2240,53 @@ def _publish_run_failure_incident(
                 run_row = supabase_client.load_run_row(run_id) or {}
                 run_status = str(run_row.get("status") or "").strip() or None
                 raw_summary = run_row.get("performance_summary")
+                failure = {**(raw_summary if isinstance(raw_summary, dict) else {}),
+                           **(performance_summary or {})}
+                if failure:
+                    performance_summary = failure
+                # Classification is evidence-driven. Any downstream error name
+                # may reach this boundary, so only the exact persisted success
+                # contract can suppress a new account-blocking incident.
+                proof_candidate = bool(
+                    run_status == "completed"
+                    or (isinstance(raw_summary, dict)
+                        and raw_summary.get("physical_preflight_passed") is True)
+                )
+                if not timed_out and not canceled and proof_candidate:
+                    try:
+                        request_row = get_account_run_request(request_id) or {}
+                        evidence_run, evidence_hold = run_row, None
+                        if (request_row.get("metadata_safe") or {}).get("restriction_preflight_only") is True:
+                            from restriction_preflight_terminal_contract import load_terminal_evidence
+                            request_incident_id = str(
+                                (request_row.get("metadata_safe") or {}).get("incident_id") or ""
+                            )
+                            evidence_run, evidence_hold = load_terminal_evidence(
+                                run_id=run_id, account_id=account_id,
+                                incident_id=request_incident_id)
+                        proven, proof_kind = _authoritative_success_before_internal_failure(
+                            request=request_row, run=evidence_run, hold=evidence_hold,
+                            failure_summary=failure, cleanup_completed=cleanup_completed,
+                            lock_released=lock_released)
+                    except Exception as proof_exc:
+                        proven, proof_kind = False, "success_proof_load_failed"
+                        log("warning", "post_success_proof_load_failed",
+                            account_id=account_id, request_id=request_id, run_id=run_id,
+                            error=str(proof_exc)[:300])
+                    if proven:
+                        reason = str(failure.get("reason") or failure.get("root_failure_code") or "internal_error")
+                        log("error", "post_success_internal_reconciliation_failed",
+                            account_id=account_id, request_id=request_id, run_id=run_id,
+                            reason=reason, failure_module=failure.get("failure_module"),
+                            failure_function=failure.get("failure_function"), success_proof=proof_kind)
+                        _audit(account_id=account_id,
+                            action_type="account_session_terminal_contract_failed", status="failed",
+                            message="Authoritative operation success preserved; internal reconciliation requires repair.",
+                            run_id=run_id, payload={"request_id": request_id, "reason": reason,
+                                "authoritative_success_preserved": True, "success_proof": proof_kind,
+                                "failure_module": failure.get("failure_module"),
+                                "failure_function": failure.get("failure_function")})
+                        return
                 if performance_summary is None and isinstance(raw_summary, dict):
                     performance_summary = raw_summary
                 if run_type == "account_session" and run_status in {"failed", "aborted"}:
@@ -2761,7 +2911,27 @@ def _finalize_manual_run_after_subprocess(
                         run_id=run_id, request_id=request_id, account_id=account_id,
                         terminal_summary=performance_summary)
                     if stored.get("persisted") is not True:
-                        preflight = {"ok": False, "reason": "resume_plan_reconciliation_required"}
+                        # The durable physical/terminal proof was validated
+                        # above. A bookkeeping failure cannot erase that proof
+                        # or be published as another account-blocking incident.
+                        # Keep request reconciliation failed and observable.
+                        _safe_complete_account_run_request(
+                            request_id, cfg.worker_id, "failed",
+                            error_code="resume_plan_reconciliation_required",
+                            error_message_safe="Successful preflight requires internal plan reconciliation.",
+                        )
+                        _audit(
+                            account_id=account_id,
+                            action_type="account_session_terminal_contract_failed",
+                            status="failed",
+                            message="Successful preflight preserved; internal plan reconciliation failed.",
+                            run_id=run_id,
+                            payload={"request_id": request_id,
+                                     "reason": "resume_plan_reconciliation_required",
+                                     "physical_success_preserved": True,
+                                     "terminal_checks": preflight.get("checks")},
+                        )
+                        return
             terminal_ok = (preflight["ok"] if preflight_marked else
                            isinstance(contract, dict) and contract.get("ok") is True)
             if not terminal_ok:

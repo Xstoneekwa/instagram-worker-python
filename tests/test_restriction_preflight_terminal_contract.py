@@ -28,6 +28,30 @@ def fixture():
 
 
 class DispatcherBoundaryTests(unittest.TestCase):
+    def test_internal_binding_failure_requires_independent_physical_evidence(self):
+        q,r,h=fixture()
+        r['performance_summary'].update(reason='restriction_preflight_terminal_binding_missing',
+            failure_module='restriction_preflight_terminal_contract',failure_function='success_summary')
+        r['performance_summary'].pop('restriction_preflight_terminal_contract')
+        r['status']='failed'
+        self.assertTrue(consumer._proven_preflight_binding_error(request=q,run=r,hold=h))
+        with patch.object(consumer.supabase_client,'load_run_row',return_value=r), \
+             patch.object(consumer,'get_account_run_request',return_value=q), \
+             patch.object(contract,'load_terminal_evidence',return_value=(r,h)), \
+             patch.object(consumer,'_audit') as audit, \
+             patch.object(consumer.runtime_incidents,'publish_account_incident') as publish:
+            consumer._publish_run_failure_incident(request_id=q['id'],account_id=q['account_id'],
+                run_id=r['id'],run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                cleanup_completed=True,lock_released=True)
+            publish.assert_not_called()
+            self.assertTrue(audit.call_args.kwargs['payload']['authoritative_success_preserved'])
+        for mutate in (lambda q,r,h:h.update(verified_by_run_id='other'),
+                       lambda q,r,h:h.update(status='active'),
+                       lambda q,r,h:r.update(total_follow=1),
+                       lambda q,r,h:q['metadata_safe'].update(authorization_id='other')):
+            a,b,c=copy.deepcopy((q,r,h));mutate(a,b,c)
+            self.assertFalse(consumer._proven_preflight_binding_error(request=a,run=b,hold=c))
+
     def finalize(self, request,run,hold,*,cleanup=True,released=True,persisted=True):
         with ExitStack() as s:
             mocks={}
@@ -67,6 +91,34 @@ class DispatcherBoundaryTests(unittest.TestCase):
                 q,r,h=fixture();r['performance_summary']['restriction_preflight_terminal_contract'][field]='other'
                 self.assert_rejected(q,r,h)
 
+    def test_foreign_canonical_authorization_cannot_fall_back_to_success(self):
+        q,r,h=fixture()
+        proof=r['performance_summary']['restriction_preflight_terminal_contract']
+        proof['authorization_id']='foreign-authorization'
+        validated=contract.validate_terminal(request=q,run=r,hold=h,
+            cleanup_completed=True,lock_released=True)
+        self.assertFalse(validated['ok'],validated)
+        accepted,authority=consumer._authoritative_success_before_internal_failure(
+            request=q,run=r,hold=h,failure_summary={},
+            cleanup_completed=True,lock_released=True)
+        self.assertFalse(accepted)
+        self.assertEqual(authority,'restriction_preflight_terminal_proof_rejected')
+        self.assert_rejected(q,r,h)
+
+    def test_absent_canonical_proof_keeps_existing_physical_authority_only(self):
+        q,r,h=fixture()
+        r['performance_summary'].pop('restriction_preflight_terminal_contract')
+        r['performance_summary'].update(
+            reason='restriction_preflight_terminal_binding_missing',
+            failure_module='restriction_preflight_terminal_contract',
+            failure_function='success_summary')
+        r['status']='failed'
+        accepted,authority=consumer._authoritative_success_before_internal_failure(
+            request=q,run=r,hold=h,failure_summary={},
+            cleanup_completed=True,lock_released=True)
+        self.assertTrue(accepted)
+        self.assertEqual(authority,'restriction_preflight_terminal_success')
+
     def test_nonzero_or_unknown_actions_rejected(self):
         for value in (1,None,False,'0'):
             with self.subTest(value=value):
@@ -84,8 +136,19 @@ class DispatcherBoundaryTests(unittest.TestCase):
             q,r,h=fixture();change(q,r,h);self.assert_rejected(q,r,h)
 
     def test_cleanup_lock_or_plan_persistence_failure_rejected(self):
-        for kw in ({'cleanup':False},{'released':False},{'persisted':False}):
+        for kw in ({'cleanup':False},{'released':False}):
             self.assert_rejected(*fixture(),**kw)
+
+    def test_post_success_plan_failure_preserves_proof_without_false_incident(self):
+        q,r,h=fixture(); before=copy.deepcopy(r)
+        m=self.finalize(q,r,h,persisted=False)
+        self.assertEqual(m['_safe_complete_account_run_request'].call_args.args[2],'failed')
+        self.assertEqual(m['_safe_complete_account_run_request'].call_args.kwargs['error_code'],
+                         'resume_plan_reconciliation_required')
+        m['_publish_run_failure_incident'].assert_not_called()
+        m['_reconcile_linked_run'].assert_not_called()
+        self.assertEqual(r,before)
+        self.assertTrue(m['_audit'].call_args.kwargs['payload']['physical_success_preserved'])
 
     def test_ordinary_business_contract_is_still_required(self):
         q,r,h=fixture();q['metadata_safe']={};r['performance_summary']={}
@@ -97,6 +160,138 @@ class DispatcherBoundaryTests(unittest.TestCase):
     def test_preflight_cannot_use_a_forged_business_phase_contract(self):
         q,r,h=fixture();r['performance_summary']['phase_terminal_contract']={'ok':True}
         h['status']='active';self.assert_rejected(q,r,h)
+
+    @staticmethod
+    def business_fixture():
+        from account_session_orchestrator import _TERMINAL_PHASE_STATUSES
+        request=dict(id='request',run_id='run',account_id='account',status='completed',
+            requested_run_type='account_session',metadata_safe={})
+        phases=dict(welcome='not_planned',follow='completed',unfollow='partial_resumable',
+                    outreach='skipped_cleanly')
+        run=dict(id='run',account_id='account',status='completed',
+            finished_at='2026-09-15T00:00:00Z',performance_summary=dict(
+                session_status='success',exit_code=0,phase_terminal_contract=dict(
+                    ok=True,reason='all_planned_phases_terminal',phases=phases,
+                    non_terminal_phases={},terminal_statuses=sorted(_TERMINAL_PHASE_STATUSES))))
+        failure=dict(reason='resume_plan_reconciliation_required',
+            failure_module='account_session_resume_plan_store',
+            failure_function='record_end_of_session')
+        return request,run,failure
+
+    def test_generic_post_success_internal_failure_is_observable_not_blocking(self):
+        request,run,failure=self.business_fixture()
+        with patch.object(consumer.supabase_client,'load_run_row',return_value=run), \
+             patch.object(consumer,'get_account_run_request',return_value=request), \
+             patch.object(consumer,'_audit') as audit, patch.object(consumer,'log') as log, \
+             patch.object(consumer.runtime_incidents,'publish_account_incident') as publish:
+            consumer._publish_run_failure_incident(request_id='request',account_id='account',
+                run_id='run',run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                worker_summary=failure,cleanup_completed=True,lock_released=True)
+        publish.assert_not_called()
+        self.assertEqual(log.call_args.args[:2],('error','post_success_internal_reconciliation_failed'))
+        self.assertTrue(audit.call_args.kwargs['payload']['authoritative_success_preserved'])
+        self.assertEqual(audit.call_args.kwargs['payload']['success_proof'],
+                         'account_session_phase_terminal_success')
+
+    def test_generic_guard_fails_closed_without_exact_success_binding(self):
+        mutations=(
+            lambda q,r,f:r.update(status='failed'),
+            lambda q,r,f:r.update(finished_at=None),
+            lambda q,r,f:q.update(run_id='foreign-run'),
+            lambda q,r,f:r['performance_summary'].update(session_status='failed'),
+            lambda q,r,f:r['performance_summary']['phase_terminal_contract'].update(ok=False),
+            lambda q,r,f:r['performance_summary']['phase_terminal_contract']['phases'].update(follow='failed'),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                request,run,failure=copy.deepcopy(self.business_fixture());mutate(request,run,failure)
+                proven,_=consumer._authoritative_success_before_internal_failure(
+                    request=request,run=run,hold=None,failure_summary=failure,
+                    cleanup_completed=True,lock_released=True)
+                self.assertFalse(proven)
+        request,run,failure=self.business_fixture()
+        for cleanup,released in ((False,True),(True,False),(None,True),(True,None)):
+            proven,_=consumer._authoritative_success_before_internal_failure(
+                request=request,run=run,hold=None,failure_summary=failure,
+                cleanup_completed=cleanup,lock_released=released)
+            self.assertFalse(proven)
+
+    def test_guard_uses_success_truth_not_error_name(self):
+        request,run,failure=self.business_fixture()
+        for reason,module,function in (
+            ('terminal_proof_normalization_failed','unknown_serializer','normalize'),
+            ('worker_exit_nonzero','runner','main'),
+            ('brand_new_unlisted_failure','future_module','future_function'),
+        ):
+            with self.subTest(reason=reason):
+                failure.update(reason=reason,failure_module=module,failure_function=function)
+                proven,proof=consumer._authoritative_success_before_internal_failure(
+                    request=request,run=run,hold=None,failure_summary=failure,
+                    cleanup_completed=True,lock_released=True)
+                self.assertTrue(proven)
+                self.assertEqual(proof,'account_session_phase_terminal_success')
+
+    def test_arbitrary_post_success_error_is_observable_and_never_blocking(self):
+        request,run,failure=self.business_fixture()
+        failure.update(reason='unlisted_projection_contract_defect',
+                       failure_module='future_projection_module',
+                       failure_function='serialize_future_receipt')
+        with patch.object(consumer.supabase_client,'load_run_row',return_value=run), \
+             patch.object(consumer,'get_account_run_request',return_value=request), \
+             patch.object(consumer,'_audit') as audit, patch.object(consumer,'log') as log, \
+             patch.object(consumer.runtime_incidents,'publish_account_incident') as publish:
+            consumer._publish_run_failure_incident(request_id='request',account_id='account',
+                run_id='run',run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                worker_summary=failure,cleanup_completed=True,lock_released=True)
+        publish.assert_not_called()
+        self.assertTrue(audit.call_args.kwargs['payload']['authoritative_success_preserved'])
+        self.assertEqual(log.call_args.args[:2],('error','post_success_internal_reconciliation_failed'))
+
+    def test_later_real_operation_failure_is_not_masked_by_prior_phase_success(self):
+        request,run,failure=self.business_fixture()
+        # The later operation has changed the authoritative whole-run state;
+        # the earlier phase receipt is historical evidence, not session success.
+        run.update(status='failed',finished_at='2026-09-15T00:01:00Z')
+        run['performance_summary']['session_status']='failed'
+        run['performance_summary']['phase_terminal_contract'].update(
+            ok=False,reason='planned_phase_non_terminal',
+            non_terminal_phases={'outreach':'failed'})
+        run['performance_summary']['phase_terminal_contract']['phases']['outreach']='failed'
+        failure.update(reason='device_unavailable',failure_module='runner',failure_function='outreach')
+        with patch.object(consumer.supabase_client,'load_run_row',return_value=run), \
+             patch.object(consumer,'get_account_run_request',return_value=request), \
+             patch.object(consumer.supabase_client,'get_account_username',return_value='synthetic'), \
+             patch.object(consumer.runtime_incidents,'publish_account_incident',
+                          return_value={'published':False}) as publish:
+            consumer._publish_run_failure_incident(request_id='request',account_id='account',
+                run_id='run',run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                worker_summary=failure,cleanup_completed=True,lock_released=True)
+        publish.assert_called_once()
+
+    def test_incoming_operation_failure_cannot_use_stale_persisted_success(self):
+        request,run,failure=self.business_fixture()
+        failure.update(session_status='failed',exit_code=1,
+            phase_terminal_contract=dict(ok=False,reason='planned_phase_non_terminal',
+                phases={'outreach':'failed'},non_terminal_phases={'outreach':'failed'}),
+            reason='device_unavailable',failure_module='runner',failure_function='outreach')
+        proven,authority=consumer._authoritative_success_before_internal_failure(
+            request=request,run=run,hold=None,failure_summary=failure,
+            cleanup_completed=True,lock_released=True)
+        self.assertFalse(proven)
+        self.assertEqual(authority,'incoming_terminal_failure_contradicts_persisted_success')
+
+    def test_pre_success_real_failure_still_reaches_existing_publisher(self):
+        request,run,failure=self.business_fixture();run['status']='failed'
+        failure.update(reason='worker_exit_nonzero',failure_module='runner',failure_function='main')
+        with patch.object(consumer.supabase_client,'load_run_row',return_value=run), \
+             patch.object(consumer,'get_account_run_request',return_value=request), \
+             patch.object(consumer.supabase_client,'get_account_username',return_value='synthetic'), \
+             patch.object(consumer.runtime_incidents,'publish_account_incident',
+                          return_value={'published':False}) as publish:
+            consumer._publish_run_failure_incident(request_id='request',account_id='account',
+                run_id='run',run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                worker_summary=failure,cleanup_completed=True,lock_released=True)
+        publish.assert_called_once()
 
 
     def test_malformed_structures_fail_closed(self):

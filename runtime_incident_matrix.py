@@ -476,6 +476,7 @@ def build_incident_dedupe_key(
 
 
 _SAFE_METADATA_KEYS = (
+    "error_class",
     "first_causal_reason",
     "restriction_evidence",
     "terminal_progress_source",
@@ -564,6 +565,8 @@ def _safe_summary_metadata(summary: dict[str, Any]) -> dict[str, Any]:
         if value is None:
             continue
         text = str(value).strip()
+        if key == "error_class" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", text):
+            continue
         if key == "specific_failure_reason":
             text = re.sub(r"<[^>]*>", "[redacted]", text)
             text = re.sub(
@@ -935,6 +938,8 @@ def classify_terminal_run_failure(
 
     # 6) Structured runtime error transmitted by the worker.
     if reason:
+        error_class = str(summary.get("error_class") or "")
+        cause = f" {error_class}." if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", error_class) else ""
         return IncidentDecision(
             should_publish=True,
             incident_type="run_worker_failure",
@@ -947,7 +952,7 @@ def classify_terminal_run_failure(
             ),
             requires_operator_review=True,
             blocking_campaign=True,
-            admin_message=f"Structured worker failure ({reason}), exit code {exit_code}.",
+            admin_message=f"Structured worker failure ({reason}), exit code {exit_code}.{cause}",
             notify_channels=True,
             metadata_safe=metadata_safe,
         )

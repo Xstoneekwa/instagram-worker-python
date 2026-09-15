@@ -277,7 +277,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(payload["detected_at"], incident["last_seen_at"])
         self.assertTrue(payload["device_id_short"])
         self.assertIn("Resolve the incident", payload["required_operator_action"])
-        self.assertIn("explicitly set the account to Active", payload["text"])
+        self.assertIn("eligibility returns immediately if no independent blocker remains", payload["text"])
 
     def test_action_rate_limit_notification_has_no_operator_review_wording(self) -> None:
         payload = incident_notifications.build_incident_notification_payload({

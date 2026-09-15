@@ -270,7 +270,8 @@ def build_incident_notification_payload(incident: dict) -> dict:
     ) or "unclassified"
     operator_review_instruction = (
         "Run interrupted — operator action required. Resolve the incident, "
-        "then explicitly set the account to Active to allow the next natural run."
+        "eligibility returns immediately if no independent blocker remains. "
+        "Execution follows the normal schedule and remaining session authority."
     )
 
     if incident_type == "instagram_human_confirmation_required":
@@ -458,6 +459,8 @@ def build_incident_notification_payload(incident: dict) -> dict:
         f"Account: {account_username or 'unknown'} ({_short_id(incident.get('account_id')) or 'no-account-id'})",
         f"Status: {status} | Occurrences: {occurrence_count}",
     ]
+    if incident_type == "run_worker_failure" and admin_message:
+        message_parts.append(f"Summary: {admin_message}")
     phase_summary = (
         metadata.get("phase_summary")
         if isinstance(metadata.get("phase_summary"), dict)

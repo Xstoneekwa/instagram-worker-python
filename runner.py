@@ -27931,14 +27931,32 @@ def _main_impl() -> int:
             )
             from restriction_preflight_terminal_contract import success_summary
             if run_id:
+                try:
+                    preflight_summary = success_summary(
+                        account_id=account_id, request_id=run_request_id, run_id=run_id,
+                        policy=restriction_resume_policy, released=released,
+                    )
+                except ValueError as proof_error:
+                    if str(proof_error) != "restriction_preflight_terminal_binding_missing":
+                        raise
+                    # Keep the physical result distinct from serialization.
+                    # The dispatcher must independently read the bound cleared
+                    # hold before treating this as an internal-only failure.
+                    proof_error.summary = {
+                        "reason": "restriction_preflight_terminal_binding_missing",
+                        "failure_module": "restriction_preflight_terminal_contract",
+                        "failure_function": "success_summary",
+                        "restriction_preflight_only": True,
+                        "physical_preflight_passed": True,
+                        "business_actions_executed": 0,
+                        "incident_id": restriction_incident_id,
+                    }
+                    raise
                 _update_run_status_safe(
                     run_id=run_id,
                     status="completed",
                     totals={"total": 0, "success": 0, "failed": 0},
-                    performance_summary=success_summary(
-                        account_id=account_id, request_id=run_request_id, run_id=run_id,
-                        policy=restriction_resume_policy, released=released,
-                    ),
+                    performance_summary=preflight_summary,
                 )
             reset_perf_counters()
             _emit_performance_summary(
@@ -29644,6 +29662,11 @@ def main() -> int:
                 terminal = getattr(exc, "summary", None)
                 terminal = dict(terminal) if isinstance(terminal, dict) else {}
                 terminal.update(account_id=_CURRENT_ACCOUNT_ID, run_id=_CURRENT_RUN_ID)
+                # Preserve the exception family without copying arbitrary
+                # exception text (URLs, credentials and device details).
+                terminal["error_class"] = type(exc).__name__[:100]
+                terminal.setdefault("failure_module", "runner")
+                terminal.setdefault("failure_function", "main")
                 if terminal_reason(terminal) == "unknown":
                     terminal["root_failure_code"] = "worker_exit_nonzero"
                 terminal["terminal_exception_intercepted"] = True
