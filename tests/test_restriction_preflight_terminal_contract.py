@@ -28,6 +28,119 @@ def fixture():
 
 
 class DispatcherBoundaryTests(unittest.TestCase):
+    def test_runtime_physical_fields_cannot_hide_false_equals_zero(self):
+        for field,bad in [('business_actions_executed',False),
+                          ('physical_preflight_passed',1),
+                          ('preflight_cleanup_completed',1),
+                          ('restriction_preflight_only',1)]:
+            with self.subTest(field=field):
+                q,r,h=fixture()
+                with patch.object(consumer,'_proven_preflight_binding_error',
+                        wraps=consumer._proven_preflight_binding_error) as fallback:
+                    accepted,_=consumer._authoritative_success_before_internal_failure(
+                        request=q,run=r,hold=h,failure_summary={field:bad},
+                        cleanup_completed=True,lock_released=True)
+                self.assertFalse(accepted)
+                fallback.assert_not_called()
+
+    def test_initial_reload_and_runtime_proof_precedence_cross_product(self):
+        import itertools
+        key='restriction_preflight_terminal_contract'
+        valid=fixture()[1]['performance_summary'][key]
+        values={'absent':None,'valid':valid,'foreign':{**valid,'authorization_id':'foreign'},
+                'malformed':[]}
+        for names in itertools.product(values,repeat=3):
+            with self.subTest(initial_reload_runtime=names):
+                q,r,h=fixture();reload=copy.deepcopy(r)
+                incoming={'reason':'internal_projection_error'}
+                sources=(r['performance_summary'],reload['performance_summary'],incoming)
+                for name,source in zip(names,sources):
+                    source.pop(key,None)
+                    if name!='absent':source[key]=copy.deepcopy(values[name])
+                with ExitStack() as s:
+                    s.enter_context(patch.object(consumer.supabase_client,'load_run_row',return_value=r))
+                    s.enter_context(patch.object(consumer,'get_account_run_request',return_value=q))
+                    s.enter_context(patch.object(contract,'load_terminal_evidence',return_value=(reload,h)))
+                    s.enter_context(patch.object(consumer.supabase_client,'get_account_username',return_value='synthetic'))
+                    s.enter_context(patch.object(consumer,'log'))
+                    audit=s.enter_context(patch.object(consumer,'_audit'))
+                    publish=s.enter_context(patch.object(consumer.runtime_incidents,'publish_account_incident',
+                        return_value={'published':False}))
+                    fallback=s.enter_context(patch.object(consumer,'_proven_preflight_binding_error',
+                        wraps=consumer._proven_preflight_binding_error))
+                    consumer._publish_run_failure_incident(request_id=q['id'],account_id=q['account_id'],
+                        run_id=r['id'],run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                        worker_summary=incoming,cleanup_completed=True,lock_released=True)
+                rejected=any(n in {'foreign','malformed'} for n in names)
+                preserved=any(c.kwargs.get('payload',{}).get('authoritative_success_preserved') is True
+                              for c in audit.call_args_list)
+                self.assertEqual(preserved,not rejected)
+                self.assertEqual(publish.call_count,int(rejected))
+                self.assertEqual(fallback.call_count,int(names==('absent','absent','absent')))
+
+    def test_all_terminal_proof_sources_at_real_incident_boundary(self):
+        valid = fixture()[1]['performance_summary']['restriction_preflight_terminal_contract']
+        foreign = {**valid, 'authorization_id': 'foreign-authorization'}
+        other = {**valid, 'run_id': 'foreign-run'}
+        absent = object()
+        cases = [
+            ('valid_persisted', valid, absent, True),
+            ('valid_runtime', absent, valid, True),
+            ('foreign_persisted', foreign, absent, False),
+            ('foreign_runtime_review_counterexample', absent, foreign, False),
+            ('valid_persisted_foreign_runtime', valid, foreign, False),
+            ('foreign_persisted_valid_runtime', foreign, valid, False),
+            ('contradictory_sources', foreign, other, False),
+            ('absent_everywhere_legacy_authority', absent, absent, True),
+            ('null_runtime', valid, None, False),
+            ('incomplete_persisted', {}, valid, False),
+            ('malformed_runtime', absent, ['invalid'], False),
+            ('matching_valid_sources', valid, valid, True),
+        ]
+        for name, persisted, incoming, accepted in cases:
+            with self.subTest(case=name):
+                q, r, h = fixture()
+                key = 'restriction_preflight_terminal_contract'
+                r['performance_summary'].pop(key)
+                failure = {'reason': 'internal_projection_error'}
+                if persisted is not absent:
+                    r['performance_summary'][key] = copy.deepcopy(persisted)
+                if incoming is not absent:
+                    failure[key] = copy.deepcopy(incoming)
+                before = copy.deepcopy((q, r, h, failure))
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(consumer.supabase_client, 'load_run_row', return_value=r))
+                    stack.enter_context(patch.object(consumer, 'get_account_run_request', return_value=q))
+                    stack.enter_context(patch.object(contract, 'load_terminal_evidence', return_value=(r, h)))
+                    stack.enter_context(patch.object(consumer.supabase_client, 'get_account_username', return_value='synthetic'))
+                    stack.enter_context(patch.object(consumer, 'log'))
+                    audit = stack.enter_context(patch.object(consumer, '_audit'))
+                    publish = stack.enter_context(patch.object(consumer.runtime_incidents,
+                        'publish_account_incident', return_value={'published': False}))
+                    fallback = stack.enter_context(patch.object(consumer, '_proven_preflight_binding_error',
+                        wraps=consumer._proven_preflight_binding_error))
+                    consumer._publish_run_failure_incident(request_id=q['id'], account_id=q['account_id'],
+                        run_id=r['id'], run_type='account_session', exit_code=1, timed_out=False,
+                        canceled=False, worker_summary=failure, cleanup_completed=True, lock_released=True)
+                preserved = any(call.kwargs.get('payload', {}).get('authoritative_success_preserved') is True
+                                for call in audit.call_args_list)
+                self.assertEqual(preserved, accepted)
+                self.assertEqual(publish.call_count, 0 if accepted else 1)
+                self.assertEqual(fallback.call_count, int(persisted is absent and incoming is absent))
+                self.assertEqual((q, r, h, failure), before)
+                if name=='foreign_runtime_review_counterexample':
+                    merged={**r,'performance_summary':{**r['performance_summary'],**failure}}
+                    canonical=contract.validate_terminal(request=q,run=merged,hold=h,
+                        cleanup_completed=True,lock_released=True)
+                    self.assertIs(canonical.get('ok'),False,canonical)
+                    self.assertFalse(preserved)
+                    fallback.assert_not_called()
+                    self.assertEqual(publish.call_count,1)
+                    import json
+                    print(json.dumps({'COUNTEREXAMPLE':name,'CANONICAL_MERGED_PROOF_VALID':False,
+                        'AUTHORITATIVE_SUCCESS_PRESERVED':preserved,'FALLBACK_USED':False,
+                        'FAIL_CLOSED':True}))
+
     def test_internal_binding_failure_requires_independent_physical_evidence(self):
         q,r,h=fixture()
         r['performance_summary'].update(reason='restriction_preflight_terminal_binding_missing',

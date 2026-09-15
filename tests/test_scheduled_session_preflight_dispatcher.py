@@ -14,6 +14,27 @@ TEST_ACCOUNT_ID = "00000000-0000-4000-8000-000000000201"
 TEST_DEVICE_ID = "00000000-0000-4000-8000-000000000401"
 TEST_APP_INSTANCE_ID = "00000000-0000-4000-8000-000000000501"
 TEST_ASSIGNMENT_ID = "00000000-0000-4000-8000-000000000601"
+TEST_LEASE_ID = "00000000-0000-4000-8000-000000000801"
+
+
+def _device_lock_binding(request_id: str, *, worker_id: str = "schedule-session:test") -> dict:
+    return {
+        "account_id": TEST_ACCOUNT_ID,
+        "request_id": request_id,
+        "device_id": TEST_DEVICE_ID,
+        "worker_id": worker_id,
+        "lease_id": TEST_LEASE_ID,
+        "generation": TEST_LEASE_ID,
+        "lease_seconds": 120,
+    }
+
+
+def _transferred_device_lock(request_id: str) -> dict:
+    return {
+        "ok": True,
+        "transferred": True,
+        **_device_lock_binding(request_id, worker_id="run-dispatcher:test"),
+    }
 
 
 class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
@@ -102,6 +123,7 @@ class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
                 "preflight_id": "00000000-0000-4000-8000-000000000701",
                 "expected_username": "mythyl_fitness",
                 "expected_package": "com.instagram.android",
+                "device_lock_binding": _device_lock_binding(TEST_REQUEST_ID),
             },
         }
         dispatch_ctx = {
@@ -132,17 +154,24 @@ class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
             patch.object(consumer, "_validate_assignment", return_value=(True, None, dispatch_ctx)),
             patch.object(consumer, "evaluate_queued_run_commercial_policy", return_value=(True, None, {})),
             patch.object(preflight_control, "evaluate_scheduled_session_preflight_claim", return_value=(True, None, None)),
-            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
+            patch.object(
+                consumer,
+                "transfer_device_lock",
+                return_value=_transferred_device_lock(TEST_REQUEST_ID),
+            ),
             patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
             patch.object(consumer, "_heartbeat"),
             patch.object(consumer, "_runner_runtime_identity_env", return_value={}),
-            patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
+            patch.object(
+                consumer, "_fleet_spawn_or_legacy", return_value=FakeProc()
+            ) as spawn,
+            patch.object(consumer, "_wait_for_subprocess", return_value=(0, False)),
             patch.object(consumer, "_finalize_manual_run_after_subprocess"),
             patch.object(consumer, "_audit"),
         ):
             consumer._handle_claimed_request(cfg, request)
 
-        cmd = popen.call_args.args[0]
+        cmd = spawn.call_args.args[1]
         self.assertIn("--device-serial", cmd)
         self.assertEqual(cmd[cmd.index("--device-serial") + 1], "RFGL145LZHE")
         self.assertIn("--package-name", cmd)
@@ -168,7 +197,12 @@ class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
             "account_id": TEST_ACCOUNT_ID,
             "requested_run_type": "scheduled_session_preflight",
             "status": "claimed",
-            "metadata_safe": {"preflight_id": "00000000-0000-4000-8000-000000000702"},
+            "metadata_safe": {
+                "preflight_id": "00000000-0000-4000-8000-000000000702",
+                "device_lock_binding": _device_lock_binding(
+                    "00000000-0000-4000-8000-000000000102"
+                ),
+            },
         }
         dispatch_ctx = {
             "assignment_found": True,
@@ -188,7 +222,13 @@ class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
             patch.object(consumer, "_validate_assignment", return_value=(True, None, dispatch_ctx)),
             patch.object(consumer, "evaluate_queued_run_commercial_policy", return_value=(True, None, {})),
             patch.object(preflight_control, "evaluate_scheduled_session_preflight_claim", return_value=(True, None, None)),
-            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
+            patch.object(
+                consumer,
+                "transfer_device_lock",
+                return_value=_transferred_device_lock(
+                    "00000000-0000-4000-8000-000000000102"
+                ),
+            ),
             patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
             patch.object(consumer, "release_device_lock", return_value={"released": True}),
             patch.object(preflight_control, "terminalize_scheduled_session_preflight_request") as terminalize,

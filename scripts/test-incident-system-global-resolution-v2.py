@@ -25,12 +25,15 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 PG = Path('/opt/homebrew/opt/postgresql@17/bin')
 BACKEND_SHA = '20718305def88ae2ceb9a0c2fa3bc2b016151cf1'
+CANDIDATE_BACKEND_SHA = '90fd0ef932f73d353d3d4b51c68ac2047c9c9864'
 MIGRATION = '20260914122213_operator_stop_natural_tick_lineage_v1.sql'
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--backend-root', type=Path, required=True)
+    ap.add_argument('--candidate-backend-sha', default=CANDIDATE_BACKEND_SHA,
+                    help='Exact Backend candidate commit; pass the final V6 commit after governance closure.')
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--test-name', help='Run one named isolated contract after full migration replay.')
     ap.add_argument('--lineage-only', action='store_true',
@@ -43,7 +46,7 @@ def main():
     if args.lineage_only and args.restriction_only: ap.error('select one contract group')
     backend = args.backend_root.resolve()
     candidate_backend = ROOT.parent / 'backend-incident-system-global-resolution-v2'
-    if subprocess.check_output(['git', '-C', str(candidate_backend), 'rev-parse', 'HEAD'], text=True).strip() != BACKEND_SHA:
+    if subprocess.check_output(['git', '-C', str(candidate_backend), 'rev-parse', 'HEAD'], text=True).strip() != args.candidate_backend_sha:
         raise RuntimeError('candidate_backend_base_mismatch')
     if subprocess.check_output(['git', '-C', str(backend), 'rev-parse', 'HEAD'], text=True).strip() != BACKEND_SHA:
         raise RuntimeError('schema_dependency_sha_mismatch')

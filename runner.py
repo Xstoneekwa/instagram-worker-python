@@ -878,6 +878,21 @@ def _current_package_safe(d: Any) -> str:
         return ""
 
 
+def _restriction_preflight_hold_authorized(hold: dict, account_id: str, incident_id: str) -> bool:
+    """Exact read gate for the existing SQL preflight release contract."""
+    if not isinstance(hold, dict) or not account_id or not incident_id:
+        return False
+    if hold.get("account_id") != account_id or hold.get("incident_id") != incident_id:
+        return False
+    if hold.get("status") == "verification_required":
+        return True
+    metadata = hold.get("metadata_safe")
+    retired = metadata.get("resolved_growth_ready_v1") if isinstance(metadata, dict) else None
+    return (hold.get("status") == "superseded" and isinstance(retired, dict)
+            and retired.get("incident_resolution_retires_hold") is True
+            and retired.get("incident_id") == incident_id)
+
+
 def _prepare_device_for_account_identity_preflight(
     d: Any,
     *,
@@ -27841,8 +27856,11 @@ def _main_impl() -> int:
                 "load_instagram_restriction_hold",
                 account_id,
                 restriction_incident_id,
+                include_resolution_retired=True,
             ) or {}
-            if str(restriction_hold.get("status") or "") != "verification_required":
+            # The validated policy and exact retired hold permit physical
+            # verification, not success. The existing release RPC remains final.
+            if not _restriction_preflight_hold_authorized(restriction_hold, account_id, restriction_incident_id):
                 hold_reason = "restriction_hold_not_verification_required"
                 log(
                     "error",

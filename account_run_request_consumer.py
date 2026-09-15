@@ -2146,6 +2146,7 @@ def _authoritative_success_before_internal_failure(
     *, request: dict, run: dict, hold: dict | None,
     failure_summary: dict, cleanup_completed: bool | None,
     lock_released: bool | None,
+    proof_sources: tuple[dict, ...] = (),
 ) -> tuple[bool, str]:
     """Recognize existing durable success; never infer it from an error flag."""
     if cleanup_completed is not True or lock_released is not True:
@@ -2161,19 +2162,31 @@ def _authoritative_success_before_internal_failure(
         if not isinstance(hold, dict):
             return False, "preflight_hold_missing"
         from restriction_preflight_terminal_contract import validate_terminal
-        validated = validate_terminal(
-            request=request, run=run, hold=hold,
-            cleanup_completed=cleanup_completed, lock_released=lock_released,
-        )
-        if validated.get("ok") is True:
-            return True, "restriction_preflight_terminal_success"
         summary = run.get("performance_summary") if isinstance(run.get("performance_summary"), dict) else {}
-        # The canonical proof is the authority whenever it is present.  A
-        # malformed, stale or foreign proof must remain rejected; the legacy
-        # physical-evidence fallback exists only for the historical serializer
-        # failure that produced no terminal-proof field at all.
-        if "restriction_preflight_terminal_contract" in summary:
-            return False, "restriction_preflight_terminal_proof_rejected"
+        # Inspect original sources as well as the merged view. Presence includes
+        # null/malformed values: dictionary precedence must never erase rejection.
+        key = "restriction_preflight_terminal_contract"
+        sources = (summary, failure_summary, *proof_sources)
+        if any(not isinstance(source, dict) for source in sources):
+            return False, "record_invalid"
+        proofs = [source[key] for source in sources if key in source]
+        if proofs:
+            for source in sources:
+                if any(name in source and (
+                           type(source[name]) is not type(summary.get(name))
+                           or source[name] != summary.get(name))
+                       for name in ("physical_preflight_passed", "restriction_preflight_only",
+                                    "business_actions_executed", "preflight_cleanup_completed")):
+                    return False, "restriction_preflight_terminal_proof_rejected"
+            for proof in proofs:
+                candidate = {**run, "performance_summary": {**summary, key: proof}}
+                validated = validate_terminal(
+                    request=request, run=candidate, hold=hold,
+                    cleanup_completed=cleanup_completed, lock_released=lock_released,
+                )
+                if validated.get("ok") is not True or proof != proofs[0]:
+                    return False, "restriction_preflight_terminal_proof_rejected"
+            return True, "restriction_preflight_terminal_success"
         # Compatibility for the already-observed failure shape where the
         # internal serializer replaced the successful summary. The separate
         # cleared hold and exact zero-action bindings remain mandatory.
@@ -2267,7 +2280,11 @@ def _publish_run_failure_incident(
                         proven, proof_kind = _authoritative_success_before_internal_failure(
                             request=request_row, run=evidence_run, hold=evidence_hold,
                             failure_summary=failure, cleanup_completed=cleanup_completed,
-                            lock_released=lock_released)
+                            lock_released=lock_released,
+                            proof_sources=(
+                                raw_summary if raw_summary is not None else {},
+                                worker_summary if worker_summary is not None else {},
+                            ))
                     except Exception as proof_exc:
                         proven, proof_kind = False, "success_proof_load_failed"
                         log("warning", "post_success_proof_load_failed",

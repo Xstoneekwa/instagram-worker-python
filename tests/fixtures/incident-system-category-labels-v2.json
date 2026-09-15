@@ -41,37 +41,221 @@
   "timezone": "Africa/Johannesburg",
   "no_new_types": true,
   "producer_contracts": {
-    "HOST_STORAGE_CRITICAL": {"kind":"terminal_classifier","signal":"host_storage_critical","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "account_configuration_failure": {"kind":"backend_configuration","signal":"welcome_template_missing","producer":"schedule_session_configuration_incidents.reportWelcomeTemplateMissingIncident","repeatable":true},
-    "account_login_required": {"kind":"terminal_classifier","signal":"checkpoint","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "active_instagram_account_mismatch": {"kind":"terminal_classifier","signal":"active_instagram_account_mismatch","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "assigned_instagram_package_unavailable": {"kind":"terminal_classifier","signal":"instagram_not_foreground","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_login_device_unavailable": {"kind":"auto_login_classifier","signal":"device_lock_failed","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_login_failed": {"kind":"auto_login_classifier","signal":"invalid_credentials","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_login_identity_mismatch": {"kind":"auto_login_classifier","signal":"active_instagram_account_mismatch","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_login_request_expired": {"kind":"auto_login_classifier","signal":"request_expired","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_login_verification_required": {"kind":"auto_login_classifier","signal":"email_challenge_detected","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "auto_restart_quota_inconsistency": {"kind":"auto_restart_hard_stop","signal":"quota_inconsistency_blocked","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "auto_restart_resume_plan_invalid": {"kind":"auto_restart_hard_stop","signal":"resume_plan_invalid","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "email_verification_code_required": {"kind":"historical_alias","signal":"legacy_auto_login_07ee","producer":"historical_auto_login_07ee.login_challenge_runtime","repeatable":false,"non_repeatable_reason":"historical producer superseded by login_verification_code_required"},
-    "instagram_account_restriction": {"kind":"terminal_classifier","signal":"instagram_account_restriction_messages_disabled","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "instagram_ads_data_consent_popup_requires_operator": {"kind":"login_challenge","signal":"instagram_ads_data_consent_popup","producer":"login_challenge_runtime.publish_login_challenge_pending_incident","repeatable":true},
-    "instagram_challenge": {"kind":"auto_restart_hard_stop","signal":"challenge_blocked","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "instagram_human_confirmation_required": {"kind":"terminal_classifier","signal":"instagram_human_confirmation_required","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "instagram_restriction": {"kind":"auto_restart_hard_stop","signal":"restriction_blocked","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "login_challenge_pending": {"kind":"login_challenge","signal":"unsupported_challenge","producer":"login_challenge_runtime.publish_login_challenge_pending_incident","repeatable":true},
-    "login_package_mismatch": {"kind":"login_package","signal":"wrong_package_foreground","producer":"login_challenge_runtime.publish_login_package_mismatch_incident","repeatable":true},
-    "login_verification_code_required": {"kind":"login_challenge","signal":"email_challenge_detected","producer":"login_challenge_runtime.publish_login_challenge_pending_incident","repeatable":true},
-    "orf4b_smoke_test": {"kind":"test_only","signal":"orf4b historical smoke","producer":"governed historical test harness","repeatable":false,"non_repeatable_reason":"test-only historical category; no runtime producer"},
-    "orf4c_smoke_test": {"kind":"test_only","signal":"orf4c historical smoke","producer":"governed historical test harness","repeatable":false,"non_repeatable_reason":"test-only historical category; no runtime producer"},
-    "run_device_unavailable": {"kind":"terminal_classifier","signal":"device_offline","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "run_identity_verification_failed": {"kind":"terminal_classifier","signal":"actual_logged_in_username_not_detected","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "run_worker_failure": {"kind":"terminal_classifier","signal":"worker_exit_nonzero","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true},
-    "runtime_unknown_blocked": {"kind":"auto_restart_hard_stop","signal":"runtime_unknown_blocked","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "scheduled_early_failure_retrying": {"kind":"transient_status","signal":"legacy early retry projection","producer":"account_run retry projection","repeatable":false,"non_repeatable_reason":"transient projection category, not a durable incident producer"},
-    "system_test_incident": {"kind":"test_only","signal":"system test fixture","producer":"governed historical test harness","repeatable":false,"non_repeatable_reason":"test-only historical category; no runtime producer"},
-    "ui_state_unknown": {"kind":"auto_restart_hard_stop","signal":"ui_state_unknown_blocked","producer":"auto_restart_hard_stop.execute_auto_restart_hard_stop","repeatable":true},
-    "welcome_retry_final_unverified_send_surface_lost": {"kind":"historical_terminal","signal":"legacy welcome retry terminal","producer":"commercial resume historical terminal contract","repeatable":false,"non_repeatable_reason":"closed historical terminal category; current producer emits welcome_surface_unstable"},
-    "welcome_surface_unstable": {"kind":"terminal_classifier","signal":"welcome_surface_unstable","producer":"runtime_incident_matrix.classify_terminal_run_failure","repeatable":true}
+    "HOST_STORAGE_CRITICAL": {
+      "kind": "terminal_classifier",
+      "signal": "host_storage_critical",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "account_configuration_failure": {
+      "kind": "backend_configuration",
+      "signal": "welcome_template_missing",
+      "producer": "schedule_session_configuration_incidents.reportWelcomeTemplateMissingIncident",
+      "repeatable": true
+    },
+    "account_login_required": {
+      "kind": "terminal_classifier",
+      "signal": "checkpoint",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "active_instagram_account_mismatch": {
+      "kind": "terminal_classifier",
+      "signal": "active_instagram_account_mismatch",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "assigned_instagram_package_unavailable": {
+      "kind": "terminal_classifier",
+      "signal": "instagram_not_foreground",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_login_device_unavailable": {
+      "kind": "auto_login_classifier",
+      "signal": "device_lock_failed",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_login_failed": {
+      "kind": "auto_login_classifier",
+      "signal": "invalid_credentials",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_login_identity_mismatch": {
+      "kind": "auto_login_classifier",
+      "signal": "active_instagram_account_mismatch",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_login_request_expired": {
+      "kind": "auto_login_classifier",
+      "signal": "request_expired",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_login_verification_required": {
+      "kind": "auto_login_classifier",
+      "signal": "email_challenge_detected",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "auto_restart_quota_inconsistency": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "quota_inconsistency_blocked",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "auto_restart_resume_plan_invalid": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "resume_plan_invalid",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "email_verification_code_required": {
+      "kind": "historical_login_challenge",
+      "signal": "legacy_auto_login_07ee",
+      "producer": "historical_auto_login_07ee.login_challenge_runtime.publish_login_challenge_pending_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "historical publisher retained in source"
+    },
+    "instagram_account_restriction": {
+      "kind": "terminal_classifier",
+      "signal": "instagram_account_restriction_messages_disabled",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "instagram_ads_data_consent_popup_requires_operator": {
+      "kind": "login_challenge",
+      "signal": "instagram_ads_data_consent_popup",
+      "producer": "login_challenge_runtime.publish_login_challenge_pending_incident",
+      "repeatable": true
+    },
+    "instagram_challenge": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "challenge_blocked",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "instagram_human_confirmation_required": {
+      "kind": "terminal_classifier",
+      "signal": "instagram_human_confirmation_required",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "instagram_restriction": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "restriction_blocked",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "login_challenge_pending": {
+      "kind": "login_challenge",
+      "signal": "unsupported_challenge",
+      "producer": "login_challenge_runtime.publish_login_challenge_pending_incident",
+      "repeatable": true
+    },
+    "login_package_mismatch": {
+      "kind": "login_package",
+      "signal": "wrong_package_foreground",
+      "producer": "login_challenge_runtime.publish_login_package_mismatch_incident",
+      "repeatable": true
+    },
+    "login_verification_code_required": {
+      "kind": "login_challenge",
+      "signal": "email_challenge_detected",
+      "producer": "login_challenge_runtime.publish_login_challenge_pending_incident",
+      "repeatable": true
+    },
+    "orf4b_smoke_test": {
+      "kind": "generic_incident_signal",
+      "signal": "orf4b historical smoke",
+      "producer": "runtime_incidents.publish_account_incident -> public.upsert_account_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "generic incident API; no dedicated current device producer claimed"
+    },
+    "orf4c_smoke_test": {
+      "kind": "generic_incident_signal",
+      "signal": "orf4c historical smoke",
+      "producer": "runtime_incidents.publish_account_incident -> public.upsert_account_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "generic incident API; no dedicated current device producer claimed"
+    },
+    "run_device_unavailable": {
+      "kind": "terminal_classifier",
+      "signal": "device_offline",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "run_identity_verification_failed": {
+      "kind": "terminal_classifier",
+      "signal": "actual_logged_in_username_not_detected",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "run_worker_failure": {
+      "kind": "terminal_classifier",
+      "signal": "worker_exit_nonzero",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    },
+    "runtime_unknown_blocked": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "runtime_unknown_blocked",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "scheduled_early_failure_retrying": {
+      "kind": "generic_incident_signal",
+      "signal": "legacy early retry projection",
+      "producer": "runtime_incidents.publish_account_incident -> public.upsert_account_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "generic incident API; no dedicated current device producer claimed"
+    },
+    "system_test_incident": {
+      "kind": "generic_incident_signal",
+      "signal": "system test fixture",
+      "producer": "runtime_incidents.publish_account_incident -> public.upsert_account_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "generic incident API; no dedicated current device producer claimed"
+    },
+    "ui_state_unknown": {
+      "kind": "auto_restart_hard_stop",
+      "signal": "ui_state_unknown_blocked",
+      "producer": "auto_restart_hard_stop.execute_auto_restart_hard_stop",
+      "repeatable": true
+    },
+    "welcome_retry_final_unverified_send_surface_lost": {
+      "kind": "generic_incident_signal",
+      "signal": "legacy welcome retry terminal",
+      "producer": "runtime_incidents.publish_account_incident -> public.upsert_account_incident",
+      "repeatable": true,
+      "previous_classification": "INVALID_TEST_ASSUMPTION",
+      "contract_rule": "public.upsert_account_incident deduplicates active rows only; resolved rows permit a new incident",
+      "contract_changed": false,
+      "producer_scope": "generic incident API; no dedicated current device producer claimed"
+    },
+    "welcome_surface_unstable": {
+      "kind": "terminal_classifier",
+      "signal": "welcome_surface_unstable",
+      "producer": "runtime_incident_matrix.classify_terminal_run_failure",
+      "repeatable": true
+    }
   }
 }

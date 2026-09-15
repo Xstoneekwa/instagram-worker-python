@@ -1285,11 +1285,19 @@ def apply_instagram_action_restriction(payload: dict[str, Any]) -> dict[str, Any
     return row
 
 
-def load_instagram_restriction_hold(account_id: str, incident_id: str | None = None) -> dict[str, Any] | None:
+def load_instagram_restriction_hold(
+    account_id: str, incident_id: str | None = None, *,
+    include_resolution_retired: bool = False,
+) -> dict[str, Any] | None:
+    # Only an already-authorized preflight may request the exact retired hold.
+    # Ordinary blocker readers must never see superseded holds as active.
+    if include_resolution_retired and not str(incident_id or '').strip():
+        raise ValueError('resolved_preflight_incident_binding_required')
     query: dict[str, str] = {
         "select": "id,account_id,incident_id,status,stable_reason,previous_admin_lifecycle_status,verification_required_at,verified_cleared_at,metadata_safe",
         "account_id": f"eq.{str(account_id or '').strip()}",
-        "status": "in.(active,verification_required)",
+        "status": ("in.(active,verification_required,superseded)"
+                   if include_resolution_retired else "in.(active,verification_required)"),
         "order": "created_at.desc",
         "limit": "1",
     }

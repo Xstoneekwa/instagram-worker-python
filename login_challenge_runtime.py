@@ -181,6 +181,7 @@ def sync_login_package_mismatch_dashboard_action(
     account_id: str,
     expected_package_name: str,
     actual_foreground_package: str | None,
+    incident_id: str | None = None,
     run_id: str | None = None,
     expected_app_instance_id: str | None = None,
     reason: str = "expected_package_mismatch",
@@ -188,6 +189,7 @@ def sync_login_package_mismatch_dashboard_action(
     return upsert_login_challenge_dashboard_action(
         account_id=account_id,
         action_type="review_login_package_mismatch",
+        incident_id=incident_id,
         run_id=run_id,
         challenge_type=None,
         screen_type=None,

@@ -20,12 +20,12 @@ Pause until YYYY-MM-DD applies only to instagram_action_rate_limit and preventiv
 
 ## Evidence and limits
 
-Final V5 evidence is external to both candidate checkouts:
+Historical V5 evidence is retained below, but its NAB certification and six-category classification were rejected. It is not V6 certification:
 
 - `/Users/admin/Projects/incident-system-v5-full-composed-3`: 17/17 composed tests PASS after replaying 126 migrations in disposable PostgreSQL 17/PostgREST. It includes the BMY same-occurrence controls and real next recurrence, the producer matrix, cross-category interactions, NAB request/claim/policy/terminal persistence, `/profiles`, `/profiles/live`, scheduler and Auto Restart projections.
-- `/Users/admin/Projects/incident-system-v5-category-matrix-3`: all 32 catalog categories are classified. Every safely executable repeatable producer completes two real producer-to-resolution cycles (26/26). Six entries are explicitly non-repeatable: one superseded alias, three test/transient-only categories and one closed historical terminal category plus its documented replacement; none is fabricated through a direct incident insert.
+- `/Users/admin/Projects/incident-system-v5-category-matrix-3`: historical 26-category replay only. The six NON_REPEATABLE assumptions were invalidated by a real second publication after real resolution. No canonical prohibition was established; those classifications must not be used as current authority.
 - `/Users/admin/Projects/incident-system-v5-bmy-recurrence-6`: the exact existing cron rejects same-slot reopen and creates the next naturally distinct occurrence after only the disposable clock advances. The old request, root, occurrence key, timestamps and attempts remain unchanged; the fresh lineage starts at attempt 1.
-- `/Users/admin/Projects/incident-system-v5-nab-projection-6`: production-shaped restriction preflight request, real claim normalization, admission, terminal proof and persistence, zero false incident, canonical blocker removal, scheduler/Auto Restart eligibility and both profile projections PASS. No device process, ADB or real secret is used.
+- `/Users/admin/Projects/incident-system-v5-nab-projection-6`: rejected as end-to-end certification: it directly released the hold, constructed terminal proof and persisted completed. V6 replaces these shortcuts with the real runner and dispatcher boundaries. Preserve this artifact solely as historical evidence.
 - `/Users/admin/Projects/incident-system-v5-interactions-9`: timed plus operational, identity plus operational, and independent manual pause interactions PASS. Resolving A leaves B's canonical blocker; only resolving B restores incident-derived eligibility. The independent manual authority survives.
 - `/Users/admin/Projects/incident-system-v5-final-evidence`: Worker affected suite 119 total / 118 PASS / 1 SKIP and Worker cross-category suite 120 total / 105 PASS / 15 SKIP. These are disjoint selections: 239 total / 223 PASS / 0 FAIL / 0 ERROR / 16 SKIP. Backend affected suite is 109/109 PASS. Skips are never counted as passes and their database boundaries are covered by the composed run.
 
@@ -48,3 +48,94 @@ The isolated harness rejects non-local HTTP destinations, uses synthetic local c
 ## Review boundary
 
 No Follow/Mute/Like execution, CT Resume, Target Lifecycle, scheduler algorithm, attempt maximum, production control-plane source or incident type/status was added or changed. Normal governed freeze/commit and Approval 2 remain separate from this source review. Deployment requires its own fresh canonical gates.
+
+## V6 local qualification — no freeze or final commit
+
+PRE_FREEZE_INTERNAL_DEFECT = YES. The same V6 was corrected before freeze.
+Final candidate identities remain unassigned: the full-suite gate is not green.
+
+The invalid test assumption covered email_verification_code_required, orf4b_smoke_test,
+orf4c_smoke_test, scheduled_early_failure_retrying, system_test_incident and
+welcome_retry_final_unverified_send_surface_lost. The first still has its historical
+publisher in historical_auto_login_07ee.login_challenge_runtime; the other five
+are accepted by runtime_incidents.publish_account_incident and the shared
+public.upsert_account_incident API. No dedicated current device producer is
+claimed for those five. The generic API accepts non-empty categories and
+deduplicates only active incidents, explicitly permitting a new incident after
+resolution. There is no category-specific prohibition found in the current
+producer contracts. Their repeatability does not imply canonical blocking status.
+
+PREVIOUS_CLASSIFICATION = INVALID_TEST_ASSUMPTION.
+BUSINESS_CONTRACT_CHANGED = NO. PRODUCER_BEHAVIOR_CHANGED = NO for the six reclassified producers.
+The permanent test_previous_nonrepeatable_classification_is_refuted preserves
+the 6/6 counterexample; no production prohibition was introduced.
+
+The targeted V6 matrix at /Users/admin/Projects/incident-system-v6-positive-matrix-2
+passed the initial producer/resolution replay, but its admission claim was
+subsequently strengthened: evaluateRunStartEligibility is only a partial gate.
+V6 now additionally requires the canonical profiles/live projection and an
+actual newly queued request from runScheduleSessionCron for each cycle. These
+requests are canceled through the real RPC with their exact lease released; no
+device executes. The final composed replay now passes all 23 tests, including 32 categories, 64 real producer/resolution cycles and 64 newly queued scheduler requests.
+
+Real NAB chain work exposed a direct dependency: the existing SQL release RPC
+allows an exact resolution-retired superseded hold, while the Python loader and
+runner formerly rejected it. The scoped V6 extension aligns only the authorized
+preflight read/gate. Ordinary blocker reads and the SQL business contract remain
+unchanged. No current candidate identity has been frozen or committed.
+
+
+### V6 final local evidence and unresolved qualification gate
+
+The signed incident-link extension fixes a second dependency revealed by the real
+producer: login_package_mismatch published an incident but its review action had
+no incident_id. The actual orchestrator now forwards that exact ID through the
+existing login dashboard-action helper/RPC. Real resolution retires its linked
+action. Independent actions and failed-publication fallback are unchanged.
+No production category, resolution rule or SQL was changed by V6.
+
+- `/Users/admin/Projects/incident-system-v6-full-composed-final`: 23/23 PASS,
+  126 local migrations, no skips. category-matrix.json has 32 categories, each
+  with two real publications, resolutions, canonical positive projections and
+  actually queued cron requests. The six-category refutation remains 6/6.
+- NAB uses the real runner in an isolated child, canonical hold release, cleanup,
+  dispatcher terminalization, publication authority and projections. Only Android
+  transport and test integrity infrastructure are fixtures; no real phone or
+  signed deployment certification is claimed. The true pre-success identity
+  failure remains blocking. Evidence: nab-projection-chain.json and
+  nab-pre-success-failure.json in that directory.
+- The proof suite covers all 64 initial/reloaded/runtime combinations, 12 explicit
+  source cases and the foreign-authorization review counterexample. A present
+  rejected proof never invokes the historical fallback. Strict type checks also
+  reject False/0 and True/1 contradictions in physical facts.
+- `/Users/admin/Projects/incident-system-v6-full-regression-final`: Backend
+  affected suite 109/109 PASS; Worker broadened selection 42 modules / 776 test
+  cases, 751 PASS, 22 SKIP, 2 failures and 1 test error. Two additional setUpClass
+  errors came from invoking database-only suites without their required socket;
+  those invocations are not passes. 38 modules individually pass (735 passing
+  cases and 22 skips). No dependencies were installed.
+- The wrapper self-test fails at the unchanged signed-deployment verifier, before
+  its self-test. The historical scheduled-preflight fixture lacks the now-required
+  device binding (one failure and one error). Both reproduce on exact V5 and V6;
+  source hashes and separate baseline logs are retained. They are not silently
+  excluded or counted as passes.
+- `/Users/admin/Projects/incident-system-v6-full-restriction-final`: the inherited
+  historical SQL suite reports 31 tests / 6 PASS / 12 failures / 13 errors. The
+  same 25 named failures/errors reproduce on exact V5 using the same local harness
+  and byte-identical migrations, in incident-system-v6-baseline-restriction-comparison.
+  That suite contains obsolete hold-state expectations and destructive historical
+  rollback tests incompatible with its current combined fixture. No production
+  rule or assertion was weakened to force it green.
+
+The full-suite gate is therefore FAIL despite the passing V6-specific evidence
+and zero new failures in the compared historical selections. No staged freeze,
+new final candidate identity, commit, push, deployment or independent review was
+performed. Resolving the test qualification gap is required before the operator's
+all-gates-green commit condition can be satisfied. Historical failures are visible
+in the evidence; this document does not grant a waiver.
+
+Reproduction of the composed suite uses the current script, exact clean Backend
+schema dependency 20718305def88ae2ceb9a0c2fa3bc2b016151cf1, the candidate Backend
+90fd0ef932f73d353d3d4b51c68ac2047c9c9864 and a new external --output. After a future
+Backend commit, pass its exact --candidate-backend-sha explicitly. The temporary
+schema clone is regenerable; all evidence directories are retained.

@@ -15,6 +15,31 @@ from tests.test_human_confirmed_resume_claim import (
 
 
 class ClaimToTerminalTests(unittest.TestCase):
+    def test_resolution_retired_hold_reader_is_opt_in_and_exact(self):
+        import supabase_client
+        with patch.object(supabase_client,'_request_json',return_value=[]) as http:
+            supabase_client.load_instagram_restriction_hold('account','incident')
+            self.assertEqual(http.call_args.kwargs['query']['status'],'in.(active,verification_required)')
+            supabase_client.load_instagram_restriction_hold('account','incident',include_resolution_retired=True)
+            self.assertEqual(http.call_args.kwargs['query']['status'],'in.(active,verification_required,superseded)')
+            self.assertEqual(http.call_args.kwargs['query']['incident_id'],'eq.incident')
+            with self.assertRaisesRegex(ValueError,'incident_binding_required'):
+                supabase_client.load_instagram_restriction_hold('account',include_resolution_retired=True)
+
+    def test_runner_retired_hold_gate_matches_exact_existing_authority(self):
+        from runner import _restriction_preflight_hold_authorized as allowed
+        base=dict(account_id='account',incident_id='incident',status='superseded',
+            metadata_safe=dict(resolved_growth_ready_v1=dict(
+                incident_id='incident',incident_resolution_retires_hold=True)))
+        self.assertTrue(allowed(base,'account','incident'))
+        self.assertTrue(allowed({**base,'status':'verification_required'},'account','incident'))
+        for delta in ({'account_id':'foreign'},{'incident_id':'foreign'},
+                      {'status':'active'},{'status':'cleared'},{'metadata_safe':None},
+                      {'metadata_safe':{'resolved_growth_ready_v1':None}},
+                      {'metadata_safe':{'resolved_growth_ready_v1':{'incident_id':'foreign','incident_resolution_retires_hold':True}}},
+                      {'metadata_safe':{'resolved_growth_ready_v1':{'incident_id':'incident','incident_resolution_retires_hold':False}}}):
+            with self.subTest(delta=delta):self.assertFalse(allowed({**base,**delta},'account','incident'))
+
     def test_preflight_root_is_bound_by_claim_when_legacy_durable_plan_has_no_root(self):
         authorization='00000000-0000-4000-8000-000000000123'
         request_id='00000000-0000-4000-8000-000000000124'
@@ -161,9 +186,7 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
                 self.assertIsNone(account.get('operationalBlocker'),account)
                 self.assertTrue(account.get('schedulerEligible'),account)
 
-    def test_nab_claim_policy_terminal_persistence_and_all_projections(self):
-        """Production-shaped preflight path with no device process or ADB."""
-        import restriction_preflight_terminal_contract as preflight_terminal
+    def _prepare_nab_preflight(self):
         self.sql("""select restriction_test.reset_legacy();
           update ig_accounts a set updated_at=h.detected_at from instagram_account_restriction_holds h where h.account_id=a.id;
           update instagram_account_restriction_holds set metadata_safe=metadata_safe-'independent_lifecycle_write_at'-'resolved_growth_ready_v1'-'restriction_pause_updated_at';""")
@@ -188,15 +211,44 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
             normalized=runtime.load_resume_policy_from_env()
         admitted=self.admit(claimed);self.assertTrue(admitted['ok'],admitted)
         run_id=admitted['run_id']
-        released=self.rpc('release_instagram_action_restriction_hold_v1',dict(
-            p_account_id=database.A,p_incident_id=database.INCIDENT,p_preflight_run_id=run_id))
-        self.assertTrue(released['ok'],released)
+        return claimed,policy,normalized,run_id
+
+    def test_nab_pre_success_identity_failure_remains_blocking(self):
+        claimed,policy,_,run_id=self._prepare_nab_preflight()
+        result=self._execute_real_nab_runner(claimed,policy,run_id,
+            android_username='different_local_identity')
+        self.assertEqual(result['exit_code'],75,result)
+        run=json.loads(self.sql(f"select row_to_json(r) from ig_runs r where id='{run_id}'"))
+        self.assertEqual(run['status'],'failed',run)
+        self.assertNotIn('restriction_preflight_terminal_contract',run['performance_summary'])
+        self.assertEqual(self.sql(f"select count(*) from account_incidents where run_id='{run_id}' and status='open' and incident_type='active_instagram_account_mismatch'"),'1')
+        self.assertGreater(len(self.rpc('canonical_active_blocking_incidents_v1',dict(p_account_ids=[database.A]))),0)
+        # evaluateRunStartEligibility is only a partial readiness check. The
+        # scheduler consumes the separate canonical incident projection too.
+        eligibility=self._read_profile_projection('profiles-live')
+        self.assertIs(eligibility.get('schedulerEligible'),False,eligibility)
+        self.assertIsNotNone(eligibility.get('operationalBlocker'),eligibility)
+        self.assertNotIn('success_summary',result['calls'])
+        self.assertNotIn('release_instagram_action_restriction_hold',result['calls'])
+        (Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'nab-pre-success-failure.json').write_text(
+            json.dumps(dict(run_id=run_id,status=run['status'],eligibility=eligibility,
+                calls=result['calls']),indent=2)+'\n')
+
+    def test_nab_claim_policy_terminal_persistence_and_all_projections(self):
+        """Production-shaped preflight path with no device process or ADB."""
+        import restriction_preflight_terminal_contract as preflight_terminal
+        claimed,policy,normalized,run_id=self._prepare_nab_preflight()
+        worker_result=self._execute_real_nab_runner(claimed,policy,run_id)
+        self.assertEqual(worker_result['exit_code'],0,worker_result)
+        for stage in ('main','load_instagram_restriction_hold',
+                      'release_instagram_action_restriction_hold','success_summary',
+                      '_update_run_status_safe','update_run_status',
+                      '_return_with_cleanup','_terminalize_run_request_after_cleanup'):
+            self.assertIn(stage,worker_result['calls'])
+        self.assertEqual(worker_result['terminal_bindings'],[{
+            'account_id':database.A,'request_id':claimed['id'],'run_id':run_id,
+            'authorization_id':normalized['authorization_id']}])
         hold=json.loads(self.sql(f"select row_to_json(h) from instagram_account_restriction_holds h where account_id='{database.A}'"))
-        proof=preflight_terminal.success_summary(account_id=database.A,
-            request_id=claimed['id'],run_id=run_id,policy=normalized,
-            released={'ok':True,'hold_status':'cleared','hold_id':hold['id']})
-        proof['preflight_cleanup_completed']=True
-        self.sql(f"update ig_runs set status='completed',finished_at=now(),performance_summary='{json.dumps(proof)}'::jsonb where id='{run_id}'")
         run=json.loads(self.sql(f"select row_to_json(r) from ig_runs r where id='{run_id}'"))
         current=self.row(claimed['id'])
         validated=preflight_terminal.validate_terminal(request=current,run=run,hold=hold,
@@ -206,19 +258,29 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
             request=current,run=run,hold=hold,failure_summary={'reason':'internal_projection_error'},
             cleanup_completed=True,lock_released=True)
         self.assertEqual(authoritative,(True,'restriction_preflight_terminal_success'))
-        self.rpc('complete_account_run_request',dict(p_request_id=claimed['id'],
-            p_worker_id=database.WORKER,p_status='completed'))
         from auto_restart_device_lock import release_device_lock
         lock=release_device_lock(device_id=database.DEVICE,worker_id=database.WORKER,
             request_id=claimed['id'],expected_lease_id=claimed['metadata_safe']['device_lock_binding']['lease_id'],
             account_id=database.A)
         self.assertTrue(lock['released'],lock)
+        from types import SimpleNamespace
+        with patch.object(store,'complete_restriction_preflight',wraps=store.complete_restriction_preflight) as persisted:
+            consumer._finalize_manual_run_after_subprocess(SimpleNamespace(worker_id=database.WORKER),
+                request_id=claimed['id'],account_id=database.A,exit_code=worker_result['exit_code'],
+                cleanup_completed=True,lock_released=True)
+        persisted.assert_called_once()
+        self.assertEqual(persisted.call_args.kwargs['terminal_summary']['restriction_preflight_terminal_contract']['authorization_id'],normalized['authorization_id'])
+        self.assertEqual(self.row(claimed['id'])['status'],'completed')
+        with patch.object(consumer,'_authoritative_success_before_internal_failure',
+                wraps=consumer._authoritative_success_before_internal_failure) as authority:
+            consumer._publish_run_failure_incident(request_id=claimed['id'],account_id=database.A,
+                run_id=run_id,run_type='account_session',exit_code=1,timed_out=False,canceled=False,
+                worker_summary={'reason':'internal_projection_error'},cleanup_completed=True,lock_released=True)
+        authority.assert_called_once()
+        self.assertEqual(authority.call_args.kwargs['request']['metadata_safe']['authorization_id'],normalized['authorization_id'])
         self.assertEqual(self.sql(f"select count(*) from account_incidents where run_id='{run_id}' and status in ('open','acknowledged')"),'0')
         self.assertEqual(self.sql(f"select count(*) from canonical_active_blocking_incidents_v1(array['{database.A}'::uuid])"),'0')
-        eligibility=database.run_backend(self,'eligibility');self.assertTrue(eligibility['ok'],eligibility)
-        tick=database.run_backend(self);self.assertEqual(tick['status'],200,tick)
-        self.assertFalse(any(x.get('reason') in {'active_incident','blocking_incident'}
-            for x in tick['result'].get('blocked',[])),tick)
+        admission=self._positive_scheduler_admission()
         projections={}
         for mode in ('profiles','profiles-live'):
             projections[mode]=self._read_profile_projection(mode)
@@ -227,8 +289,124 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
         (Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'nab-projection-chain.json').write_text(json.dumps({
             'authorization_id':normalized['authorization_id'],'request_id':claimed['id'],
             'run_id':run_id,'terminal_validator':validated,'false_incident_count':0,
-            'canonical_blockers':0,'scheduler_eligibility':'PASS','auto_restart_tick':'PASS',
+            'canonical_blockers':0,'scheduler_eligibility':admission,
+            'runner_trace':worker_result,'dispatcher_plan_terminalization':'REAL',
+            'publication_authority_visited':'REAL',
             'botapp_projection':'profiles/live','projections':projections},indent=2)+'\n')
+
+    def _execute_real_nab_runner(self,claimed,policy,run_id,android_username='local_cert_identity'):
+        """Use the real runner entrypoint. Only Android transport is simulated."""
+        # A real runner owns signal handlers and process globals. Keep that
+        # lifetime separate from the dispatcher/test process, as in production.
+        if os.environ.get('INCIDENT_V6_RUNNER_CHILD')!='1':
+            import subprocess
+            out=Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'nab-runners'/run_id
+            out.mkdir(parents=True,exist_ok=False)
+            payload=out/'nab-runner-input.json'
+            payload.write_text(json.dumps(dict(claimed=claimed,policy=policy,run_id=run_id,
+                android_username=android_username)))
+            code="""import json,os,sys
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()/'tests'))
+from test_incident_system_global_resolution_v2 import ResolutionDatabaseTests
+ResolutionDatabaseTests.setUpClass()
+d=json.loads(Path(sys.argv[1]).read_text())
+r=ResolutionDatabaseTests()._execute_real_nab_runner(**d)
+Path(sys.argv[2]).write_text(json.dumps(r))
+"""
+            result=subprocess.run([sys.executable,'-B','-c',code,str(payload),str(out/'nab-runner-result.json')],
+                cwd=Path(__file__).resolve().parents[1],env={**os.environ,'INCIDENT_V6_RUNNER_CHILD':'1',
+                    'RESTRICTION_TEST_OUTPUT':str(out)},
+                capture_output=True,text=True,timeout=120)
+            (out/'nab-runner-process.log').write_text(result.stdout+result.stderr)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            return json.loads((out/'nab-runner-result.json').read_text())
+        import runner
+        import follow60_mainline_integrity_v3 as integrity
+        from test_follow60_mainline_lock_v3 import _write_contract
+        import hashlib
+        import subprocess
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        class Selector:
+            exists=False
+            info={}
+            def wait(self,**kw):return self.exists
+            def click(self,*a,**kw):return None
+            def count(self):return int(self.exists)
+        class Android:
+            serial='isolated-no-adb'
+            info={'screenOn':True,'displayWidth':1080,'displayHeight':1920}
+            def app_current(self):return {'package':'com.instagram.android','activity':'MainActivity'}
+            def window_size(self):return (1080,1920)
+            def shell(self,cmd,*a,**kw):return SimpleNamespace(output='ok',exit_code=0)
+            def press(self,*a,**kw):pass
+            def screen_on(self):pass
+            def app_stop(self,*a,**kw):pass
+            def app_start(self,*a,**kw):pass
+            def click(self,*a,**kw):pass
+            def swipe(self,*a,**kw):pass
+            def dump_hierarchy(self,*a,**kw):
+                return '<hierarchy><node package="com.instagram.android" resource-id="com.instagram.android:id/profile_tab" content-desc="Profile" selected="true" bounds="[800,1700][1000,1900]"/><node package="com.instagram.android" resource-id="com.instagram.android:id/action_bar_title" text="'+android_username+'"/><node resource-id="com.instagram.android:id/profile_header"/><node text="Edit profile"/></hierarchy>'
+            def __call__(self,**kw):
+                s=Selector()
+                if 'profile_tab' in str(kw):
+                    s.exists=True;s.info={'bounds':{'left':800,'top':1700,'right':1000,'bottom':1900},'selected':True}
+                return s
+        argv=['runner.py','--account-id',database.A,'--run-type','account_session',
+              '--run-request-id',claimed['id'],'--admitted-run-id',run_id,
+              '--device-serial','isolated-no-adb','--package-name','com.instagram.android',
+              '--expected-app-instance-id',database.APP]
+        events=[];terminal_bindings=[]
+        old_profile=sys.getprofile()
+        # Out-of-band integrity material is an isolated infrastructure fixture,
+        # not a candidate certificate. Execute the actual byte-hash verifier;
+        # never mock its verdict or modify the checkout's signed artifacts.
+        root=Path(runner.__file__).resolve().parent
+        protected={name:hashlib.sha256((root/name).read_bytes()).hexdigest()
+                   for name in subprocess.check_output(
+                       ['git','ls-files','*.py'],cwd=root,text=True).splitlines()
+                   if (root/name).is_file()}
+        integrity_dir=Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'runner-integrity-fixture'
+        integrity_dir.mkdir(exist_ok=True)
+        manifest,_=_write_contract(integrity_dir,protected,approval_id='isolated-test-only')
+        def trace(frame,event,arg):
+            if event=='call' and Path(frame.f_code.co_filename).name in {
+                'runner.py','restriction_preflight_terminal_contract.py','supabase_client.py'}:
+                events.append(frame.f_code.co_name)
+                if (Path(frame.f_code.co_filename).name=='restriction_preflight_terminal_contract.py'
+                        and frame.f_code.co_name=='success_summary'):
+                    terminal_bindings.append({k:frame.f_locals.get(k) for k in ('account_id','request_id','run_id')})
+                    terminal_bindings[-1]['authorization_id']=frame.f_locals['policy'].get('authorization_id')
+        with ExitStack() as s:
+            original_popen=subprocess.Popen
+            def local_process_only(command,*args,**kwargs):
+                argv=command if isinstance(command,(list,tuple)) else [command]
+                if any(Path(str(x)).name in {'adb','adb.exe'} for x in argv):
+                    raise AssertionError('ADB forbidden in isolated NAB certification')
+                return original_popen(command,*args,**kwargs)
+            s.enter_context(patch.object(subprocess,'Popen',side_effect=local_process_only))
+            s.enter_context(patch.object(integrity,'follow60_certification_paths',
+                return_value=(manifest,integrity_dir/'unused-test-signature')))
+            s.enter_context(patch.object(sys,'argv',argv))
+            env=runtime.runner_env_for_resume_policy(policy)
+            env.update(RUN_CONTROL_DISPATCHER_WORKER_ID=database.WORKER,
+                FLEET_DEVICE_LOCK_BINDING_JSON=json.dumps(claimed['metadata_safe']['device_lock_binding']))
+            s.enter_context(patch.dict(os.environ,env))
+            s.enter_context(patch.object(runner,'connect_device',return_value=Android()))
+            s.enter_context(patch.object(runner,'disable_android_animations'))
+            # Android package/version management belongs to the fake transport.
+            s.enter_context(patch.object(runner.config,'LOCK_INSTAGRAM_AUTO_UPDATE',False))
+            s.enter_context(patch.object(runner.config,'ENABLE_STRICT_UPDATE_LOCK',False))
+            try:
+                sys.setprofile(trace)
+                result=runner.main()
+            finally:
+                sys.setprofile(old_profile)
+        observed={'exit_code':result,'calls':events,'terminal_bindings':terminal_bindings,
+                  'test_integrity_material':'isolated hash fixture; not deployment certification'}
+        (Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'nab-real-runner-trace.json').write_text(json.dumps(observed,indent=2)+'\n')
+        return observed
 
     def _read_profile_projection(self, mode):
         branch="""if(process.env.RESTRICTION_TEST_NODE_MODE.startsWith('profiles')){
@@ -296,13 +474,10 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
         for category in categories:
             with self.subTest(category=category):
                 self.sql('select restriction_test.reset_ready()')
+                self.sql('update restriction_test.deterministic_clock set observed_at=now()')
+                self.sql(f"insert into account_credentials(account_id,status,secret_ref,secret_provider) select '{database.A}','active','local-fixture-never-dereferenced','synthetic' where not exists(select 1 from account_credentials where account_id='{database.A}' and status='active')")
                 contract=contracts[category]
-                if not contract['repeatable']:
-                    evidence.append({'CATEGORY':category,'REPEATABLE':'NO',
-                        'REAL_PRODUCER':contract['producer'],'REAL_SIGNAL':contract['signal'],
-                        'NON_REPEATABLE_PROVED':contract['non_repeatable_reason'],
-                        'FIRST_CYCLE':'NOT_SAFELY_EXECUTABLE','SECOND_CYCLE':'NOT_APPLICABLE'})
-                    continue
+                self.assertTrue(contract['repeatable'], 'Unsupported classification requires executable evidence')
                 cycles=[]
                 previous_id=None
                 for ordinal in (1,2):
@@ -311,16 +486,19 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
                     self.assertNotEqual(created['incident_id'],previous_id)
                     incident=json.loads(self.sql(
                         f"select row_to_json(i) from account_incidents i where id='{created['incident_id']}'"))
-                    self.assertEqual(self.sql(
-                        f"select count(*) from canonical_active_operational_blockers_v1(array['{database.A}'::uuid])"),'1')
+                    blockers_before=int(self.sql(
+                        f"select count(*) from canonical_active_operational_blockers_v1(array['{database.A}'::uuid])"))
+                    # Historical/test categories are repeatable but are not
+                    # current account blockers. Do not invent blocking semantics.
+                    expected_blockers=0 if contract.get('previous_classification') else 1
+                    self.assertEqual(blockers_before,expected_blockers)
                     self._resolve_actual_incident(incident,f'category-resolve-{ordinal}')
-                    tick=database.run_backend(self)
-                    self.assertEqual(tick['status'],200,tick)
-                    self.assertFalse(any(x.get('reason') in {'active_incident','blocking_incident'}
-                        for x in tick['result'].get('blocked',[])),tick)
+                    admission=self._positive_scheduler_admission()
+                    admission['real_scheduled_request']=self._positive_real_cron_occurrence(ordinal)
                     cycles.append({'real_signal':'PASS','create':'PASS','incident_id':created['incident_id'],
                         'resolve':'PASS','eligible_after_resolution':'PASS',
-                        'natural_tick_decision':'PASS'})
+                        'canonical_blockers_before_resolution':blockers_before,
+                        'positive_admission':admission})
                     previous_id=created['incident_id']
                 evidence.append({'CATEGORY':category,'REPEATABLE':'YES',
                     'FIRST_CREATE':'PASS','FIRST_RESOLVE':'PASS','ELIGIBLE_AFTER_FIRST':'PASS',
@@ -330,9 +508,121 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
                     'resolution':'transition_account_incident_human_review_v3','cycles':cycles})
         (Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'category-matrix.json').write_text(json.dumps(evidence,indent=2)+'\n')
 
+    def test_previous_nonrepeatable_classification_is_refuted(self):
+        """Permanently retain V5's counterexample using real persistence.
+
+        This is a contract probe, not category-producer certification. A second
+        accepted signal disproves a prohibition; it cannot certify a historical
+        UI producer that is no longer present in this candidate.
+        """
+        import runtime_incidents
+        contracts=json.loads((Path(__file__).parent/'fixtures/incident-system-category-labels-v2.json').read_text())['producer_contracts']
+        evidence=[]
+        for category, contract in contracts.items():
+            if contract.get('previous_classification') != 'INVALID_TEST_ASSUMPTION':
+                continue
+            with self.subTest(category=category):
+                self.sql('select restriction_test.reset_ready()')
+                key='v6-prohibition-probe:'+category
+                first=runtime_incidents.publish_account_incident(category,key,
+                    account_id=database.A,severity='warning',reason='isolated_contract_probe')
+                self.assertTrue(first['published'],first)
+                row=json.loads(self.sql(f"select row_to_json(i) from account_incidents i where id='{first['incident_id']}'"))
+                resolved=self._transition_incident(row,'v6-prohibition-resolve')
+                second=runtime_incidents.publish_account_incident(category,key,
+                    account_id=database.A,severity='warning',reason='isolated_contract_probe')
+                observation={'category':category,'producer':'runtime_incidents.publish_account_incident',
+                    'persistence':'public.upsert_account_incident','first':first,
+                    'resolution':resolved,'second':second,
+                    'second_cycle_prohibited':second.get('published') is False}
+                evidence.append(observation)
+                (Path(os.environ['RESTRICTION_TEST_OUTPUT'])/'nonrepeatable-prohibition-probe.json').write_text(json.dumps(evidence,indent=2)+'\n')
+                self.assertTrue(second.get('published'),observation)
+                self.assertNotEqual(first['incident_id'],second['incident_id'])
+        self.assertEqual(len(evidence),6)
+
+    def _positive_scheduler_admission(self):
+        blockers=self.rpc('canonical_active_blocking_incidents_v1',dict(p_account_ids=[database.A]))
+        self.assertEqual(blockers,[],blockers)
+        result=database.run_backend(self,'eligibility')
+        self.assertIs(result.get('ok'),True,result)
+        self.assertEqual(result.get('normalizedRunType'),'account_session',result)
+        self.assertEqual(result.get('trigger'),'scheduler',result)
+        self.assertIs(result['health'].get('healthy'),True,result)
+        self.assertEqual(result['health'].get('reason'),'ready',result)
+        self.assertNotIn('reason',result,result)
+        self.assertEqual(self.sql(f"select id::text from ig_accounts where id='{database.A}'"),database.A)
+        projection=self._read_profile_projection('profiles-live')
+        self.assertIs(projection.get('schedulerEligible'),True,projection)
+        self.assertIsNone(projection.get('operationalBlocker'),projection)
+        return {'account_id':database.A,'boundary':'evaluateRunStartEligibility',
+                'decision':result,'canonical_blockers':blockers,'canonical_projection':projection}
+
+    def _positive_real_cron_occurrence(self,ordinal):
+        if ordinal==1:self._prepare_next_real_schedule_occurrence()
+        # The real cron rolls the assignment forward; the next probe advances
+        # one occurrence from that current window, not from the historical row.
+        at=json.loads(self.sql(f"select to_json(starts_at+interval '1 day 1 hour') from account_assignments where id='{database.ASSIGNMENT}'"))
+        self._advance_fixture_heartbeat_only(at)
+        before=set(json.loads(self.sql(f"select coalesce(jsonb_agg(id::text),'[]') from account_run_requests where account_id='{database.A}'")))
+        result=self._run_scheduled_cron(at)
+        self.assertEqual(result['status'],200,result)
+        rows=json.loads(self.sql(f"select coalesce(jsonb_agg(to_jsonb(q)),'[]') from account_run_requests q where account_id='{database.A}' and source_surface='instagram_schedule_session_cron'"))
+        fresh=[r for r in rows if r['id'] not in before]
+        self.assertEqual(len(fresh),1,{'cron':result,'rows':rows})
+        row=fresh[0]
+        self.assertEqual(row['status'],'queued',row)
+        self.assertEqual(row['account_id'],database.A)
+        self.assertEqual(row['root_business_session_id'],row['id'])
+        self.assertEqual(row['execution_attempt_no'],1)
+        self.assertEqual(row['idempotency_key'],f"schedule-session:{database.ASSIGNMENT}:{row['metadata_safe']['scheduled_session_at']}")
+        # No device execution: retire this isolated scheduling probe through
+        # the real cancellation RPC before the next independent incident.
+        from account_run_control import cancel_account_run_request
+        cancel_account_run_request(request_id=row['id'],reason='manual_stop')
+        self.assertEqual(self.row(row['id'])['status'],'canceled')
+        from auto_restart_device_lock import release_device_lock
+        binding=row['metadata_safe']['device_lock_binding']
+        release_device_lock(device_id=binding['device_id'],worker_id=binding['worker_id'],
+            request_id=row['id'],expected_lease_id=binding['lease_id'],account_id=database.A)
+        self.assertEqual(self.sql(f"select count(*) from auto_restart_device_locks where device_id='{database.DEVICE}'"),'0')
+        return {'boundary':'runScheduleSessionCron','request':row,'decision':result,'observed_at':at}
+
+    def test_two_positive_cron_occurrences_without_device_execution(self):
+        self.sql(f"insert into account_credentials(account_id,status,secret_ref,secret_provider) values ('{database.A}','active','local-fixture-never-dereferenced','synthetic')")
+        first=self._positive_real_cron_occurrence(1)
+        second=self._positive_real_cron_occurrence(2)
+        self.assertNotEqual(first['request']['id'],second['request']['id'])
+        self.assertNotEqual(first['request']['idempotency_key'],second['request']['idempotency_key'])
+
+    def test_login_package_mismatch_real_producer_resolves_its_action_twice(self):
+        self.sql(f"insert into account_credentials(account_id,status,secret_ref,secret_provider) values ('{database.A}','active','local-fixture-never-dereferenced','synthetic')")
+        fixture=json.loads((Path(__file__).parent/'fixtures/incident-system-category-labels-v2.json').read_text())
+        contract=fixture['producer_contracts']['login_package_mismatch'];previous=None
+        for ordinal in (1,2):
+            created=self._produce_category_signal('login_package_mismatch',contract,ordinal)
+            self.assertNotEqual(created['incident_id'],previous)
+            row=json.loads(self.sql(f"select row_to_json(i) from account_incidents i where id='{created['incident_id']}'"))
+            self._resolve_actual_incident(row,f'package-mismatch-{ordinal}')
+            self.assertEqual(self.sql(f"select count(*) from account_dashboard_actions where incident_id='{created['incident_id']}' and status<>'resolved'"),'0')
+            self._positive_scheduler_admission()
+            self._positive_real_cron_occurrence(ordinal)
+            previous=created['incident_id']
+
     def _produce_category_signal(self, category, contract, ordinal):
         """Exercise the category owner before the shared persistence sink."""
         kind=contract['kind'];signal=contract['signal']
+        if kind=='generic_incident_signal':
+            import runtime_incidents
+            return runtime_incidents.publish_account_incident(category,
+                'v6-category-signal:'+database.A+':'+category,account_id=database.A,
+                severity='warning',reason=signal)
+        if kind=='historical_login_challenge':
+            from historical_auto_login_07ee import login_challenge_runtime as historical
+            return historical.publish_login_challenge_pending_incident(
+                account_id=database.A,expected_username='synthetic_account',run_id=None,
+                challenge_type='email',screen_type='challenge',reason=signal,
+                dashboard_action_type='enter_email_verification_code')
         if kind in {'terminal_classifier','auto_login_classifier'}:
             from runtime_incident_matrix import (classify_terminal_run_failure,
                 build_run_failure_incident_payload)
@@ -358,11 +648,9 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
             return incident
         if kind=='auto_restart_hard_stop':
             import auto_restart_hard_stop as hard_stop
-            with patch.object(hard_stop,'upsert_hard_stop_dashboard_action',
-                              return_value={'published':True,'dashboard_action_id':'isolated'}):
-                result=hard_stop.execute_auto_restart_hard_stop(account_id=database.A,
-                    reason=signal,request_id=f'producer-{ordinal}',cancel_pending=False,
-                    account_username='synthetic_account',evidence={'isolated_test':True})
+            result=hard_stop.execute_auto_restart_hard_stop(account_id=database.A,
+                reason=signal,request_id=f'producer-{ordinal}',cancel_pending=False,
+                account_username='synthetic_account',evidence={'isolated_test':True})
             self.assertTrue(result['executed'],result)
             return result['incident']
         if kind=='login_challenge':
@@ -378,13 +666,16 @@ class ResolutionDatabaseTests(database.RealDatabaseTests):
                 challenge_type='email',screen_type=screen,human_review_required=True)
             return incident
         if kind=='login_package':
-            import login_challenge_runtime as login
-            incident=login.publish_login_package_mismatch_incident(account_id=database.A,
-                expected_username='synthetic_account',expected_package_name='com.instagram.android',
-                actual_foreground_package=f'com.synthetic.foreign{ordinal}',reason=signal)
-            login.sync_login_package_mismatch_dashboard_action(account_id=database.A,
+            from instagram_login_provisioner_orchestrator import _sync_login_package_mismatch_side_effects
+            result=_sync_login_package_mismatch_side_effects(account_id=database.A,
+                expected_username='local_cert_identity',
                 expected_package_name='com.instagram.android',
-                actual_foreground_package=f'com.synthetic.foreign{ordinal}',reason=signal)
+                actual_foreground_package='com.synthetic.foreign',reason=signal,
+                run_id=None,run_type='login_provisioning',device_id=None,
+                expected_app_instance_id=database.APP,adb_serial_masked=None)
+            incident=result['login_package_mismatch_incident']
+            self.assertTrue(result['login_package_mismatch_dashboard_action']['published'],result)
+            self.assertEqual(self.sql(f"select count(*) from account_dashboard_actions where account_id='{database.A}' and action_type='review_login_package_mismatch' and incident_id='{incident['incident_id']}' and status='pending'"),'1')
             return incident
         if kind=='backend_configuration':
             result=self._run_backend_configuration_producer()

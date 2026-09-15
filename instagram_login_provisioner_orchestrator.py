@@ -5361,6 +5361,7 @@ def _sync_login_package_mismatch_side_effects(
     try:
         dashboard_action = sync_login_package_mismatch_dashboard_action(
             account_id=account_id,
+            incident_id=incident.get("incident_id"),
             expected_package_name=expected_package_name,
             actual_foreground_package=actual_foreground_package,
             run_id=run_id,
