@@ -9432,7 +9432,9 @@ def _follow_ui_state_from_fresh_hierarchy(
     return "unknown"
 
 
-def _follow_ui_state_and_fresh_hierarchy(d: u2.Device) -> tuple[str, str]:
+def _follow_ui_state_and_fresh_hierarchy(
+    d: u2.Device, *, expected_username: str = ""
+) -> tuple[str, str]:
     """Use one hierarchy as both Follow-state proof and late-popup authority."""
     try:
         try:
@@ -9441,6 +9443,14 @@ def _follow_ui_state_and_fresh_hierarchy(d: u2.Device) -> tuple[str, str]:
             hierarchy = str(d.dump_hierarchy() or "")
     except Exception:
         hierarchy = ""
+    if "_instagram_446_observed_context" in vars(d):
+        from instagram_ui_446_compat import context_matches, relationship_from_xml
+        package = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+        context = vars(d)["_instagram_446_observed_context"]
+        if not hierarchy or not context_matches(context, d, get_device_serial(d), package):
+            return "unknown", hierarchy
+        return relationship_from_xml(hierarchy, package=package,
+                                     expected_username=expected_username), hierarchy
     if not hierarchy:
         return _follow_ui_state_snapshot(d), ""
     try:
@@ -11913,7 +11923,7 @@ def perform_follow_safe(
             state_after = _follow_ui_state_snapshot(d)
         if state_after == "unknown" and not late_action_rate_limit_checked_once:
             _fresh_state, _fresh_verify_hierarchy = (
-                _follow_ui_state_and_fresh_hierarchy(d)
+                _follow_ui_state_and_fresh_hierarchy(d, expected_username=str(username or ""))
             )
             if _fresh_state != "unknown":
                 state_after = _fresh_state

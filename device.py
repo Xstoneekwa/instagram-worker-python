@@ -841,4 +841,9 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
                 "instagram_strict_lock_version_mismatch",
                 **payload,
             )
+    # Version-scoped evidence reuse: no additional device read on either version.
+    if (vn, vc) == ("446.0.0.49.77", 385211304) or "_instagram_446_observed_context" in vars(d):
+        from instagram_ui_446_compat import retain_context
+        retain_context(d, serial=serial, package=pkg, version_name=vn,
+                       version_code=vc, unsafe=unsafe)
     return payload

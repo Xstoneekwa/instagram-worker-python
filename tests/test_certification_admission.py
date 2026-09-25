@@ -307,9 +307,44 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(update.call_args.kwargs['performance_summary']['root_failure_code'],ca.IDENTITY_UNPROVED)
             self.assertEqual(update.call_args.kwargs['status'],'stopped')
 
+    # Exact hunks authorized by a0-ui-446 Approval1 and its test amendment.
+    # No function/AST exclusions: reversing these must reconstruct all A0 bytes.
+    _APPROVED_446_HUNKS = {'device.py': [(b'            )\n    # Version-scoped evidence reuse: no additional device read on either version.\n    if (vn, vc) == ("446.0.0.49.77", 385211304) or "_instagram_446_observed_context" in vars(d):\n        from instagram_ui_446_compat import retain_context\n        retain_context(d, serial=serial, package=pkg, version_name=vn,\n                       version_code=vc, unsafe=unsafe)\n    return payload\n', b'            )\n    return payload\n')], 'instagram_navigation.py': [(b'\ndef _follow_ui_state_and_fresh_hierarchy(\n    d: u2.Device, *, expected_username: str = ""\n) -> tuple[str, str]:\n    """Use one hierarchy as both Follow-state proof and late-popup authority."""\n', b'\ndef _follow_ui_state_and_fresh_hierarchy(d: u2.Device) -> tuple[str, str]:\n    """Use one hierarchy as both Follow-state proof and late-popup authority."""\n'), (b'        hierarchy = ""\n    if "_instagram_446_observed_context" in vars(d):\n        from instagram_ui_446_compat import context_matches, relationship_from_xml\n        package = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")\n        context = vars(d)["_instagram_446_observed_context"]\n        if not hierarchy or not context_matches(context, d, get_device_serial(d), package):\n            return "unknown", hierarchy\n        return relationship_from_xml(hierarchy, package=package,\n                                     expected_username=expected_username), hierarchy\n    if not hierarchy:\n', b'        hierarchy = ""\n    if not hierarchy:\n'), (b'            _fresh_state, _fresh_verify_hierarchy = (\n                _follow_ui_state_and_fresh_hierarchy(d, expected_username=str(username or ""))\n            )\n', b'            _fresh_state, _fresh_verify_hierarchy = (\n                _follow_ui_state_and_fresh_hierarchy(d)\n            )\n')]}
+
+    def _assert_navigation_a0_with_exact_446_delta(self, name, candidate):
+        normalized = candidate
+        for current, original in self._APPROVED_446_HUNKS.get(name, ()):
+            self.assertEqual(normalized.count(current), 1,
+                             "approved446 hunk missing, duplicated or modified: " + name)
+            normalized = normalized.replace(current, original, 1)
+        self.assertEqual(normalized, subprocess.check_output(
+            ['git', 'show', BASE + ':' + name], cwd=ROOT))
+
     def test_navigation_exact_a0_bytes(self):
         for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
-            self.assertEqual((ROOT/name).read_bytes(),subprocess.check_output(['git','show',BASE+':'+name],cwd=ROOT))
+            self._assert_navigation_a0_with_exact_446_delta(name, (ROOT/name).read_bytes())
+
+    def test_navigation_freeze_rejects_unrelated_byte_changes(self):
+        for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self._assert_navigation_a0_with_exact_446_delta(
+                    name, (ROOT/name).read_bytes() + b'\n# unrelated change\n')
+
+    def test_navigation_freeze_rejects_changed_or_missing_approved_hunk(self):
+        for name, hunks in self._APPROVED_446_HUNKS.items():
+            source = (ROOT/name).read_bytes()
+            for current, original in hunks:
+                for replacement in (original, current + b'# changed hunk\n'):
+                    with self.subTest(name=name), self.assertRaises(AssertionError):
+                        self._assert_navigation_a0_with_exact_446_delta(
+                            name, source.replace(current, replacement, 1))
+
+    def test_navigation_freeze_rejects_duplicate_approved_hunk(self):
+        for name, hunks in self._APPROVED_446_HUNKS.items():
+            for current, _ in hunks:
+                with self.subTest(name=name), self.assertRaises(AssertionError):
+                    self._assert_navigation_a0_with_exact_446_delta(
+                        name, (ROOT/name).read_bytes() + current)
 
     def test_no_ui_dependency_or_bare_except(self):
         tree=ast.parse((ROOT/'certification_admission.py').read_text())
