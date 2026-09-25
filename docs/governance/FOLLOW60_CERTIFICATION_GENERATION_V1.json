@@ -1,0 +1,41 @@
+{
+  "certification_admission_contract_version": "A0_CERTIFICATION_ADMISSION_V1",
+  "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
+  "external_launcher_files_sha256": {
+    "canary_child.py": "f8e25cc1543721e79d0790a85a9a50a8c3e8f0d53713b0d69b18606203177e5f",
+    "canary_contract.py": "053a74ff462a51609e0990c297572a47a3f30484761f9e0f3e06ef16ce643561",
+    "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
+    "tests/test_canary_launcher.py": "afcd527a85e1488765bcb9a641c5aa0f0db347594b61565b0fdee94d21b03a09"
+  },
+  "previous_candidate_sha": "c08d0d3bbd107ee7bd98fde9ca4c0e7a24cc80ab",
+  "prior_authorization_evidence": [
+    {
+      "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-business-launcher/approval-1.json",
+      "request_sha256": "5211a1f5503041f9a1e55a97d477a5df8ffe8742e63766843e376c2a1f0f638c",
+      "signature_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-business-launcher/approval-1.sig",
+      "signature_sha256": "c87a252e33e45b0e9e3e00eb95f49448b911b66191b7faff6ed3aaf3d72cf8bb"
+    },
+    {
+      "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-runtime-git-probe/approval-1.json",
+      "request_sha256": "8839a5210ee0653ab4afa20b23aa43fa518b3452a4843de13feeea0fe39acb7c",
+      "signature_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-runtime-git-probe/approval-1.sig",
+      "signature_sha256": "87780ced6c0d454a25b16a6021696fbc596c7dc06eaef707d5f1b3cddae3970a"
+    }
+  ],
+  "prior_envelope_qualification_evidence": {
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/FINAL_SOURCE_HASHES.json": "7b7b4809ed8bc1f60dd4aa781460cfdec7ef842ddb04c1f0a5fdb5aa63abdca1",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/GATE_RESULT.json": "dd73fed9914211c1d239bf7e76d89aebb0977baa3432eb2a19b2bab21a53be0c",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/final-byte-identity.json": "480078f7eb37b8a4bd6d4e33cd5fc73d9e0df500f5b8948e179d85b731aed5f7",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/launcher-tests.log": "29dd9ed60efd2fa87235c0b3bc8ced844b2f85baf334a4523a12302e72666365",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/result.json": "8d181e78f8b61fd2d1cba885886e691b4c9b3c287948e4b765547330aa98ce86",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-recert/suite.log": "700b66be1a6d3e73af1d1e69be982b3a643e38097b7cce2cf64b14c5b70e3991",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-sql-natural/tests.log": "352e2daad5b3c64bfa3664dd2f4aedf1ac88d0b73919650dddbfa1781e0e9df7",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/runtime-git-sql-restriction/tests.log": "74a31d86793b9775d6c9759270e1c6fe796bbdc4ff49de9e525900906d5e8e97"
+  },
+  "purpose": "446_business_canary_recertification",
+  "qualification_scope": "Prior evidence qualifies the unchanged executable/external envelope only; it is not recertification of the future candidate commit.",
+  "reason": "external_certification_envelope_changed",
+  "runtime_behavior_activation": false,
+  "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
+  "version": 1
+}
