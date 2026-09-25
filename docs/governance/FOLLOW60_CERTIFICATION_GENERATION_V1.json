@@ -18,9 +18,12 @@
     "version_name": "446.0.0.49.77"
   },
   "external_certification_migration": {
-    "installed": false,
-    "live_installation_requires_separate_explicit_authorization": true,
+    "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json",
+    "installation_evidence_sha256": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
+    "installed": true,
+    "live_installation_requires_separate_explicit_authorization": false,
     "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260925195140_follow60_certification_a1603_isolation_v1.sql",
+    "server_migration_version": "20260925204354",
     "sha256": "54467f700bb5121a608e1a3a450ef740c564553f38e30d35810810592c8d689e"
   },
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
@@ -30,7 +33,15 @@
     "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
     "tests/test_canary_launcher.py": "9272dd5dea2ee30de7c16658f1baf3e004337a7a754650d5e1740a0b9cfe905b"
   },
-  "previous_candidate_sha": "762ab5191b4698c022be444d208cddf9581c4b79",
+  "fresh_execution_context_evidence": {
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-isolation-final/FOLLOW60_MAINLINE_LOCK_V3.json": "3458f822c90f88b7885d9f226a86405696efe526788f5e73738e370727bdb596",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-isolation-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "1584b71307bab90901330d1925ae798353b6a8babadfa5f700d20fda118a6699",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-isolation-final/RECERTIFICATION_RECEIPT.json": "07344dadd5a0a397b41c066f303e630679b229e8db891d2ad942b71324031250",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/isolation-timeout-forensic/QUARANTINED_CONTEXT.json": "ec93093c28ffa50d12f44ce9ca5c9030ef4cc55079b4035ff3308b43f44861a4",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/isolation-timeout-forensic/RESULT.json": "94de13ca5222e68a2545727886553fb77350dc0af86163955381dbe7bcda2749",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa"
+  },
+  "previous_candidate_sha": "fc6440659380b684cda0b62cd18bbc6eb750fa28",
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
@@ -49,9 +60,9 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-canonical-restriction/tests.log": "ff99e37d7b9f796c9b7180426adbaa129b075ecb4885dffb6b17ab698f4101f8",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
-  "purpose": "446_a1603_business_canary_recertification",
-  "qualification_scope": "Prior evidence qualifies the external A16-03 envelope and unchanged executable candidate only, not the future commit. Final SHA recertification and new Approval2 remain mandatory.",
-  "reason": "a1603_exact_signed_isolation_exception",
+  "purpose": "446_a1603_fresh_business_canary_certification",
+  "qualification_scope": "Prior evidence qualifies unchanged historical candidate and external launcher bytes. New final-SHA recertification, fresh one-shot permit/nonce/window/worker, new Liam Approval2 and absent canonical publication namespace are mandatory. No old campaign context reuse.",
+  "reason": "fresh_execution_context_after_quarantined_network_path_failure",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "version": 1
