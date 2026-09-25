@@ -283,7 +283,7 @@ class GrowthLikeFreshAuthorityResetV1Tests(unittest.TestCase):
             (
                 "posts_absent",
                 {"fresh_xml": self._xml(candidate, include_posts=False)},
-                "liketapcontext_fresh_posts_viewer_missing",
+                "liketapcontext_fresh_candidate_identity_missing",  # Owner authority requires Posts context first.
             ),
             (
                 "like_absent",

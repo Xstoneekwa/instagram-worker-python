@@ -58,6 +58,7 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
             "target_followers_resume_source_request_id",
             "auto_restart_resume_policy",
             "worker_runtime_identity",
+            "account_session_snapshot",
         }:
             normalized.args.kwonlyargs.pop(index)
             normalized.args.kw_defaults.pop(index)
@@ -77,6 +78,7 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
                         "target_followers_resume_source_request_id",
                         "auto_restart_resume_policy",
                         "worker_runtime_identity",
+                        "account_session_snapshot",
                     }
                 )
             ]
@@ -424,7 +426,8 @@ def _without_reviewed_authoritative_exit_53_decision(
             if any(
                 isinstance(target, ast.Name)
                 and target.id
-                in {"authoritative_exit_53_consumed", "termination_decision"}
+                in {"authoritative_exit_53_consumed", "authoritative_termination_consumed",
+                    "authoritative_termination_invalid", "termination_decision"}
                 for target in item.targets
             ):
                 return None
@@ -445,8 +448,9 @@ def _without_reviewed_authoritative_exit_53_decision(
                     return restored
                 return None
             if (
-                isinstance(item.test, ast.Name)
-                and item.test.id == "authoritative_exit_53_consumed"
+                (isinstance(item.test, ast.Name) and item.test.id == "authoritative_exit_53_consumed"
+                 or ast.dump(item.test) == ast.dump(ast.parse(
+                     "authoritative_termination_consumed or authoritative_termination_invalid", mode="eval").body))
                 and len(item.orelse) == 1
                 and isinstance(item.orelse[0], ast.If)
             ):
@@ -456,6 +460,35 @@ def _without_reviewed_authoritative_exit_53_decision(
     return ast.fix_missing_locations(
         RemoveAuthoritativeExit53Decision().visit(normalized)
     )
+
+
+def _without_reviewed_late_handoff_and_exception_projection(node):
+    """Canonical deltas: 6e7f02c late exit97 and 47b48ff exception projection.
+
+    The caller separately requires exact AST parity with the current canonical
+    baseline before removing these additions for the historical comparison.
+    """
+    class Normalize(ast.NodeTransformer):
+        def visit_Assign(self, item):
+            if any(isinstance(t, ast.Name) and t.id in {
+                "predecision_reason", "prospective_completed", "finalized_handoff"
+            } for t in item.targets):
+                return None
+            return self.generic_visit(item)
+
+        def visit_If(self, item):
+            if ast.dump(item.test) == ast.dump(ast.parse("finalized_handoff['decision']", mode="eval").body):
+                return None
+            return self.generic_visit(item)
+
+        def visit_Try(self, item):
+            if (len(item.body) == 1 and isinstance(item.body[0], ast.Assign)
+                and ast.dump(item.body[0]) == ast.dump(ast.parse(
+                    "exit_code = int(run_followers_list_engine_session(d, **call_kwargs))").body[0])):
+                return item.body
+            return self.generic_visit(item)
+
+    return ast.fix_missing_locations(Normalize().visit(copy.deepcopy(node)))
 
 
 class TargetAvailabilityDisabledParityTests(unittest.TestCase):
@@ -471,6 +504,11 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         )
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
+        # No business delta may hide inside normalization of historical additions.
+        canonical = subprocess.check_output(["git", "show",
+            "a0d995be8df3ea1a773c572bc900aa1d3a360df6:account_session_orchestrator.py"], cwd=root, text=True)
+        self.assertEqual(ast.dump(_function(current_source, "_run_follow_target_rotation")),
+                         ast.dump(_function(canonical, "_run_follow_target_rotation")))
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
         actual = _without_reviewed_cooperative_safe_stop(
             _without_reviewed_target_local_failure_propagation(
@@ -489,6 +527,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
                 )
             )
         )
+        actual = _without_reviewed_late_handoff_and_exception_projection(actual)
         self.assertEqual(ast.dump(actual, include_attributes=False), ast.dump(expected, include_attributes=False))
 
     def test_flags_off_outputs_calls_metrics_and_transitions_match_no_hook_path(self):

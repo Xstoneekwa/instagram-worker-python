@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ast
 from pathlib import Path
 import tempfile
 import unittest
@@ -154,7 +155,42 @@ class RuntimeArtifactsV1Tests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("runner_workdir = runtime_home()", consumer)
-        self.assertEqual(consumer.count("cwd=str(runner_workdir)"), 2)
+        calls = [node for node in ast.walk(ast.parse(consumer))
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_fleet_spawn_or_legacy"]
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(ast.dump(call.args[2]), ast.dump(ast.Name(id="runner_workdir", ctx=ast.Load())))
+
+        # Exercise the current spawn boundary in both isolation modes. The callback
+        # must carry the external workdir through to Popen, not merely mention it.
+        import account_run_request_consumer as consumer_module
+        with tempfile.TemporaryDirectory() as raw:
+            workdir = Path(raw).resolve()
+            command = ["synthetic-runner"]
+            environment = {"fixture": "isolated"}
+            binding = {"request_id": "fixture-request"}
+            child = object()
+            session = mock.Mock()
+            session.environment.return_value = {"fleet": "scoped"}
+            session.spawn.side_effect = lambda spawn: spawn()
+            for active in (False, True):
+                with self.subTest(fleet=active), mock.patch.object(
+                    consumer_module, "_FLEET_EXECUTIONS", {"fixture-request": session} if active else {}
+                ), mock.patch.object(consumer_module.subprocess, "Popen", return_value=child) as spawn, mock.patch(
+                    "fleet_runtime_barrier.fleet_spawn_isolated_v1", side_effect=lambda callback, **kw: callback()
+                ) as isolated, mock.patch.object(consumer_module, "runtime_artifact_path", return_value=workdir / "isolation"):
+                    self.assertIs(consumer_module._fleet_spawn_or_legacy(
+                        "fixture-request", command, workdir, environment, launch_binding=binding), child)
+                    spawn.assert_called_once_with(command, cwd=str(workdir),
+                        env={**environment, **({"fleet": "scoped"} if active else {})}, start_new_session=True)
+                    self.assertFalse(workdir.is_relative_to(root))
+                    if active:
+                        isolated.assert_not_called()
+                        session.register_child.assert_called_once_with(child)
+                    else:
+                        self.assertEqual(isolated.call_args.kwargs["binding"], binding)
+                        self.assertEqual(isolated.call_args.kwargs["root"], workdir / "isolation")
 
         config_source = (root / "config.py").read_text(encoding="utf-8")
         live_view_source = (root / "live_view_host_agent_core.py").read_text(

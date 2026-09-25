@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import certification_admission
 import os
 import random
 import re
@@ -10551,6 +10552,12 @@ def _try_visual_followers_picker_dry_run(
                 resolved_username_hint=best.get("resolved_username_hint") or "",
             )
             visual_target_profile_lock_clear()
+            if certification_admission.is_enabled():
+                certification_admission.before_candidate_transport(
+                    run_id=run_id, request_id=_CURRENT_RUN_REQUEST_ID, account_id=_CURRENT_ACCOUNT_ID,
+                    source_ct=source_profile_username, candidate=best,
+                    normalize_handle=_norm_ig_handle, valid_handle=_is_plausible_public_ig_username,
+                )
             open_out = open_visual_follower_candidate_from_screenshot(
                 d,
                 best,
@@ -20382,6 +20389,12 @@ def _run_followers_list_engine_session(
             ):
                 _mark_target_budget_reached("rotation_pending_before_open_follower_profile")
                 break
+            if certification_admission.is_enabled():
+                certification_admission.before_candidate_transport(
+                    run_id=run_id, request_id=_CURRENT_RUN_REQUEST_ID, account_id=account_id,
+                    source_ct=source_profile_username, candidate=pick,
+                    normalize_handle=_norm_ig_handle, valid_handle=_is_plausible_public_ig_username,
+                )
             if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
                 _target_rejection_record(
                     target_scan_tracker,
@@ -21946,6 +21959,12 @@ def _run_followers_list_engine_session(
                                 "rotation_pending_before_screen_guard_reopen"
                             )
                             break
+                        if certification_admission.is_enabled():
+                            certification_admission.before_candidate_transport(
+                                run_id=run_id, request_id=_CURRENT_RUN_REQUEST_ID, account_id=account_id,
+                                source_ct=source_profile_username, candidate=pick,
+                                normalize_handle=_norm_ig_handle, valid_handle=_is_plausible_public_ig_username,
+                            )
                         if not open_follower_profile_from_list(
                             d, pick, source_profile_username, pkg
                         ):
@@ -29530,7 +29549,26 @@ def _main_impl() -> int:
 
 def main() -> int:
     try:
+        if certification_admission.is_enabled():
+            certification_admission.validate_execution_context()
         return _main_impl()
+    except certification_admission.CertificationStop as exc:
+        # Certification admission is a run-level stop, never a candidate skip.
+        summary = dict(exc.summary)
+        summary['session_counters'] = dict(_SESSION_COUNTERS)
+        summary['completed_actions_preserved'] = True
+        log('warning', 'certification_admission_stopped',
+            account_id=_CURRENT_ACCOUNT_ID, run_id=_CURRENT_RUN_ID,
+            request_id=_CURRENT_RUN_REQUEST_ID, **summary)
+        if _CURRENT_RUN_ID:
+            _update_run_status_safe(
+                run_id=_CURRENT_RUN_ID, status='stopped',
+                totals={'total': int(_RUNTIME_FOLLOW_COUNT or 0),
+                        'success': int(_RUNTIME_FOLLOW_COUNT or 0), 'failed': 0},
+                performance_summary=summary, defer_until_cleanup=False,
+            )
+        # External supervisor owns process/request/lease cleanup. No UI cleanup.
+        return 1
     except ui_continuity_v1.UiContinuityLost as exc:
         # No device cleanup gesture with an unproved post-suspension surface.
         # Durable intents/receipts are untouched; a tap interrupted in flight
@@ -29720,6 +29758,10 @@ def main() -> int:
             target_lt_10_seconds=True,
         )
         return _return_with_cleanup(exc.device, 76)
+
+    finally:
+        if certification_admission.is_enabled():
+            certification_admission.mark_terminal('certification_runner_exit')
 
 
 

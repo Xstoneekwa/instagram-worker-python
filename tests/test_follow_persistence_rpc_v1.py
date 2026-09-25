@@ -861,13 +861,43 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             supabase_client, "get_follow_persistence_event", return_value=None
         ), mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
             runner, "_follow_ui_state_snapshot", return_value="follow"
-        ), mock.patch.object(
+        ) as snapshot, mock.patch.object(
             runner, "_persist_verified_follow_success_to_supabase"
-        ) as persist:
-            self.assertFalse(runner._recover_verified_follow_persistence_intents(
+        ) as persist, mock.patch.object(
+            runner, "_persist_unresolved_follow_ambiguity", return_value=True
+        ) as ambiguity:
+            self.assertEqual(runner._recover_verified_follow_persistence_intents(
                 object(), account_id=ACCOUNT_ID, run_id=RUN_ID, supabase_mode=True
-            ))
+            ), "RECOVERY_PENDING_RETRYABLE")
         persist.assert_not_called()
+        self.assertEqual(snapshot.call_count, 2)
+        ambiguity.assert_called_once()
+        self.assertEqual(ambiguity.call_args.kwargs["action_id"], self.action_id)
+        self.assertEqual(ambiguity.call_args.kwargs["account_id"], ACCOUNT_ID)
+        self.assertEqual(ambiguity.call_args.kwargs["original_run_id"], RUN_ID)
+        self.assertEqual(ambiguity.call_args.kwargs["candidate_username"], "candidate")
+        self.assertEqual(ambiguity.call_args.kwargs["follow_state_after"], "follow")
+        stored = json.loads(Path(self.tmp.name, RUN_ID, f"{self.action_id}.json").read_text())
+        self.assertEqual(stored["stage"], "ambiguity_durable_projected")
+
+    def test_recovery_without_following_projection_failure_stays_fail_closed(self) -> None:
+        with mock.patch.object(
+            supabase_client, "get_follow_persistence_event", return_value=None
+        ), mock.patch.object(runner, "verify_profile", return_value=True), mock.patch.object(
+            runner, "_follow_ui_state_snapshot", return_value="follow"
+        ) as snapshot, mock.patch.object(
+            runner, "_persist_verified_follow_success_to_supabase"
+        ) as persist, mock.patch.object(
+            runner, "_persist_unresolved_follow_ambiguity", return_value=False
+        ) as ambiguity:
+            self.assertEqual(runner._recover_verified_follow_persistence_intents(
+                object(), account_id=ACCOUNT_ID, run_id=RUN_ID, supabase_mode=True
+            ), "RECOVERY_INFRA_UNAVAILABLE")
+        persist.assert_not_called()
+        self.assertEqual(snapshot.call_count, 2)
+        ambiguity.assert_called_once()
+        stored = json.loads(Path(self.tmp.name, RUN_ID, f"{self.action_id}.json").read_text())
+        self.assertNotIn(stored["stage"], {"persisted", "ambiguity_durable_projected"})
 
     def test_auto_restart_receipt_first_uses_original_run_and_starts_no_ui(self) -> None:
         prior_run = RUN_ID
@@ -891,7 +921,7 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         follow_persistence_intent.update_intent_stage(
             run_id=prior_run,
             action_id=action_id,
-            stage="physical_attempt_started",
+            stage="tap_dispatched",
         )
         receipt = {
             "id": action_id,
@@ -902,20 +932,28 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
         }
         with mock.patch.object(
             supabase_client, "get_follow_persistence_event", return_value=receipt
-        ), mock.patch.object(runner, "verify_profile") as verify, mock.patch.object(
+        ) as lookup, mock.patch.object(runner, "verify_profile") as verify, mock.patch.object(
             runner, "_follow_ui_state_snapshot"
         ) as snapshot, mock.patch.object(
             runner, "_persist_verified_follow_success_to_supabase"
-        ) as persist:
-            self.assertTrue(
+        ) as persist, mock.patch.object(supabase_client, "resolve_ambiguous_follow_mutation") as resolve:
+            self.assertEqual(
                 runner._recover_verified_follow_persistence_intents(
                     object(),
                     account_id=ACCOUNT_ID,
                     run_id=current_run,
                     business_session_id=session_id,
+                    lineage_run_ids=[prior_run],
                     supabase_mode=True,
-                )
+                ), "RECOVERY_RESOLVED"
             )
+            self.assertEqual(runner._recover_verified_follow_persistence_intents(
+                object(), account_id=ACCOUNT_ID, run_id=current_run,
+                business_session_id=session_id, lineage_run_ids=[prior_run],
+                supabase_mode=True), "RECOVERY_NOT_REQUIRED")
+        lookup.assert_called_once()
+        resolve.assert_called_once_with(ACCOUNT_ID, "arnaud_blanchard74", "bmybusinesses",
+            action_id=action_id, resolution="canonical_follow_receipt")
         verify.assert_not_called()
         snapshot.assert_not_called()
         persist.assert_not_called()

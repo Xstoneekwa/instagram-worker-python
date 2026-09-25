@@ -56,6 +56,7 @@ class FollowUnfollowDailyPlanHandoffTests(unittest.TestCase):
             actual_logged_in_username=None,
             failure_reason="test_stop_after_plan_resolution",
             verification_method="test",
+            meta={},
         )
         def capture_candidates(_account_id, *, settings, **_kwargs):
             captured["planning_after_days"] = settings.after_days
