@@ -3122,14 +3122,38 @@ def open_search(
 
 def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
     """One qualified446 Explore header action;372 remains an I/O-free no-op."""
-    key = "_instagram_446_observed_context"
-    if key not in vars(d):
-        return True
+    from run_latency_observability_v1 import _TimedProxy, _UI_METHODS
     from instagram_ui_446_compat import context_matches, explore_search_entry_from_xml
-    context = vars(d)[key]
-    try:
-        if not context_matches(context, d, get_device_serial(d), package):
+    key = "_instagram_446_observed_context"
+
+    def authority():
+        owner = d
+        if isinstance(d, _TimedProxy):
+            if type(d) is not _TimedProxy or vars(d).get("_kind") != "device":
+                raise ValueError("search_context_owner_unproved")
+            owner = vars(d).get("_raw")
+            if owner is None or isinstance(owner, _TimedProxy):
+                raise ValueError("search_context_owner_unproved")
+        observed = vars(owner).get("_instagram_search_observed_version")
+        serial = get_device_serial(owner)
+        if (type(observed) is not tuple or len(observed) != 5
+                or observed[:3] != (id(owner), serial, package)
+                or not serial or not package or type(observed[4]) is not int):
+            raise ValueError("search_version_authority_unproved")
+        if observed[3:] == ("372.0.0.48.60", 377611059):
+            if key in vars(owner):
+                raise ValueError("search_version_authority_contradictory")
+            return owner, observed, None
+        context = vars(owner).get(key)
+        if (observed[3:] != ("446.0.0.49.77", 385211304)
+                or not context_matches(context, owner, serial, package)):
             raise ValueError("version_context_unproved")
+        return owner, observed, context
+
+    try:
+        owner, observed, context = authority()
+        if context is None:
+            return True
         proof = explore_search_entry_from_xml(d.dump_hierarchy(compressed=False), package=package)
         if proof is None:
             raise ValueError("explore_entry_unproved")
@@ -3138,6 +3162,11 @@ def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
         for suffix in ("explore_action_bar_container", "action_bar_search_hints_text_layout",
                        "action_bar_search_edit_text"):
             control = control.child(resourceId=package + ":id/" + suffix)
+        # child() returns a raw selector in the existing instrumentation API.
+        # Keep the final scoped click observable without changing that API.
+        if type(d) is _TimedProxy:
+            control = _TimedProxy(control, kind="uiautomator",
+                                  emit=vars(d)["_emit"], methods=_UI_METHODS)
         if control.count != 1:
             raise ValueError("search_entry_not_unique")
         tab = d(resourceId=package + ":id/search_tab")
@@ -3158,7 +3187,9 @@ def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
             raise ValueError("search_tab_changed")
         if not matches(control.info, proof["action_bar_search_edit_text"]):
             raise ValueError("search_entry_changed")
-        if not context_matches(vars(d).get(key), d, get_device_serial(d), package):
+        current_owner, current_observed, current_context = authority()
+        if (current_owner is not owner or current_observed is not observed
+                or current_context is not context):
             raise ValueError("version_context_changed")
         control.click()
         log("info", "open_search_446_header_clicked", editable_postcondition="pending")

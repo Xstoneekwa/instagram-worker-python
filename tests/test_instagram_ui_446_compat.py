@@ -19,7 +19,7 @@ class Device:
     def __init__(self,xml):self.xml=xml;self.serial='RFGL62SZ7NR';self.calls=[]
     def dump_hierarchy(self,**kwargs):self.calls.append(('dump',kwargs));return self.xml
     def window_size(self):self.calls.append(('window_size',));return (1080,2340)
-def bind(d):compat.retain_context(d,serial=d.serial,package=PACKAGE,version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False)
+def bind(d):compat.retain_context(d,serial=d.serial,package=PACKAGE,version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False);vars(d)["_instagram_search_observed_version"]=(id(d),d.serial,PACKAGE,*compat.VERSION)
 
 class Tests(unittest.TestCase):
     def test_exact_physical_counter_collision(self):
@@ -178,6 +178,7 @@ class SearchEntryTests(unittest.TestCase):
 
     def test_372_noop_zero_io(self):
         d=SearchDevice();compat.retain_context(d,serial=d.serial,package=PACKAGE,version_name='372.0.0.48.60',version_code=377611059,unsafe=False)
+        vars(d)['_instagram_search_observed_version']=(id(d),d.serial,PACKAGE,'372.0.0.48.60',377611059)
         self.assertTrue(nav._open_446_explore_search_entry(d, PACKAGE));self.assertEqual(d.calls,[])
 
     def test_revoked_wrong_context_zero_io(self):
@@ -239,3 +240,110 @@ class SearchEntryTests(unittest.TestCase):
             self.assertEqual(d.clicked,[PACKAGE+':id/action_bar_search_edit_text'])
             self.assertEqual(result,ready)
             self.assertEqual(strict.call_count,1 if ready else 0)
+
+class SearchContextWiringTests(unittest.TestCase):
+    def wrapped(self, d, events=None):
+        from run_latency_observability_v1 import instrument_device
+        with patch.dict('os.environ', {'PHONEFARM_RUN_LATENCY_OBSERVABILITY_V1':'1'}):
+            return instrument_device(d, emit=lambda *args, **kw: events.append(kw) if events is not None else None)
+
+    def test_exact_previous_helper_skips_instrumented_context(self):
+        import ast, subprocess
+        from pathlib import Path
+        root=Path(nav.__file__).parent
+        source=subprocess.check_output(['git','-C',str(root),'show',
+            '027642a12152ab33662bab12748e2b2a8e9b000d:instagram_navigation.py'],text=True)
+        node=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='_open_446_explore_search_entry')
+        namespace={};exec(compile('from __future__ import annotations\n'+ast.get_source_segment(source,node),'old_helper','exec'),namespace)
+        d=SearchDevice();bind(d);proxy=self.wrapped(d)
+        self.assertTrue(namespace[node.name](proxy,PACKAGE));self.assertEqual(d.calls,[])
+        self.assertNotIn(compat.CONTEXT_KEY,vars(proxy));self.assertIn(compat.CONTEXT_KEY,vars(d))
+
+    def test_real_proxy_one_header_then_real_a0_edittext_wait(self):
+        class TransitionDevice(SearchDevice):
+            def __call__(self, **selector):
+                if selector=={'className':'android.widget.EditText'}:
+                    outer=self
+                    class Editable:
+                        def wait(self,timeout):
+                            outer.calls.append('editable_wait')
+                            return outer.clicked==[PACKAGE+':id/action_bar_search_edit_text']
+                    return Editable()
+                return super().__call__(**selector)
+        d=TransitionDevice();bind(d);events=[];proxy=self.wrapped(d,events)
+        self.assertIsNone(nav._wait_search_edittext(proxy));d.calls.clear();events.clear()
+        self.assertTrue(nav._open_446_explore_search_entry(proxy,PACKAGE))
+        self.assertEqual(d.calls,['dump','count','count','info','info','click'])
+        self.assertEqual(d.clicked,[PACKAGE+':id/action_bar_search_edit_text'])
+        self.assertIsNotNone(nav._wait_search_edittext(proxy))
+        self.assertEqual([e['operation'] for e in events],['dump_hierarchy','click','wait'])
+        self.assertTrue(all(e['success'] and not e['extra_phone_call'] for e in events))
+
+    def test_proved_372_raw_and_proxy_zero_io(self):
+        for wrap in (False,True):
+            d=SearchDevice();vars(d)['_instagram_search_observed_version']=(id(d),d.serial,PACKAGE,'372.0.0.48.60',377611059)
+            self.assertTrue(nav._open_446_explore_search_entry(self.wrapped(d) if wrap else d,PACKAGE))
+            self.assertEqual(d.calls,[])
+
+    def test_invalid_or_missing_authority_never_reads_or_clicks(self):
+        for case in ('missing_version','missing_context','revoked','wrong_version','wrong_code','bool_code','serial','package','raw_identity','context_identity','observed_identity','malformed','contradictory_372'):
+            with self.subTest(case=case):
+                d=SearchDevice();bind(d);pkg=PACKAGE;obs=list(vars(d)['_instagram_search_observed_version'])
+                if case=='missing_version':del vars(d)['_instagram_search_observed_version']
+                elif case=='missing_context':del vars(d)[compat.CONTEXT_KEY]
+                elif case=='revoked':vars(d)[compat.CONTEXT_KEY]=None
+                elif case=='wrong_version':obs[3]='447';vars(d)['_instagram_search_observed_version']=tuple(obs)
+                elif case=='wrong_code':obs[4]+=1;vars(d)['_instagram_search_observed_version']=tuple(obs)
+                elif case=='bool_code':obs[4]=True;vars(d)['_instagram_search_observed_version']=tuple(obs)
+                elif case=='serial':d.serial='wrong'
+                elif case=='package':pkg='foreign'
+                elif case=='raw_identity':other=SearchDevice();vars(other).update({k:v for k,v in vars(d).items() if k.startswith('_instagram')});d=other
+                elif case=='context_identity':vars(d)[compat.CONTEXT_KEY]=compat.ObservedContext(d.serial,PACKAGE,compat.VERSION,id(d)+1)
+                elif case=='observed_identity':obs[0]+=1;vars(d)['_instagram_search_observed_version']=tuple(obs)
+                elif case=='malformed':vars(d)['_instagram_search_observed_version']=obs
+                elif case=='contradictory_372':vars(d)['_instagram_search_observed_version']=(id(d),d.serial,PACKAGE,'372.0.0.48.60',377611059)
+                self.assertFalse(nav._open_446_explore_search_entry(self.wrapped(d),pkg));self.assertEqual(d.calls,[])
+
+    def test_unknown_nested_subclass_and_missing_proxy_owner_rejected(self):
+        from run_latency_observability_v1 import _TimedProxy
+        d=SearchDevice();bind(d);p=self.wrapped(d)
+        class Unknown:
+            def __getattr__(self,name):return getattr(d,name)
+        class Sub(_TimedProxy):pass
+        cases=[Unknown(),Sub(d,kind='device',emit=None,methods=frozenset()),_TimedProxy(p,kind='device',emit=None,methods=frozenset()),_TimedProxy(None,kind='device',emit=None,methods=frozenset()),_TimedProxy(d,kind='uiautomator',emit=None,methods=frozenset())]
+        for item in cases:
+            with self.subTest(type=type(item).__name__):
+                self.assertFalse(nav._open_446_explore_search_entry(item,PACKAGE));self.assertEqual(d.calls,[])
+
+    def test_pre_action_owner_or_context_change_blocks_click(self):
+        for case in ('owner','observed','context'):
+            d=SearchDevice();bind(d);proxy=self.wrapped(d);original=SearchSelector.info.fget
+            def info(selector):
+                result=original(selector)
+                if selector.path[0]['resourceId'].endswith('/explore_action_bar'):
+                    if case=='owner':object.__setattr__(proxy,'_raw',SearchDevice())
+                    elif case=='observed':vars(d)['_instagram_search_observed_version']=tuple(list(vars(d)['_instagram_search_observed_version']))
+                    else:vars(d)[compat.CONTEXT_KEY]=None
+                return result
+            with patch.object(SearchSelector,'info',property(info)):
+                self.assertFalse(nav._open_446_explore_search_entry(proxy,PACKAGE))
+            self.assertEqual(d.clicked,[])
+
+    def test_version_hook_records_existing_read_and_revokes_before_failed_read(self):
+        for version in [('372.0.0.48.60',377611059),compat.VERSION]:
+            d=SearchDevice();store=SimpleNamespace(path='/not-used',read=lambda:{'authorized_version_name':version[0],'authorized_version_code':version[1]})
+            with patch.object(device_module.config,'INSTAGRAM_PACKAGE',PACKAGE),patch.object(device_module,'_fetch_package_version',return_value=version) as fetch,patch.object(device_module,'_package_disabled_for_user0',return_value=True),patch.object(device_module,'_package_suspended',return_value=False),patch.object(device_module,'_lock_state_store',return_value=store),patch.object(device_module,'log'):
+                device_module.check_instagram_version_lock(d)
+            fetch.assert_called_once_with(d.serial,PACKAGE);self.assertEqual(vars(d)['_instagram_search_observed_version'],(id(d),d.serial,PACKAGE,*version));self.assertEqual(d.calls,[])
+            with patch.object(device_module,'_fetch_package_version',side_effect=RuntimeError('read_failed')):
+                with self.assertRaises(RuntimeError):device_module.check_instagram_version_lock(d)
+            self.assertIsNone(vars(d)['_instagram_search_observed_version'])
+            self.assertFalse(nav._open_446_explore_search_entry(self.wrapped(d),PACKAGE));self.assertEqual(d.calls,[])
+
+    def test_a0_selector_wait_and_recovery_ast_unchanged(self):
+        import ast,subprocess
+        from pathlib import Path
+        root=Path(nav.__file__).parent;old=ast.parse(subprocess.check_output(['git','-C',str(root),'show','027642a12152ab33662bab12748e2b2a8e9b000d:instagram_navigation.py'],text=True));new=ast.parse(Path(nav.__file__).read_text())
+        for name in ('open_search','_wait_search_edittext','_click_search_tab_in_open_search','ensure_global_search_surface'):
+            a=next(n for n in old.body if isinstance(n,ast.FunctionDef) and n.name==name);b=next(n for n in new.body if isinstance(n,ast.FunctionDef) and n.name==name)
+            self.assertEqual(ast.dump(a),ast.dump(b),name)

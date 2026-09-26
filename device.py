@@ -747,6 +747,8 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
     Inspect IG version + lock-related signals; update strict unsafe_for_automation
     when installed build diverges from lock_state.json baseline.
     """
+    # Revoke before any read: a failed re-check cannot retain Search authority.
+    vars(d)["_instagram_search_observed_version"] = None
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
     serial = get_device_serial(d)
     strict = bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False))
@@ -846,4 +848,6 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
         from instagram_ui_446_compat import retain_context
         retain_context(d, serial=serial, package=pkg, version_name=vn,
                        version_code=vc, unsafe=unsafe)
+    if not unsafe and serial and pkg and type(vc) is int:
+        vars(d)["_instagram_search_observed_version"] = (id(d), serial, pkg, vn, vc)
     return payload
