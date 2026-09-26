@@ -34,17 +34,20 @@
     "tests/test_canary_launcher.py": "9272dd5dea2ee30de7c16658f1baf3e004337a7a754650d5e1740a0b9cfe905b"
   },
   "fresh_execution_context_evidence": {
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-network-fresh-final/FOLLOW60_MAINLINE_LOCK_V3.json": "de871d898ad06af727f7dd5e36a6c19b673507b50ea734401d529c21e6dc15eb",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-network-fresh-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "c500358e3d458865e9d8ba978bf9ebc6fa08121b9a911de8e42136ce4bcd3503",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-network-fresh-final/RECERTIFICATION_RECEIPT.json": "49f423b4df88ad7c6feb25460b50cb191696823e382185247e3726d42b501c3f",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/FOLLOW60_MAINLINE_LOCK_V3.json": "b3b8d61d7925c032303241c42df985dd320d8dbb6ae29b4c811a8acaa7e47c3e",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "331b7b6d9ba3b5a8dc21e231b1b51240a1c1f04285ba2ddfb0c40c21c77e0315",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/RECERTIFICATION_RECEIPT.json": "add3dc8f39af8cbdf32ccb85cab773958a8a8ecdde1d091332dd2b83e296c68f",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/RESULT.json": "29291c740272caeb6078f7127286c70091be4a2a397fd7bcad3954f75eeba96b",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/gates.json": "0f5d9613e0bef7a40af53e73bde661d2cc98f3af77e95a18a792d10769a1a22d",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/production.json": "7d01a48a17de007e184f3c522e308b37d698339ed745db032f9207c3a3446e4b",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/state.json": "fdfe79e120389b5813b35fcc75bf68e4e121b3c12fd930bbf6862d2d8ada9260",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-network-fresh-canary/QUARANTINED_CONTEXT.json": "e4b6b961aa717d0fb0d630028acc89511952b4ba13a89cc1a355eb7ace3b63dd"
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/AFTER_READBACK.json": "4246f7bad07460f7c5b82d57e049835625f660cda3a424f1e06dc4a087d9ae84",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/CAPTURE_EVIDENCE.json": "09d3045b8916d03dc0b420c8315350b83527046b6457acb32430ddc876c57e5b",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/QUARANTINED_CONTEXT.json": "98d715b92d9c0edfdf76bee6e7988aa8d0d9332f838427ab6b69a11101f66f2e",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/RESULT.json": "b33a256c301da837c1fe83a6307fcb467e0234e3f4aa95b81906b6237954339c",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa"
   },
-  "previous_candidate_sha": "0e2433ab90fd4ed681d57104e6feb48971381c60",
+  "previous_candidate_sha": "0697426338ae11a98fa4bf93a396a58448b3e2cc",
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
@@ -65,7 +68,7 @@
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
   "qualification_scope": "Prior evidence qualifies unchanged historical candidate and external launcher bytes. New final-SHA recertification, fresh one-shot permit/nonce/window/worker, new Liam Approval2 and absent canonical publication namespace are mandatory. No old campaign context reuse.",
-  "reason": "fresh_execution_context_after_operator_manual_only_and_incident_resolution",
+  "reason": "fresh_execution_context_after_operator_notifications_popup_dismissal",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "version": 1
