@@ -34,9 +34,18 @@
     "tests/test_canary_launcher.py": "abfbdfac9fb373d9fc2020d6e3793cb41412a227cb9f7b0be2b787417f63d6f1"
   },
   "fresh_execution_context_evidence": {
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/adb-transport-diagnostic-20260926/RESULT.json": "ff53da562f526ea2802ff7e826fd95e907b2506482bae2e43cafb5c61fd69a29",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/FOLLOW60_MAINLINE_LOCK_V3.json": "7f7e79edbb4dbdc377cadbf6c5dc3c7b876595ffc116f559db06fb3747bc79a5",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "f8656aba790824df3ac3e513f930c838456679195140f8cb4570ff4914409569",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/RECERTIFICATION_RECEIPT.json": "eef30aeef0b3726c6022b3265c96885d78c44d1a70c750080c4c63f1732121a3",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/FOLLOW60_MAINLINE_LOCK_V3.json": "b3b8d61d7925c032303241c42df985dd320d8dbb6ae29b4c811a8acaa7e47c3e",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "331b7b6d9ba3b5a8dc21e231b1b51240a1c1f04285ba2ddfb0c40c21c77e0315",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/RECERTIFICATION_RECEIPT.json": "add3dc8f39af8cbdf32ccb85cab773958a8a8ecdde1d091332dd2b83e296c68f",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/ABORT_REGRESSION.log": "ba2f519d5a968d02db50f18129e08e2df480f96adb16d45f8f151e916e671209",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/ADB_INTERVAL_TARGET.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/BACKEND_READINESS.json": "240026c3fe70081c732a9839adc8b932ce1cba4406fbb3311532b88e6ddc1296",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/COMMANDS.json": "c16d620c6c330177f5f0e0cdb1289246eaf2748ac318c734218d84565a927623",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/DEVICE_READINESS.json": "93c09ce5a1eaffac45c0f892257dd132604ef5e17e15ea98445b25baff1300c0",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/RESULT.json": "29291c740272caeb6078f7127286c70091be4a2a397fd7bcad3954f75eeba96b",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/gates.json": "0f5d9613e0bef7a40af53e73bde661d2cc98f3af77e95a18a792d10769a1a22d",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/nab-clean-manual-state/production.json": "7d01a48a17de007e184f3c522e308b37d698339ed745db032f9207c3a3446e4b",
@@ -46,9 +55,12 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/QUARANTINED_CONTEXT.json": "98d715b92d9c0edfdf76bee6e7988aa8d0d9332f838427ab6b69a11101f66f2e",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/RESULT.json": "b33a256c301da837c1fe83a6307fcb467e0234e3f4aa95b81906b6237954339c",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-popup-resume-canary/QUARANTINED_CONTEXT.json": "a53b75bd290789d37a83e0c306f5ba3ebc5a7f1893a289b232e5b191d8a0f7e8"
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-popup-resume-canary/QUARANTINED_CONTEXT.json": "a53b75bd290789d37a83e0c306f5ba3ebc5a7f1893a289b232e5b191d8a0f7e8",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-search-entry-canary/AFTER_READBACK.json": "ae9a54c0c99052ab3fd526d23391f2aa85348346efabaf7ba52cc0762b9dbb94",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-search-entry-canary/QUARANTINED_CONTEXT.json": "14dcb54eba69fd2a917056f678b179e504da274acd7334280a626d22517e3025",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-search-entry-canary/RESULT.json": "f397385c8b6ef626f5ffb323f46a2cfef20192575ee5c32f2cada689c1e0ff90"
   },
-  "previous_candidate_sha": "23cdeb2d4ef697d8e01a5bfd009bf81e522bda1b",
+  "previous_candidate_sha": "e7dfb1cda4cf852f689857f5959cccfacbbab6b6",
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
@@ -80,8 +92,8 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
-  "qualification_scope": "Exact signed Search446 and neutral early-abort delta, exact test hunk normalization and external inventory pin. Full final-byte recertification, fresh one-shot context/window/permit and new final Approval2 required. No business,372 behavior, SQL, admission or scheduler change.",
-  "reason": "446_search_entry_and_early_abort_compatibility_with_exact_inventory_pin",
+  "qualification_scope": "Only this non-executable generation record changes. All919 other candidate files, exact919 bootstrap inventory, four launcher files and installed SQL unchanged. Full final-byte recertification, normal-hook final commit, fresh one-shot permit/nonce/window, fresh worker generated by existing launcher, new final Liam Approval2 and immutable publication required. Prior failed context quarantined; no reuse.",
+  "reason": "fresh_a1603_execution_context_after_read_only_adb_readiness_pass",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "version": 1
