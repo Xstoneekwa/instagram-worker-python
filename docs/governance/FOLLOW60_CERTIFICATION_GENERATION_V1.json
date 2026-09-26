@@ -29,9 +29,9 @@
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
     "canary_child.py": "f8e25cc1543721e79d0790a85a9a50a8c3e8f0d53713b0d69b18606203177e5f",
-    "canary_contract.py": "fe6d72df5f82607c72d1e40847d125b25ffbaa2247ae1d3c5ff6712703f380c7",
+    "canary_contract.py": "06917ba00ce2e556d03b2edf14a31269f9586c916d1c76e66140adc11354e42c",
     "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
-    "tests/test_canary_launcher.py": "9272dd5dea2ee30de7c16658f1baf3e004337a7a754650d5e1740a0b9cfe905b"
+    "tests/test_canary_launcher.py": "abfbdfac9fb373d9fc2020d6e3793cb41412a227cb9f7b0be2b787417f63d6f1"
   },
   "fresh_execution_context_evidence": {
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-a1603-clean-manual-final/FOLLOW60_MAINLINE_LOCK_V3.json": "b3b8d61d7925c032303241c42df985dd320d8dbb6ae29b4c811a8acaa7e47c3e",
@@ -45,15 +45,28 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/CAPTURE_EVIDENCE.json": "09d3045b8916d03dc0b420c8315350b83527046b6457acb32430ddc876c57e5b",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/QUARANTINED_CONTEXT.json": "98d715b92d9c0edfdf76bee6e7988aa8d0d9332f838427ab6b69a11101f66f2e",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/RESULT.json": "b33a256c301da837c1fe83a6307fcb467e0234e3f4aa95b81906b6237954339c",
-    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa"
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-popup-resume-canary/QUARANTINED_CONTEXT.json": "a53b75bd290789d37a83e0c306f5ba3ebc5a7f1893a289b232e5b191d8a0f7e8"
   },
-  "previous_candidate_sha": "0697426338ae11a98fa4bf93a396a58448b3e2cc",
+  "previous_candidate_sha": "23cdeb2d4ef697d8e01a5bfd009bf81e522bda1b",
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
       "request_sha256": "866062705e7257bf706b6dbd55cc3b747d884158f998661ff84085e67bfd02b3",
       "signature_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.sig",
       "signature_sha256": "e2e3524756eee4919bd1698d090d9cc0b0dd69a67a696753f17a5ebb27374be9"
+    },
+    {
+      "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-search-entry-abort/approval-1.json",
+      "request_sha256": "64d2105a1e8f95e899a4515ca6bcca22498f668f6b4e54fed3054739001683f7",
+      "signature_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-search-entry-abort/approval-1.sig",
+      "signature_sha256": "9fec6af3b69966b5898bd013aacd88dfb27d6ad2b15dc72690c8e1967d8a6846"
+    },
+    {
+      "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-search-pin-amendment/approval-1.json",
+      "request_sha256": "9a58fde449e20cf24f579d14b8f00e422e1b6d585d89c1a94d9fec656256cf8d",
+      "signature_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-446-search-pin-amendment/approval-1.sig",
+      "signature_sha256": "13b95c0e4491fc623c12fcb4ce0fb53bb11f4123972349774ba1729da914ca7a"
     }
   ],
   "prior_envelope_qualification_evidence": {
@@ -67,8 +80,8 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
-  "qualification_scope": "Prior evidence qualifies unchanged historical candidate and external launcher bytes. New final-SHA recertification, fresh one-shot permit/nonce/window/worker, new Liam Approval2 and absent canonical publication namespace are mandatory. No old campaign context reuse.",
-  "reason": "fresh_execution_context_after_operator_notifications_popup_dismissal",
+  "qualification_scope": "Exact signed Search446 and neutral early-abort delta, exact test hunk normalization and external inventory pin. Full final-byte recertification, fresh one-shot context/window/permit and new final Approval2 required. No business,372 behavior, SQL, admission or scheduler change.",
+  "reason": "446_search_entry_and_early_abort_compatibility_with_exact_inventory_pin",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "version": 1

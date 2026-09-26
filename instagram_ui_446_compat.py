@@ -124,3 +124,77 @@ def relationship_from_xml(xml, *, package, expected_username):
                 and max(nb[1], box[1]) < min(nb[3], box[3])):
             return 'unknown'
     return states[label]
+
+
+def explore_search_entry_from_xml(xml, *, package):
+    """446 Explore entry authority, never editable-field authority.
+
+    Observed on A16-03: Search is a Button inside the Explore action bar.
+    Return only the exact container-scoped control and selected-tab evidence.
+    The caller owns freshness, live revalidation and the editable postcondition.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except (ET.ParseError, TypeError):
+        return None
+    nodes = list(root.iter('node'))
+    parents = {c: p for p in root.iter() for c in p}
+    prefix = package + ':id/'
+    names = ('action_bar_search_edit_text', 'action_bar_search_hints_text_layout',
+             'explore_action_bar_container', 'explore_action_bar', 'search_tab')
+    found = {}
+    for name in names:
+        matches = [n for n in nodes if n.get('resource-id') == prefix + name]
+        if len(matches) != 1:
+            return None
+        found[name] = matches[0]
+    button = found[names[0]]
+    if (button.get('class') != 'android.widget.Button'
+            or button.get('text') != 'Search' or button.get('content-desc') != 'Search'
+            or button.get('focused') != 'false'):
+        return None
+    for child, parent in zip(names[:3], names[1:4]):
+        if parents.get(found[child]) is not found[parent]:
+            return None
+    tab = found['search_tab']
+    if (tab.get('class') != 'android.widget.FrameLayout' or tab.get('selected') != 'true'
+            or tab.get('content-desc') != 'Search and explore'):
+        return None
+    box = _bounds(button)
+    if not box or min(box[:2]) < 0:
+        return None
+    for control in (button, tab):
+        if control.get('clickable') != 'true' or control.get('enabled') != 'true':
+            return None
+        ancestor = control
+        while ancestor is not None and ancestor.tag == 'node':
+            bounds = _bounds(ancestor)
+            if (ancestor.get('package') != package or not _visible(ancestor)
+                    or ancestor.get('enabled') != 'true' or not bounds):
+                return None
+            cb = _bounds(control)
+            if not (bounds[0] <= cb[0] < cb[2] <= bounds[2]
+                    and bounds[1] <= cb[1] < cb[3] <= bounds[3]):
+                return None
+            ancestor = parents.get(ancestor)
+    hosts = set()
+    ancestor = button
+    while ancestor is not None:
+        hosts.add(ancestor)
+        ancestor = parents.get(ancestor)
+    for n in nodes:
+        if not _visible(n):
+            continue
+        semantic = ' '.join(n.get(k, '').casefold() for k in ('text', 'content-desc', 'resource-id', 'class'))
+        if any(s in semantic for s in ('introducing the instagram map', 'introducing instants',
+                'android.app.dialog', 'dialog_container', 'challenge', 'confirm you', 'log in', 'review before')):
+            return None
+        if n.get('package') not in (package, 'com.android.systemui'):
+            return None
+        nb = _bounds(n)
+        if (n not in hosts and n not in set(button.iter()) and nb
+                and n.get('enabled') != 'false' and n.get('clickable') == 'true'
+                and max(nb[0], box[0]) < min(nb[2], box[2])
+                and max(nb[1], box[1]) < min(nb[3], box[3])):
+            return None
+    return {name: dict(found[name].attrib) for name in names}

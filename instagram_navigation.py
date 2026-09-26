@@ -2903,6 +2903,9 @@ def open_search(
     search_click_ms = (time.perf_counter() - t_click_phase) * 1000
     time.sleep(settle)
 
+    if not _open_446_explore_search_entry(d, pkg):
+        return False
+
     t_wait = time.perf_counter()
     ed = retry_until(
         lambda: _wait_search_edittext(d),
@@ -3115,6 +3118,55 @@ def open_search(
         )
 
     return False
+
+
+def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
+    """One qualified446 Explore header action;372 remains an I/O-free no-op."""
+    key = "_instagram_446_observed_context"
+    if key not in vars(d):
+        return True
+    from instagram_ui_446_compat import context_matches, explore_search_entry_from_xml
+    context = vars(d)[key]
+    try:
+        if not context_matches(context, d, get_device_serial(d), package):
+            raise ValueError("version_context_unproved")
+        proof = explore_search_entry_from_xml(d.dump_hierarchy(compressed=False), package=package)
+        if proof is None:
+            raise ValueError("explore_entry_unproved")
+        # Re-resolve the exact live ancestry, never any Search/Not-now match.
+        control = d(resourceId=package + ":id/explore_action_bar")
+        for suffix in ("explore_action_bar_container", "action_bar_search_hints_text_layout",
+                       "action_bar_search_edit_text"):
+            control = control.child(resourceId=package + ":id/" + suffix)
+        if control.count != 1:
+            raise ValueError("search_entry_not_unique")
+        tab = d(resourceId=package + ":id/search_tab")
+        if tab.count != 1:
+            raise ValueError("search_tab_not_unique")
+        def matches(info, node):
+            from instagram_ui_446_compat import _bounds
+            b = info.get("bounds") or {}
+            return (info.get("resourceName") == node["resource-id"]
+                    and info.get("className") == node["class"]
+                    and info.get("text", "") == node.get("text", "")
+                    and info.get("contentDescription", "") == node.get("content-desc", "")
+                    and info.get("enabled") is True and info.get("clickable") is True
+                    and info.get("selected") == (node.get("selected") == "true")
+                    and info.get("focused") == (node.get("focused") == "true")
+                    and tuple(b.get(k) for k in ("left", "top", "right", "bottom")) == _bounds(node))
+        if not matches(tab.info, proof["search_tab"]):
+            raise ValueError("search_tab_changed")
+        if not matches(control.info, proof["action_bar_search_edit_text"]):
+            raise ValueError("search_entry_changed")
+        if not context_matches(vars(d).get(key), d, get_device_serial(d), package):
+            raise ValueError("version_context_changed")
+        control.click()
+        log("info", "open_search_446_header_clicked", editable_postcondition="pending")
+        return True
+    except Exception as exc:
+        log("warning", "open_search_446_entry_rejected", reason=str(exc) if isinstance(exc, ValueError)
+            else type(exc).__name__)
+        return False
 
 
 def _wait_search_edittext(d: u2.Device):

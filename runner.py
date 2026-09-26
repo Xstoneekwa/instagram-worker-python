@@ -13812,6 +13812,9 @@ def _run_followers_list_engine_session(
         target_action_budget=int(max_iter),
     )
 
+    # Early acquisition aborts can publish before the Followers loop starts.
+    _followers_loop_finally_stop = ""
+
     def _global_follow_cap_payload() -> dict[str, Any]:
         cap = int(global_follow_stop_cap_for_logs or 0)
         return {

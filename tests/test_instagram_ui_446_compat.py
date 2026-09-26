@@ -115,3 +115,127 @@ class Tests(unittest.TestCase):
         self.assertEqual(read(xml_mutation(change)),'unknown')
 
 if __name__=='__main__':unittest.main()
+
+# A16-03 one-shot post-search_tab capture; no query or header action executed.
+SEARCH_CAPTURE = ('91652e306b63ab2fcfae0ff12b7f64a2e119730732c782296ce732466161e5b9', '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')
+
+def search_capture():
+    xml = zlib.decompress(base64.b64decode(SEARCH_CAPTURE[1]))
+    assert hashlib.sha256(xml).hexdigest() == SEARCH_CAPTURE[0]
+    return xml.decode()
+
+
+def search_mutate(xml, suffix, key, value):
+    root = ET.fromstring(xml)
+    node(root, suffix).set(key, value)
+    return ET.tostring(root, encoding='unicode')
+
+
+class SearchSelector:
+    def __init__(self, d, path): self.d, self.path = d, path
+    def child(self, **selector): return SearchSelector(self.d, self.path + [selector])
+    def nodes(self):
+        tree = ET.fromstring(self.d.live)
+        found = [n for n in tree.iter('node') if n.get('resource-id') == self.path[0]['resourceId']]
+        for selector in self.path[1:]:
+            found = [n for p in found for n in p if n.get('resource-id') == selector['resourceId']]
+        return found
+    @property
+    def count(self):
+        self.d.calls.append('count')
+        return len(self.nodes())
+    @property
+    def info(self):
+        self.d.calls.append('info')
+        n = self.nodes()[0]; b = compat._bounds(n)
+        return dict(resourceName=n.get('resource-id'), className=n.get('class'), text=n.get('text',''),
+                    contentDescription=n.get('content-desc',''), bounds=dict(zip(('left','top','right','bottom'),b)),
+                    **{k:n.get(k)=='true' for k in ('enabled','clickable','selected','focused')})
+    def click(self):
+        self.d.calls.append('click'); self.d.clicked.append(self.nodes()[0].get('resource-id'))
+
+
+class SearchDevice:
+    def __init__(self, snapshot=None, live=None):
+        self.xml = snapshot or search_capture(); self.live = live or self.xml
+        self.serial = 'RFGL62N646V'; self.calls = []; self.clicked = []
+    def dump_hierarchy(self, **kwargs): self.calls.append('dump'); return self.xml
+    def __call__(self, **selector): return SearchSelector(self, [selector])
+
+
+class SearchEntryTests(unittest.TestCase):
+    def test_exact_physical_button_not_editable(self):
+        proof = compat.explore_search_entry_from_xml(search_capture(), package=PACKAGE)
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof['action_bar_search_edit_text']['class'], 'android.widget.Button')
+        self.assertFalse(any(n.get('class')=='android.widget.EditText' for n in ET.fromstring(search_capture()).iter()))
+
+    def test_scoped_live_action_and_io_bound(self):
+        d=SearchDevice();bind(d)
+        self.assertTrue(nav._open_446_explore_search_entry(d, PACKAGE))
+        self.assertEqual(d.clicked, [PACKAGE+':id/action_bar_search_edit_text'])
+        self.assertEqual(d.calls, ['dump','count','count','info','info','click'])
+
+    def test_372_noop_zero_io(self):
+        d=SearchDevice();compat.retain_context(d,serial=d.serial,package=PACKAGE,version_name='372.0.0.48.60',version_code=377611059,unsafe=False)
+        self.assertTrue(nav._open_446_explore_search_entry(d, PACKAGE));self.assertEqual(d.calls,[])
+
+    def test_revoked_wrong_context_zero_io(self):
+        for kind in ('revoked','serial','package','object','version'):
+            d=SearchDevice();bind(d);pkg=PACKAGE
+            if kind=='revoked':vars(d)[compat.CONTEXT_KEY]=None
+            if kind=='serial':d.serial='wrong'
+            if kind=='package':pkg='foreign'
+            if kind=='object':vars(d)[compat.CONTEXT_KEY]=vars(SearchDevice()).get(compat.CONTEXT_KEY)
+            if kind=='version':vars(d)[compat.CONTEXT_KEY]=compat.ObservedContext(d.serial,PACKAGE,('447',1),id(d))
+            self.assertFalse(nav._open_446_explore_search_entry(d,pkg));self.assertEqual(d.calls,[])
+
+    def test_structural_negatives(self):
+        cases=[('action_bar_search_edit_text',k,v) for k,v in [('class','android.widget.EditText'),('text','Not now'),('content-desc','other'),('enabled','false'),('clickable','false'),('focused','true'),('visible-to-user','false'),('package','foreign'),('bounds','[0,0][0,0]')]]
+        cases += [('explore_action_bar_container',k,v) for k,v in [('resource-id',PACKAGE+':id/unrelated'),('visible-to-user','false'),('enabled','false'),('package','foreign')]]
+        cases += [('search_tab','selected','false'),('search_tab','content-desc','other')]
+        for suffix,k,v in cases:
+            with self.subTest(suffix=suffix,key=k):
+                xml=search_mutate(search_capture(),suffix,k,v)
+                self.assertIsNone(compat.explore_search_entry_from_xml(xml,package=PACKAGE))
+                d=SearchDevice(xml);bind(d);self.assertFalse(nav._open_446_explore_search_entry(d,PACKAGE));self.assertEqual(d.clicked,[])
+
+    def test_live_replacement_and_stale_bounds(self):
+        for suffix,k,v in [('action_bar_search_edit_text','text','Not now'),('action_bar_search_edit_text','bounds','[35,100][929,200]'),('action_bar_search_edit_text','enabled','false'),('explore_action_bar_container','resource-id',PACKAGE+':id/notifications'),('search_tab','selected','false')]:
+            d=SearchDevice(live=search_mutate(search_capture(),suffix,k,v));bind(d)
+            self.assertFalse(nav._open_446_explore_search_entry(d,PACKAGE));self.assertEqual(d.clicked,[])
+
+    def test_duplicate_and_overlay(self):
+        for mode in ('duplicate','live_duplicate','foreign','modal','cover'):
+            root=ET.fromstring(search_capture())
+            if 'duplicate' in mode:
+                node(root,'action_bar_search_hints_text_layout').append(copy.deepcopy(node(root,'action_bar_search_edit_text')))
+            else:
+                ET.SubElement(root,'node',{'package':'foreign' if mode=='foreign' else PACKAGE,'text':'Introducing instants' if mode=='modal' else '', 'bounds':'[0,100][1080,250]','clickable':'true','enabled':'true','visible-to-user':'true'})
+            xml=ET.tostring(root,encoding='unicode');d=SearchDevice(live=xml) if mode=='live_duplicate' else SearchDevice(xml);bind(d)
+            self.assertFalse(nav._open_446_explore_search_entry(d,PACKAGE));self.assertEqual(d.clicked,[])
+
+    def test_broken_or_unrelated_xml(self):
+        for x in ('<broken','<hierarchy/>',fixture()):
+            self.assertIsNone(compat.explore_search_entry_from_xml(x,package=PACKAGE))
+
+    def test_open_search_keeps_editable_postcondition(self):
+        # Execute the real open_search; only its external/pre-existing probes are scripted.
+        from contextlib import ExitStack
+        for ready in (False,True):
+            d=SearchDevice();bind(d)
+            field=object() if ready else None
+            with ExitStack() as stack:
+                for name,value in [('should_reuse_search_surface',False),('_open_search_skip_lightweight_follow_ct_cold_bootstrap',True),('_click_search_tab_in_open_search',(True,'exact')),('is_follow_ct_search_context_active',False),('_current_foreground_package',PACKAGE)]:
+                    stack.enter_context(patch.object(nav,name,return_value=value))
+                stack.enter_context(patch.object(nav.config,'INSTAGRAM_PACKAGE',PACKAGE))
+                stack.enter_context(patch.object(nav.time,'sleep'))
+                stack.enter_context(patch.object(nav,'retry_until',return_value=field))
+                stack.enter_context(patch.object(nav,'_wait_search_edittext',return_value=field))
+                stack.enter_context(patch.object(nav,'log'))
+                strict = stack.enter_context(patch.object(nav,'instagram_search_surface_strict_ok',return_value=(True,'qualified_test_surface')))
+                # Later metric/cache validation is retained; no invented field from Button.
+                result=nav.open_search(d,allow_percent_fallback=False)
+            self.assertEqual(d.clicked,[PACKAGE+':id/action_bar_search_edit_text'])
+            self.assertEqual(result,ready)
+            self.assertEqual(strict.call_count,1 if ready else 0)
