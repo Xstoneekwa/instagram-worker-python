@@ -565,3 +565,98 @@ class FollowersActivityTests(unittest.TestCase):
             stale,reason=nav.followers_proof.issue_row_action_token(token.scope, 'candidate_exact', max_age_ms=1500.0)
         self.assertIsNone(stale)
         self.assertIn('stale', reason)
+
+
+class CandidateProfileActivityTests(unittest.TestCase):
+    def check(self, d, *, expected='bytanyusha_', observed='bytanyusha_', package=PACKAGE, **kw):
+        return nav._expected_profile_identity_boundary(
+            d, expected, package, observed_username=observed, **kw)
+
+    def test_exact_physical_profile_and_372_matrix(self):
+        f=FollowersActivityTests()
+        for package,activity,version in [
+            ('com.instagram.androif',f.MAIN,('372.0.0.48.60',377611059)),
+            (PACKAGE,f.MAIN,compat.VERSION),(PACKAGE,f.TAB,compat.VERSION),
+            (PACKAGE,'com.instagram.android.activity.MainTabActivity',compat.VERSION)]:
+            with self.subTest(package=package,activity=activity):
+                d=f.make_device(package,activity,version)
+                ok,meta=self.check(d,package=package)
+                self.assertTrue(ok,meta)
+                self.assertEqual(meta['identity_method'],'exact_observed_username')
+                self.assertEqual(d.calls,['app_current'])
+
+    def test_unqualified_activities_versions_and_clones_reject(self):
+        f=FollowersActivityTests()
+        cases=[(PACKAGE,f.TAB,('372.0.0.48.60',377611059)),
+               ('com.instagram.androif',f.TAB,compat.VERSION)]
+        for activity in ('MainActivity','.MainActivity','foreign.ProfileActivity',
+                         'foreign.activity.MainTabActivity','UnqualifiedOverlayActivity',
+                         'com.instagram.mainactivity.InstagramMainActivityOverlay','',None):
+            cases.append((PACKAGE,activity,compat.VERSION))
+        for package,activity,version in cases:
+            with self.subTest(package=package,activity=activity):
+                d=f.make_device(package,activity,version)
+                ok,meta=self.check(d,package=package)
+                self.assertFalse(ok,meta)
+                self.assertEqual(meta['reason'],'profile_identity_activity_unproven')
+                self.assertEqual(d.calls,['app_current'])
+
+    def test_wrong_package_and_wrong_candidate_reject(self):
+        for kw,reason in [({'package':'wrong.package'},'profile_identity_package_mismatch'),
+                          ({'observed':'other_candidate'},'profile_identity_username_mismatch'),
+                          ({'expected':'other_candidate'},'profile_identity_username_mismatch'),
+                          ({'expected':''},'profile_identity_expected_username_missing')]:
+            d=FollowersActivityTests().make_device()
+            ok,meta=self.check(d,**kw)
+            self.assertFalse(ok);self.assertEqual(meta['reason'],reason)
+            self.assertEqual(d.calls,[] if not kw.get('expected',True) else ['app_current'])
+
+    def test_missing_identity_cannot_be_replaced_by_activity(self):
+        for kw in ({}, {'allow_stage_scoped_transition':True},
+                   {'allow_stage_scoped_transition':True,'stage_binding_id':'old'},
+                   {'stage_scoped_transition_proven':True,'stage_binding_id':'old'}):
+            d=FollowersActivityTests().make_device()
+            with patch.object(nav,'_profile_signal_b_username_top_band',return_value=None) as probe:
+                ok,meta=self.check(d,observed='',**kw)
+            self.assertFalse(ok);self.assertEqual(meta['reason'],'profile_identity_username_unproven')
+            probe.assert_called_once_with(d,'bytanyusha_')
+            self.assertEqual(d.calls,['app_current'])
+
+    def test_existing_positive_identity_proofs_unchanged(self):
+        d=FollowersActivityTests().make_device()
+        with patch.object(nav,'_profile_signal_b_username_top_band',return_value='exact_top_band'):
+            ok,meta=self.check(d,observed='')
+        self.assertTrue(ok);self.assertEqual(meta['identity_method'],'exact_top_band')
+        with patch.object(nav,'_profile_signal_b_username_top_band',return_value=None):
+            ok,meta=self.check(d,observed='',allow_stage_scoped_transition=True,
+                               stage_scoped_transition_proven=True,stage_binding_id='fresh_caller_proof')
+        self.assertTrue(ok);self.assertEqual(meta['identity_method'],'stage_scoped_visual_transition')
+
+    def test_retained_context_mismatch_cannot_prove_profile(self):
+        for mutate in (lambda d:vars(d).pop(compat.CONTEXT_KEY),
+                       lambda d:setattr(d,'serial','wrong'),
+                       lambda d:vars(d).pop('_instagram_search_observed_version')):
+            d=FollowersActivityTests().make_device();mutate(d)
+            ok,meta=self.check(d);self.assertFalse(ok,meta)
+            self.assertEqual(d.calls,['app_current'])
+
+    def test_timing_proxy_reuses_same_context_without_new_io(self):
+        from run_latency_observability_v1 import _TimedProxy
+        for kind,allowed in [('device',True),('uiautomator',False)]:
+            d=FollowersActivityTests().make_device()
+            proxy=_TimedProxy(d,kind=kind,emit=lambda *a,**kw:None,methods=set())
+            ok,meta=self.check(proxy);self.assertIs(ok,allowed,meta)
+            self.assertEqual(d.calls,['app_current'])
+
+    def test_dangerous_activity_negative_guard_preserved(self):
+        d=FollowersActivityTests().make_device(activity='com.instagram.DirectActivity')
+        ok,meta=self.check(d);self.assertFalse(ok)
+        self.assertEqual(meta['reason'],'profile_identity_dangerous_activity')
+
+    def test_stale_row_proof_not_refreshed_by_profile_identity(self):
+        f=FollowersActivityTests();nav.followers_proof.reset_for_tests();d=f.make_device()
+        token,meta=f.prepare(d);self.assertIsNotNone(token,meta)
+        ok,meta=self.check(d,expected='candidate_exact',observed='candidate_exact');self.assertTrue(ok,meta)
+        with patch.object(nav.followers_proof.time,'monotonic',return_value=token.issued_at_monotonic+2):
+            stale,reason=nav.followers_proof.issue_row_action_token(token.scope,'candidate_exact',max_age_ms=1500.0)
+        self.assertIsNone(stale);self.assertIn('stale',reason)

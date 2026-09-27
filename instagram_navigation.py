@@ -5022,11 +5022,7 @@ def _expected_profile_identity_boundary(
     if any(token in activity_norm for token in dangerous_activity_tokens):
         meta["reason"] = "profile_identity_dangerous_activity"
         return False, meta
-    if not (
-        "instagrammainactivity" in activity_norm
-        or activity_norm.endswith(".mainactivity")
-        or "profileactivity" in activity_norm
-    ):
+    if not _followers_row_activity_allowed(d, expected_package, current_activity):
         meta["reason"] = "profile_identity_activity_unproven"
         return False, meta
 
