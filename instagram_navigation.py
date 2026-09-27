@@ -47378,6 +47378,35 @@ def open_followers_list_from_profile(
     return False, fmeta
 
 
+def _followers_row_activity_allowed(d, package: str, activity: str) -> bool:
+    """Local membership only; consumes the already retained version evidence."""
+    if not package:
+        return False
+    if activity == "com.instagram.mainactivity.InstagramMainActivity":
+        return True
+    if package != "com.instagram.android" or activity not in (
+        "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity"
+    ):
+        return False
+    from run_latency_observability_v1 import _TimedProxy
+    from instagram_ui_446_compat import context_matches
+    owner = d
+    if isinstance(d, _TimedProxy):
+        if type(d) is not _TimedProxy or vars(d).get("_kind") != "device":
+            return False
+        owner = vars(d).get("_raw")
+        if owner is None or isinstance(owner, _TimedProxy):
+            return False
+    observed = vars(owner).get("_instagram_search_observed_version")
+    serial = get_device_serial(owner)
+    return (type(observed) is tuple and len(observed) == 5
+            and observed[:3] == (id(owner), serial, package) and bool(serial)
+            and type(observed[4]) is int
+            and observed[3:] == ("446.0.0.49.77", 385211304)
+            and context_matches(vars(owner).get("_instagram_446_observed_context"),
+                                owner, serial, package))
+
+
 def _followers_prepare_exact_row_action_token(
     d: u2.Device,
     *,
@@ -47415,7 +47444,7 @@ def _followers_prepare_exact_row_action_token(
             "current_package": current_package,
             "current_activity": current_activity,
         }
-    if current_activity and "MainActivity" not in current_activity:
+    if not _followers_row_activity_allowed(d, pkg, current_activity):
         return None, {
             "reason": "activity_mismatch",
             "current_package": current_package,

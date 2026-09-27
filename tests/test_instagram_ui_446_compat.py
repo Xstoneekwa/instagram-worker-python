@@ -471,3 +471,97 @@ class SearchHeaderRidEchoTests(unittest.TestCase):
     def test_tab_missing_rid_still_rejected(self):
         ok,d=SearchTabNullEmptyTests().run_live({'resourceName':None})
         self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+
+class FollowersActivityTests(unittest.TestCase):
+    MAIN = 'com.instagram.mainactivity.InstagramMainActivity'
+    TAB = '.activity.MainTabActivity'
+    XML = '<hierarchy><node resource-id="follow_list_container" bounds="[400,850][900,1050]"><node resource-id="follow_list_username" text="candidate_exact" bounds="[500,900][800,1000]"/></node></hierarchy>'
+
+    def make_device(self, package=PACKAGE, activity=TAB, version=compat.VERSION):
+        class D:
+            serial = 'offline_activity_device'
+            def __init__(self): self.calls = []; self.xml = FollowersActivityTests.XML
+            def app_current(self):
+                self.calls.append('app_current'); return dict(package=package, activity=activity)
+            def dump_hierarchy(self, compressed=False):
+                self.calls.append('dump_hierarchy'); return self.xml
+        d = D()
+        if version is not None:
+            vars(d)['_instagram_search_observed_version'] = (id(d), d.serial, package, *version)
+            compat.retain_context(d, serial=d.serial, package=package,
+                                  version_name=version[0], version_code=version[1], unsafe=False)
+        return d
+
+    def prepare(self, d, package=PACKAGE, username='candidate_exact'):
+        return nav._followers_prepare_exact_row_action_token(
+            d, expected_username=username, source_profile_username='source_ct', pkg=package)
+
+    def test_exact_activity_matrix_without_io(self):
+        cases = [(PACKAGE, self.MAIN, compat.VERSION, True),
+                 ('com.instagram.androif', self.MAIN, ('372.0.0.48.60',377611059), True),
+                 (PACKAGE, self.TAB, compat.VERSION, True),
+                 (PACKAGE, 'com.instagram.android.activity.MainTabActivity', compat.VERSION, True),
+                 (PACKAGE, self.TAB, ('372.0.0.48.60',377611059), False),
+                 ('com.instagram.androif', self.TAB, compat.VERSION, False),
+                 ('foreign.package', self.TAB, compat.VERSION, False)]
+        for activity in ('MainActivity','.MainActivity','UnqualifiedOverlayActivity',
+                         'foreign.activity.MainTabActivity','',None,self.MAIN+'Overlay'):
+            cases.append((PACKAGE,activity,compat.VERSION,False))
+        for package, activity, version, expected in cases:
+            with self.subTest(package=package,activity=activity,version=version):
+                d=self.make_device(package,activity,version)
+                self.assertIs(nav._followers_row_activity_allowed(d,package,activity),expected)
+                self.assertEqual(d.calls,[])
+
+    def test_context_mutations_reject_without_io(self):
+        mutations = [lambda d: vars(d).pop(compat.CONTEXT_KEY),
+                     lambda d: vars(d).__setitem__(compat.CONTEXT_KEY,None),
+                     lambda d: vars(d).pop('_instagram_search_observed_version'),
+                     lambda d: vars(d).__setitem__('_instagram_search_observed_version',(id(d),d.serial,PACKAGE,'446.0.0.49.77',True)),
+                     lambda d: setattr(d,'serial','other'),
+                     lambda d: vars(d).__setitem__(compat.CONTEXT_KEY,compat.ObservedContext(d.serial,PACKAGE,compat.VERSION,id(d)+1))]
+        for mutation in mutations:
+            d=self.make_device();mutation(d)
+            self.assertFalse(nav._followers_row_activity_allowed(d,PACKAGE,self.TAB));self.assertEqual(d.calls,[])
+        d=self.make_device(version=None)
+        self.assertFalse(nav._followers_row_activity_allowed(d,PACKAGE,self.TAB))
+
+    def test_existing_timing_proxy_context_is_preserved(self):
+        from run_latency_observability_v1 import _TimedProxy
+        d=self.make_device(); proxy=_TimedProxy(d,kind='device',emit=lambda *a,**k:None,methods=set())
+        self.assertTrue(nav._followers_row_activity_allowed(proxy,PACKAGE,self.TAB))
+        bad=_TimedProxy(d,kind='uiautomator',emit=lambda *a,**k:None,methods=set())
+        self.assertFalse(nav._followers_row_activity_allowed(bad,PACKAGE,self.TAB))
+        nested=_TimedProxy(proxy,kind='device',emit=lambda *a,**k:None,methods=set())
+        self.assertFalse(nav._followers_row_activity_allowed(nested,PACKAGE,self.TAB));self.assertEqual(d.calls,[])
+
+    def test_real_row_proof_passes_with_same_io_as_372(self):
+        counts=[]
+        for package, activity, version in [('com.instagram.androif',self.MAIN,('372.0.0.48.60',377611059)),
+                                         (PACKAGE,self.MAIN,compat.VERSION),(PACKAGE,self.TAB,compat.VERSION),
+                                         (PACKAGE,'com.instagram.android.activity.MainTabActivity',compat.VERSION)]:
+            nav.followers_proof.reset_for_tests();d=self.make_device(package,activity,version)
+            token,meta=self.prepare(d,package)
+            self.assertIsNotNone(token,meta);self.assertEqual(token.row_username,'candidate_exact')
+            counts.append(d.calls)
+        self.assertTrue(all(c==counts[0] for c in counts));self.assertEqual(counts[0].count('app_current'),1)
+        self.assertEqual(counts[0].count('dump_hierarchy'),1)
+
+    def test_row_identity_missing_xml_and_wrong_package_still_reject(self):
+        for kind in ('missing_xml','wrong_identity','wrong_package','empty_activity'):
+            with self.subTest(kind=kind):
+                nav.followers_proof.reset_for_tests();d=self.make_device(activity='' if kind=='empty_activity' else self.TAB)
+                if kind=='missing_xml': d.xml=''
+                token,meta=self.prepare(d, 'wrong.package' if kind=='wrong_package' else PACKAGE,
+                                        'other_candidate' if kind=='wrong_identity' else 'candidate_exact')
+                self.assertIsNone(token,meta)
+
+    def test_new_activity_does_not_refresh_stale_token(self):
+        nav.followers_proof.reset_for_tests();d=self.make_device()
+        token,meta=self.prepare(d);self.assertIsNotNone(token,meta)
+        self.assertTrue(nav._followers_row_activity_allowed(d,PACKAGE,self.TAB))
+        with patch.object(nav.followers_proof.time,'monotonic',return_value=token.issued_at_monotonic+2):
+            stale,reason=nav.followers_proof.issue_row_action_token(token.scope, 'candidate_exact', max_age_ms=1500.0)
+        self.assertIsNone(stale)
+        self.assertIn('stale', reason)
