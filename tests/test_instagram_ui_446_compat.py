@@ -406,3 +406,68 @@ class SearchTabNullEmptyTests(unittest.TestCase):
         vars(d)['_instagram_search_observed_version']=(id(d),d.serial,PACKAGE,'372.0.0.48.60',377611059)
         d.calls.clear()
         self.assertTrue(nav._open_446_explore_search_entry(d,PACKAGE));self.assertEqual(d.calls,[])
+
+class SearchHeaderRidEchoTests(unittest.TestCase):
+    def run_header(self, changes, *, snapshot=None, live=None, count=None):
+        d=SearchDevice(snapshot,live);bind(d)
+        original=SearchSelector.info.fget
+        def info(selector):
+            value=original(selector)
+            if value['resourceName']==PACKAGE+':id/action_bar_search_edit_text':
+                value.update(changes)
+                if changes.get('_omit_rid'):
+                    value.pop('resourceName');value.pop('_omit_rid')
+            return value
+        with patch.object(SearchSelector,'info',property(info)):
+            if count is None: ok=nav._open_446_explore_search_entry(d,PACKAGE)
+            else:
+                with patch.object(SearchSelector,'count',property(lambda s:count)):
+                    ok=nav._open_446_explore_search_entry(d,PACKAGE)
+        return ok,d
+
+    def test_exact_none_and_absent_echo_same_io(self):
+        for changes in ({'resourceName':None},{'_omit_rid':True},{}):
+            with self.subTest(changes=changes):
+                ok,d=self.run_header(changes);self.assertTrue(ok)
+                self.assertEqual(d.calls,['dump','count','count','info','info','click'])
+                self.assertEqual(d.clicked,[PACKAGE+':id/action_bar_search_edit_text'])
+
+    def test_wrong_or_falsy_echo_is_not_unavailable(self):
+        for value in (PACKAGE+':id/wrong','',False,0,[],{}):
+            with self.subTest(value=value):
+                ok,d=self.run_header({'resourceName':value});self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_all_other_fields_strict_with_missing_echo(self):
+        for key,value in [('className','android.widget.EditText'),('text',None),('text','Wrong'),
+                          ('contentDescription','Wrong'),('enabled',False),('clickable',False),
+                          ('selected',True),('focused',True),('bounds',{'left':35,'top':100,'right':929,'bottom':200})]:
+            with self.subTest(field=key,value=value):
+                ok,d=self.run_header({'resourceName':None,key:value});self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_xml_and_live_rid_and_ancestry_must_match(self):
+        for suffix in ('action_bar_search_edit_text','action_bar_search_hints_text_layout',
+                       'explore_action_bar_container','explore_action_bar'):
+            for side in ('snapshot','live'):
+                with self.subTest(suffix=suffix,side=side):
+                    xml=search_mutate(search_capture(),suffix,'resource-id',PACKAGE+':id/wrong')
+                    ok,d=self.run_header({'resourceName':None},**{side:xml})
+                    self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_unique_live_match_required(self):
+        for count in (0,2):
+            ok,d=self.run_header({'resourceName':None},count=count)
+            self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_selector_cannot_redirect_header_to_other_rid(self):
+        original=SearchSelector.child
+        def wrong(selector,**query):
+            if query.get('resourceId')==PACKAGE+':id/action_bar_search_edit_text':
+                query={'resourceId':PACKAGE+':id/wrong'}
+            return original(selector,**query)
+        with patch.object(SearchSelector,'child',wrong):
+            ok,d=self.run_header({'resourceName':None})
+        self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_tab_missing_rid_still_rejected(self):
+        ok,d=SearchTabNullEmptyTests().run_live({'resourceName':None})
+        self.assertFalse(ok);self.assertEqual(d.clicked,[])

@@ -3172,10 +3172,12 @@ def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
         tab = d(resourceId=package + ":id/search_tab")
         if tab.count != 1:
             raise ValueError("search_tab_not_unique")
-        def matches(info, node, *, search_tab_text=False):
+        def matches(info, node, *, search_tab_text=False, qualified_header=False):
             from instagram_ui_446_compat import _bounds
             b = info.get("bounds") or {}
-            return (info.get("resourceName") == node["resource-id"]
+            return ((info.get("resourceName") == node["resource-id"]
+                     or (qualified_header and info.get("resourceName") is None
+                         and node["resource-id"] == package + ":id/action_bar_search_edit_text"))
                     and info.get("className") == node["class"]
                     and (info.get("text", "") == node.get("text", "")
                          or (search_tab_text and info.get("text") is None
@@ -3187,7 +3189,9 @@ def _open_446_explore_search_entry(d: u2.Device, package: str) -> bool:
                     and tuple(b.get(k) for k in ("left", "top", "right", "bottom")) == _bounds(node))
         if not matches(tab.info, proof["search_tab"], search_tab_text=True):
             raise ValueError("search_tab_changed")
-        if not matches(control.info, proof["action_bar_search_edit_text"]):
+        # The unique, ancestry-scoped RID selector above proves header identity.
+        # UiObject fallback does not populate its optional resourceName echo.
+        if not matches(control.info, proof["action_bar_search_edit_text"], qualified_header=True):
             raise ValueError("search_entry_changed")
         current_owner, current_observed, current_context = authority()
         if (current_owner is not owner or current_observed is not observed
