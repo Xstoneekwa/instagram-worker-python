@@ -56699,6 +56699,15 @@ def _post_open_live_positive_identity_contract(
     instagram_main_activity = bool(
         "instagram" in activity_lower and "mainactivity" in activity_lower
     )
+    if (not instagram_main_activity and package_exact
+            and current_package == "com.instagram.android"
+            and current_activity in ("com.instagram.android.activity.MainTabActivity",
+                                     ".activity.MainTabActivity")):
+        try:
+            instagram_main_activity = _followers_row_activity_allowed(
+                d, current_package, current_activity)
+        except (AttributeError, TypeError):
+            instagram_main_activity = False
 
     try:
         action_bar_title = str(_visual_read_action_bar_username(d) or "").strip()
@@ -56836,6 +56845,15 @@ def _post_open_snapshot_audit_signals(
     instagram_main_activity = bool(
         "instagram" in activity_lower and "mainactivity" in activity_lower
     )
+    if (not instagram_main_activity and package_exact
+            and current_package == "com.instagram.android"
+            and current_activity in ("com.instagram.android.activity.MainTabActivity",
+                                     ".activity.MainTabActivity")):
+        try:
+            instagram_main_activity = _followers_row_activity_allowed(
+                d, current_package, current_activity)
+        except (AttributeError, TypeError):
+            instagram_main_activity = False
     posts_action_bar = bool(posts_action_bar_hint) or bool(
         identity_signals.get("posts_action_bar_in_snapshot")
     )

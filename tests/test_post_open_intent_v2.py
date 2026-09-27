@@ -455,7 +455,22 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
                     device_context=d,
                 )'''
         self.assertEqual(current.count(call),1)
-        self.assertEqual(omit_helper(current.replace(call,call.replace("                    device_context=d,\n",""),1)),omit_helper(self.old))
+        viewer_activity_hunks = [['    activity_lower = current_activity.lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n    if (not instagram_main_activity and package_exact\n            and current_package == "com.instagram.android"\n            and current_activity in ("com.instagram.android.activity.MainTabActivity",\n                                     ".activity.MainTabActivity")):\n        try:\n            instagram_main_activity = _followers_row_activity_allowed(\n                d, current_package, current_activity)\n        except (AttributeError, TypeError):\n            instagram_main_activity = False\n', '    activity_lower = current_activity.lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n'], ['    activity_lower = str(current_activity or "").lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n    if (not instagram_main_activity and package_exact\n            and current_package == "com.instagram.android"\n            and current_activity in ("com.instagram.android.activity.MainTabActivity",\n                                     ".activity.MainTabActivity")):\n        try:\n            instagram_main_activity = _followers_row_activity_allowed(\n                d, current_package, current_activity)\n        except (AttributeError, TypeError):\n            instagram_main_activity = False\n', '    activity_lower = str(current_activity or "").lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n']]
+        def restore_viewer_activity(src):
+            for new, old in viewer_activity_hunks:
+                self.assertEqual(src.count(new), 1, "viewer hunk absent/modified/duplicated")
+                src = src.replace(new, old, 1)
+            return src
+        def assert_exact_baseline(src):
+            restored = restore_viewer_activity(src)
+            self.assertEqual(omit_helper(restored.replace(call,call.replace("                    device_context=d,\n",""),1)),omit_helper(self.old))
+        assert_exact_baseline(current)
+        for new, old in viewer_activity_hunks:
+            for corrupted in (current.replace(new,old,1), current.replace(new,new.replace("except (AttributeError, TypeError)","except Exception"),1), current + new):
+                with self.assertRaises(AssertionError):
+                    assert_exact_baseline(corrupted)
+        with self.assertRaises(AssertionError):
+            assert_exact_baseline(current + "\n# unrelated navigation delta\n")
         for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
             self.assertEqual((self.root/name).read_bytes(),subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
 
