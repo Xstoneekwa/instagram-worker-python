@@ -502,5 +502,151 @@ class OrchestratorAndDurableReplayTests(unittest.TestCase):
             clear_active_store(store)
 
 
+
+
+class Exact446ActivityRoutingTests(unittest.TestCase):
+    BASE = "eefa841ff02a28838de92f8fd6fe7fb3f929138f"
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        import subprocess
+        cls.root = Path(v2.__file__).parent
+        cls.old_source = subprocess.check_output(
+            ["git", "show", cls.BASE + ":follow60_ordering_v2_behavioral_canary_v1.py"],
+            cwd=cls.root, text=True)
+        tree = ast.parse(cls.old_source)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == "build_stable_candidate_proof_v2")
+        namespace = dict(vars(v2))
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "signed-baseline", "exec"), namespace)
+        cls.old_builder = staticmethod(namespace[node.name])
+
+    def device(self, version=("446.0.0.49.77", 385211304), package="com.instagram.android"):
+        from instagram_ui_446_compat import retain_context
+        class NoIO:
+            serial = "RFGL62N646V"
+            def __getattr__(self, name):
+                raise AssertionError("unexpected device I/O: " + name)
+        d = NoIO()
+        d._instagram_search_observed_version = (id(d), d.serial, package, *version)
+        retain_context(d, serial=d.serial, package=package,
+                       version_name=version[0], version_code=version[1], unsafe=False)
+        return d
+
+    def args(self, activity=".activity.MainTabActivity", **changes):
+        binding, _ = _binding()
+        return dict(binding=binding, mono_capture={**_capture(), "activity": activity, **changes},
+                    business_evidence=_business(), target_id="target-a", candidate_username="alice",
+                    action_id="action-a", binding_kind="mainline")
+
+    def outcome(self, builder, args, **kw):
+        proof, reason = builder(**args, **kw)
+        route = v2.route_candidate_v2(binding=args["binding"], stable_proof=proof, completed_v2_cycles=0)
+        return proof is not None, reason, route
+
+    def test_exact_version_package_activity_matrix(self):
+        main = "com.instagram.mainactivity.InstagramMainActivity"
+        full = "com.instagram.android.activity.MainTabActivity"
+        for version, package, activity, expected in (
+            (("372.0.0.48.60",377611059),"com.instagram.androif",main,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",main,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",full,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",".activity.MainTabActivity",True),
+            (("372.0.0.48.60",377611059),"com.instagram.android",full,False),
+            (("446.0.0.49.77",385211304),"com.instagram.androif",full,False),
+            (("446.0.0.49.77",385211304),"foreign.package",full,False),
+            (("446.0.0.49.77",385211304),"com.instagram.android",full+"Overlay",False),
+        ):
+            with self.subTest(version=version,package=package,activity=activity):
+                out=self.outcome(v2.build_stable_candidate_proof_v2,self.args(activity,package=package),
+                                 device_context=self.device(version,package))
+                self.assertEqual(out[0],expected)
+                self.assertEqual(out[2][0],"POST_FIRST_V2" if expected else "FOLLOW60_V1")
+
+    def test_missing_wrong_stale_or_forged_context_rejected(self):
+        def stale_owner(d):
+            other=type(d)()
+            vars(other).update(vars(d))
+            return other
+        mutations = [lambda d: None, lambda d: object(),
+            lambda d: (vars(d).pop("_instagram_search_observed_version"),d)[1],
+            lambda d: (vars(d).__setitem__("_instagram_446_observed_context",None),d)[1],
+            lambda d: (vars(d).__setitem__("serial","other"),d)[1],
+            lambda d: (vars(d).__setitem__("_instagram_search_observed_version",(id(d),d.serial,"com.instagram.android","446.0.0.49.77",True)),d)[1],
+            stale_owner]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                out=self.outcome(v2.build_stable_candidate_proof_v2,self.args(),device_context=mutate(self.device()))
+                self.assertFalse(out[0]);self.assertEqual(out[1],"v2_profile_surface_package_activity_not_exact")
+        for version in [("445",385211304),("446.0.0.49.77",385211305)]:
+            self.assertFalse(self.outcome(v2.build_stable_candidate_proof_v2,self.args(),device_context=self.device(version))[0])
+        self.assertFalse(self.outcome(v2.build_stable_candidate_proof_v2,self.args(package_exact=False),device_context=self.device())[0])
+
+    def test_existing_timing_proxy_and_wrong_proxy(self):
+        from run_latency_observability_v1 import _TimedProxy
+        d=self.device();proxy=_TimedProxy(d,kind="device",emit=None,methods=frozenset())
+        self.assertTrue(self.outcome(v2.build_stable_candidate_proof_v2,self.args(),device_context=proxy)[0])
+        for bad in [_TimedProxy(d,kind="uiautomator",emit=None,methods=frozenset()),
+                    _TimedProxy(proxy,kind="device",emit=None,methods=frozenset())]:
+            self.assertFalse(self.outcome(v2.build_stable_candidate_proof_v2,self.args(),device_context=bad)[0])
+
+    def test_372_and_historical_activity_differential(self):
+        for activity in ["com.instagram.mainactivity.InstagramMainActivity","instagram.MainActivity",
+                         ".activity.MainTabActivity","com.instagram.android.activity.MainTabActivity",
+                         "", "foreign.Activity", "challenge"]:
+            for package in ["com.instagram.android","com.instagram.androif",""]:
+                args=self.args(activity,package=package)
+                self.assertEqual(self.outcome(self.old_builder,args),self.outcome(
+                    v2.build_stable_candidate_proof_v2,args,device_context=self.device(("372.0.0.48.60",377611059),package)))
+
+    def test_legitimate_fallbacks_identical_for_both_activities(self):
+        mutations=[lambda a:a["mono_capture"].update(exact_identity=False),
+                   lambda a:a["mono_capture"].update(private_probe_payload={"private_profile_detected":True}),
+                   lambda a:a["business_evidence"].update(filter_passed=False),
+                   lambda a:a["business_evidence"].update(eligibility_passed=False),
+                   lambda a:a["business_evidence"].update(follow_budget_available=False),
+                   lambda a:a["mono_capture"].pop("ui_generation"),
+                   lambda a:a["mono_capture"].update(xml=_xml().replace("Grid view","Reels")),
+                   lambda a:a["mono_capture"].update(xml=_xml().replace("8 posts","0 posts")),
+                   lambda a:a["mono_capture"].update(xml=_xml().replace('[0,900][360,1260]','[0,2200][360,2500]'))]
+        for mutate in mutations:
+            old=self.args("com.instagram.mainactivity.InstagramMainActivity");new=self.args();mutate(old);mutate(new)
+            expected=self.outcome(self.old_builder,old)
+            self.assertFalse(expected[0]);self.assertEqual(expected[2][0],"FOLLOW60_V1")
+            self.assertEqual(expected,self.outcome(v2.build_stable_candidate_proof_v2,new,device_context=self.device()))
+
+    def test_real_runner_call_passes_context_to_real_builder(self):
+        import ast
+        tree=ast.parse((self.root/"runner.py").read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="_follow60_ordering_v2_prepare_candidate")
+        calls=[n for n in ast.walk(fn) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
+               and n.func.id=="build_stable_candidate_proof_v2"]
+        self.assertEqual(len(calls),1)
+        args=self.args();d=self.device();env={**args,"d":d,"_mainline_mode":True,
+            "build_stable_candidate_proof_v2":v2.build_stable_candidate_proof_v2}
+        proof,reason=eval(compile(ast.Expression(calls[0]),"real-runner-call","eval"),env)
+        self.assertIsNotNone(proof,reason)
+        self.assertEqual(v2.route_candidate_v2(binding=args["binding"],stable_proof=proof,completed_v2_cycles=0)[0],"POST_FIRST_V2")
+
+    def test_no_added_io_sleep_or_network(self):
+        from unittest.mock import patch
+        import instagram_navigation as nav
+        d=self.device();args=self.args()
+        # The grid parser and actual activity authority run; no permissive helper mock.
+        with patch.object(nav.time,"sleep",side_effect=AssertionError("sleep")), \
+             patch("subprocess.run",side_effect=AssertionError("subprocess")), \
+             patch("socket.socket",side_effect=AssertionError("network")):
+            self.assertTrue(self.outcome(v2.build_stable_candidate_proof_v2,args,device_context=d)[0])
+
+    def test_routing_orchestrator_and_other_functions_byte_identical(self):
+        import ast
+        old=ast.parse(self.old_source);current=ast.parse(Path(v2.__file__).read_text())
+        def remaining(source,tree):
+            return {n.name:ast.get_source_segment(source,n) for n in tree.body
+                    if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name!="build_stable_candidate_proof_v2"}
+        self.assertEqual(remaining(self.old_source,old),remaining(Path(v2.__file__).read_text(),current))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12548,6 +12548,7 @@ def _follow60_ordering_v2_prepare_candidate(
     if binding is not None:
         stable, proof_reason = build_stable_candidate_proof_v2(
             binding=binding,
+            device_context=d,
             mono_capture=dict(mono_capture or {}),
             business_evidence={
                 "filter_passed": True,

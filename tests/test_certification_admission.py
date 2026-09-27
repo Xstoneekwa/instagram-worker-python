@@ -298,7 +298,11 @@ class RunnerIntegrationTests(unittest.TestCase):
                 return self.generic_visit(n)
         neutral = '    # Early acquisition aborts can publish before the Followers loop starts.\n    _followers_loop_finally_stop = ""\n\n'
         self.assertEqual(self.source.count(neutral), 1)
-        candidate=Strip().visit(ast.parse(self.source.replace(neutral, "", 1)))
+        hook = '        stable, proof_reason = build_stable_candidate_proof_v2(\n            binding=binding,\n            device_context=d,\n'
+        original_hook = '        stable, proof_reason = build_stable_candidate_proof_v2(\n            binding=binding,\n'
+        self.assertEqual(self.source.count(hook), 1)
+        self.assertEqual(self.source.count('            device_context=d,\n'), 1)
+        candidate=Strip().visit(ast.parse(self.source.replace(neutral, "", 1).replace(hook, original_hook, 1)))
         self.assertEqual(ast.dump(candidate,include_attributes=False),ast.dump(self.baseline,include_attributes=False))
 
     def test_approved_neutral_init_rejects_other_runner_deltas(self):
@@ -314,6 +318,19 @@ class RunnerIntegrationTests(unittest.TestCase):
                         self.test_normal_runner_ast_unchanged_except_authorized_hooks()
                 finally:
                     self.source = original
+
+    def test_exact_v2_context_wiring_rejects_other_runner_deltas(self):
+        original=self.source
+        keyword='            device_context=d,\n'
+        for altered in (original.replace(keyword,'',1), original.replace(keyword,keyword*2,1),
+                        original.replace(keyword,'            device_context=other,\n',1),
+                        original+'\nUNRELATED_V2_CHANGE = True\n'):
+            with self.subTest(altered=hashlib.sha256(altered.encode()).hexdigest()):
+                self.source=altered
+                try:
+                    with self.assertRaises(AssertionError):
+                        self.test_normal_runner_ast_unchanged_except_authorized_hooks()
+                finally:self.source=original
 
     def test_main_stop_reaches_terminal_without_ui_cleanup(self):
         import runner

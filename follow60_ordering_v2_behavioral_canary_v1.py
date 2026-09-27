@@ -426,6 +426,7 @@ def build_stable_candidate_proof_v2(
     candidate_username: str,
     action_id: str,
     binding_kind: str,
+    device_context: Any = None,
 ) -> tuple[StableCandidateProofV2 | None, str]:
     """Build the only proof that may select POST_FIRST_V2.
 
@@ -450,11 +451,22 @@ def build_stable_candidate_proof_v2(
         return None, "v2_follow_budget_unavailable"
     package = _text(capture.get("package"))
     activity = _text(capture.get("activity"))
+    # Preserve historical membership; extend only the certified original446 case.
+    qualified_main_tab = False
+    if (package == "com.instagram.android" and device_context is not None
+            and activity in ("com.instagram.android.activity.MainTabActivity",
+                             ".activity.MainTabActivity")):
+        from instagram_navigation import _followers_row_activity_allowed
+        try:
+            qualified_main_tab = _followers_row_activity_allowed(
+                device_context, package, activity)
+        except (AttributeError, TypeError):
+            qualified_main_tab = False
     if (
         capture.get("package_exact") is not True
         or not package
-        or "instagram" not in activity.lower()
-        or "mainactivity" not in activity.lower()
+        or (("instagram" not in activity.lower()
+             or "mainactivity" not in activity.lower()) and not qualified_main_tab)
     ):
         return None, "v2_profile_surface_package_activity_not_exact"
     generation_fields = (
