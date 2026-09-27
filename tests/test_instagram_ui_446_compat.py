@@ -347,3 +347,62 @@ class SearchContextWiringTests(unittest.TestCase):
         for name in ('open_search','_wait_search_edittext','_click_search_tab_in_open_search','ensure_global_search_surface'):
             a=next(n for n in old.body if isinstance(n,ast.FunctionDef) and n.name==name);b=next(n for n in new.body if isinstance(n,ast.FunctionDef) and n.name==name)
             self.assertEqual(ast.dump(a),ast.dump(b),name)
+
+class SearchTabNullEmptyTests(unittest.TestCase):
+    def run_live(self, changes, *, xml_text='', target='search_tab'):
+        d=SearchDevice(search_mutate(search_capture(),'search_tab','text',xml_text));bind(d)
+        original=SearchSelector.info.fget
+        def info(selector):
+            result=original(selector)
+            if result['resourceName']==PACKAGE+':id/'+target:
+                result.update(changes)
+            return result
+        with patch.object(SearchSelector,'info',property(info)):
+            ok=nav._open_446_explore_search_entry(d,PACKAGE)
+        return ok,d
+
+    def test_physical_null_and_empty_text_equal_without_extra_io(self):
+        for text in (None,''):
+            with self.subTest(text=text):
+                ok,d=self.run_live({'text':text})
+                self.assertTrue(ok)
+                self.assertEqual(d.calls,['dump','count','count','info','info','click'])
+                self.assertEqual(d.clicked,[PACKAGE+':id/action_bar_search_edit_text'])
+
+    def test_nonempty_whitespace_and_arbitrary_falsy_are_not_empty(self):
+        for text in ('something',' ','\t',False,0,[],{}):
+            with self.subTest(text=text):
+                ok,d=self.run_live({'text':text})
+                self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_null_does_not_equal_nonempty_xml(self):
+        ok,d=self.run_live({'text':None},xml_text='Search')
+        self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_eight_other_fields_remain_strict_with_null_text(self):
+        for key,value in [('resourceName',PACKAGE+':id/wrong'),('className','android.widget.Button'),
+                          ('contentDescription',None),('enabled',False),('clickable',False),
+                          ('selected',False),('focused',True),
+                          ('bounds',{'left':649,'top':2070,'right':864,'bottom':2205})]:
+            with self.subTest(field=key):
+                ok,d=self.run_live({'text':None,key:value})
+                self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_header_null_text_is_still_rejected(self):
+        ok,d=self.run_live({'text':None},target='action_bar_search_edit_text')
+        self.assertFalse(ok);self.assertEqual(d.clicked,[])
+
+    def test_normalization_disabled_by_default_and_372_zero_io(self):
+        import ast
+        from pathlib import Path
+        fn=next(n for n in ast.parse(Path(nav.__file__).read_text()).body
+                if isinstance(n,ast.FunctionDef) and n.name=='_open_446_explore_search_entry')
+        comparator=next(n for n in ast.walk(fn) if isinstance(n,ast.FunctionDef) and n.name=='matches')
+        ns={};exec(compile(ast.Module(body=[comparator],type_ignores=[]),'<comparator>','exec'),ns)
+        d=SearchDevice();n=compat.explore_search_entry_from_xml(d.xml,package=PACKAGE)['search_tab']
+        info=d(resourceId=PACKAGE+':id/search_tab').info;info['text']=None
+        self.assertFalse(ns['matches'](info,n))
+        self.assertTrue(ns['matches'](info,n,search_tab_text=True))
+        vars(d)['_instagram_search_observed_version']=(id(d),d.serial,PACKAGE,'372.0.0.48.60',377611059)
+        d.calls.clear()
+        self.assertTrue(nav._open_446_explore_search_entry(d,PACKAGE));self.assertEqual(d.calls,[])
