@@ -35461,6 +35461,22 @@ def visual_like_open_post(
                 for key in ("account_id", "run_id", "request_id", "action_id")
             )
         )
+        stage_activity_allowed = bool(
+            "InstagramMainActivity" in str(stage_ctx.get("activity") or "")
+        )
+        if (not stage_activity_allowed
+                and str(stage_ctx.get("package") or "") == "com.instagram.android"
+                and str(stage_ctx.get("activity") or "") in (
+                    "com.instagram.android.activity.MainTabActivity",
+                    ".activity.MainTabActivity")
+                and str(stage_ctx.get("activity") or "")
+                == str(meta0.get("current_activity") or "")):
+            try:
+                stage_activity_allowed = _followers_row_activity_allowed(
+                    d, str(stage_ctx.get("package") or ""),
+                    str(stage_ctx.get("activity") or ""))
+            except (AttributeError, TypeError):
+                stage_activity_allowed = False
         stage_scoped_open_context_ok = bool(
             post_opened_via_profile_grid
             and _normalize_handle(
@@ -35469,8 +35485,7 @@ def visual_like_open_post(
             == _normalize_handle(expected_follower_username)
             and str(stage_ctx.get("package") or "")
             == str(meta0.get("current_package") or "")
-            and "InstagramMainActivity"
-            in str(stage_ctx.get("activity") or "")
+            and stage_activity_allowed
             and str(stage_ctx.get("viewer_type") or "") == "Posts"
             and bool(stage_ctx.get("v5_positive"))
             and not bool(stage_ctx.get("story_or_highlight_detected"))
