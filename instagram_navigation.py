@@ -28798,6 +28798,7 @@ def _post_open_intent_surface_from_final_proof(
     evidence: dict[str, Any] | None,
     *,
     expected_package: str,
+    device_context: Any = None,
 ) -> tuple[str, str]:
     """Return the package/activity bound to the terminal grid observation.
 
@@ -28825,7 +28826,18 @@ def _post_open_intent_surface_from_final_proof(
         return "", ""
     activity_lower = activity.lower()
     if "instagram" not in activity_lower or "mainactivity" not in activity_lower:
-        return "", ""
+        # Extend only the existing, version-qualified original446 authority.
+        qualified_main_tab = False
+        if (package == "com.instagram.android" and device_context is not None
+                and activity in ("com.instagram.android.activity.MainTabActivity",
+                                 ".activity.MainTabActivity")):
+            try:
+                qualified_main_tab = _followers_row_activity_allowed(
+                    device_context, package, activity)
+            except (AttributeError, TypeError):
+                qualified_main_tab = False
+        if not qualified_main_tab:
+            return "", ""
     return package, activity
 
 
@@ -59726,6 +59738,7 @@ def run_post_follow_post_likes_phase(
                 _post_open_intent_surface_from_final_proof(
                     _intent_evidence,
                     expected_package=pkg,
+                    device_context=d,
                 )
             )
             _meta_before = {

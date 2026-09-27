@@ -317,5 +317,147 @@ class PostOpenIntentV2Tests(unittest.TestCase):
         device.click.assert_not_called()
 
 
+
+class Exact446PostOpenAuthorityTests(unittest.TestCase):
+    BASE = "3bbd471bf7919926817ccfe300cb2ae4295fcd1e"
+    MAIN = "com.instagram.mainactivity.InstagramMainActivity"
+    FULL = "com.instagram.android.activity.MainTabActivity"
+    REL = ".activity.MainTabActivity"
+
+    @classmethod
+    def setUpClass(cls):
+        import ast, subprocess
+        from pathlib import Path
+        cls.root = Path(nav.__file__).parent
+        cls.old = subprocess.check_output(["git", "show", cls.BASE + ":instagram_navigation.py"], cwd=cls.root, text=True)
+        node = next(n for n in ast.parse(cls.old).body if isinstance(n, ast.FunctionDef)
+                    and n.name == "_post_open_intent_surface_from_final_proof")
+        ns = dict(vars(nav))
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "signed-base", "exec"), ns)
+        cls.original = staticmethod(ns[node.name])
+
+    def device(self, version=("446.0.0.49.77", 385211304), package="com.instagram.android"):
+        from instagram_ui_446_compat import retain_context
+        class NoIO:
+            serial = "RFGL62N646V"
+            def __getattr__(self, name):
+                raise AssertionError("extra device I/O: " + name)
+        d = NoIO()
+        d._instagram_search_observed_version = (id(d), d.serial, package, *version)
+        retain_context(d, serial=d.serial, package=package, version_name=version[0],
+                       version_code=version[1], unsafe=False)
+        return d
+
+    def convert(self, d, activity=None, package="com.instagram.android", expected=None):
+        return nav._post_open_intent_surface_from_final_proof(
+            {"final_proof_package": package, "final_proof_activity": activity},
+            expected_package=package if expected is None else expected, device_context=d)
+
+    def test_required_positive_and_negative_matrix(self):
+        for version, package, activity, accepted in (
+            (("372.0.0.48.60",377611059),"com.instagram.androif",self.MAIN,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",self.MAIN,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",self.FULL,True),
+            (("446.0.0.49.77",385211304),"com.instagram.android",self.REL,True),
+            (("372.0.0.48.60",377611059),"com.instagram.android",self.REL,False),
+            (("446.0.0.49.77",385211304),"com.instagram.androif",self.FULL,False),
+            (("446.0.0.49.77",385211304),"foreign",self.REL,False),
+            (("445",385211304),"com.instagram.android",self.REL,False),
+            (("446.0.0.49.77",385211305),"com.instagram.android",self.REL,False),
+        ):
+            with self.subTest(version=version, package=package, activity=activity):
+                self.assertEqual(self.convert(self.device(version,package),activity,package),
+                                 (package,activity) if accepted else ("",""))
+        for activity in ["MainActivity", "foreign.Activity",self.FULL+"Overlay", "",None]:
+            self.assertEqual(self.convert(self.device(),activity),("",""))
+        self.assertEqual(self.convert(self.device(),self.REL,expected="foreign"),("",""))
+
+    def test_absent_forged_stale_context_and_proxy_rejected(self):
+        from run_latency_observability_v1 import _TimedProxy
+        mutations=[lambda d:None,lambda d:object(),
+            lambda d:(vars(d).pop("_instagram_search_observed_version"),d)[1],
+            lambda d:(vars(d).__setitem__("_instagram_446_observed_context",None),d)[1],
+            lambda d:(vars(d).__setitem__("serial","wrong"),d)[1],
+            lambda d:(vars(d).__setitem__("_instagram_search_observed_version",(id(d),d.serial,"com.instagram.android","446.0.0.49.77",True)),d)[1]]
+        for change in mutations:self.assertEqual(self.convert(change(self.device()),self.REL),("",""))
+        d=self.device();other=type(d)();vars(other).update(vars(d))
+        self.assertEqual(self.convert(other,self.REL),("",""))
+        proxy=_TimedProxy(d,kind="device",emit=None,methods=frozenset())
+        self.assertEqual(self.convert(proxy,self.REL),("com.instagram.android",self.REL))
+        for bad in [_TimedProxy(d,kind="uiautomator",emit=None,methods=frozenset()),
+                    _TimedProxy(proxy,kind="device",emit=None,methods=frozenset())]:
+            self.assertEqual(self.convert(bad,self.REL),("",""))
+
+    def test_372_differential_and_no_context_compatibility(self):
+        for activity in [self.MAIN,"instagram.MainActivity",self.FULL,self.REL,"",None,"foreign.Activity"]:
+            for package in ["com.instagram.android","com.instagram.androif",""]:
+                proof={"final_proof_package":package,"final_proof_activity":activity}
+                before=self.original(proof,expected_package=package)
+                self.assertEqual(nav._post_open_intent_surface_from_final_proof(proof,expected_package=package),before)
+                self.assertEqual(self.convert(self.device(("372.0.0.48.60",377611059),package),activity,package),before)
+
+    def test_precedence_and_exact_activity_spelling_preserved(self):
+        d=self.device()
+        for activity in [self.FULL,self.REL]:
+            proof={"package":"foreign","activity":"foreign","final_proof_package":"com.instagram.android",
+                   "final_proof_activity":"stale","post_reveal_package":"com.instagram.android","post_reveal_activity":activity}
+            self.assertEqual(nav._post_open_intent_surface_from_final_proof(proof,expected_package="com.instagram.android",device_context=d),
+                             ("com.instagram.android",activity))
+        proof["post_reveal_activity"]="foreign.overlay"
+        self.assertEqual(nav._post_open_intent_surface_from_final_proof(proof,expected_package="com.instagram.android",device_context=d),("",""))
+
+    def test_real_unmodified_jit_rejects_live_mismatches(self):
+        class JitDevice:
+            def __init__(self,p,a,w,h):self.values=(p,a,w,h);self.calls=[]
+            def app_current(self):self.calls.append("app_current");return dict(zip(("package","activity"),self.values[:2]))
+            def window_size(self):self.calls.append("window_size");return self.values[2:]
+        p,a=self.convert(self.device(),self.REL)
+        for lp,la,w,h,ok in [(p,a,1080,2340,True),("foreign",a,1080,2340,False),
+                            (p,self.FULL,1080,2340,False),(p,"foreign.overlay",1080,2340,False),
+                            (p,a,0,2340,False),(p,a,1080,0,False)]:
+            d=JitDevice(lp,la,w,h)
+            result=nav._post_open_intent_jit_surface(d,expected_package=p,expected_activity=a)
+            self.assertEqual(result["ok"],ok)
+            if not ok:self.assertEqual(result["reason"],"post_open_jit_surface_mismatch")
+            self.assertEqual(d.calls,["app_current","window_size"])
+
+    def test_conversion_has_zero_extra_io(self):
+        import socket, subprocess
+        d=self.device()
+        with mock.patch.object(time,"sleep",side_effect=AssertionError("sleep")), \
+             mock.patch.object(socket,"create_connection",side_effect=AssertionError("network")), \
+             mock.patch.object(subprocess,"run",side_effect=AssertionError("subprocess")):
+            self.assertEqual(self.convert(d,self.REL),("com.instagram.android",self.REL))
+
+    def test_real_callsite_transports_existing_context(self):
+        import ast, inspect
+        tree=ast.parse(inspect.getsource(nav.run_post_follow_post_likes_phase))
+        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
+               and n.func.id=="_post_open_intent_surface_from_final_proof"]
+        self.assertEqual(len(calls),1)
+        self.assertEqual([(k.arg,ast.unparse(k.value)) for k in calls[0].keywords],
+                         [("expected_package","pkg"),("device_context","d")])
+        ns={"_post_open_intent_surface_from_final_proof":nav._post_open_intent_surface_from_final_proof,
+            "_intent_evidence":{"final_proof_package":"com.instagram.android","final_proof_activity":self.REL},
+            "pkg":"com.instagram.android","d":self.device()}
+        self.assertEqual(eval(compile(ast.Expression(calls[0]),"real-callsite","eval"),ns),("com.instagram.android",self.REL))
+
+    def test_all_other_navigation_bytes_and_routing_unchanged(self):
+        import ast, subprocess
+        current=(self.root/"instagram_navigation.py").read_text()
+        def omit_helper(src):
+            node=next(n for n in ast.parse(src).body if isinstance(n,ast.FunctionDef)
+                      and n.name=="_post_open_intent_surface_from_final_proof")
+            lines=src.splitlines(True);return "".join(lines[:node.lineno-1]+lines[node.end_lineno:])
+        call='''                _post_open_intent_surface_from_final_proof(
+                    _intent_evidence,
+                    expected_package=pkg,
+                    device_context=d,
+                )'''
+        self.assertEqual(current.count(call),1)
+        self.assertEqual(omit_helper(current.replace(call,call.replace("                    device_context=d,\n",""),1)),omit_helper(self.old))
+        for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
+            self.assertEqual((self.root/name).read_bytes(),subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
+
 if __name__ == "__main__":
     unittest.main()
