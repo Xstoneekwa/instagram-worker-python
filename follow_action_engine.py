@@ -404,10 +404,20 @@ def capture_ordering_v2_profile_reentry_follow_surface(
         current = {}
     current_package = str(current.get("package") or "").strip()
     current_activity = str(current.get("activity") or "").strip()
+    activity_allowed = "instagrammainactivity" in current_activity.lower()
+    if (not activity_allowed and current_package == pkg_use
+            and current_package == "com.instagram.android"
+            and current_activity in (
+                "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):
+        try:
+            activity_allowed = ign._followers_row_activity_allowed(
+                d, current_package, current_activity)
+        except (AttributeError, TypeError):
+            activity_allowed = False
     if (
         not pkg_use
         or current_package != pkg_use
-        or "instagrammainactivity" not in current_activity.lower()
+        or not activity_allowed
     ):
         return {"ok": False, "reason": "v2_reentry_package_or_activity_mismatch"}
 

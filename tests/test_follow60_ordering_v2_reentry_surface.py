@@ -419,3 +419,84 @@ class FollowPreTapStabilizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Reentry446ActivityAuthorityTests(unittest.TestCase):
+    def device(self, activity=".activity.MainTabActivity"):
+        from instagram_ui_446_compat import retain_context
+        d = _Device()
+        d.serial = "offline-446"
+        d.activity = activity
+        d.read_count = 0
+        original = d.app_current
+        def read():
+            d.read_count += 1
+            return original()
+        d.app_current = read
+        d._instagram_search_observed_version = (id(d), d.serial, d.package, "446.0.0.49.77", 385211304)
+        retain_context(d, serial=d.serial, package=d.package, version_name="446.0.0.49.77", version_code=385211304, unsafe=False)
+        return d
+
+    def capture(self, d, expected="com.instagram.android", ign=navigation):
+        with patch.object(engine, "try_select_exact_profile_header_follow_fast", return_value=(object(), {"bounds": {"left":700,"top":300,"right":1010,"bottom":420}, "text":"Follow"})) as select, patch("follow_60s_canary.invalidate"), patch("follow_60s_canary.runtime_context", return_value={"ui_generation":7,"navigation_counter":11}):
+            result = engine.capture_ordering_v2_profile_reentry_follow_surface(d, ign, expected, candidate_username="alice", visual_candidate_id="action", screen_guard=None)
+            return result, select.call_count
+
+    def test_372_and_exact_446_have_same_io_budget(self):
+        for activity in ("com.instagram.mainactivity.InstagramMainActivity", "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity"):
+            with self.subTest(activity=activity):
+                d=self.device(activity)
+                if "InstagramMainActivity" in activity:
+                    d.package="com.instagram.androif"
+                    d._instagram_search_observed_version=(id(d),d.serial,d.package,"372.0.0.48.60",0)
+                    d._instagram_446_observed_context=None
+                r,c=self.capture(d,expected=d.package)
+                self.assertTrue(r["ok"],r)
+                self.assertEqual((d.read_count,len(d.selector_calls),c),(1,2,1))
+                self.assertEqual((r["xml_count"],r["screenshot_count"]),(0,0))
+
+    def test_unqualified_activity_matrix_blocks_before_selectors(self):
+        cases=["372","package_drift","version","code","owner","serial","context","clone","foreign","empty","none","substring","missing_helper"]
+        for case in cases:
+            with self.subTest(case=case):
+                d=self.device(); expected=d.package; ign=navigation
+                obs=list(d._instagram_search_observed_version)
+                if case=="372": obs[3:]=["372.0.0.48.60",0]
+                elif case=="version": obs[3]="447.0.0.1"
+                elif case=="code": obs[4]=385211305
+                elif case=="owner": obs[0]+=1
+                elif case=="serial": d.serial="other"
+                elif case=="context": d._instagram_446_observed_context=None
+                elif case=="package_drift": d.package="com.foreign"
+                elif case=="clone": d.package=expected="com.instagram.androif"
+                elif case=="foreign": d.activity="com.foreign.Activity"
+                elif case=="empty": d.activity=""
+                elif case=="none": d.activity=None
+                elif case=="substring": d.activity="com.foreign.MainTabActivity"
+                elif case=="missing_helper": ign=_Ign
+                d._instagram_search_observed_version=tuple(obs)
+                r,c=self.capture(d,expected,ign)
+                self.assertEqual(r,{"ok":False,"reason":"v2_reentry_package_or_activity_mismatch"})
+                self.assertEqual((d.read_count,len(d.selector_calls),c),(1,0,0))
+
+    def test_qualified_activity_does_not_override_wrong_identity(self):
+        d=self.device()
+        with patch.object(engine,"_norm_follow_handle",side_effect=["alice","mallory"]):
+            r,c=self.capture(d)
+        self.assertEqual(r["reason"],"v2_reentry_wrong_profile")
+        self.assertEqual(c,0)
+
+    def test_only_exact_runtime_hunk_differs_from_signed_base(self):
+        from pathlib import Path
+        import subprocess
+        source=Path(engine.__file__).read_text()
+        before,after=REENTRY_ACTIVITY_HUNK
+        baseline=subprocess.check_output(["git","show","04b327dd5b59600a4ffa51c00e1dce04f4ea6769:follow_action_engine.py"],cwd=Path(engine.__file__).parent,text=True)
+        def restore(value):
+            self.assertEqual(value.count(after),1)
+            self.assertEqual(value.replace(after,before,1),baseline)
+        restore(source)
+        for corrupt in (source.replace(after,before,1),source+after,source.replace(after,after.replace("except (AttributeError, TypeError)","except Exception"),1),source+"\n# unrelated"):
+            with self.assertRaises(AssertionError): restore(corrupt)
+
+REENTRY_ACTIVITY_HUNK = ('    if (\n        not pkg_use\n        or current_package != pkg_use\n        or "instagrammainactivity" not in current_activity.lower()\n    ):\n        return {"ok": False, "reason": "v2_reentry_package_or_activity_mismatch"}\n\n', '    activity_allowed = "instagrammainactivity" in current_activity.lower()\n    if (not activity_allowed and current_package == pkg_use\n            and current_package == "com.instagram.android"\n            and current_activity in (\n                "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):\n        try:\n            activity_allowed = ign._followers_row_activity_allowed(\n                d, current_package, current_activity)\n        except (AttributeError, TypeError):\n            activity_allowed = False\n    if (\n        not pkg_use\n        or current_package != pkg_use\n        or not activity_allowed\n    ):\n        return {"ok": False, "reason": "v2_reentry_package_or_activity_mismatch"}\n\n')
