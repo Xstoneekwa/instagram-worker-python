@@ -34954,7 +34954,17 @@ def _validate_like_tap_context_v2(
             return False, "liketapcontext_package_mismatch", age_ms
         if live_activity != str(ctx.get("activity") or ""):
             return False, "liketapcontext_activity_mismatch", age_ms
-        if "instagram" not in live_activity.lower() or "mainactivity" not in live_activity.lower():
+        activity_allowed = bool(
+            "instagram" in live_activity.lower() and "mainactivity" in live_activity.lower()
+        )
+        if (not activity_allowed and live_package == "com.instagram.android"
+                and live_activity in (
+                    "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):
+            try:
+                activity_allowed = _followers_row_activity_allowed(d, live_package, live_activity)
+            except (AttributeError, TypeError):
+                activity_allowed = False
+        if not activity_allowed:
             return False, "liketapcontext_viewer_mismatch", age_ms
     try:
         from follow_60s_canary import runtime_context as _follow_60_runtime_context

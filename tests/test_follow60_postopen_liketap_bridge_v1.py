@@ -317,9 +317,125 @@ class LikeContextActivityAuthority446Tests(unittest.TestCase):
         original=subprocess.check_output(['git','show',
             'fcd58cb1b7ad9b5d4d5a88503bdfbc88b71259ab:instagram_navigation.py'],cwd=root,text=True)
         current=Path(nav.__file__).read_text()
+        current = restore_liketap_validator_activity(current)
         import ast
         a=next(n for n in ast.parse(original).body if isinstance(n,ast.FunctionDef) and n.name=='visual_like_open_post')
         b=next(n for n in ast.parse(current).body if isinstance(n,ast.FunctionDef) and n.name=='visual_like_open_post')
         old_lines=original.splitlines(True);new_lines=current.splitlines(True)
         self.assertEqual(old_lines[:a.lineno-1],new_lines[:b.lineno-1])
         self.assertEqual(old_lines[a.end_lineno:],new_lines[b.end_lineno:])
+
+
+VALIDATOR_ACTIVITY_HUNK = ('        activity_allowed = bool(\n            "instagram" in live_activity.lower() and "mainactivity" in live_activity.lower()\n        )\n        if (not activity_allowed and live_package == "com.instagram.android"\n                and live_activity in (\n                    "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):\n            try:\n                activity_allowed = _followers_row_activity_allowed(d, live_package, live_activity)\n            except (AttributeError, TypeError):\n                activity_allowed = False\n        if not activity_allowed:\n            return False, "liketapcontext_viewer_mismatch", age_ms\n', '        if "instagram" not in live_activity.lower() or "mainactivity" not in live_activity.lower():\n            return False, "liketapcontext_viewer_mismatch", age_ms\n')
+
+def restore_liketap_validator_activity(source):
+    after, before = VALIDATOR_ACTIVITY_HUNK
+    if source.count(after) != 1:
+        raise AssertionError('validator_activity_hunk_not_unique')
+    return source.replace(after, before, 1)
+
+
+class LikeTapValidatorActivity446Tests(unittest.TestCase):
+    def setUp(self):
+        configure_canary(canary, account_id=ACCOUNT_ID, account_username='bridge_account',
+                         run_id='run-validator', package=PKG, resume_policy=None)
+        self.binding = dict(account_id=ACCOUNT_ID, run_id='run-validator',
+                            request_id='request-validator', action_id='action-validator')
+
+    def evaluate(self, activity='.activity.MainTabActivity', package=PKG,
+                 version=('446.0.0.49.77',385211304), changes=None,
+                 live_activity=None, device_mutation=None, bad_hash=False):
+        d=LikeContextActivityAuthority446Tests.device(version,package)
+        calls=[]
+        d.app_current=lambda: (calls.append('app_current') or
+            dict(package=package,activity=activity if live_activity is None else live_activity))
+        d.window_size=lambda: (calls.append('window_size') or (1080,2340))
+        if device_mutation: device_mutation(d)
+        ctx=dict(version='LikeTapContextV2',**self.binding,
+            candidate_username='azafranytaconesespanol',package=package,activity=activity,
+            viewer_type='Posts',v5_positive=True,story_or_highlight_detected=False,
+            exact_like_source=package+':id/row_feed_button_like',
+            like_bounds=dict(left=34,top=1440,right=102,bottom=1569),
+            canonical_generation=canary.runtime_context()['ui_generation'],
+            created_at_monotonic=100.,ttl_ms=600.,one_shot_nonce='offline-only',
+            consumed=False,already_liked=False)
+        ctx.update(changes or {})
+        ctx['proof_hash']=nav._like_tap_context_v2_proof_hash(ctx)
+        if bad_hash:ctx['proof_hash']='invalid'
+        # Freeze clock only; use the actual validator and actual retained-version authority.
+        with mock.patch.object(nav.time,'monotonic',return_value=100.1):
+            result=nav._validate_like_tap_context_v2(ctx,expected_stage_binding=self.binding,
+                expected_follower_username='azafranytaconesespanol',d=d,expected_package=package)
+        return result,calls
+
+    def test_positive_exact_activity_matrix_and_no_added_io(self):
+        for activity,package,version in [
+            (ACT,'com.instagram.androif',('372.0.0.48.60',377611059)),
+            (ACT,PKG,('446.0.0.49.77',385211304)),
+            ('com.instagram.android.activity.MainTabActivity',PKG,('446.0.0.49.77',385211304)),
+            ('.activity.MainTabActivity',PKG,('446.0.0.49.77',385211304))]:
+            with self.subTest(activity=activity,package=package):
+                result,calls=self.evaluate(activity,package,version)
+                self.assertEqual(result[:2],(True,''))
+                self.assertEqual(calls,['app_current','window_size'])
+
+    def test_unqualified_activity_version_package_rejected(self):
+        for kwargs in [dict(version=('372.0.0.48.60',377611059)),
+            dict(version=('446.0.0.49.77',385211305)),dict(version=('447.0.0',385211304)),
+            dict(package='com.instagram.androif'),dict(package='foreign.package'),
+            dict(activity='foreign.MainTabActivity'),dict(activity='overlay.MainTabActivity'),
+            dict(activity='com.instagram.android.activity.MainTabActivityOverlay')]:
+            with self.subTest(kwargs=kwargs):
+                result,calls=self.evaluate(**kwargs)
+                self.assertEqual(result[:2],(False,'liketapcontext_viewer_mismatch'))
+                self.assertEqual(calls,['app_current'])
+
+    def test_retained_owner_serial_context_required(self):
+        for mutation in [lambda d:vars(d).pop('_instagram_446_observed_context'),
+            lambda d:setattr(d,'serial','wrong-serial'),
+            lambda d:setattr(d,'_instagram_446_observed_context',None),
+            lambda d:setattr(d,'_instagram_search_observed_version',(0,d.serial,PKG,'446.0.0.49.77',385211304)),
+            lambda d:setattr(d,'_instagram_search_observed_version',None)]:
+            result,calls=self.evaluate(device_mutation=mutation)
+            self.assertEqual(result[:2],(False,'liketapcontext_viewer_mismatch'))
+            self.assertEqual(calls,['app_current'])
+
+    def test_activity_equality_precedes_membership(self):
+        result,calls=self.evaluate(live_activity='com.instagram.android.activity.MainTabActivity')
+        self.assertEqual(result[:2],(False,'liketapcontext_activity_mismatch'))
+        self.assertEqual(calls,['app_current'])
+
+    def test_original_reasons_and_ttl_preserved(self):
+        for changes,reason in [({'viewer_type':'Reels'},'viewer_mismatch'),
+            ({'candidate_username':'wrong'},'candidate_mismatch'),
+            ({'v5_positive':False},'v5_rejected'),
+            ({'story_or_highlight_detected':True},'v5_rejected'),
+            ({'account_id':'wrong'},'account_id_mismatch'),
+            ({'run_id':'wrong'},'run_id_mismatch'),
+            ({'request_id':'wrong'},'request_id_mismatch'),
+            ({'action_id':'wrong'},'action_id_mismatch'),
+            ({'created_at_monotonic':99.},'ttl_expired'),
+            ({'exact_like_source':''},'exact_like_source_missing'),
+            ({'consumed':True},'consumed'),({'already_liked':True},'already_liked'),
+            ({'canonical_generation':-1},'generation_changed')]:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.evaluate(changes=changes)[0][:2],
+                                 (False,'liketapcontext_'+reason))
+        self.assertEqual(self.evaluate(bad_hash=True)[0][:2],(False,'liketapcontext_hash_mismatch'))
+
+    def test_exact_inverse_hunk_rejects_changed_missing_duplicate(self):
+        from pathlib import Path
+        source=Path(nav.__file__).read_text();after,before=VALIDATOR_ACTIVITY_HUNK
+        for mutation in [source.replace(after,''),source+after,
+                         source.replace(after,after.replace('activity_allowed = False','activity_allowed = True'))]:
+            with self.assertRaises(AssertionError):restore_liketap_validator_activity(mutation)
+
+    def test_only_validator_hunk_changed_against_signed_baseline(self):
+        import subprocess
+        from pathlib import Path
+        root=Path(nav.__file__).resolve().parent
+        baseline=subprocess.check_output(['git','show',
+            'c2677f10507b873b71c3a550ee497322a62e128c:instagram_navigation.py'],cwd=root,text=True)
+        current=Path(nav.__file__).read_text()
+        self.assertEqual(restore_liketap_validator_activity(current),baseline)
+        self.assertNotEqual(restore_liketap_validator_activity(current+'\n'),baseline)
