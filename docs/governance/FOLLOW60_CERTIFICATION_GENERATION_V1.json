@@ -29,7 +29,7 @@
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
     "canary_child.py": "f8e25cc1543721e79d0790a85a9a50a8c3e8f0d53713b0d69b18606203177e5f",
-    "canary_contract.py": "bcf7220ffd9246c357f861978911ac5fe87c52c2fd60dab703ed77ade1d1d0c9",
+    "canary_contract.py": "1583e4a554a0c85e44b6fd62a68c2f11004ac21721d889a767b70ec1172ac2c3",
     "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
     "tests/test_canary_launcher.py": "abfbdfac9fb373d9fc2020d6e3793cb41412a227cb9f7b0be2b787417f63d6f1"
   },
@@ -38,6 +38,9 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-candidate-profile-activity-final/FOLLOW60_MAINLINE_LOCK_V3.json": "610464cef8f87f719384fe3ca18216d22957195a7329834df9b2b16b2fa78dec",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-candidate-profile-activity-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "9d40c97a72b3b2fa56fdb863000ec7af6297943b396c8acd9976fd8088f71582",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-candidate-profile-activity-final/RECERTIFICATION_RECEIPT.json": "ccff7c162f4d7194cde19a6d785711288645c234f9e480cc1c51f986bafa2149",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-liketap-validator-activity-final/FOLLOW60_MAINLINE_LOCK_V3.json": "c9cf50a5d41544334e57ad1f54dc9887bb357ecbdb395f9f5640a821c2b9a153",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-liketap-validator-activity-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "1a1f507e996ce6d7f7c5e00744c29561702919a928a061a51f31ce64b52f1a06",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-liketap-validator-activity-final/RECERTIFICATION_RECEIPT.json": "1c7e9c45bbb4f2b6d85edb578af0744cba879afe1dacab32bc520317e96e5141",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/FOLLOW60_MAINLINE_LOCK_V3.json": "7f7e79edbb4dbdc377cadbf6c5dc3c7b876595ffc116f559db06fb3747bc79a5",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "f8656aba790824df3ac3e513f930c838456679195140f8cb4570ff4914409569",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-446-search-entry-final/RECERTIFICATION_RECEIPT.json": "eef30aeef0b3726c6022b3265c96885d78c44d1a70c750080c4c63f1732121a3",
@@ -48,6 +51,10 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-candidate-profile-after-tick-20260927/BACKEND_READINESS.json": "ddce1b95b64ab48a1fffb0ca48d4bf6114d292d61e76a2b61e365ac99e921068",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-candidate-profile-after-tick-20260927/COMMANDS.json": "f82dc136b9f1b7d7212c8eda969c7c0e29c052b7736761521601ddf24a416435",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-candidate-profile-after-tick-20260927/DEVICE_READINESS.json": "c111b92499af735fe3dcc200b25b67cbbca498d46a1da670ed54324c24e44a04",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-liketap-after-tick-20260928/ADB_INTERVAL_TARGET.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-liketap-after-tick-20260928/BACKEND_READINESS.json": "71ed769688639dcb678a116b7d254cb9642a90782524a79a98afcb8f0996bf3f",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-liketap-after-tick-20260928/COMMANDS.json": "7b5a20e28ce2ed324a2a4d0ff2014909eb8f33b6f90a7a8514c0f3b7992846a5",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-liketap-after-tick-20260928/DEVICE_READINESS.json": "0354972075309b97db5e3bb458d5a9a655153486a54589857aafea03f166e1c2",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/ABORT_REGRESSION.log": "ba2f519d5a968d02db50f18129e08e2df480f96adb16d45f8f151e916e671209",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/ADB_INTERVAL_TARGET.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/fresh-a1603-search-readiness-20260926/BACKEND_READINESS.json": "240026c3fe70081c732a9839adc8b932ce1cba4406fbb3311532b88e6ddc1296",
@@ -65,6 +72,9 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/QUARANTINED_CONTEXT.json": "98d715b92d9c0edfdf76bee6e7988aa8d0d9332f838427ab6b69a11101f66f2e",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-clean-manual-canary/RESULT.json": "b33a256c301da837c1fe83a6307fcb467e0234e3f4aa95b81906b6237954339c",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-liketap-validator-activity-canary/QUARANTINED_CONTEXT.json": "f1136d1328802173679b1bf4f571c7016eb57e9542c99d0d07a919032ab4c52f",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-liketap-validator-activity-canary/RESULT.json": "8cd942fb0c73aba522cfb63c8d09b8b873a067be679b7fea7ae8c6bc4c1a83ba",
+    "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-liketap-validator-activity-canary/SIGNED_PUBLICATION.json": "dc2ae00e4ed11cfec8a25ec101981c07fb2c0d8b4eb1b356e1c12dd734a9385f",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-popup-resume-canary/QUARANTINED_CONTEXT.json": "a53b75bd290789d37a83e0c306f5ba3ebc5a7f1893a289b232e5b191d8a0f7e8",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-search-entry-canary/AFTER_READBACK.json": "ae9a54c0c99052ab3fd526d23391f2aa85348346efabaf7ba52cc0762b9dbb94",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-search-entry-canary/QUARANTINED_CONTEXT.json": "14dcb54eba69fd2a917056f678b179e504da274acd7334280a626d22517e3025",
@@ -73,7 +83,7 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/tick-lock-readonly-audit-20260927/REPORT.md": "c2295951a2a6d7642b6a7bd9a831826615aaf5a6cdc3ad34080c07c2a32a5118",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/tick-lock-readonly-audit-20260927/RESULT.json": "aca25089b9964766addd5239bbc74a8fdddf9a450861ebcf77a244b792cc800d"
   },
-  "previous_candidate_sha": "a4d7409055d41f3490a930945510e01fd68953e5",
+  "previous_candidate_sha": "9b34c9fd8fdc7980bedaa91b375f9561669e70e1",
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
@@ -105,8 +115,8 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
-  "qualification_scope": "Only this non-executable governance record changes. All919 other tracked candidate files and four external launcher files remain byte-identical. Current candidate-profile fix preserved, no later-phase adaptation. Full final-byte recertification, normal-hook commit and new Approval2 required; new permit/nonce/window and fresh worker generated by existing launcher. Old campaign quarantined, no reuse.",
-  "reason": "fresh_a1603_candidate_profile_validation_after_normal_transient_tick_preflight_stop",
+  "qualification_scope": "Only this non-executable generation record changes. All 919 other candidate files and four launcher files unchanged. Full final-byte recertification, normal-hook commit, fresh Approval2, permit, nonce and signed window required. Previous stopped context retired; no reuse. No production promotion.",
+  "reason": "fresh_a1603_liketap_validation_after_tick_preflight_stop",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "version": 1
