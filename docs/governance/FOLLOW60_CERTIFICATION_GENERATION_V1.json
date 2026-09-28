@@ -1,5 +1,9 @@
 {
-  "certification_admission_contract_version": "A0_CERTIFICATION_ADMISSION_V2",
+  "canonical_cycle_trust_review": {
+    "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/SLOT2_CANONICAL_TRUST_MODEL_REVIEW.md",
+    "sha256": "a1fd08913f8aa9cb855e8ce7c316bd096ded7651d6099e92cdd8dff395fec8b7"
+  },
+  "certification_admission_contract_version": "A0_CERTIFICATION_ADMISSION_V3_CANONICAL_CYCLE",
   "certification_candidate_capacity": {
     "default": 1,
     "explicit_signed_A16_03": 2,
@@ -38,9 +42,9 @@
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
     "canary_child.py": "f8e25cc1543721e79d0790a85a9a50a8c3e8f0d53713b0d69b18606203177e5f",
-    "canary_contract.py": "0ccd9080bef4b20fd2a2d2ad90815512d2eb15b7981df12c9724038bae6917a1",
+    "canary_contract.py": "322c7c4825ba4fe9e15ea66b1760416091a7836b623e24c884ced531fe1c1dd7",
     "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
-    "tests/test_canary_launcher.py": "be34c0d3b59c8e5b3f2c6c5616c76af41f8b2158eaf175081564cbedd3a64e8c"
+    "tests/test_canary_launcher.py": "70a66a04a6c56f5764967d1571637b8aed80d9bc7da4fc35082d801d0aea95c0"
   },
   "fresh_execution_context_evidence": {
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-two-candidate-receipt-generation/PROPOSED_QUALIFICATION.json": "2be8119d9f274e2dff6a5d8867ba3baa68f5af0a8004b9865f6c8c5165b96fe5",
@@ -53,7 +57,7 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-two-candidate-canary/SIGNED_PUBLICATION.json": "f0d4672f7d2a31a32d06ea36adb36b852f3e4a378a1b67bf7547f17fdede32da",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/two-candidate-migration-installation/INSTALLATION_GATES.json": "ce46c6d55771139cdccdc76015fbc70f6e493cf79bd35e8ff47749cd23aad1e8"
   },
-  "previous_candidate_sha": "a8f61546f2003d1570a2a8d508570e5b0aa470c2",
+  "previous_candidate_sha": "6f583c41d0ebff70839bca16a7d15cc8b115d1b3",
   "previous_external_certification_migration": {
     "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json",
     "installation_evidence_sha256": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
@@ -94,18 +98,18 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
-  "qualification_scope": "Only certification generation record changes. All 920 other candidate files and four external launcher files remain byte-identical. Final-byte replay and new Approval2 required. Correct receipt root FAIL/ERROR copied from existing results; launcher validation remains unchanged. No device before new signature and preflight.",
-  "reason": "fresh_generation_after_signed_qualification_receipt_schema_mismatch",
+  "qualification_scope": "Six-path certification-only canonical cycle reader and launcher outcome. Mainline completed ledger plus exact Follow/Mute/ReturnCT producer evidence; verified/safe_skip supported. V2 strict coverage separate. No SQL or product behavior changes. New final-byte recertification and Approval2 required.",
+  "reason": "canonical_completed_cycle_authority_for_certification_slot2",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
   "two_candidate_authorization": {
     "approval-1.json": {
-      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-two-candidate-self-test-amendment/approval-1.json",
-      "sha256": "7fd32d79f9571ec4e32b7b1ebaf102453ad345c4ed195d0c4620b845f51e1511"
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-slot2-test-amendment/approval-1.json",
+      "sha256": "183f9fb6f3adc3764e1fcbdb26af0ba4aa011e02ff13ae7abac8e55fa8713324"
     },
     "approval-1.sig": {
-      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-two-candidate-self-test-amendment/approval-1.sig",
-      "sha256": "36871e8abecebd19636a17c7fa6ff5c9693d2877c09bab2108c5648a87f56197"
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-slot2-test-amendment/approval-1.sig",
+      "sha256": "dc267a6cca3f5048488fa496aebfc3a2e67d117e35adca4dd0e575b23f6ae998"
     }
   },
   "version": 1

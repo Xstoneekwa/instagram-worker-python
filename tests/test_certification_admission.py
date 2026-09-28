@@ -519,6 +519,80 @@ class SelfXmlExactFreezeTests(unittest.TestCase):
                 restore_exact_self_xml_delta(name, source + '\n')
 
 
+
+class CanonicalBackendFixture:
+    """Backend GET and local producer-file fixtures; no admission/reader mock."""
+    def __init__(self, root, binding):
+        from tests.test_follow_persistence_rpc_v1 import SETTINGS_REVISION
+        self.root=Path(root).resolve();self.binding=binding;self.intents=self.root/'intents'
+        self.ledgers=[];self.events={};self.interactions={};self.calls=[]
+        self.settings=dict(account_id=binding['account_id'],unfollow_after_days=3,updated_at=SETTINGS_REVISION)
+
+    def action(self,name):
+        from follow_persistence_rpc import deterministic_action_id
+        return deterministic_action_id(self.binding['account_id'],self.binding['run_id'],name)
+
+    def intent_path(self,name):
+        return self.intents/self.binding['run_id']/(self.action(name)+'.json')
+
+    def install(self, stack):
+        import supabase_client as db
+        stack.enter_context(patch.dict(os.environ,{'FOLLOW_PERSISTENCE_INTENT_ROOT':str(self.intents)}))
+        stack.enter_context(patch.object(db,'_request_json',side_effect=self.get))
+
+    def get(self,method,table,*,query,request_timeout,max_retries):
+        import copy
+        assert method=='GET' and request_timeout==5.0 and max_retries==0
+        self.calls.append((table,dict(query)))
+        b=self.binding
+        if table=='follow_60s_completed_cycle_ledger':result=self.ledgers
+        elif table=='ig_runs':result=[dict(id=b['run_id'],account_id=b['account_id'])]
+        elif table=='account_run_requests':result=[dict(id=b['request_id'],account_id=b['account_id'],run_id=b['run_id'])]
+        elif table=='ig_account_unfollow_settings':result=[self.settings]
+        elif table=='ig_interaction_events':
+            action=query['or'].split('id.eq.')[1].split(',')[0];result=self.events.get(action,[])
+        elif table=='ig_interacted_users':result=[self.interactions[query['username'][3:]]] if query['username'][3:] in self.interactions else []
+        else:raise AssertionError('unexpected_backend_read:'+table)
+        return copy.deepcopy(result)
+
+    def cycle(self,name,*,terminal='verified',complete=True,v2_action=None):
+        from tests.test_follow_persistence_rpc_v1 import canonical_evidence, FOLLOWED_AT, SETTINGS_REVISION
+        b=self.binding;action=self.action(name);ah=hashlib.sha256(action.encode()).hexdigest();common={k:b[k] for k in ('account_id','run_id','request_id')}
+        reason='like_verified' if terminal=='verified' else 'no_posts_verified'
+        intent=dict(version=3,receipt_schema='AMBIGUOUS_MUTATION_INTENT_V1',action_id=action,idempotency_key=action,action_type='follow',**common,
+                    candidate_username=name,source_ct_username='ct',source_target_id='target',business_session_id='session',attempt_id='1',intent_generation='1',
+                    worker_sha=b['candidate_sha'],settings_revision=SETTINGS_REVISION,stage='persisted',physical_attempt_started_at=FOLLOWED_AT,followed_at=FOLLOWED_AT,
+                    interaction_row_id=None,receipt_metadata_safe=dict(candidate_username=name,source_profile='ct',tap_sent=True,physical_follow_state='following',
+                    tap_ready_boundary_reached=True,verification_method='worker_exact_following_state',post_follow_stage_persist_ok=True,return_ct_exact=True,
+                    receipt_ready_before_critical_rpc=True,post_follow_stage_results=dict(mute_posts_verified=True,mute_stories_verified=True,return_ct_exact=True)))
+        path=self.intent_path(name);path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(intent))
+        ev=canonical_evidence(action);follow=ev['event'];follow.update(common,username=name,source_profile='ct',source_target_id='target',source_target_username='ct',evidence_source='worker_follow_state_exact')
+        interaction=ev['interaction'];interaction.update(common,username=name,source_target_id='target',interaction_type='follow');interaction['id']='interaction-'+name;follow['payload']['interaction_id']=interaction['id']
+        self.interactions[name]=interaction;events=[follow]
+        for stage,event_type,it in [('mute_posts_verified','mute_posts_verified','mute'),('mute_stories_verified','mute_success','mute'),('return_ct_exact','return_ct_exact','navigation')]+([('like_verified','post_like_success','like')] if terminal=='verified' else []):
+            payload=dict(schema='FOLLOW60_MAINLINE_POST_FOLLOW_V3',stage=stage,action_id_hash=ah,attempt_id=1,business_session_id='session',binding_kind='mainline',binding_id=b['run_id'],control_id=b['run_id'],worker_sha=b['candidate_sha'])
+            if stage=='mute_posts_verified':payload['muted_posts']=True
+            if stage=='mute_stories_verified':payload['muted_stories']=True
+            if stage=='return_ct_exact':payload.update(return_ok=True,return_how='exact_followers',required_mute_verification_complete=True,required_mute_missing_axes=[],like_terminal_status=terminal,like_terminal_reason=reason)
+            if stage=='like_verified':payload.update(real_tap_sent=True,fresh_like_verified=True,like_action_state='LIKE_ACTION_PERFORMED_NOW',liked_count=1,candidate_username=name,action_id=v2_action or 'viewer-'+name)
+            events.append(dict(id=stage+'-'+name,**common,username=name,source_profile='ct',session_id='session',event_status='success',interaction_status='success',evidence_source='follow60_mainline_post_follow_v3',stage_idempotency_key='follow60:v2:'+ah+':'+stage,event_type=event_type,interaction_type=it,event_at=FOLLOWED_AT,payload=payload))
+        self.events[action]=events
+        if complete:self.ledgers.append(dict(common,control_id=b['run_id'],binding_kind='mainline',action_id_hash=ah,candidate_username=name,source_profile='ct',business_session_id='session',attempt_id=1,worker_sha=b['candidate_sha'],revision=len(self.ledgers)+1,created_at=FOLLOWED_AT,like_terminal_status=terminal,like_terminal_reason=reason,metadata_safe=dict(schema='FOLLOW60_MAINLINE_CYCLE_LEDGER_V2',binding_kind='mainline',binding_id=b['run_id'],action_id_hash=ah)))
+        return action
+
+    def bind_store_context(self, stack, store):
+        import auto_restart_device_lock as locks, account_run_control as requests, supabase_client as db
+        b=self.binding;end=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat()
+        lease={k:b[k] for k in ('device_id','worker_id','request_id','account_id','lease_id')};lease['lease_expires_at']=end
+        req=dict(id=b['request_id'],account_id=b['account_id'],run_id=b['run_id'],claimed_by=b['worker_id'],status='running',lease_expires_at=end,metadata_safe={'device_lock_binding':dict(lease,generation=b['lease_id'])})
+        stack.enter_context(patch.object(locks,'_load_device_lock',return_value=lease))
+        stack.enter_context(patch.object(requests,'get_account_run_request',return_value=req))
+        stack.enter_context(patch.object(db,'load_run_row',return_value=dict(id=b['run_id'],account_id=b['account_id'],status='running')))
+        stack.enter_context(patch.object(ca,'_REQUESTED',True))
+        stack.enter_context(patch.object(ca,'_SESSION',(dict(certification_not_before=(datetime.now(timezone.utc)-timedelta(minutes=1)).isoformat(),certification_expires_at=end),b,store)))
+        return lease
+
+
 class TwoCandidateDurableCertificationTests(unittest.TestCase):
     """Actual fsynced permit and actual canonical SQLite writer, no admission mock."""
     def setUp(self):
@@ -528,7 +602,11 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
         self.path=Path(self.tmp.name).resolve()/'receipts.sqlite'
         p=patch.object(lv,'DEFAULT_PATH',self.path);p.start();self.addCleanup(p.stop)
         self.binding=dict(BINDING,max_candidate_admissions=2)
+        from contextlib import ExitStack
+        self.stack=ExitStack();self.addCleanup(self.stack.close)
+        self.backend=CanonicalBackendFixture(self.tmp.name,self.binding);self.backend.install(self.stack)
         self.store=ca._PermitStore(self.tmp.name,self.binding);self.addCleanup(self.store.close)
+        self.lease=self.backend.bind_store_context(self.stack,self.store)
 
     def cycle(self, name, action, *, complete=True):
         scope=self.lv.LedgerScope('account','run','request','session','target',action,name)
@@ -540,6 +618,7 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
             ('mute_posts_verified',{'verified':True}),('mute_stories_verified',{'verified':True}),
             ('return_ct_exact',{'verified':True}),('cycle_complete',{'critical_persistence_acknowledged':True,'candidate_username':name})]
         for stage,payload in (payloads if complete else payloads[:-1]):store.apply_receipt(stage,payload)
+        self.backend.cycle(name,complete=complete,v2_action=action)
         return store
 
     def test_two_complete_cycles_third_blocked_zero_transport(self):
@@ -549,7 +628,7 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
         self.assertEqual(self.store.admit(('run','account','ct','bob')),'SECOND_ADMISSION_GRANTED');transports.append('bob')
         self.cycle('bob','action-b')
         cycles=ca.read_certification_cycles(self.binding,self.store._read()['slots'])
-        self.assertEqual([c.scope.action_id for c in cycles],['action-a','action-b'])
+        self.assertEqual([c.scope.action_id for c in cycles],[self.backend.action('alice'),self.backend.action('bob')])
         self.assertEqual(self.store.admit(('run','account','ct','bob')),'SAME_CANDIDATE_REENTRY_GRANTED')
         with self.assertRaises(ca.CertificationStop) as e:
             self.store.admit(('run','account','ct','charlie'));transports.append('charlie')
@@ -563,9 +642,9 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
         self.assertEqual(len(self.store._read()['slots']),1)
 
     def test_old_receipts_cannot_authorize_second(self):
-        self.cycle('alice','action-a');self.store.admit(KEY)
-        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','bob'))
-        self.assertEqual(e.exception.reason,'PREVIOUS_CYCLE_UNPROVED')
+        self.cycle('alice','action-a')
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(KEY)
+        self.assertEqual(e.exception.reason,'STALE_CANDIDATE_INTENT')
 
     def test_prior_candidate_reentry_rejected_after_second_admission(self):
         self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'))
@@ -585,6 +664,9 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
         import sqlite3
         self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'));self.cycle('bob','action-b')
         with sqlite3.connect(self.path) as conn:conn.execute("UPDATE follow60_ordering_v2_receipts SET payload_json='{}' WHERE action_id='action-a' AND stage='return_ct_exact'")
+        slots=[{k:v for k,v in x.items() if not k.startswith('completed_')} for x in self.store._read()['slots']]
+        with self.assertRaises(ValueError):ca.read_v2_certification_cycles(self.binding,slots)
+        self.backend.events[self.backend.action('alice')][-2]['payload']['return_ok']=False
         with self.assertRaises(ValueError):ca.read_certification_cycles(self.binding,self.store._read()['slots'])
 
     def test_extra_action_rejected(self):
@@ -641,10 +723,11 @@ class TwoCandidateDurableCertificationTests(unittest.TestCase):
         with sqlite3.connect(self.path) as conn:
             saved=conn.execute("SELECT created_at_monotonic FROM follow60_ordering_v2_receipts WHERE stage='cycle_complete'").fetchone()[0]
             conn.execute("UPDATE follow60_ordering_v2_receipts SET created_at_monotonic=? WHERE stage='cycle_complete'",(saved+1000,))
-        with self.assertRaisesRegex(ValueError,'stale_receipt'):ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+        with self.assertRaisesRegex(ValueError,'stale_receipt'):ca.read_v2_certification_cycles(self.binding,self.store._read()['slots'])
         with sqlite3.connect(self.path) as conn:
             conn.execute("UPDATE follow60_ordering_v2_receipts SET created_at_monotonic=? WHERE stage='cycle_complete'",(saved,))
             conn.execute("UPDATE follow60_ordering_v2_receipts SET request_id='different' WHERE stage='cycle_complete'")
+        self.backend.ledgers[0]['request_id']='different'
         with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','bob'))
         self.assertEqual(e.exception.reason,'PREVIOUS_CYCLE_UNPROVED')
         self.assertEqual(len(self.store._read()['slots']),1)
@@ -753,3 +836,149 @@ class TwoCandidateConfigurationTests(unittest.TestCase):
         with self.assertRaises(ca.CertificationStop):self.configure_fixture(absent)
         def duplicate(m,b):m['physical_canary_permits']*=2
         with self.assertRaises(ca.CertificationStop):self.configure_fixture(duplicate)
+
+
+class CanonicalCycleAdmissionTests(unittest.TestCase):
+    setUp = TwoCandidateDurableCertificationTests.setUp
+    cycle = TwoCandidateDurableCertificationTests.cycle
+
+    def read(self):
+        return ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+
+    def test_safe_skip_and_verified_in_both_orders_without_synthetic_v2(self):
+        self.store.admit(KEY);self.backend.cycle('alice',terminal='safe_skip')
+        first=self.read()[0]
+        self.assertEqual(first.scope.like_terminal_status,'safe_skip')
+        self.assertFalse(first.v2_coverage_proved)
+        self.assertFalse(hasattr(first,'stages'))
+        self.assertEqual(self.store.admit(('run','account','ct','bob')),'SECOND_ADMISSION_GRANTED')
+        self.backend.cycle('bob',terminal='verified')
+        self.assertEqual([x.scope.like_terminal_status for x in self.read()],['safe_skip','verified'])
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','third'))
+        self.assertEqual(e.exception.reason,'THIRD_CANDIDATE_BLOCKED')
+
+    def test_verified_then_safe_skip_complete_with_distinct_actions(self):
+        self.store.admit(KEY);self.cycle('alice','v2-alice')
+        self.assertTrue(self.read()[0].v2_coverage_proved)
+        self.store.admit(('run','account','ct','bob'));self.backend.cycle('bob',terminal='safe_skip')
+        cycles=self.read();self.assertEqual(len({c.scope.action_id for c in cycles}),2)
+        self.assertEqual([c.scope.like_terminal_status for c in cycles],['verified','safe_skip'])
+        self.assertTrue(cycles[0].v2_coverage_proved);self.assertFalse(cycles[1].v2_coverage_proved)
+        self.assertNotEqual(cycles[0].scope.action_id,'v2-alice')
+        with self.assertRaises(ca.CertificationStop):self.store.admit(('run','account','ct','third'))
+
+    def test_exact_scope_and_producer_negative_matrix(self):
+        import copy
+        self.store.admit(KEY);self.backend.cycle('alice')
+        action=self.backend.action('alice')
+        mutations=[]
+        for key in ('control_id','binding_kind','action_id_hash','account_id','run_id','request_id','candidate_username','source_profile','business_session_id','attempt_id','worker_sha','revision','like_terminal_reason','like_terminal_status','metadata_safe'):
+            mutations.append(('ledger.'+key,lambda k=key:self.backend.ledgers[0].__setitem__(k,'wrong')))
+        for key in ('id','account_id','run_id','request_id','username','source_target_id','source_target_username','source_profile','event_type','event_status','evidence_source'):
+            mutations.append(('follow.'+key,lambda k=key:self.backend.events[action][0].__setitem__(k,'wrong')))
+        for key in ('account_id','run_id','request_id','source_target_id','interaction_type','follow_status','was_successful','payload','eligible_unfollow_at'):
+            mutations.append(('interaction.'+key,lambda k=key:self.backend.interactions['alice'].__setitem__(k,'wrong')))
+        for key in ('account_id','run_id','request_id','session_id','username','source_profile','event_type','event_status','evidence_source','stage_idempotency_key'):
+            mutations.append(('stage.'+key,lambda k=key:self.backend.events[action][1].__setitem__(k,'wrong')))
+        for key in ('schema','stage','action_id_hash','attempt_id','business_session_id','binding_kind','binding_id','control_id','worker_sha','muted_posts'):
+            mutations.append(('stage.payload.'+key,lambda k=key:self.backend.events[action][1]['payload'].__setitem__(k,'wrong')))
+        original=copy.deepcopy((self.backend.ledgers,self.backend.events,self.backend.interactions))
+        for label,change in mutations:
+            self.backend.ledgers,self.backend.events,self.backend.interactions=copy.deepcopy(original)
+            change()
+            with self.subTest(label=label),self.assertRaises((ValueError,TypeError,AttributeError)):self.read()
+        self.backend.ledgers,self.backend.events,self.backend.interactions=original
+        self.assertEqual(len(self.read()),1)
+
+    def test_intent_negative_matrix_and_stale_run(self):
+        self.store.admit(KEY);self.backend.cycle('alice')
+        path=self.backend.intent_path('alice');original=json.loads(path.read_text())
+        for field in ('account_id','run_id','request_id','worker_sha','business_session_id','attempt_id','source_target_id','source_ct_username','action_id','candidate_username','stage','receipt_schema','settings_revision'):
+            bad=dict(original);bad[field]='wrong';path.write_text(json.dumps(bad))
+            with self.subTest(field=field),self.assertRaises(ValueError):self.read()
+        for field in ('tap_sent','tap_ready_boundary_reached','post_follow_stage_persist_ok','return_ct_exact','receipt_ready_before_critical_rpc'):
+            bad=json.loads(json.dumps(original));bad['receipt_metadata_safe'][field]=False;path.write_text(json.dumps(bad))
+            with self.subTest(field=field),self.assertRaises(ValueError):self.read()
+        path.write_text(json.dumps(original));self.assertEqual(len(self.read()),1)
+        stale=dict(self.binding,run_id='old-run')
+        with self.assertRaises((ValueError,FileNotFoundError)):ca.read_certification_cycles(stale,self.store._read()['slots'])
+
+    def test_like_terminal_required_not_absence_and_ambiguity_rejected(self):
+        import copy
+        self.store.admit(KEY);self.backend.cycle('alice',terminal='safe_skip');a=self.backend.action('alice')
+        original=copy.deepcopy(self.backend.events[a]);self.assertEqual(len(self.read()),1)
+        for key,value in [('like_terminal_status',''),('like_terminal_reason',''),('like_terminal_reason','different'),('return_ok',False),('required_mute_verification_complete',False),('required_mute_missing_axes',['posts']),('like_mutation_ambiguous',True),('real_tap_sent',True)]:
+            self.backend.events[a]=copy.deepcopy(original);self.backend.events[a][-1]['payload'][key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):self.read()
+        self.backend.events[a]=original
+        # An independently present Like contradicts safe_skip, never ignored.
+        bad=copy.deepcopy(original[-1]);bad['id']='like';bad['payload']['stage']='like_verified';self.backend.events[a].append(bad)
+        with self.assertRaises(ValueError):self.read()
+
+    def test_verified_like_requires_current_real_positive_proof(self):
+        import copy
+        self.store.admit(KEY);self.backend.cycle('alice');a=self.backend.action('alice');original=copy.deepcopy(self.backend.events[a])
+        for key,value in [('real_tap_sent',False),('fresh_like_verified',False),('like_action_state','old'),('liked_count',0),('liked_count',True),('candidate_username','other'),('action_id','')]:
+            self.backend.events[a]=copy.deepcopy(original);self.backend.events[a][-1]['payload'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.read()
+
+    def test_missing_duplicate_extra_and_partial_commit_rows_fail_closed(self):
+        import copy
+        self.store.admit(KEY);self.backend.cycle('alice');a=self.backend.action('alice');original=copy.deepcopy(self.backend.events[a])
+        for i in range(len(original)):
+            self.backend.events[a]=copy.deepcopy(original);self.backend.events[a].pop(i)
+            with self.subTest(missing=i),self.assertRaises(ValueError):self.read()
+        for i in range(len(original)):
+            self.backend.events[a]=copy.deepcopy(original)+[copy.deepcopy(original[i])]
+            with self.subTest(duplicate=i),self.assertRaises(ValueError):self.read()
+        self.backend.events[a]=original
+        saved=list(self.backend.ledgers);self.backend.ledgers=[]
+        with self.assertRaises(ValueError):self.read()
+        self.backend.ledgers=saved*3
+        with self.assertRaises(ValueError):self.read()
+
+    def test_completed_hash_detects_same_scope_payload_drift(self):
+        self.store.admit(KEY);self.backend.cycle('alice',terminal='safe_skip');self.store.admit(('run','account','ct','bob'));self.backend.cycle('bob',terminal='safe_skip')
+        self.backend.events[self.backend.action('alice')][-1]['payload']['return_how']='another_exact_return'
+        with self.assertRaisesRegex(ValueError,'completed_cycle_changed'):self.read()
+
+    def test_atomic_retry_same_facts_no_second_consumption(self):
+        self.store.admit(KEY);self.backend.cycle('alice',terminal='safe_skip')
+        a=self.read()[0].envelope_sha256;b=self.read()[0].envelope_sha256;self.assertEqual(a,b)
+        self.assertEqual(self.store.admit(KEY),'SAME_CANDIDATE_REENTRY_GRANTED')
+        self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(self.store._read()['slots'][0]['completed_envelope_sha256'],a)
+
+    def test_lease_loss_during_read_blocks_reservation(self):
+        self.store.admit(KEY);self.backend.cycle('alice',terminal='safe_skip')
+        original=self.backend.get
+        def read_then_expire(*a,**kw):
+            result=original(*a,**kw);self.lease['lease_expires_at']='2020-01-01T00:00:00Z';return result
+        import supabase_client as db
+        with patch.object(db,'_request_json',side_effect=read_then_expire),self.assertRaises(ca.CertificationStop):self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(len(self.store._read()['slots']),1)
+
+    def test_backend_timeout_no_retry_or_slot_grant(self):
+        import supabase_client as db
+        self.store.admit(KEY);self.backend.cycle('alice')
+        with patch.object(db,'_request_json',side_effect=TimeoutError('offline')) as get,self.assertRaises(ca.CertificationStop):self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(get.call_count,1);self.assertEqual(len(self.store._read()['slots']),1)
+
+    def test_get_counts_bounded_and_evidence_read_does_not_mutate(self):
+        self.store.admit(KEY);self.backend.cycle('alice');before=self.backend.intent_path('alice').read_bytes()
+        self.backend.calls.clear();self.read();self.assertEqual(len(self.backend.calls),6)
+        self.assertEqual(self.backend.intent_path('alice').read_bytes(),before)
+        self.store.admit(('run','account','ct','bob'));self.backend.cycle('bob')
+        self.backend.calls.clear();self.read();self.assertEqual(len(self.backend.calls),8)
+        self.assertTrue(all(int(q['limit'])<=6 for _,q in self.backend.calls))
+
+    def test_symlink_and_oversized_local_receipt_rejected(self):
+        self.store.admit(KEY);self.backend.cycle('alice');path=self.backend.intent_path('alice');content=path.read_bytes();saved=path.with_suffix('.saved');saved.write_bytes(content);path.unlink();path.symlink_to(saved)
+        with self.assertRaises(ValueError):self.read()
+        path.unlink();path.write_bytes(b' '*(ca._MAX_EVIDENCE_BYTES+1))
+        with self.assertRaises(ValueError):self.read()
+
+    def test_projection_drift_rejects_without_repair(self):
+        self.store.admit(KEY);self.backend.cycle('alice');self.backend.interactions['alice']['payload']['action_id']='another-action'
+        with self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.backend.interactions['alice']['payload']['action_id'],'another-action')

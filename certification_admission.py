@@ -146,7 +146,7 @@ class _PermitStore:
         if value['state'] == 'AVAILABLE':
             value.update(state='CONSUMED_BOUND', candidate_key=list(key))
             if self.limit == 2:
-                value['slots'] = [{'key': list(key), 'admitted_at_monotonic': time.monotonic()}]
+                value['slots'] = [self._new_slot(key)]
             self._write(value)
             return 'FIRST_ADMISSION_GRANTED'
         if value['candidate_key'] == list(key):
@@ -164,14 +164,34 @@ class _PermitStore:
             except Exception as exc:
                 self.terminal('PREVIOUS_CYCLE_UNPROVED')
                 raise CertificationStop('PREVIOUS_CYCLE_UNPROVED') from exc
+            # Reads can consume the remaining lease/window. Never grant from an
+            # authority checked only before the read. Same session/store required.
+            if _SESSION is None or _SESSION[2] is not self:
+                self.terminal('BINDING_MISMATCH')
+                raise CertificationStop('BINDING_MISMATCH')
+            try:
+                validate_execution_context()
+            except CertificationStop:
+                self.terminal('BINDING_MISMATCH')
+                raise
             slots[0]['completed_action_id'] = cycles[0].scope.action_id
-            slots[0]['completed_receipt_hashes'] = {k:v.payload_hash for k,v in cycles[0].receipts.items()}
-            slots.append({'key':list(key), 'admitted_at_monotonic':time.monotonic()})
+            slots[0]['completed_envelope_sha256'] = cycles[0].envelope_sha256
+            slots.append(self._new_slot(key))
             value.update(candidate_key=list(key), slots=slots)
             self._write(value)
             return 'SECOND_ADMISSION_GRANTED'
         self.terminal('SECOND_CANDIDATE_BLOCKED')
         raise CertificationStop('SECOND_CANDIDATE_BLOCKED')
+
+    def _new_slot(self, key):
+        # Fresh run is canonical; this additional local check rejects accidental
+        # same-run replay before any candidate transport, without clock conversion.
+        if _cycle_intent_path(self.binding, key).exists():
+            self.terminal('STALE_CANDIDATE_INTENT')
+            raise CertificationStop('STALE_CANDIDATE_INTENT')
+        return {'key': list(key), 'admitted_at_monotonic': time.monotonic(),
+                'canonical_cycle_contract': 'MAINLINE_COMPLETED_CYCLE_V1',
+                'intent_absent_at_admission': True}
 
     def terminal(self, reason):
         with self.mutex:
@@ -364,7 +384,7 @@ def mark_terminal(reason):
             store.close()
 
 
-def read_certification_cycles(binding, slots):
+def read_v2_certification_cycles(binding, slots, *, candidate_only=None, until_monotonic=None):
     """Bounded read-only replay of exact durable receipts; never UI truth creation.
 
     Fresh run/request plus admission monotonic boundary exclude earlier receipts.
@@ -379,8 +399,11 @@ def read_certification_cycles(binding, slots):
         raise ValueError('slot_count_invalid')
     with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=3) as conn:
         conn.row_factory=sqlite3.Row
-        rows=list(conn.execute('SELECT * FROM follow60_ordering_v2_receipts WHERE account_id=? AND run_id=? AND request_id=? ORDER BY created_at_monotonic,rowid LIMIT 25',
-                              (binding['account_id'],binding['run_id'],binding['request_id'])))
+        query='SELECT * FROM follow60_ordering_v2_receipts WHERE account_id=? AND run_id=? AND request_id=?'
+        params=(binding['account_id'],binding['run_id'],binding['request_id'])
+        if candidate_only is not None:
+            query+=' AND candidate_username=?';params+=(candidate_only,)
+        rows=list(conn.execute(query+' ORDER BY created_at_monotonic,rowid LIMIT 25',params))
     if not rows or len(rows) >= 25:
         raise ValueError('ledger_missing_or_excessive')
     if len({r['action_id'] for r in rows}) != len(slots):
@@ -396,7 +419,7 @@ def read_certification_cycles(binding, slots):
             raise ValueError('candidate_receipts_missing')
         scope=LedgerScope(**{k:group[0][k] for k in keys});ledger=OrderingLedger(scope)
         floor=slot['admitted_at_monotonic']
-        ceiling=slots[index+1]['admitted_at_monotonic'] if index+1<len(slots) else time.monotonic()
+        ceiling=slots[index+1]['admitted_at_monotonic'] if index+1<len(slots) else (time.monotonic() if until_monotonic is None else until_monotonic)
         if not isinstance(floor,(int,float)) or isinstance(floor,bool) or not math.isfinite(floor) or not 0<floor<=ceiling:
             raise ValueError('admission_time_invalid')
         payloads={}
@@ -427,4 +450,229 @@ def read_certification_cycles(binding, slots):
         cycles.append(ledger)
     if len({c.scope.action_id for c in cycles})!=len(slots) or len({c.scope.candidate_username for c in cycles})!=len(slots) or sum(len(c.receipts) for c in cycles)!=len(rows):
         raise ValueError('cycle_scope_overlap')
+    return cycles
+
+
+# Generic completed Mainline cycles are not OrderingLedger/V2 stages. Keep the
+# original strict V2 reader above for separate coverage claims only.
+_CYCLE_SCHEMA = 'MAINLINE_COMPLETED_CYCLE_V1'
+_MAX_EVIDENCE_BYTES = 1024 * 1024
+
+
+def _cycle_require(condition, reason):
+    if not condition:
+        raise ValueError(reason)
+
+
+def _cycle_intent_path(binding, key):
+    from follow_persistence_intent import _root
+    from follow_persistence_rpc import deterministic_action_id
+    _cycle_require(type(key) is list or type(key) is tuple, 'slot_key_invalid')
+    _cycle_require(len(key) == 4 and list(key[:2]) == [binding['run_id'], binding['account_id']], 'slot_binding_mismatch')
+    _cycle_require(all(type(v) is str and re.fullmatch(r'[A-Za-z0-9_.-]+', v) for v in key), 'slot_identity_invalid')
+    root = _root()
+    path = root / key[0] / (deterministic_action_id(key[1], key[0], key[3]) + '.json')
+    _cycle_require(path.is_absolute() and not any(p.is_symlink() for p in (path, *path.parents)), 'intent_path_invalid')
+    return path
+
+
+def _read_cycle_intent(binding, key):
+    path = _cycle_intent_path(binding, key)
+    import stat
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        _cycle_require(stat.S_ISREG(os.fstat(fd).st_mode), 'intent_not_regular_file')
+        raw = stream.read(_MAX_EVIDENCE_BYTES + 1)
+    _cycle_require(len(raw) <= _MAX_EVIDENCE_BYTES, 'intent_excessive')
+    value = json.loads(raw)
+    _cycle_require(type(value) is dict, 'intent_shape')
+    return value
+
+
+def _cycle_get(table, query, maximum):
+    """Only GET, one attempt, canonical bounded read timeout; no polling/repair."""
+    from supabase_client import _request_json
+    result = _request_json('GET', table, query=dict(query, limit=str(maximum + 1)),
+                           request_timeout=5.0, max_retries=0)
+    _cycle_require(type(result) is list and len(result) <= maximum, 'cycle_rows_missing_or_excessive')
+    _cycle_require(all(type(row) is dict for row in result), 'cycle_row_shape')
+    _cycle_require(len(_bytes(result)) <= _MAX_EVIDENCE_BYTES, 'cycle_payload_excessive')
+    return result
+
+
+def _cycle_one(rows):
+    _cycle_require(len(rows) == 1, 'cycle_cardinality')
+    return rows[0]
+
+
+def _validate_cycle_envelope(envelope, binding, slot):
+    from follow_persistence_rpc import deterministic_action_id, validate_canonical_persistence_evidence
+    _cycle_require(envelope.get('schema') == _CYCLE_SCHEMA, 'cycle_schema_invalid')
+    key = slot['key']
+    _cycle_require(slot.get('canonical_cycle_contract') == _CYCLE_SCHEMA and slot.get('intent_absent_at_admission') is True, 'admission_freshness_unproved')
+    _cycle_require(len(key) == 4 and key[:2] == [binding['run_id'], binding['account_id']], 'slot_binding_mismatch')
+    intent, ledger, events = envelope['intent'], envelope['ledger'], envelope['events']
+    action = deterministic_action_id(binding['account_id'], binding['run_id'], key[3])
+    action_hash = hashlib.sha256(action.encode()).hexdigest()
+    common = {'account_id': binding['account_id'], 'run_id': binding['run_id'], 'request_id': binding['request_id']}
+    expected = dict(common, action_id=action, idempotency_key=action, action_type='follow',
+                    candidate_username=key[3], source_ct_username=key[2], worker_sha=binding['candidate_sha'])
+    _cycle_require(all(intent.get(k) == v for k, v in expected.items()), 'intent_scope_mismatch')
+    _cycle_require(intent.get('receipt_schema') == 'AMBIGUOUS_MUTATION_INTENT_V1' and intent.get('version') == 3, 'intent_schema')
+    _cycle_require(intent.get('stage') in ('persisted', 'reconciled'), 'follow_not_durable')
+    session, attempt, target = intent.get('business_session_id'), intent.get('attempt_id'), intent.get('source_target_id')
+    _cycle_require(type(session) is str and bool(session) and type(target) is str and bool(target), 'intent_lineage_missing')
+    _cycle_require(type(attempt) is str and re.fullmatch(r'[1-9][0-9]*', attempt) is not None, 'intent_attempt_invalid')
+    _cycle_require(intent.get('intent_generation') == attempt, 'intent_generation_mismatch')
+    metadata = intent.get('receipt_metadata_safe') or {}
+    _cycle_require(metadata.get('like_mutation_ambiguous') is not True, 'local_like_ambiguous')
+    _cycle_require(metadata.get('candidate_username') == key[3] and metadata.get('source_profile') == key[2], 'local_candidate_scope')
+    _cycle_require(metadata.get('tap_sent') is True and metadata.get('physical_follow_state') == 'following'
+                   and metadata.get('tap_ready_boundary_reached') is True and bool(metadata.get('verification_method')), 'real_follow_unproved')
+    _cycle_require(all(metadata.get(k) is True for k in ('post_follow_stage_persist_ok', 'return_ct_exact', 'receipt_ready_before_critical_rpc')), 'local_return_unproved')
+    _cycle_require(all((metadata.get('post_follow_stage_results') or {}).get(k) is True for k in ('mute_posts_verified', 'mute_stories_verified', 'return_ct_exact')), 'local_mute_unproved')
+    _utc(intent.get('physical_attempt_started_at')); _utc(intent.get('followed_at'))
+    run, request = envelope['run'], envelope['request']
+    _cycle_require(run.get('id') == binding['run_id'] and run.get('account_id') == binding['account_id'], 'run_scope_mismatch')
+    _cycle_require(request.get('id') == binding['request_id'] and request.get('account_id') == binding['account_id'] and request.get('run_id') == binding['run_id'], 'request_scope_mismatch')
+    expected_ledger = dict(common, control_id=binding['run_id'], binding_kind='mainline', action_id_hash=action_hash,
+                           candidate_username=key[3], source_profile=key[2], business_session_id=session,
+                           attempt_id=int(attempt), worker_sha=binding['candidate_sha'])
+    _cycle_require(all(ledger.get(k) == v for k, v in expected_ledger.items()), 'completed_ledger_scope')
+    _cycle_require(type(ledger.get('attempt_id')) is int and type(ledger.get('revision')) is int and ledger['revision'] > 0, 'ledger_integer_invalid')
+    _cycle_require((ledger.get('metadata_safe') or {}) == {'schema': 'FOLLOW60_MAINLINE_CYCLE_LEDGER_V2', 'binding_kind': 'mainline', 'binding_id': binding['run_id'], 'action_id_hash': action_hash}, 'ledger_metadata_invalid')
+    _utc(ledger.get('created_at'))
+    follow = _cycle_one([e for e in events if e.get('id') == action])
+    interaction, settings = envelope['interaction'], envelope['settings']
+    valid, reason, _, _ = validate_canonical_persistence_evidence(
+        {'event': follow, 'interaction': interaction, 'unfollow_settings': settings},
+        expected_action_id=action, expected_account_id=binding['account_id'],
+        expected_request_id=binding['request_id'], expected_run_id=binding['run_id'],
+        expected_username=key[3], expected_settings_revision=intent.get('settings_revision'))
+    _cycle_require(valid, 'canonical_follow_unproved:' + reason)
+    for row in (follow, interaction):
+        _cycle_require(all(row.get(k) == v for k, v in common.items()), 'follow_lineage_mismatch')
+        _cycle_require(row.get('source_target_id') == target, 'follow_target_mismatch')
+    _cycle_require(follow.get('source_profile') == key[2] and follow.get('source_target_username') == key[2], 'follow_ct_mismatch')
+    _cycle_require(follow.get('evidence_source') == 'worker_follow_state_exact', 'follow_producer_invalid')
+    _cycle_require(interaction.get('interaction_type') == 'follow', 'follow_type_invalid')
+    if intent.get('interaction_row_id') is not None:
+        _cycle_require(intent['interaction_row_id'] == interaction.get('id'), 'intent_interaction_mismatch')
+    stages = {}
+    types = {'mute_posts_verified': ('mute_posts_verified', 'mute'), 'mute_stories_verified': ('mute_success', 'mute'),
+             'return_ct_exact': ('return_ct_exact', 'navigation'), 'like_verified': ('post_like_success', 'like')}
+    for event in events:
+        if event is follow:
+            continue
+        payload = event.get('payload') or {}
+        stage = payload.get('stage')
+        _cycle_require(stage in types and stage not in stages, 'stage_unknown_or_duplicate')
+        _cycle_require(all(event.get(k) == v for k, v in dict(common, username=key[3], source_profile=key[2], session_id=session,
+                        event_status='success', interaction_status='success', evidence_source='follow60_mainline_post_follow_v3',
+                        stage_idempotency_key='follow60:v2:' + action_hash + ':' + stage).items()), 'stage_scope_mismatch')
+        _cycle_require((event.get('event_type'), event.get('interaction_type')) == types[stage], 'stage_type_invalid')
+        required_payload = {'schema': 'FOLLOW60_MAINLINE_POST_FOLLOW_V3', 'action_id_hash': action_hash,
+                            'attempt_id': int(attempt), 'business_session_id': session, 'binding_kind': 'mainline',
+                            'binding_id': binding['run_id'], 'control_id': binding['run_id'], 'worker_sha': binding['candidate_sha']}
+        _cycle_require(all(payload.get(k) == v for k, v in required_payload.items()) and type(payload.get('attempt_id')) is int, 'stage_producer_binding')
+        _cycle_require(payload.get('like_mutation_ambiguous') is not True, 'like_ambiguous')
+        _utc(event.get('event_at'))
+        stages[stage] = payload
+    _cycle_require({'mute_posts_verified', 'mute_stories_verified', 'return_ct_exact'} <= set(stages), 'required_stage_missing')
+    _cycle_require(stages['mute_posts_verified'].get('muted_posts') is True and stages['mute_stories_verified'].get('muted_stories') is True, 'mute_unproved')
+    ret = stages['return_ct_exact']
+    _cycle_require(ret.get('return_ok') is True and type(ret.get('return_how')) is str and bool(ret['return_how'])
+                   and ret.get('required_mute_verification_complete') is True and ret.get('required_mute_missing_axes') == [], 'exact_return_unproved')
+    status, reason = ledger.get('like_terminal_status'), ledger.get('like_terminal_reason')
+    _cycle_require(status in ('verified', 'safe_skip') and type(reason) is str and bool(reason.strip()), 'terminal_invalid')
+    _cycle_require(ret.get('like_terminal_status') == status and ret.get('like_terminal_reason') == reason, 'terminal_conflict')
+    if status == 'verified':
+        like = stages.get('like_verified') or {}
+        _cycle_require(like.get('real_tap_sent') is True and like.get('fresh_like_verified') is True
+                       and like.get('like_action_state') == 'LIKE_ACTION_PERFORMED_NOW' and type(like.get('liked_count')) is int
+                       and like['liked_count'] > 0 and like.get('candidate_username') == key[3]
+                       and type(like.get('action_id')) is str and bool(like['action_id']), 'canonical_like_unproved')
+    else:
+        _cycle_require('like_verified' not in stages and ret.get('real_tap_sent') is not True, 'safe_skip_conflict')
+    return dict(common, action_id=action, candidate_username=key[3], source_profile=key[2], target_id=target,
+                business_session_id=session, like_terminal_status=status, like_terminal_reason=reason)
+
+
+class CanonicalCycle:
+    """Validated immutable bytes, never synthetic V2 stages. Revalidated at outcome."""
+    def __init__(self, envelope, binding, slot):
+        self._raw = _bytes(envelope)
+        self.validate(binding, slot)
+
+    @property
+    def envelope_sha256(self):
+        return hashlib.sha256(self._raw).hexdigest()
+
+    @property
+    def scope(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(**self._scope)
+
+    def validate(self, binding, slot):
+        self._scope = _validate_cycle_envelope(json.loads(self._raw), binding, slot)
+        if 'completed_action_id' in slot:
+            _cycle_require(slot['completed_action_id'] == self._scope['action_id'] and
+                           slot.get('completed_envelope_sha256') == self.envelope_sha256, 'completed_cycle_changed')
+        return self
+
+
+def read_certification_cycles(binding, slots):
+    """Generic Mainline completion, at most 8 GETs for two slots, no UI/writes.
+
+    Freshness is causal (new run/permit + absent intent before admission), not a
+    comparison between UTC timestamps and monotonic time. Caller owns the permit
+    lock; live admission rechecks fencing after this read. Terminal audit doesn't.
+    """
+    _cycle_require(type(slots) is list and 1 <= len(slots) <= 2, 'slot_count_invalid')
+    _cycle_require(len({s['key'][3] for s in slots}) == len(slots), 'candidate_overlap')
+    common = {k: 'eq.' + binding[k] for k in ('account_id', 'run_id', 'request_id')}
+    ledgers = _cycle_get('follow_60s_completed_cycle_ledger', dict(common, select='*'), 2)
+    _cycle_require(len(ledgers) == len(slots), 'action_count_mismatch')
+    _cycle_require(all(type(r.get('revision')) is int for r in ledgers) and len({r['revision'] for r in ledgers}) == len(slots), 'ledger_revision_conflict')
+    run = _cycle_one(_cycle_get('ig_runs', {'id': 'eq.' + binding['run_id'], 'select': 'id,account_id'}, 1))
+    request = _cycle_one(_cycle_get('account_run_requests', {'id': 'eq.' + binding['request_id'], 'select': 'id,account_id,run_id'}, 1))
+    settings = _cycle_one(_cycle_get('ig_account_unfollow_settings', {'account_id': 'eq.' + binding['account_id'], 'select': 'account_id,unfollow_after_days,updated_at'}, 1))
+    cycles = []
+    for slot in slots:
+        from follow_persistence_rpc import deterministic_action_id
+        key = slot['key']; intent = _read_cycle_intent(binding, key)
+        action = deterministic_action_id(binding['account_id'], binding['run_id'], key[3])
+        ah = hashlib.sha256(action.encode()).hexdigest()
+        stage_keys = ','.join('follow60:v2:' + ah + ':' + s for s in ('mute_posts_verified', 'mute_stories_verified', 'return_ct_exact', 'like_verified'))
+        events = _cycle_get('ig_interaction_events', dict(common, select='*', **{'or': '(id.eq.' + action + ',stage_idempotency_key.in.(' + stage_keys + '))'}), 5)
+        interaction = _cycle_one(_cycle_get('ig_interacted_users', {'account_id': 'eq.' + binding['account_id'], 'username': 'eq.' + key[3],
+            'select': 'id,account_id,run_id,request_id,username,source_target_id,interaction_type,interaction_status,follow_status,was_successful,followed_by_bot,followed_at,eligible_unfollow_at,payload'}, 1))
+        ledger = _cycle_one([r for r in ledgers if r.get('candidate_username') == key[3]])
+        # Project the local proof and immutable event contract, not changing
+        # counters/run status/last-update fields, into the frozen envelope.
+        intent_keys = ('version','receipt_schema','action_id','idempotency_key','action_type','account_id','run_id','request_id','candidate_username',
+                       'source_ct_username','source_target_id','business_session_id','attempt_id','intent_generation','worker_sha','settings_revision',
+                       'stage','physical_attempt_started_at','followed_at','interaction_row_id','receipt_metadata_safe')
+        event_keys = ('id','account_id','run_id','request_id','session_id','username','source_profile','source_target_id','source_target_username',
+                      'event_type','event_status','interaction_type','interaction_status','evidence_source','stage_idempotency_key','event_at','payload')
+        envelope = {'schema': _CYCLE_SCHEMA, 'intent': {k:intent.get(k) for k in intent_keys}, 'ledger': ledger,
+                    'events': sorted(({k:e.get(k) for k in event_keys} for e in events), key=lambda e:e['id']),
+                    'interaction': interaction, 'settings': settings, 'run': run, 'request': request}
+        cycles.append(CanonicalCycle(envelope, binding, slot))
+    _cycle_require(len({c.scope.action_id for c in cycles}) == len(slots), 'action_overlap')
+    # Optional strict V2 coverage; never infer V1 from its absence. V2 has a
+    # separate action identity linked by the canonical Like payload.
+    for index, cycle in enumerate(cycles):
+        slot = {k:v for k,v in slots[index].items() if not k.startswith('completed_')}
+        ceiling = slots[index+1]['admitted_at_monotonic'] if index+1 < len(slots) else time.monotonic()
+        cycle.v2_coverage_proved = False
+        try:
+            v2 = read_v2_certification_cycles(binding, [slot], candidate_only=slot['key'][3], until_monotonic=ceiling)[0]
+        except (ValueError, OSError):
+            continue
+        envelope = json.loads(cycle._raw)
+        likes = [e['payload'] for e in envelope['events'] if (e.get('payload') or {}).get('stage') == 'like_verified']
+        cycle.v2_coverage_proved = bool(likes and likes[0].get('action_id') == v2.scope.action_id and
+            all(getattr(cycle.scope,k) == getattr(v2.scope,k) for k in
+                ('account_id','run_id','request_id','business_session_id','target_id','candidate_username')))
     return cycles
