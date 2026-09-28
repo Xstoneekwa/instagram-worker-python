@@ -7,6 +7,7 @@ from unittest import mock
 
 import follow_60s_canary as canary
 import instagram_navigation as nav
+from tests.test_certification_admission import restore_exact_like_budget_delta
 from tests.follow60_generic_fixtures import configure_canary
 
 
@@ -316,7 +317,7 @@ class LikeContextActivityAuthority446Tests(unittest.TestCase):
         root=Path(nav.__file__).resolve().parent
         original=subprocess.check_output(['git','show',
             'fcd58cb1b7ad9b5d4d5a88503bdfbc88b71259ab:instagram_navigation.py'],cwd=root,text=True)
-        current=Path(nav.__file__).read_text()
+        current=restore_exact_like_budget_delta(Path(nav.__file__).read_text())
         current = restore_liketap_validator_activity(current)
         import ast
         a=next(n for n in ast.parse(original).body if isinstance(n,ast.FunctionDef) and n.name=='visual_like_open_post')
@@ -436,6 +437,6 @@ class LikeTapValidatorActivity446Tests(unittest.TestCase):
         root=Path(nav.__file__).resolve().parent
         baseline=subprocess.check_output(['git','show',
             'c2677f10507b873b71c3a550ee497322a62e128c:instagram_navigation.py'],cwd=root,text=True)
-        current=Path(nav.__file__).read_text()
+        current=restore_exact_like_budget_delta(Path(nav.__file__).read_text())
         self.assertEqual(restore_liketap_validator_activity(current),baseline)
         self.assertNotEqual(restore_liketap_validator_activity(current+'\n'),baseline)

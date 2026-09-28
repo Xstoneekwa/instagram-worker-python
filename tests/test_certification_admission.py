@@ -17,6 +17,26 @@ import certification_admission as ca
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'a0d995be8df3ea1a773c572bc900aa1d3a360df6'
+
+# Exact signed Like Verify delta. Whole-source hashes pin hunk locations as well
+# as bytes; no function/range exclusion and no generic whitespace normalization.
+LIKE_BUDGET_SOURCE_SHA256 = 'fe3fba2c7b5051a4e5f95adfd98a316ac294de3b87d2b26e6eaa84b0617e2d30'
+LIKE_BUDGET_BASE_SHA256 = 'db4a882e77feef02ff8db074e869bfbb79a37680e1428c2567704b3c33342c37'
+LIKE_BUDGET_EXACT_HUNKS = [('\ndef _ui_post_viewer_action_button_liked_strict(\n    d: u2.Device,\n    *,\n    semantic_deadline: float | None = None,\n) -> tuple[bool, str, float, dict[str, Any]]:\n    """Trusted already-liked: exact Unlike (or localized) on the action heart button."""\n    checks: list[tuple[str, Callable[[], object], float]] = [\n', '\ndef _ui_post_viewer_action_button_liked_strict(\n    d: u2.Device,\n) -> tuple[bool, str, float, dict[str, Any]]:\n    """Trusted already-liked: exact Unlike (or localized) on the action heart button."""\n    checks: list[tuple[str, Callable[[], object], float]] = [\n'), ('        ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$"), 0.9),\n    ]\n    for method, pred, conf in checks:\n        if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:\n            return False, "", 0.0, {}\n        try:\n            el = pred()\n            if not el.exists(timeout=0.14):\n', '        ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$"), 0.9),\n    ]\n    for method, pred, conf in checks:\n        try:\n            el = pred()\n            if not el.exists(timeout=0.14):\n'), ('\ndef _ui_post_viewer_liked_state_for_verify(\n    d: u2.Device,\n    *,\n    semantic_deadline: float | None = None,\n) -> tuple[bool, str, float, dict[str, Any]]:\n    """\n    Post-tap verification only: accept Unlike / Double tap to unlike on the real heart control.\n    Does not use broad engagement or \'Liked by\' (filtered in _verify_post_tap_text_is_unlike_semantic).\n    """\n    ok, method, conf, proof = _ui_post_viewer_action_button_liked_strict(\n        d, semantic_deadline=semantic_deadline\n    )\n    if ok:\n        return True, method, conf, proof\n\n', '\ndef _ui_post_viewer_liked_state_for_verify(\n    d: u2.Device,\n) -> tuple[bool, str, float, dict[str, Any]]:\n    """\n    Post-tap verification only: accept Unlike / Double tap to unlike on the real heart control.\n    Does not use broad engagement or \'Liked by\' (filtered in _verify_post_tap_text_is_unlike_semantic).\n    """\n    ok, method, conf, proof = _ui_post_viewer_action_button_liked_strict(d)\n    if ok:\n        return True, method, conf, proof\n\n'), ('        ),\n    ]\n    for method_label, pred, conf in probes:\n        if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:\n            return False, "", 0.0, {}\n        try:\n            el = pred()\n            if not el.exists(timeout=0.16):\n', '        ),\n    ]\n    for method_label, pred, conf in probes:\n        try:\n            el = pred()\n            if not el.exists(timeout=0.16):\n'), ('                return True, "ui_action_button_unlike", conf, proof\n        except Exception:\n            continue\n\n    if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:\n        return False, "", 0.0, {}\n\n    try:\n        el = d(resourceId="com.instagram.android:id/row_feed_button_like")\n', '                return True, "ui_action_button_unlike", conf, proof\n        except Exception:\n            continue\n\n    try:\n        el = d(resourceId="com.instagram.android:id/row_feed_button_like")\n'), ('                fail_snap["semantic_result"] = continuity_reason\n                break\n            ok_ui, method_ui, conf_ui, proof_ui = (\n                _ui_post_viewer_liked_state_for_verify(d, semantic_deadline=semantic_deadline)\n            )\n            if proof_ui:\n                fail_snap["last_ui_candidate_method"] = str(\n', '                fail_snap["semantic_result"] = continuity_reason\n                break\n            ok_ui, method_ui, conf_ui, proof_ui = (\n                _ui_post_viewer_liked_state_for_verify(d)\n            )\n            if proof_ui:\n                fail_snap["last_ui_candidate_method"] = str(\n')]
+
+
+def restore_exact_like_budget_delta(source):
+    if hashlib.sha256(source.encode()).hexdigest() != LIKE_BUDGET_SOURCE_SHA256:
+        raise AssertionError("like_budget_source_changed")
+    for approved, original in LIKE_BUDGET_EXACT_HUNKS:
+        if source.count(approved) != 1:
+            raise AssertionError("like_budget_hunk_missing_altered_or_duplicated")
+        source = source.replace(approved, original, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != LIKE_BUDGET_BASE_SHA256:
+        raise AssertionError("like_budget_reverse_not_exact_baseline")
+    return source
+
+
 BINDING = dict(permit_id='test-permit', permit_hash='signed-hash', run_id='run',
                request_id='request', account_id='account', worker_id='worker', lease_id='lease',
                device_id='device', serial='serial', package='package', version_name='372', candidate_sha=BASE)
@@ -348,7 +368,8 @@ class RunnerIntegrationTests(unittest.TestCase):
     _APPROVED_446_HUNKS["instagram_navigation.py"].append((b'    if not _followers_row_activity_allowed(d, expected_package, current_activity):\n', b'    if not (\n        "instagrammainactivity" in activity_norm\n        or activity_norm.endswith(".mainactivity")\n        or "profileactivity" in activity_norm\n    ):\n'))
 
     def _assert_navigation_a0_with_exact_446_delta(self, name, candidate):
-        normalized = candidate
+        normalized = (restore_exact_like_budget_delta(candidate.decode()).encode()
+                      if name == "instagram_navigation.py" else candidate)
         for current, original in self._APPROVED_446_HUNKS.get(name, ()):
             self.assertEqual(normalized.count(current), 1,
                              "approved446 hunk missing, duplicated or modified: " + name)
@@ -391,3 +412,58 @@ class RunnerIntegrationTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+
+class LikeBudgetExactFreezeTests(unittest.TestCase):
+    def test_exact_hunks_reconstruct_signed_baseline(self):
+        source = (ROOT / 'instagram_navigation.py').read_text()
+        expected = subprocess.check_output(['git','show',
+            '8519f1c16284a7f4f4185e898b0b281d8ea27e72:instagram_navigation.py'],cwd=ROOT,text=True)
+        self.assertEqual(restore_exact_like_budget_delta(source),expected)
+        for approved, original in LIKE_BUDGET_EXACT_HUNKS:
+            self.assertEqual(source.count(approved),1)
+
+    def test_missing_changed_duplicate_and_moved_hunks_fail(self):
+        source = (ROOT / 'instagram_navigation.py').read_text()
+        for approved, original in LIKE_BUDGET_EXACT_HUNKS:
+            for mutated in (source.replace(approved,original,1),
+                            source.replace(approved,approved+'# unauthorized byte\n',1),
+                            source+approved,
+                            source.replace(approved,'',1)+approved):
+                with self.subTest(hunk=hashlib.sha256(approved.encode()).hexdigest()), self.assertRaises(AssertionError):
+                    restore_exact_like_budget_delta(mutated)
+
+    def test_unrelated_semantic_and_business_mutations_fail(self):
+        source = (ROOT / 'instagram_navigation.py').read_text()
+        names = ('_ui_post_viewer_action_button_liked_strict',
+                 '_ui_post_viewer_liked_state_for_verify','visual_verify_post_liked',
+                 '_visual_filled_heart_red_ratio','_hierarchy_liked_state_for_post_verify',
+                 '_followers_row_activity_allowed','visual_like_open_post')
+        tree = ast.parse(source)
+        for name in names:
+            node = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name == name)
+            lines = source.splitlines(True)
+            lines.insert(node.end_lineno,'# unauthorized semantic/budget/selector/ROI/XML/old446 delta\n')
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                restore_exact_like_budget_delta(''.join(lines))
+        for old,new in [('timeout=0.14','timeout=0.15'),
+                        ('row_feed_button_like','row_feed_button_wrong'),
+                        ('semantic_deadline=semantic_deadline','semantic_deadline=None')]:
+            self.assertIn(old,source)
+            with self.subTest(change=old), self.assertRaises(AssertionError):
+                restore_exact_like_budget_delta(source.replace(old,new,1))
+        with self.assertRaises(AssertionError):
+            restore_exact_like_budget_delta(source+'\n')
+
+    def test_reentry_follow_mute_return_ct_v1_routing_remain_exact(self):
+        hashes = {'follow_action_engine.py': '3240d8d6aa4f3ed59a3615706f8104644696910ca0e71a9f4e44598f7a6fb9df', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652', 'runner.py': '290ee55729856b9d3f4f821bce43b4e0a10a4903755c95fcfd4b7dbdb90e6829', 'follow60_ordering_v2_behavioral_canary_v1.py': '57f75c698c550e8ac943ac7da67498058c5cbe2c8139200d8eb1966a892eb92e'}
+        def assert_exact(name, content):
+            if hashlib.sha256(content).hexdigest() != hashes[name]:
+                raise AssertionError('business_companion_changed:' + name)
+        for name in hashes:
+            content = (ROOT/name).read_bytes()
+            assert_exact(name,content)
+            for bad in (content+b'\n',content[:-1],b'# changed reentry/fallback\n'+content):
+                with self.subTest(name=name), self.assertRaises(AssertionError):
+                    assert_exact(name,bad)

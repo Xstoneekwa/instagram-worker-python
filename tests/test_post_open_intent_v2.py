@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import instagram_navigation as nav
+from tests.test_certification_admission import restore_exact_like_budget_delta
 import post_open_intent_v2 as intent_v2
 from tests.test_follow60_ordering_v2_behavioral_canary_v1 import _binding, _stable
 
@@ -464,7 +465,7 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
                 src = src.replace(new, old, 1)
             return src
         def assert_exact_baseline(src):
-            restored = restore_viewer_activity(src)
+            restored = restore_viewer_activity(restore_exact_like_budget_delta(src))
             self.assertEqual(omit_helper(restored.replace(call,call.replace("                    device_context=d,\n",""),1)),omit_helper(self.old))
         assert_exact_baseline(current)
         for new, old in viewer_activity_hunks:

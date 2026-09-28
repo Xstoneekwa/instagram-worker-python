@@ -31874,6 +31874,8 @@ def _ui_post_viewer_broad_like_chrome_hint(d: u2.Device) -> tuple[bool, str, flo
 
 def _ui_post_viewer_action_button_liked_strict(
     d: u2.Device,
+    *,
+    semantic_deadline: float | None = None,
 ) -> tuple[bool, str, float, dict[str, Any]]:
     """Trusted already-liked: exact Unlike (or localized) on the action heart button."""
     checks: list[tuple[str, Callable[[], object], float]] = [
@@ -31887,6 +31889,8 @@ def _ui_post_viewer_action_button_liked_strict(
         ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$"), 0.9),
     ]
     for method, pred, conf in checks:
+        if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:
+            return False, "", 0.0, {}
         try:
             el = pred()
             if not el.exists(timeout=0.14):
@@ -32728,12 +32732,16 @@ def _ui_heart_button_trusted_for_post_verify(proof: dict[str, Any], d: u2.Device
 
 def _ui_post_viewer_liked_state_for_verify(
     d: u2.Device,
+    *,
+    semantic_deadline: float | None = None,
 ) -> tuple[bool, str, float, dict[str, Any]]:
     """
     Post-tap verification only: accept Unlike / Double tap to unlike on the real heart control.
     Does not use broad engagement or 'Liked by' (filtered in _verify_post_tap_text_is_unlike_semantic).
     """
-    ok, method, conf, proof = _ui_post_viewer_action_button_liked_strict(d)
+    ok, method, conf, proof = _ui_post_viewer_action_button_liked_strict(
+        d, semantic_deadline=semantic_deadline
+    )
     if ok:
         return True, method, conf, proof
 
@@ -32750,6 +32758,8 @@ def _ui_post_viewer_liked_state_for_verify(
         ),
     ]
     for method_label, pred, conf in probes:
+        if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:
+            return False, "", 0.0, {}
         try:
             el = pred()
             if not el.exists(timeout=0.16):
@@ -32760,6 +32770,9 @@ def _ui_post_viewer_liked_state_for_verify(
                 return True, "ui_action_button_unlike", conf, proof
         except Exception:
             continue
+
+    if semantic_deadline is not None and time.perf_counter() >= semantic_deadline:
+        return False, "", 0.0, {}
 
     try:
         el = d(resourceId="com.instagram.android:id/row_feed_button_like")
@@ -33724,7 +33737,7 @@ def visual_verify_post_liked(
                 fail_snap["semantic_result"] = continuity_reason
                 break
             ok_ui, method_ui, conf_ui, proof_ui = (
-                _ui_post_viewer_liked_state_for_verify(d)
+                _ui_post_viewer_liked_state_for_verify(d, semantic_deadline=semantic_deadline)
             )
             if proof_ui:
                 fail_snap["last_ui_candidate_method"] = str(
