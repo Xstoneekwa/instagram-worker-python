@@ -1137,6 +1137,7 @@ def _run_follow_target_rotation(
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
     account_session_snapshot: AccountSessionCPlusSnapshot | None = None,
+    verified_current_account_username: str | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -1377,6 +1378,8 @@ def _run_follow_target_rotation(
             "worker_runtime_identity": worker_runtime_identity,
             "account_session_snapshot": account_session_snapshot,
         }
+        if verified_current_account_username is not None:
+            call_kwargs["verified_current_account_username"] = verified_current_account_username
         if follow60_canary_active:
             call_kwargs.update(
                 {
@@ -5010,6 +5013,7 @@ def run_account_session(
     follow60_mainline_active: bool = False,
     follow60_business_session_binding: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
+    verified_current_account_username: str | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
     _LAST_ACCOUNT_SESSION_SUMMARY = {}
@@ -5562,6 +5566,7 @@ def run_account_session(
                 )
                 rotation_result = _run_follow_target_rotation(
                     d,
+                    verified_current_account_username=verified_current_account_username,
                     account_id=aid,
                     account_username=uname,
                     run_id=run_id,
@@ -6734,9 +6739,11 @@ def dispatch_account_session(
     follow60_mainline_active: bool = False,
     follow60_business_session_binding: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
+    verified_current_account_username: str | None = None,
 ) -> int:
     return run_account_session(
         d,
+        verified_current_account_username=verified_current_account_username,
         account_id=account_id,
         account_username=account_username,
         run_id=run_id,

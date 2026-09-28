@@ -18,6 +18,22 @@ import certification_admission as ca
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'a0d995be8df3ea1a773c572bc900aa1d3a360df6'
 
+# Exact inverse of the signed XML-self delta. Full restored historical hashes
+# enforce position and all other bytes; no whole-file exclusion or hash replacement.
+SELF_XML_BASE_HASHES = {'runner.py': '290ee55729856b9d3f4f821bce43b4e0a10a4903755c95fcfd4b7dbdb90e6829', 'account_session_orchestrator.py': 'ff22ffb59d7b1dd73e502fe32d374084c76b9a63b2a75ca692c7b94081c6839c'}
+SELF_XML_EXACT_HUNKS = {'runner.py': [('    auto_restart_resume_policy: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    account_session_snapshot: Any | None = None,\n    verified_current_account_username: str | None = None,\n) -> int:\n    """\n    Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.\n', '    auto_restart_resume_policy: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    account_session_snapshot: Any | None = None,\n) -> int:\n    """\n    Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.\n'), ('    global _RUNTIME_SKIPPED_USERNAMES\n    global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION\n    _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0\n    _verified_current_account_key = _norm_ig_handle(verified_current_account_username or "")\n    _snapshot_payload = (\n        account_session_snapshot.to_payload()\n        if hasattr(account_session_snapshot, "to_payload")\n', '    global _RUNTIME_SKIPPED_USERNAMES\n    global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION\n    _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0\n    _snapshot_payload = (\n        account_session_snapshot.to_payload()\n        if hasattr(account_session_snapshot, "to_payload")\n'), ('                    return None\n                for c in cand_list:\n                    ckey = _norm_ig_handle(str(c.get("username") or ""))\n                    if _verified_current_account_key and ckey == _verified_current_account_key:\n                        log(\n                            "info",\n                            "followers_candidate_skipped_source_account_self",\n                            username=c.get("username"),\n                            source_profile_username=source_profile_username,\n                            skip_reason="source_account_self",\n                        )\n                        _expl_v1.note_visible_skip("source_account_self")\n                        continue\n                    if ckey == src_key:\n                        log(\n                            "info",\n', '                    return None\n                for c in cand_list:\n                    ckey = _norm_ig_handle(str(c.get("username") or ""))\n                    if ckey == src_key:\n                        log(\n                            "info",\n'), ('        ),\n    )\n\n    verified_current_account_username = None\n    if (\n        supabase_mode\n        and not unfollow_session_run\n', '        ),\n    )\n\n    if (\n        supabase_mode\n        and not unfollow_session_run\n'), ('                target_username=account_username or None,\n            )\n            return _return_with_cleanup(d, 75)\n        if isinstance(identity.actual_logged_in_username, str):\n            verified_current_account_username = identity.actual_logged_in_username or None\n\n    if account_session_run and supabase_mode and account_id:\n        from auto_restart_runtime import load_resume_policy_from_env\n', '                target_username=account_username or None,\n            )\n            return _return_with_cleanup(d, 75)\n\n    if account_session_run and supabase_mode and account_id:\n        from auto_restart_runtime import load_resume_policy_from_env\n'), ('        )\n        asess_code = dispatch_account_session(\n            d,\n            verified_current_account_username=verified_current_account_username,\n            account_id=account_id,\n            account_username=account_username,\n            run_id=run_id or None,\n', '        )\n        asess_code = dispatch_account_session(\n            d,\n            account_id=account_id,\n            account_username=account_username,\n            run_id=run_id or None,\n'), ('        )\n        eng_code = _run_followers_list_engine_session(\n            d,\n            verified_current_account_username=verified_current_account_username,\n            source_profile_username=source_profile_username,\n            account_id=account_id,\n            run_id=run_id,\n', '        )\n        eng_code = _run_followers_list_engine_session(\n            d,\n            source_profile_username=source_profile_username,\n            account_id=account_id,\n            run_id=run_id,\n')], 'account_session_orchestrator.py': [('    auto_restart_resume_policy: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    account_session_snapshot: AccountSessionCPlusSnapshot | None = None,\n    verified_current_account_username: str | None = None,\n) -> dict[str, Any]:\n    total_targets = len(follow_targets)\n    max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)\n', '    auto_restart_resume_policy: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    account_session_snapshot: AccountSessionCPlusSnapshot | None = None,\n) -> dict[str, Any]:\n    total_targets = len(follow_targets)\n    max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)\n'), ('            "worker_runtime_identity": worker_runtime_identity,\n            "account_session_snapshot": account_session_snapshot,\n        }\n        if verified_current_account_username is not None:\n            call_kwargs["verified_current_account_username"] = verified_current_account_username\n        if follow60_canary_active:\n            call_kwargs.update(\n                {\n', '            "worker_runtime_identity": worker_runtime_identity,\n            "account_session_snapshot": account_session_snapshot,\n        }\n        if follow60_canary_active:\n            call_kwargs.update(\n                {\n'), ('    follow60_mainline_active: bool = False,\n    follow60_business_session_binding: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    verified_current_account_username: str | None = None,\n) -> int:\n    global _LAST_ACCOUNT_SESSION_SUMMARY\n    _LAST_ACCOUNT_SESSION_SUMMARY = {}\n', '    follow60_mainline_active: bool = False,\n    follow60_business_session_binding: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n) -> int:\n    global _LAST_ACCOUNT_SESSION_SUMMARY\n    _LAST_ACCOUNT_SESSION_SUMMARY = {}\n'), ('                )\n                rotation_result = _run_follow_target_rotation(\n                    d,\n                    verified_current_account_username=verified_current_account_username,\n                    account_id=aid,\n                    account_username=uname,\n                    run_id=run_id,\n', '                )\n                rotation_result = _run_follow_target_rotation(\n                    d,\n                    account_id=aid,\n                    account_username=uname,\n                    run_id=run_id,\n'), ('    follow60_mainline_active: bool = False,\n    follow60_business_session_binding: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n    verified_current_account_username: str | None = None,\n) -> int:\n    return run_account_session(\n        d,\n        verified_current_account_username=verified_current_account_username,\n        account_id=account_id,\n        account_username=account_username,\n        run_id=run_id,\n', '    follow60_mainline_active: bool = False,\n    follow60_business_session_binding: dict[str, Any] | None = None,\n    worker_runtime_identity: WorkerRuntimeIdentity | None = None,\n) -> int:\n    return run_account_session(\n        d,\n        account_id=account_id,\n        account_username=account_username,\n        run_id=run_id,\n')]}
+
+
+def restore_exact_self_xml_delta(name, source):
+    for approved, original in SELF_XML_EXACT_HUNKS[name]:
+        if source.count(approved) != 1:
+            raise AssertionError('self_xml_hunk_missing_altered_or_duplicated:' + name)
+        source = source.replace(approved, original, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != SELF_XML_BASE_HASHES[name]:
+        raise AssertionError('self_xml_unapproved_delta_or_position:' + name)
+    return source
+
+
 # Exact signed Like Verify delta. Whole-source hashes pin hunk locations as well
 # as bytes; no function/range exclusion and no generic whitespace normalization.
 LIKE_BUDGET_SOURCE_SHA256 = 'fe3fba2c7b5051a4e5f95adfd98a316ac294de3b87d2b26e6eaa84b0617e2d30'
@@ -322,7 +338,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         original_hook = '        stable, proof_reason = build_stable_candidate_proof_v2(\n            binding=binding,\n'
         self.assertEqual(self.source.count(hook), 1)
         self.assertEqual(self.source.count('            device_context=d,\n'), 1)
-        candidate=Strip().visit(ast.parse(self.source.replace(neutral, "", 1).replace(hook, original_hook, 1)))
+        candidate=Strip().visit(ast.parse(restore_exact_self_xml_delta("runner.py", self.source).replace(neutral, "", 1).replace(hook, original_hook, 1)))
         self.assertEqual(ast.dump(candidate,include_attributes=False),ast.dump(self.baseline,include_attributes=False))
 
     def test_approved_neutral_init_rejects_other_runner_deltas(self):
@@ -463,7 +479,41 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
                 raise AssertionError('business_companion_changed:' + name)
         for name in hashes:
             content = (ROOT/name).read_bytes()
+            if name == "runner.py":
+                content = restore_exact_self_xml_delta(name, content.decode()).encode()
             assert_exact(name,content)
             for bad in (content+b'\n',content[:-1],b'# changed reentry/fallback\n'+content):
                 with self.subTest(name=name), self.assertRaises(AssertionError):
                     assert_exact(name,bad)
+
+
+class SelfXmlExactFreezeTests(unittest.TestCase):
+    def test_exact_inverse_and_missing_altered_duplicate_or_moved_hunks(self):
+        for name, hunks in SELF_XML_EXACT_HUNKS.items():
+            source = (ROOT/name).read_text()
+            restored = restore_exact_self_xml_delta(name, source)
+            self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), SELF_XML_BASE_HASHES[name])
+            for approved, original in hunks:
+                for bad in (source.replace(approved, original, 1),
+                            source.replace(approved, approved.replace('verified_current_account', 'wrong_current_account'), 1),
+                            source + approved,
+                            source.replace(approved, '', 1) + approved):
+                    with self.subTest(name=name), self.assertRaises(AssertionError):
+                        restore_exact_self_xml_delta(name, bad)
+
+    def test_business_and_orchestrator_mutations_remain_rejected(self):
+        for name, surfaces in [('runner.py', ('reentry', 'Follow', 'Mute', 'Return CT', 'checkpoint/resume', 'extra byte')),
+                               ('account_session_orchestrator.py', ('Target Availability', 'rotation', 'unapproved propagation'))]:
+            source = (ROOT/name).read_text()
+            tree = ast.parse(source)
+            # Inject a byte inside real functions as well as at file end. Nothing
+            # outside the authorized hunks may be swallowed by normalization.
+            functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+            for i, surface in enumerate(surfaces):
+                node = functions[i % len(functions)]
+                lines = source.splitlines(True)
+                lines.insert(node.end_lineno, '# unauthorized ' + surface + '\n')
+                with self.subTest(name=name, surface=surface), self.assertRaises(AssertionError):
+                    restore_exact_self_xml_delta(name, ''.join(lines))
+            with self.assertRaises(AssertionError):
+                restore_exact_self_xml_delta(name, source + '\n')

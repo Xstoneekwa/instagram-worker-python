@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import instagram_navigation as nav
-from tests.test_certification_admission import restore_exact_like_budget_delta
+from tests.test_certification_admission import restore_exact_like_budget_delta, restore_exact_self_xml_delta
 import post_open_intent_v2 as intent_v2
 from tests.test_follow60_ordering_v2_behavioral_canary_v1 import _binding, _stable
 
@@ -475,7 +475,10 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_exact_baseline(current + "\n# unrelated navigation delta\n")
         for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
-            self.assertEqual((self.root/name).read_bytes(),subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
+            current_bytes = (self.root/name).read_bytes()
+            if name == "runner.py":
+                current_bytes = restore_exact_self_xml_delta(name, current_bytes.decode()).encode()
+            self.assertEqual(current_bytes,subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
 
 if __name__ == "__main__":
     unittest.main()

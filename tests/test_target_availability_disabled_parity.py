@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import account_session_orchestrator as session
+from tests.test_certification_admission import restore_exact_self_xml_delta
 
 
 PRODUCTION_BASE_SHA = "8f6d16c772236450b22d167239223ca3eae30e7d"
@@ -504,6 +505,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         )
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
+        current_source = restore_exact_self_xml_delta("account_session_orchestrator.py", current_source)
         # No business delta may hide inside normalization of historical additions.
         canonical = subprocess.check_output(["git", "show",
             "a0d995be8df3ea1a773c572bc900aa1d3a360df6:account_session_orchestrator.py"], cwd=root, text=True)

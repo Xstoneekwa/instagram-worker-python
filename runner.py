@@ -12981,6 +12981,7 @@ def _run_followers_list_engine_session(
     auto_restart_resume_policy: dict[str, Any] | None = None,
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
     account_session_snapshot: Any | None = None,
+    verified_current_account_username: str | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -12990,6 +12991,7 @@ def _run_followers_list_engine_session(
     global _RUNTIME_SKIPPED_USERNAMES
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+    _verified_current_account_key = _norm_ig_handle(verified_current_account_username or "")
     _snapshot_payload = (
         account_session_snapshot.to_payload()
         if hasattr(account_session_snapshot, "to_payload")
@@ -18401,6 +18403,16 @@ def _run_followers_list_engine_session(
                     return None
                 for c in cand_list:
                     ckey = _norm_ig_handle(str(c.get("username") or ""))
+                    if _verified_current_account_key and ckey == _verified_current_account_key:
+                        log(
+                            "info",
+                            "followers_candidate_skipped_source_account_self",
+                            username=c.get("username"),
+                            source_profile_username=source_profile_username,
+                            skip_reason="source_account_self",
+                        )
+                        _expl_v1.note_visible_skip("source_account_self")
+                        continue
                     if ckey == src_key:
                         log(
                             "info",
@@ -27715,6 +27727,7 @@ def _main_impl() -> int:
         ),
     )
 
+    verified_current_account_username = None
     if (
         supabase_mode
         and not unfollow_session_run
@@ -27814,6 +27827,8 @@ def _main_impl() -> int:
                 target_username=account_username or None,
             )
             return _return_with_cleanup(d, 75)
+        if isinstance(identity.actual_logged_in_username, str):
+            verified_current_account_username = identity.actual_logged_in_username or None
 
     if account_session_run and supabase_mode and account_id:
         from auto_restart_runtime import load_resume_policy_from_env
@@ -28985,6 +29000,7 @@ def _main_impl() -> int:
         )
         asess_code = dispatch_account_session(
             d,
+            verified_current_account_username=verified_current_account_username,
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
@@ -29152,6 +29168,7 @@ def _main_impl() -> int:
         )
         eng_code = _run_followers_list_engine_session(
             d,
+            verified_current_account_username=verified_current_account_username,
             source_profile_username=source_profile_username,
             account_id=account_id,
             run_id=run_id,
