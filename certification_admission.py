@@ -11,6 +11,8 @@ import json
 import os
 import re
 import tempfile
+import time
+import math
 from threading import RLock
 
 IDENTITY_UNPROVED = 'certification_candidate_identity_unproved_pre_transport'
@@ -55,6 +57,9 @@ class _PermitStore:
     """
     def __init__(self, directory, binding):
         self.binding = json.loads(_bytes(binding))
+        self.limit = binding.get('max_candidate_admissions', 1)
+        if type(self.limit) is not int or self.limit not in (1, 2):
+            raise CertificationStop('PERMIT_INVALID')
         self.pid = os.getpid()
         self.fd = None
         self.mutex = RLock()
@@ -80,6 +85,8 @@ class _PermitStore:
                 os.fsync(fd)
                 self._sync_parent()
                 self._write({'binding': self.binding, 'state': 'AVAILABLE', 'candidate_key': None})
+            if not created and self.limit == 2:
+                raise CertificationStop('PERMIT_RESTART_FORBIDDEN')
             self._read()
         except (OSError, ValueError, TypeError, CertificationStop) as exc:
             self.close()
@@ -118,8 +125,14 @@ class _PermitStore:
                 raise CertificationStop('PERMIT_INVALID')
             if value['state'] == 'CONSUMED_BOUND' and not isinstance(value.get('candidate_key'), list):
                 raise CertificationStop('PERMIT_INVALID')
+            if self.limit == 2 and value.get('candidate_key') is not None:
+                slots = value.get('slots')
+                if not isinstance(slots, list) or not 1 <= len(slots) <= 2 or value['candidate_key'] != slots[-1]['key']:
+                    raise CertificationStop('PERMIT_INVALID')
+                if len({slot['key'][3] for slot in slots}) != len(slots):
+                    raise CertificationStop('PERMIT_INVALID')
             return value
-        except (OSError, ValueError, TypeError, AttributeError) as exc:
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise CertificationStop('PERMIT_INVALID') from exc
 
     def admit(self, key):
@@ -132,10 +145,31 @@ class _PermitStore:
             raise CertificationStop('PERMIT_ALREADY_TERMINAL')
         if value['state'] == 'AVAILABLE':
             value.update(state='CONSUMED_BOUND', candidate_key=list(key))
+            if self.limit == 2:
+                value['slots'] = [{'key': list(key), 'admitted_at_monotonic': time.monotonic()}]
             self._write(value)
             return 'FIRST_ADMISSION_GRANTED'
         if value['candidate_key'] == list(key):
             return 'SAME_CANDIDATE_REENTRY_GRANTED'
+        if self.limit == 2:
+            slots = value['slots']
+            if any(slot['key'][3] == key[3] for slot in slots):
+                self.terminal('PRIOR_CANDIDATE_REENTRY_BLOCKED')
+                raise CertificationStop('PRIOR_CANDIDATE_REENTRY_BLOCKED')
+            if len(slots) == 2:
+                self.terminal('THIRD_CANDIDATE_BLOCKED')
+                raise CertificationStop('THIRD_CANDIDATE_BLOCKED')
+            try:
+                cycles = read_certification_cycles(self.binding, slots)
+            except Exception as exc:
+                self.terminal('PREVIOUS_CYCLE_UNPROVED')
+                raise CertificationStop('PREVIOUS_CYCLE_UNPROVED') from exc
+            slots[0]['completed_action_id'] = cycles[0].scope.action_id
+            slots[0]['completed_receipt_hashes'] = {k:v.payload_hash for k,v in cycles[0].receipts.items()}
+            slots.append({'key':list(key), 'admitted_at_monotonic':time.monotonic()})
+            value.update(candidate_key=list(key), slots=slots)
+            self._write(value)
+            return 'SECOND_ADMISSION_GRANTED'
         self.terminal('SECOND_CANDIDATE_BLOCKED')
         raise CertificationStop('SECOND_CANDIDATE_BLOCKED')
 
@@ -207,11 +241,26 @@ def configure_from_signed_permit(*, manifest_path, signature_path, permit_id,
         required = {'permit_id', 'nonce', 'candidate_sha', 'account_id', 'serial', 'package',
                     'device_id', 'version_name', 'certification_not_before', 'certification_expires_at',
                     'max_candidate_admissions'}
-        if set(claims) != required or type(claims['max_candidate_admissions']) is not int or claims['max_candidate_admissions'] != 1:
+        if set(claims) != required or type(claims['max_candidate_admissions']) is not int or claims['max_candidate_admissions'] not in (1, 2):
             raise CertificationStop('PERMIT_INVALID')
         if any(type(claims[k]) is not str or not claims[k] or claims[k].strip() != claims[k]
                for k in required - {'max_candidate_admissions'}):
             raise CertificationStop('PERMIT_INVALID')
+        if claims['max_candidate_admissions'] == 2:
+            exact = {'account_id':'76c1dff8-d16a-40cf-83df-8138d2ca5bd4',
+                     'device_id':'ddec36ad-19d8-4f00-9f7d-a8c2d29fe540', 'serial':'RFGL62N646V',
+                     'package':'com.instagram.android', 'version_name':'446.0.0.49.77'}
+            if any(claims.get(k) != v for k,v in exact.items()):
+                raise CertificationStop('PERMIT_INVALID')
+            sql = [p for p in manifest.get('physical_canary_permits', []) if p.get('permit_id') == permit_id]
+            if len(sql) != 1 or type(sql[0].get('max_candidate_admissions')) is not int or sql[0]['max_candidate_admissions'] != 2:
+                raise CertificationStop('PERMIT_INVALID')
+            mapped = {'account':'account_id', 'device_id':'device_id', 'serial':'serial',
+                      'package':'package', 'version_name':'version_name', 'nonce':'nonce', 'candidate_sha':'candidate_sha'}
+            if any(sql[0].get(k) != claims[v] for k,v in mapped.items()) or sql[0].get('app_instance_id') != '36495109-0581-408c-baf0-d419c5caf534' or type(sql[0].get('version_code')) is not int or sql[0]['version_code'] != 385211304:
+                raise CertificationStop('PERMIT_INVALID')
+            if _utc(sql[0].get('expires_at')) != _utc(claims['certification_expires_at']):
+                raise CertificationStop('PERMIT_INVALID')
         if claims['candidate_sha'] != manifest.get('certified_candidate_sha'):
             raise CertificationStop('BINDING_MISMATCH')
         expected = {'run_id', 'request_id', 'worker_id', 'lease_id', 'account_id', 'serial',
@@ -229,6 +278,8 @@ def configure_from_signed_permit(*, manifest_path, signature_path, permit_id,
         if not _utc(claims['certification_not_before']) <= now < _utc(claims['certification_expires_at']):
             raise CertificationStop('PERMIT_INVALID')
         binding = dict(execution_binding, permit_id=permit_id, permit_hash=hashlib.sha256(_bytes(claims)).hexdigest())
+        if claims['max_candidate_admissions'] == 2:
+            binding['max_candidate_admissions'] = 2
         _canonical_authority(binding)
         # Root creation belongs to the governed launcher, never implicit issuance recovery.
         store = _PermitStore(directory, binding)
@@ -311,3 +362,69 @@ def mark_terminal(reason):
             store.terminal(reason)
         finally:
             store.close()
+
+
+def read_certification_cycles(binding, slots):
+    """Bounded read-only replay of exact durable receipts; never UI truth creation.
+
+    Fresh run/request plus admission monotonic boundary exclude earlier receipts.
+    Mode2 restart is forbidden: monotonic evidence is never compared across boots.
+    """
+    import sqlite3
+    from follow60_ordering_v2_ledger_v1 import DEFAULT_PATH, LedgerScope, OrderingLedger
+    path = Path(DEFAULT_PATH)
+    if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file():
+        raise ValueError('business_ledger_missing')
+    if not isinstance(slots, list) or not 1 <= len(slots) <= 2:
+        raise ValueError('slot_count_invalid')
+    with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=3) as conn:
+        conn.row_factory=sqlite3.Row
+        rows=list(conn.execute('SELECT * FROM follow60_ordering_v2_receipts WHERE account_id=? AND run_id=? AND request_id=? ORDER BY created_at_monotonic,rowid LIMIT 25',
+                              (binding['account_id'],binding['run_id'],binding['request_id'])))
+    if not rows or len(rows) >= 25:
+        raise ValueError('ledger_missing_or_excessive')
+    if len({r['action_id'] for r in rows}) != len(slots):
+        raise ValueError('action_count_mismatch')
+    keys=('account_id','run_id','request_id','business_session_id','target_id','action_id','candidate_username','ordering_version')
+    cycles=[]
+    for index,slot in enumerate(slots):
+        key=slot['key']
+        if len(key)!=4 or key[:2] != [binding['run_id'],binding['account_id']]:
+            raise ValueError('slot_binding_mismatch')
+        group=[r for r in rows if r['candidate_username']==key[3]]
+        if not group:
+            raise ValueError('candidate_receipts_missing')
+        scope=LedgerScope(**{k:group[0][k] for k in keys});ledger=OrderingLedger(scope)
+        floor=slot['admitted_at_monotonic']
+        ceiling=slots[index+1]['admitted_at_monotonic'] if index+1<len(slots) else time.monotonic()
+        if not isinstance(floor,(int,float)) or isinstance(floor,bool) or not math.isfinite(floor) or not 0<floor<=ceiling:
+            raise ValueError('admission_time_invalid')
+        payloads={}
+        for row in group:
+            stamp=row['created_at_monotonic']
+            if not all(row[k]==getattr(scope,k) for k in keys) or row['stage'] in payloads or row['acknowledged'] not in (0,1):
+                raise ValueError('ledger_scope_or_duplicate')
+            if not math.isfinite(stamp) or not floor<=stamp<=ceiling:
+                raise ValueError('stale_receipt')
+            payload=json.loads(row['payload_json']);ack=ledger.apply_receipt(row['stage'],payload)
+            if ack['idempotency_key']!=row['idempotency_key'] or ledger.receipts[row['stage']].payload_hash!=row['payload_hash']:
+                raise ValueError('ledger_corrupt')
+            payloads[row['stage']]=payload
+        required={'profile_certified','post_opened','like_verified','profile_reentry_verified','follow_pending','follow_verified','mute_posts_verified','mute_stories_verified','return_ct_exact','cycle_complete'}
+        if ledger.stages != required:
+            raise ValueError('cycle_stages_unproved')
+        like=payloads['like_verified'];follow=payloads['follow_verified'];cycle=payloads['cycle_complete']
+        if not (like.get('like_action_state')=='LIKE_ACTION_PERFORMED_NOW' and like.get('real_tap_sent') is True and like.get('fresh_like_verified') is True):
+            raise ValueError('real_like_unproved')
+        if not (follow.get('tap_sent') is True and follow.get('follow_state_after')=='following' and follow.get('candidate_username')==key[3]):
+            raise ValueError('real_follow_unproved')
+        if not all(payloads[s].get('verified') is True for s in ('mute_posts_verified','mute_stories_verified','return_ct_exact')):
+            raise ValueError('verification_unproved')
+        if cycle.get('critical_persistence_acknowledged') is not True or cycle.get('candidate_username')!=key[3]:
+            raise ValueError('cycle_persistence_unproved')
+        if 'completed_action_id' in slot and (slot['completed_action_id']!=scope.action_id or slot['completed_receipt_hashes']!={k:v.payload_hash for k,v in ledger.receipts.items()}):
+            raise ValueError('completed_cycle_changed')
+        cycles.append(ledger)
+    if len({c.scope.action_id for c in cycles})!=len(slots) or len({c.scope.candidate_username for c in cycles})!=len(slots) or sum(len(c.receipts) for c in cycles)!=len(rows):
+        raise ValueError('cycle_scope_overlap')
+    return cycles

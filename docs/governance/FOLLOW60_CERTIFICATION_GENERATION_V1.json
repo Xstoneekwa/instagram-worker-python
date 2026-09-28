@@ -1,5 +1,14 @@
 {
-  "certification_admission_contract_version": "A0_CERTIFICATION_ADMISSION_V1",
+  "certification_admission_contract_version": "A0_CERTIFICATION_ADMISSION_V2",
+  "certification_candidate_capacity": {
+    "default": 1,
+    "explicit_signed_A16_03": 2,
+    "other_values": "REJECT",
+    "production_configuration_can_activate": false,
+    "restart_mode2": "FAIL_CLOSED_NO_REFUND",
+    "temporary": true,
+    "third_candidate": "BLOCKED_BEFORE_TRANSPORT"
+  },
   "certification_test_tuple": {
     "account": "nab_youss",
     "account_id": "76c1dff8-d16a-40cf-83df-8138d2ca5bd4",
@@ -18,20 +27,17 @@
     "version_name": "446.0.0.49.77"
   },
   "external_certification_migration": {
-    "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json",
-    "installation_evidence_sha256": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
-    "installed": true,
-    "live_installation_requires_separate_explicit_authorization": false,
-    "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260925195140_follow60_certification_a1603_isolation_v1.sql",
-    "server_migration_version": "20260925204354",
-    "sha256": "54467f700bb5121a608e1a3a450ef740c564553f38e30d35810810592c8d689e"
+    "installed": false,
+    "live_installation_requires_separate_explicit_authorization": true,
+    "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260928182812_follow60_certification_a1603_two_candidate_v1.sql",
+    "sha256": "902e84debc0508ce2e7258743b700ba3c7b0f46ac3fff71ee17f6c26d2330070"
   },
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
     "canary_child.py": "f8e25cc1543721e79d0790a85a9a50a8c3e8f0d53713b0d69b18606203177e5f",
-    "canary_contract.py": "1583e4a554a0c85e44b6fd62a68c2f11004ac21721d889a767b70ec1172ac2c3",
+    "canary_contract.py": "0ccd9080bef4b20fd2a2d2ad90815512d2eb15b7981df12c9724038bae6917a1",
     "canary_launcher.py": "382a9dfb61275b290e82cb6d626da746aad0fc97102a22dd33ebe07a0eb858ca",
-    "tests/test_canary_launcher.py": "abfbdfac9fb373d9fc2020d6e3793cb41412a227cb9f7b0be2b787417f63d6f1"
+    "tests/test_canary_launcher.py": "be34c0d3b59c8e5b3f2c6c5616c76af41f8b2158eaf175081564cbedd3a64e8c"
   },
   "fresh_execution_context_evidence": {
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/adb-transport-diagnostic-20260926/RESULT.json": "ff53da562f526ea2802ff7e826fd95e907b2506482bae2e43cafb5c61fd69a29",
@@ -83,7 +89,16 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/tick-lock-readonly-audit-20260927/REPORT.md": "c2295951a2a6d7642b6a7bd9a831826615aaf5a6cdc3ad34080c07c2a32a5118",
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/tick-lock-readonly-audit-20260927/RESULT.json": "aca25089b9964766addd5239bbc74a8fdddf9a450861ebcf77a244b792cc800d"
   },
-  "previous_candidate_sha": "9b34c9fd8fdc7980bedaa91b375f9561669e70e1",
+  "previous_candidate_sha": "dc24e8a10445cadcdcb7c2f7bf7b9dac1b4df99a",
+  "previous_external_certification_migration": {
+    "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-a1603-isolation-canary/INSTALLATION_GATES.json",
+    "installation_evidence_sha256": "f6e60ade24de67c2ffc585a537cb89a10533c9e64f10ad6076354cf287a4b2fa",
+    "installed": true,
+    "live_installation_requires_separate_explicit_authorization": false,
+    "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260925195140_follow60_certification_a1603_isolation_v1.sql",
+    "server_migration_version": "20260925204354",
+    "sha256": "54467f700bb5121a608e1a3a450ef740c564553f38e30d35810810592c8d689e"
+  },
   "prior_authorization_evidence": [
     {
       "request_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-a1603-isolation/approval-1.json",
@@ -115,9 +130,19 @@
     "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/a1603-isolation-implementation/sql-complete/a1603-sql-results.json": "ef69fe7373e4f973f936803ce73e9a6ff9dc52bebdca285205c8dd7f82eec9fd"
   },
   "purpose": "446_a1603_fresh_business_canary_certification",
-  "qualification_scope": "Only this non-executable generation record changes. All 919 other candidate files and four launcher files unchanged. Full final-byte recertification, normal-hook commit, fresh Approval2, permit, nonce and signed window required. Previous stopped context retired; no reuse. No production promotion.",
-  "reason": "fresh_a1603_liketap_validation_after_tick_preflight_stop",
+  "qualification_scope": "Signed Suggestions and self-XML test-only governance corrections, isolated certification module and external contract, new dedicated SQL migration and tests. Full final-byte replay required. No runner, UI navigation, Mainline, scheduler, production quotas or assignment changes; no remote migration installation or promotion from this record.",
+  "reason": "explicit_signed_two_candidate_certification_only",
   "runtime_behavior_activation": false,
   "schema": "FOLLOW60_CERTIFICATION_GENERATION_V1",
+  "two_candidate_authorization": {
+    "approval-1.json": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-two-candidate-self-test-amendment/approval-1.json",
+      "sha256": "7fd32d79f9571ec4e32b7b1ebaf102453ad345c4ed195d0c4620b845f51e1511"
+    },
+    "approval-1.sig": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-two-candidate-self-test-amendment/approval-1.sig",
+      "sha256": "36871e8abecebd19636a17c7fa6ff5c9693d2877c09bab2108c5648a87f56197"
+    }
+  },
   "version": 1
 }

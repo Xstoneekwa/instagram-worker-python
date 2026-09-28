@@ -517,3 +517,239 @@ class SelfXmlExactFreezeTests(unittest.TestCase):
                     restore_exact_self_xml_delta(name, ''.join(lines))
             with self.assertRaises(AssertionError):
                 restore_exact_self_xml_delta(name, source + '\n')
+
+
+class TwoCandidateDurableCertificationTests(unittest.TestCase):
+    """Actual fsynced permit and actual canonical SQLite writer, no admission mock."""
+    def setUp(self):
+        import follow60_ordering_v2_ledger_v1 as lv
+        self.lv=lv
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.path=Path(self.tmp.name).resolve()/'receipts.sqlite'
+        p=patch.object(lv,'DEFAULT_PATH',self.path);p.start();self.addCleanup(p.stop)
+        self.binding=dict(BINDING,max_candidate_admissions=2)
+        self.store=ca._PermitStore(self.tmp.name,self.binding);self.addCleanup(self.store.close)
+
+    def cycle(self, name, action, *, complete=True):
+        scope=self.lv.LedgerScope('account','run','request','session','target',action,name)
+        store=self.lv.DurableOrderingLedgerV1(scope,path=self.path)
+        payloads=[('profile_certified',{'proof_hash':'profile-'+name}),('post_opened',{'verified':True}),
+            ('like_verified',{'like_action_state':'LIKE_ACTION_PERFORMED_NOW','real_tap_sent':True,'fresh_like_verified':True,'candidate_username':name,'action_id':action,'stable_proof_hash':'proof-'+name,'media_binding':'media-'+name}),
+            ('profile_reentry_verified',{'verified':True}),('follow_pending',{}),
+            ('follow_verified',{'tap_sent':True,'follow_state_after':'following','candidate_username':name}),
+            ('mute_posts_verified',{'verified':True}),('mute_stories_verified',{'verified':True}),
+            ('return_ct_exact',{'verified':True}),('cycle_complete',{'critical_persistence_acknowledged':True,'candidate_username':name})]
+        for stage,payload in (payloads if complete else payloads[:-1]):store.apply_receipt(stage,payload)
+        return store
+
+    def test_two_complete_cycles_third_blocked_zero_transport(self):
+        transports=[]
+        self.assertEqual(self.store.admit(KEY),'FIRST_ADMISSION_GRANTED');transports.append('alice')
+        self.cycle('alice','action-a')
+        self.assertEqual(self.store.admit(('run','account','ct','bob')),'SECOND_ADMISSION_GRANTED');transports.append('bob')
+        self.cycle('bob','action-b')
+        cycles=ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+        self.assertEqual([c.scope.action_id for c in cycles],['action-a','action-b'])
+        self.assertEqual(self.store.admit(('run','account','ct','bob')),'SAME_CANDIDATE_REENTRY_GRANTED')
+        with self.assertRaises(ca.CertificationStop) as e:
+            self.store.admit(('run','account','ct','charlie'));transports.append('charlie')
+        self.assertEqual(e.exception.reason,'THIRD_CANDIDATE_BLOCKED')
+        self.assertEqual(transports,['alice','bob'])
+
+    def test_missing_or_incomplete_first_cycle_blocks_second(self):
+        self.store.admit(KEY);self.cycle('alice','action-a',complete=False)
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(e.exception.reason,'PREVIOUS_CYCLE_UNPROVED')
+        self.assertEqual(len(self.store._read()['slots']),1)
+
+    def test_old_receipts_cannot_authorize_second(self):
+        self.cycle('alice','action-a');self.store.admit(KEY)
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(e.exception.reason,'PREVIOUS_CYCLE_UNPROVED')
+
+    def test_prior_candidate_reentry_rejected_after_second_admission(self):
+        self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'))
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(KEY)
+        self.assertEqual(e.exception.reason,'PRIOR_CANDIDATE_REENTRY_BLOCKED')
+
+    def test_restart_never_refunds_slots(self):
+        self.store.admit(KEY);self.store.close()
+        with self.assertRaises(ca.CertificationStop) as e:ca._PermitStore(self.tmp.name,self.binding)
+        self.assertEqual(e.exception.reason,'PERMIT_RESTART_FORBIDDEN')
+
+    def test_concurrent_session_cannot_open_same_permit(self):
+        with self.assertRaises(ca.CertificationStop):ca._PermitStore(self.tmp.name,self.binding)
+        self.assertEqual(self.store.admit(KEY),'FIRST_ADMISSION_GRANTED')
+
+    def test_changed_first_payload_rejected_after_second(self):
+        import sqlite3
+        self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'));self.cycle('bob','action-b')
+        with sqlite3.connect(self.path) as conn:conn.execute("UPDATE follow60_ordering_v2_receipts SET payload_json='{}' WHERE action_id='action-a' AND stage='return_ct_exact'")
+        with self.assertRaises(ValueError):ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+
+    def test_extra_action_rejected(self):
+        self.store.admit(KEY);self.cycle('alice','action-a');self.cycle('other','action-x')
+        with self.assertRaises(ca.CertificationStop):self.store.admit(('run','account','ct','bob'))
+
+    def test_fresh_tokens_and_memory_between_two_cycles(self):
+        import time
+        import followers_surface_proof as proof
+        import social_memory
+        from types import SimpleNamespace
+        proof.reset_for_tests();self.addCleanup(proof.reset_for_tests)
+        scope=proof.FollowersSurfaceScope('serial','app','account','target','instagram_followers_list')
+        tokens=[]
+        for name,action in [('alice','action-a'),('bob','action-b')]:
+            self.store.admit(('run','account','ct',name))
+            # The unchanged opener obtains current-generation geometry after
+            # certification admission; this exercises the real token primitive.
+            proof.capture_viewport(scope,'<hierarchy/>',[{'username':name,'bounds':{'left':100,'top':700,'right':500,'bottom':820},'row_center':[300,760],'resource_id':'follow_list_username'}],package_name='com.instagram.android',activity_name='.activity.MainTabActivity',captured_at_monotonic=time.monotonic())
+            token,reason=proof.issue_row_action_token(scope,name)
+            self.assertIsNotNone(token,reason);tokens.append(token)
+            self.assertTrue(proof.consume_row_action_token(token)[0])
+            self.assertFalse(proof.consume_row_action_token(token)[0])
+            self.cycle(name,action)
+            proof.invalidate(scope,reason='candidate_cycle_navigation',navigation_changed=True)
+        self.assertNotEqual(tokens[0],tokens[1])
+        self.assertFalse(proof.consume_row_action_token(tokens[0])[0])
+        denied=social_memory.evaluate_follow_eligibility(target_username='alice',source_profile='ct',db_row={'account_id':'account','username':'alice','posts_liked_count':1},runtime_followed={'alice'},runtime_unfollowed=set(),runtime_interacted={'alice'},runtime_skipped=set(),config=SimpleNamespace(SOCIAL_MEMORY_ENABLED=True))
+        self.assertFalse(denied.allowed)
+        self.assertEqual(len(ca.read_certification_cycles(self.binding,self.store._read()['slots'])),2)
+
+    def test_third_is_blocked_even_without_second_completion(self):
+        self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'))
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','charlie'))
+        self.assertEqual(e.exception.reason,'THIRD_CANDIDATE_BLOCKED')
+        with self.assertRaises(ValueError):ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+
+    def test_terminal_before_first_transport_is_readable(self):
+        self.store.terminal(ca.IDENTITY_UNPROVED)
+        self.assertEqual(self.store._read()['state'],'TERMINAL')
+        with self.assertRaises(ca.CertificationStop):self.store.admit(KEY)
+
+
+
+    def test_restart_after_second_slot_is_also_forbidden(self):
+        self.store.admit(KEY);self.cycle('alice','action-a');self.store.admit(('run','account','ct','bob'))
+        self.store.close()
+        with self.assertRaises(ca.CertificationStop) as e:ca._PermitStore(self.tmp.name,self.binding)
+        self.assertEqual(e.exception.reason,'PERMIT_RESTART_FORBIDDEN')
+
+    def test_receipt_scope_and_future_time_rejected_without_second_grant(self):
+        import sqlite3
+        self.store.admit(KEY);self.cycle('alice','action-a')
+        with sqlite3.connect(self.path) as conn:
+            saved=conn.execute("SELECT created_at_monotonic FROM follow60_ordering_v2_receipts WHERE stage='cycle_complete'").fetchone()[0]
+            conn.execute("UPDATE follow60_ordering_v2_receipts SET created_at_monotonic=? WHERE stage='cycle_complete'",(saved+1000,))
+        with self.assertRaisesRegex(ValueError,'stale_receipt'):ca.read_certification_cycles(self.binding,self.store._read()['slots'])
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE follow60_ordering_v2_receipts SET created_at_monotonic=? WHERE stage='cycle_complete'",(saved,))
+            conn.execute("UPDATE follow60_ordering_v2_receipts SET request_id='different' WHERE stage='cycle_complete'")
+        with self.assertRaises(ca.CertificationStop) as e:self.store.admit(('run','account','ct','bob'))
+        self.assertEqual(e.exception.reason,'PREVIOUS_CYCLE_UNPROVED')
+        self.assertEqual(len(self.store._read()['slots']),1)
+
+
+def two_candidate_process(directory, binding, queue=None, hold=None):
+    try:
+        store=ca._PermitStore(directory,binding)
+        grant=store.admit(KEY)
+        if queue is None:os._exit(19)
+        queue.put(grant)
+        if hold is not None:hold.wait(10)
+        store.close()
+    except ca.CertificationStop as exc:
+        if queue is not None:queue.put(exc.reason)
+        else:os._exit(20)
+
+
+class TwoCandidateProcessTests(unittest.TestCase):
+    def test_crash_restart_and_concurrent_second_executor_fail_closed(self):
+        binding=dict(BINDING,max_candidate_admissions=2)
+        ctx=multiprocessing.get_context('spawn')
+        with tempfile.TemporaryDirectory() as temp:
+            q=ctx.Queue();hold=ctx.Event()
+            a=ctx.Process(target=two_candidate_process,args=(temp,binding,q,hold));a.start()
+            try:
+                self.assertEqual(q.get(timeout=15),'FIRST_ADMISSION_GRANTED')
+                b=ctx.Process(target=two_candidate_process,args=(temp,binding,q));b.start();b.join(15)
+                self.assertEqual(b.exitcode,0);self.assertEqual(q.get(timeout=2),'PERMIT_INVALID')
+            finally:
+                hold.set();a.join(15)
+                if a.is_alive():a.kill();a.join()
+                q.close()
+            self.assertEqual(a.exitcode,0)
+            with self.assertRaises(ca.CertificationStop) as e:ca._PermitStore(temp,binding)
+            self.assertEqual(e.exception.reason,'PERMIT_RESTART_FORBIDDEN')
+        with tempfile.TemporaryDirectory() as temp:
+            a=ctx.Process(target=two_candidate_process,args=(temp,binding));a.start();a.join(15)
+            if a.is_alive():a.kill();a.join();self.fail('child timeout')
+            self.assertEqual(a.exitcode,19)
+            before=next(Path(temp).glob('*.json')).read_bytes()
+            with self.assertRaises(ca.CertificationStop) as e:ca._PermitStore(temp,binding)
+            self.assertEqual(e.exception.reason,'PERMIT_RESTART_FORBIDDEN')
+            self.assertEqual(next(Path(temp).glob('*.json')).read_bytes(),before)
+
+
+class TwoCandidateConfigurationTests(unittest.TestCase):
+    def configure_fixture(self, mutate=lambda m,b:None, *, verified=True):
+        # Only external signature/read RPC responses are fixtures. Exact
+        # configure, canonical row validation and durable store execute.
+        from contextlib import ExitStack
+        import follow60_deployment_gate_v1 as dg
+        import auto_restart_device_lock as locks,account_run_control as requests,supabase_client as db
+        now=datetime.now(timezone.utc)
+        a=dict(permit_id='fixture',nonce='fresh-fixture',candidate_sha=BASE,account_id='76c1dff8-d16a-40cf-83df-8138d2ca5bd4',device_id='ddec36ad-19d8-4f00-9f7d-a8c2d29fe540',serial='RFGL62N646V',package='com.instagram.android',version_name='446.0.0.49.77',certification_not_before=(now-timedelta(minutes=1)).isoformat(),certification_expires_at=(now+timedelta(minutes=2)).isoformat(),max_candidate_admissions=2)
+        sql={k:a[k] for k in ('permit_id','nonce','candidate_sha','device_id','serial','package','version_name','max_candidate_admissions')}
+        sql.update(account=a['account_id'],app_instance_id='36495109-0581-408c-baf0-d419c5caf534',version_code=385211304,expires_at=a['certification_expires_at'])
+        b={k:a[k] for k in ('account_id','device_id','serial','package','version_name','candidate_sha')}
+        b.update(run_id='real-generated-run',request_id='real-generated-request',worker_id='fixture-worker',lease_id='fixture-lease')
+        m=dict(certified_candidate_sha=BASE,a0_candidate_admission_permits=[a],physical_canary_permits=[sql]);mutate(m,b)
+        lease={k:b[k] for k in ('device_id','worker_id','request_id','account_id','lease_id')};lease['lease_expires_at']=(now+timedelta(minutes=3)).isoformat()
+        req=dict(id=b['request_id'],run_id=b['run_id'],account_id=b['account_id'],claimed_by=b['worker_id'],status='running',lease_expires_at=lease['lease_expires_at'],metadata_safe={'device_lock_binding':dict(lease,generation=b['lease_id'])})
+        run=dict(id=b['run_id'],account_id=b['account_id'],status='running')
+        with tempfile.TemporaryDirectory() as t,ExitStack() as stack:
+            home=Path(t).resolve();state=home/'Library/Application Support/BotApp/follow60-lock-v3.1/a0-candidate-admissions';state.mkdir(parents=True)
+            mp=home/'manifest.json';mp.write_text(json.dumps(m))
+            stack.enter_context(patch.object(Path,'home',return_value=home))
+            stack.enter_context(patch.object(dg,'verify_deployment_candidate',return_value={'ok':verified}))
+            stack.enter_context(patch.object(locks,'_load_device_lock',return_value=lease))
+            stack.enter_context(patch.object(requests,'get_account_run_request',return_value=req))
+            stack.enter_context(patch.object(db,'load_run_row',return_value=run))
+            ca._REQUESTED=False;ca._SESSION=None
+            try:
+                ca.configure_from_signed_permit(manifest_path=mp,signature_path=home/'fixture.sig',permit_id='fixture',execution_binding=b,state_directory=state)
+                ca.validate_execution_context()
+                return ca._SESSION[2].limit
+            finally:
+                if ca._SESSION is not None:ca._SESSION[2].close()
+                ca._REQUESTED=False;ca._SESSION=None
+
+    def test_exact_signed_two_and_legacy_one(self):
+        self.assertEqual(self.configure_fixture(),2)
+        def one(m,b):
+            for k in ('a0_candidate_admission_permits','physical_canary_permits'):m[k][0]['max_candidate_admissions']=1
+        self.assertEqual(self.configure_fixture(one),1)
+
+    def test_invalid_authority_and_limits(self):
+        with self.assertRaises(ca.CertificationStop):self.configure_fixture(verified=False)
+        for value in (True,False,0,3,-1,2.0,'2',None):
+            def wrong(m,b):
+                for k in ('a0_candidate_admission_permits','physical_canary_permits'):m[k][0]['max_candidate_admissions']=value
+            with self.subTest(value=value),self.assertRaises(ca.CertificationStop):self.configure_fixture(wrong)
+
+    def test_wrong_exact_tuple_even_when_execution_agrees(self):
+        for key in ('account_id','device_id','serial','package','version_name','candidate_sha'):
+            def wrong(m,b):
+                m['a0_candidate_admission_permits'][0][key]='wrong';b[key]='wrong'
+                m['physical_canary_permits'][0]['account' if key=='account_id' else key]='wrong'
+            with self.subTest(key=key),self.assertRaises(ca.CertificationStop):self.configure_fixture(wrong)
+
+    def test_collections_must_agree_and_sql_identity_exact(self):
+        for key in ('nonce','candidate_sha','account','serial','package','device_id','version_name','app_instance_id','version_code','max_candidate_admissions','expires_at'):
+            def wrong(m,b):m['physical_canary_permits'][0][key]='wrong'
+            with self.subTest(key=key),self.assertRaises(ca.CertificationStop):self.configure_fixture(wrong)
+        def absent(m,b):m['physical_canary_permits']=[]
+        with self.assertRaises(ca.CertificationStop):self.configure_fixture(absent)
+        def duplicate(m,b):m['physical_canary_permits']*=2
+        with self.assertRaises(ca.CertificationStop):self.configure_fixture(duplicate)
