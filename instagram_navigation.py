@@ -8131,8 +8131,160 @@ def reset_to_search_for_next_target(d: u2.Device, pkg: str | None = None) -> boo
     return return_to_search_from_profile(d, pkg)
 
 
+def _dm_446_context(d):
+    """No I/O. None is historical A0; invalid retained authority never falls back."""
+    from run_latency_observability_v1 import _TimedProxy
+    from instagram_ui_446_compat import context_matches
+    owner = d
+    if isinstance(d, _TimedProxy):
+        if type(d) is not _TimedProxy or vars(d).get("_kind") != "device":
+            raise ValueError("dm_version_context_unproved")
+        owner = vars(d).get("_raw")
+        if owner is None or isinstance(owner, _TimedProxy):
+            raise ValueError("dm_version_context_unproved")
+    values = vars(owner)
+    observed = values.get("_instagram_search_observed_version")
+    key = "_instagram_446_observed_context"
+    if key not in values and observed is None:
+        return None  # Unchanged unversioned A0 call sites; no added device read.
+    serial = get_device_serial(owner)
+    if (type(observed) is not tuple or len(observed) != 5
+            or observed[:2] != (id(owner), serial) or not serial
+            or type(observed[4]) is not int):
+        raise ValueError("dm_version_context_unproved")
+    if observed[3:] == ("372.0.0.48.60", 377611059) and key not in values:
+        return None
+    context = values.get(key)
+    if not context_matches(context, owner, serial, observed[2]):
+        raise ValueError("dm_version_context_unproved")
+    if observed[3:] != ("446.0.0.49.77", 385211304):
+        raise ValueError("dm_version_context_unproved")
+    return context
+
+
+def _dm_446_observation(d, package):
+    """One XML read bracketed by exact foreground continuity; no action."""
+    from dm_ui_446_evidence import composer_evidence
+    context = _dm_446_context(d)
+    if context is None or context.package != package:
+        raise ValueError("dm_version_context_unproved")
+    before = d.app_current() or {}
+    activity = before.get("activity")
+    if before.get("package") != package or activity not in (
+        "com.instagram.modal.ModalActivity",
+        "com.instagram.mainactivity.InstagramMainActivity",
+        "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity",
+    ):
+        raise ValueError("dm_foreground_unproved")
+    display = d.window_size()
+    xml = d.dump_hierarchy()
+    after = d.app_current() or {}
+    if (after.get("package"), after.get("activity")) != (package, activity):
+        raise ValueError("dm_foreground_changed")
+    if _dm_446_context(d) != context:
+        raise ValueError("dm_version_context_changed")
+    return xml, composer_evidence(xml, package, display_size=display)
+
+
+def _dm_446_composer(d, package):
+    """Exact current selector, never a generic EditText fallback or a tap."""
+    try:
+        _xml, evidence = _dm_446_observation(d, package)
+        if not evidence["visible"]:
+            return False, evidence["reason"], None, None
+        rid = package + ":id/row_thread_composer_edittext"
+        selector = d(resourceId=rid)
+        nodes = selector.all()
+        if len(nodes) != 1:
+            return False, "dm_composer_not_unique", None, None
+        info = nodes[0].info or {}
+        if (info.get("resourceName") != rid
+                or info.get("className") != "android.widget.EditText"
+                or info.get("enabled") is not True
+                or info.get("clickable") is not True
+                or info.get("focusable") is not True
+                or info.get("bounds") != evidence["bounds"]):
+            return False, "dm_composer_live_mismatch", None, None
+        # Live resolution is not atomic Android compare-and-act. Re-read the
+        # context, including ancestry/occlusion, before returning any control.
+        _current_xml, current = _dm_446_observation(d, package)
+        if current != evidence:
+            return False, "dm_composer_context_changed", None, None
+        return True, "contextual_composer:" + evidence["context"], evidence["bounds"], nodes[0]
+    except Exception:
+        return False, "dm_composer_observation_unproved", None, None
+
+
+def _dm_446_thread_state(d, username, package, composer_timeout_s):
+    """446-only frozen A truth. No composer-based inference of EMPTY."""
+    from dm_thread_truth import classify_dm_history
+    snap = dict(thread_state="unknown", composer_visible=False, composer_signal="",
+                has_history=False, has_history_signal=False, history_signal_type="",
+                empty_signal_type="", draft_only_fast=False, package=package,
+                username=username, positive_empty_observations=0, number_of_reads=0)
+    started = time.monotonic()
+    budget = max(0.0, float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5)))
+    if composer_timeout_s is not None:
+        budget = min(budget, max(0.0, float(composer_timeout_s)))
+    poll = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1)))
+    probe = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8)))
+    positive = 0
+    first = None
+    probe_deadline = None
+    for _ in range(9):
+        if time.monotonic() - started >= budget:
+            snap["reason"] = "dm_observation_budget_exhausted"
+            break
+        try:
+            xml, composer = _dm_446_observation(d, package)
+            snap["number_of_reads"] += 1
+            state, proof = classify_dm_history(xml, package, username)
+            snap.update(proof, composer_visible=composer["visible"],
+                        composer_signal=composer["reason"])
+        except Exception:
+            snap["reason"] = "dm_observation_unproved"
+            break
+        if time.monotonic() - started > budget:
+            snap["reason"] = "dm_observation_budget_exhausted"
+            break
+        if state == "existing_thread":
+            snap.update(thread_state=state, has_history=True, has_history_signal=True)
+            break
+        if state != "empty_new_thread" or not composer["visible"]:
+            break
+        if not username or not str(username).strip():
+            snap["reason"] = "dm_recipient_unproved"
+            break
+        # Two separate reads must prove the same recipient/conversation surface.
+        # Strict equality is deliberately local to this empty-thread proof.
+        if first is not None and xml != first:
+            snap["reason"] = "dm_empty_surface_changed"
+            break
+        first = xml
+        positive += 1
+        snap["positive_empty_observations"] = positive
+        if positive >= 2:
+            snap.update(thread_state="empty_new_thread", reason="positive_empty_rechecked")
+            break
+        if probe_deadline is None:
+            probe_deadline = time.monotonic() + probe
+        remaining = min(probe_deadline - time.monotonic(), budget - (time.monotonic() - started))
+        if remaining <= 0:
+            snap["reason"] = "dm_positive_reread_unavailable"
+            break
+        time.sleep(min(poll, remaining))
+    snap["elapsed_s"] = time.monotonic() - started
+    return snap["thread_state"], snap
+
+
 def _dm_find_focus_composer(d: u2.Device) -> Any | None:
     """Bottom-half Instagram DM composer EditText (best-effort)."""
+    try:
+        context = _dm_446_context(d)
+    except Exception:
+        return None
+    if context is not None:
+        return _dm_446_composer(d, context.package)[3]
     w, h = d.window_size()
     # Prefer explicit composer resource id when available.
     try:
@@ -8239,6 +8391,16 @@ def _dm_detect_composer_signal(
     Best-effort composer detection.
     Returns: (composer_visible, composer_signal, composer_bounds, composer_el)
     """
+    try:
+        context = _dm_446_context(d)
+    except Exception:
+        return False, "dm_version_context_unproved", None, None
+    if context is not None:
+        started_446 = time.monotonic()
+        result_446 = _dm_446_composer(d, current_pkg)
+        if time.monotonic() - started_446 > max(0.0, float(timeout_s)):
+            return False, "dm_composer_budget_exhausted", None, None
+        return result_446
     deadline = time.monotonic() + float(timeout_s)
     w, h = d.window_size()
     bottom_y_min = int(h * 0.5)
@@ -8412,6 +8574,12 @@ def detect_dm_thread_state(
     - existing_thread: composer visible and history signal present
     Never returns unknown when composer is visible.
     """
+    try:
+        context = _dm_446_context(d)
+    except Exception:
+        return "unknown", {"thread_state": "unknown", "reason": "dm_version_context_unproved"}
+    if context is not None:
+        return _dm_446_thread_state(d, username, pkg or context.package, composer_timeout_s)
     start = time.perf_counter()
     current_pkg = pkg or (d.app_current() or {}).get("package") or config.INSTAGRAM_PACKAGE
     # Snapshot fields requested by runner debugging.

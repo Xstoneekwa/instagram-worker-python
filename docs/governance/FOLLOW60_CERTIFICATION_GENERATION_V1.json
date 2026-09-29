@@ -42,9 +42,9 @@
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
     "canary_child.py": "d4717b8fb0a023b9cf5720ff0405a3b5e7fd5a53072e00f1af2b865a7e97f597",
-    "canary_contract.py": "322c7c4825ba4fe9e15ea66b1760416091a7836b623e24c884ced531fe1c1dd7",
+    "canary_contract.py": "c4247c022f8b3df7375264217ee4529bbc92b6bfbb0b6a43906886076af2453b",
     "canary_launcher.py": "13983933191a32babb2d813be1a016ff80b1877d83e87a3e89ccc258d50689fc",
-    "tests/test_canary_launcher.py": "50b810a7a3e8afeb2d3fd75f16cad6cc326f57e59471353e3620994a4b8f0612"
+    "tests/test_canary_launcher.py": "a7f37226d1d61d7c0f9cbf2e1dc8b3cb81a83bcb09e15ed94afd626c0621daa4"
   },
   "final_validation_technicalcall_authorization": {
     "approval-1.json": {
@@ -122,5 +122,15 @@
       "sha256": "dc267a6cca3f5048488fa496aebfc3a2e67d117e35adca4dd0e575b23f6ae998"
     }
   },
-  "version": 1
+  "version": 1,
+  "dm446_test_pin_authorization": {
+    "approval-1.json": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
+      "sha256": "c01bd4a3e0fc9771922f62e9d4020de18f3764c5b0526b364850cae268b1683a"
+    },
+    "approval-1.sig": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.sig",
+      "sha256": "d80030b4f4e79d4d2dd96bae011bbba42992042589012b7135cf949f172cac97"
+    }
+  }
 }
