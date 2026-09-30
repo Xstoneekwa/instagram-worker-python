@@ -102,8 +102,35 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
     def test_premium_native_welcome(self): self.assert_full_cycle('premium', False)
     def test_premium_with_addon(self): self.assert_full_cycle('premium', True)
 
+    def assert_preserved_bytes(self, name, source):
+        if name == 'dm_certification_admission.py':
+            # Signed certification-only recipient replacement; every other byte
+            # still hashes to the original routing baseline.
+            current = b"'recipient_username': 'nab_youss'"
+            historical = b"'recipient_username': 'rex_gen_boost_ai'"
+            self.assertEqual(source.count(current), 1)
+            self.assertNotIn(historical, source)
+            source = source.replace(current, historical)
+        self.assertEqual(hashlib.sha256(source).hexdigest(), PRESERVED[name])
+
     def assert_preserved(self, name):
-        self.assertEqual(hashlib.sha256((ROOT/name).read_bytes()).hexdigest(), PRESERVED[name])
+        self.assert_preserved_bytes(name, (ROOT/name).read_bytes())
+
+    def test_certification_recipient_preservation_rejects_wrong_or_duplicate_literal(self):
+        name = 'dm_certification_admission.py'
+        source = (ROOT/name).read_bytes()
+        current = b"'recipient_username': 'nab_youss'"
+        for bad in (source.replace(current, b"'recipient_username': 'rex_gen_boost_ai'"),
+                    source.replace(current, b"'recipient_username': 'other'"),
+                    source + b'\n# ' + current):
+            with self.subTest(source=hashlib.sha256(bad).hexdigest()), self.assertRaises(AssertionError):
+                self.assert_preserved_bytes(name, bad)
+
+    def test_certification_recipient_preservation_rejects_unrelated_byte_change(self):
+        name = 'dm_certification_admission.py'
+        source = (ROOT/name).read_bytes()
+        with self.assertRaises(AssertionError):
+            self.assert_preserved_bytes(name, source + b'\n')
 
     def test_entitlement_rejection_preserved(self):
         self.assert_preserved('supabase/functions/outreach-enqueue/index.ts')

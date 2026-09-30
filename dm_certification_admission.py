@@ -23,7 +23,7 @@ EXACT = {
     'app_instance_id': '7f84f24b-1ad7-4839-adff-7b9639fb91b2',
     'serial': 'RFGL62SZ7NR', 'package': 'com.instagram.android',
     'version_name': '446.0.0.49.77', 'version_code': 385211304,
-    'recipient_username': 'rex_gen_boost_ai', 'message_body': 'salut test',
+    'recipient_username': 'nab_youss', 'message_body': 'salut test',
     'dm_type': 'outreach', 'max_jobs': 1, 'max_send_attempts': 1,
 }
 FIELDS = frozenset(EXACT) | {
