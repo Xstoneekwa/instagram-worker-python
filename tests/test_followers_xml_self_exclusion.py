@@ -1,4 +1,4 @@
-from tests.test_certification_admission import restore_exact_dm446_delta
+from tests.test_certification_admission import restore_exact_dm446_delta, restore_exact_dm_certification_delta
 """Offline execution of the actual picker and exact identity propagation."""
 import ast
 import __future__
@@ -207,6 +207,7 @@ class SelfExclusionTests(unittest.TestCase):
   for name,wanted in expected.items():
    source=(ROOT/name).read_bytes()
    def require_exact(value):
+    if name=='runner.py':value=restore_exact_dm_certification_delta(value.decode()).encode()
     if name=='instagram_navigation.py':value=restore_exact_dm446_delta(value.decode()).encode()
     if hashlib.sha256(value).hexdigest()!=wanted:raise AssertionError('business_or_self_skip_changed')
    require_exact(source)

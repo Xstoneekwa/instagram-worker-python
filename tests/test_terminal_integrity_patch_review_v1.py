@@ -99,6 +99,8 @@ class TerminalPatchReview(unittest.TestCase):
                 body=[ast.Raise(exc=ast.Name(id='review_crash', ctx=ast.Load()), cause=None)],
                 handlers=[handler], orelse=[], finalbody=[])])
         env = dict(vars(runner)); env['review_crash'] = RuntimeError('technical failure')
+        env['dm_certification'] = __import__('dm_certification_admission')
+        self.assertFalse(env['dm_certification'].is_present())
         env['_CURRENT_RUN_ID'] = R; env['_CURRENT_ACCOUNT_ID'] = A
         terminal = Mock(); env['_update_run_status_safe'] = terminal
         exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<real-handler>', 'exec'), env)

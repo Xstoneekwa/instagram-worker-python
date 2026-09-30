@@ -26,6 +26,8 @@ class CloseoutTests(unittest.TestCase):
             failure=RuntimeError('technical failure'); failure.summary={'follow_quota_target':120,
                 'history':{'reason':'preventive_follow_restriction'}}
             env=dict(vars(runner),failure=failure,_CURRENT_ACCOUNT_ID=A,_CURRENT_RUN_ID=R)
+            env['dm_certification'] = __import__('dm_certification_admission')
+            self.assertFalse(env['dm_certification'].is_present())
             exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'<actual-technical-handler>','exec'),env)
             with patch.object(runner,'_DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP',True), \
                  patch.object(runner,'_RUNNER_SESSION_CLEANUP_COMPLETE',False), \

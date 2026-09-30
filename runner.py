@@ -25935,6 +25935,9 @@ def _main_impl() -> int:
     unfollow_session_run = _is_unfollow_session_run(args)
     unfollow_outreach_pipeline_run = _is_unfollow_outreach_pipeline_run(args)
 
+    import dm_certification_admission as dm_certification
+    dm_certification_context = dm_certification.validate_runner(args)
+
     if (
         welcome_baseline_run
         or welcome_scan_run
@@ -26036,14 +26039,14 @@ def _main_impl() -> int:
         _t_run_control = time.perf_counter()
         run = (
             {"id": admitted_run_id}
-            if admitted_run_id and account_session_run
+            if admitted_run_id and (account_session_run or dm_certification_context is not None)
             else (_safe_supabase_call("create_run", account_id=account_id) or {})
         )
         run_id = str(run.get("id") or "").strip()
         _CURRENT_RUN_ID = run_id or None
         linked: dict[str, Any] | None = (
             {"id": run_request_id, "run_id": run_id}
-            if admitted_run_id and account_session_run and run_request_id and run_id
+            if admitted_run_id and (account_session_run or dm_certification_context is not None) and run_request_id and run_id
             else None
         )
         if run_request_id and run_id and not admitted_run_id:
@@ -26411,7 +26414,13 @@ def _main_impl() -> int:
     dispatch_ctx: dict[str, Any] = {}
     dispatch_log_fields: dict[str, Any] = {}
     _t_assignment = time.perf_counter()
-    if bool(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)):
+    if dm_certification_context is not None:
+        dispatch_ctx = dm_certification.routing(account_id, account_username, run_id, run_request_id)
+        device_serial = dispatch_ctx['adb_serial']
+        config.INSTAGRAM_PACKAGE = dispatch_ctx['package_name']
+        dispatch_log_fields = dict(dispatch_ctx)
+        log('info', 'dm_certification_routing', **dispatch_log_fields)
+    elif bool(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)):
         dispatch_run_types = _account_assignment_dispatch_run_types()
         if dispatch_run_type not in dispatch_run_types:
             log(
@@ -28769,12 +28778,18 @@ def _main_impl() -> int:
             account_username=account_username,
             run_id=run_id or None,
         )
-        out_code = dispatch_outreach_session(
-            d,
-            account_id=account_id,
-            account_username=account_username,
-            run_id=run_id or None,
-        )
+        if dm_certification_context is not None:
+            out_code = dm_certification.dispatch(
+                d, account_id=account_id, account_username=account_username,
+                run_id=run_id, verified_username=verified_current_account_username,
+            )
+        else:
+            out_code = dispatch_outreach_session(
+                d,
+                account_id=account_id,
+                account_username=account_username,
+                run_id=run_id or None,
+            )
         out_summary = get_last_outreach_session_summary()
         if supabase_mode and run_id:
             _update_run_status_safe(
@@ -29569,10 +29584,16 @@ def _main_impl() -> int:
 
 
 def main() -> int:
+    import dm_certification_admission as dm_certification
     try:
         if certification_admission.is_enabled():
             certification_admission.validate_execution_context()
         return _main_impl()
+    except dm_certification.CertificationStop as exc:
+        log('error', 'dm_certification_stopped', reason=str(exc),
+            account_id=_CURRENT_ACCOUNT_ID, run_id=_CURRENT_RUN_ID,
+            request_id=_CURRENT_RUN_REQUEST_ID, safe_to_continue_ui=False)
+        return 1
     except certification_admission.CertificationStop as exc:
         # Certification admission is a run-level stop, never a candidate skip.
         summary = dict(exc.summary)
@@ -29608,6 +29629,11 @@ def main() -> int:
             )
         return 1
     except Exception as exc:
+        if dm_certification.is_present():
+            # The external supervisor alone owns certification teardown.
+            log('error', 'dm_certification_unexpected_stop',
+                error_type=type(exc).__name__, safe_to_continue_ui=False)
+            return 1
         if isinstance(exc, PreDeviceControlPlaneUnavailable):
             log(
                 "error",
@@ -29781,6 +29807,7 @@ def main() -> int:
         return _return_with_cleanup(exc.device, 76)
 
     finally:
+        dm_certification.revoke_local()
         if certification_admission.is_enabled():
             certification_admission.mark_terminal('certification_runner_exit')
 
