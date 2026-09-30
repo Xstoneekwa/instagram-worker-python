@@ -30,6 +30,36 @@
     "version_code": 385211304,
     "version_name": "446.0.0.49.77"
   },
+  "dm446_ads_consent_resume_generation": {
+    "evidence_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-ads-consent-resume-generation/BACKEND_READBACK.json": "01198f821ea7aea9d546ff2291d7bc47be76a3ec3644dc512fe9a3489663ee75",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-popup-resume-final/EXTERNAL_FREEZE.json": "97e27c4afee0f103e4d0be58ef76d484961f3776bba3ff0da538e1a30b7dc171",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-popup-resume-final/FOLLOW60_MAINLINE_LOCK_V3.json": "06d5260f106fb7f843367da84af807c4b63b0a8764d2a5c342306445defa4b27",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-popup-resume-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "2739491b8a3b6a1ffd76947f7967702411b90fe34e3456c51626f1333851ba36",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-popup-resume-final/RECERTIFICATION_RECEIPT.json": "28a874c8aed0ef0c8661f7fc03aa4c586c2d33e46b97bea0ef3449cf36bd55fe",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-popup-resume-canary/AFTER.json": "8f6ecf21fbda51d128270eb5a603a9391e45d7d22356c60745708211437d4824",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-popup-resume-canary/FINAL_RESULT.json": "08b628138d5e6d21022a452e753d26b92b15b70a972107e14ae274f489756efb",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-popup-resume-canary/SIGNED_PUBLICATION.json": "a527992caebeb02db4116fb17486005b7d318a9cb12b74eb4704e1eecdcebdff"
+    },
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930171826_dm446_certification_context_renewal_v1.sql": "a1d1304234649132d77a1e29951b70e8cd447bce460be3aa5cfc87b270e4b31c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_context_renewal.py": "318e6615c9506e199c67db48d468561e2f74448d176fb4ae1586b404ab43cfa4",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "e4d858945b7a66cc408ed7ba8dc8b15c5a13819a7baf49699398bd6a78e87baa",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_contract.py": "bd4c16b35314e1ba21f7a184184a60aacab390de02b67991ccf39e21f3ad1a92",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_launcher.py": "07e14ac5040fea1a9ee3e1104a655430306bb9d4ae8675e6aa53db7d3b0321db",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "1a4938495a32fe7bd1bd5b51430beb48e2970a359a88b71c9f240b49d00c4bc5"
+    },
+    "gates": "Fresh final SHA namespace, complete recertification, new Approval2, fresh permit/nonce/job/window/worker; normal signed backend preflight/admission before device readiness; old revoked bindings never reused. First failure STOP. No promotion.",
+    "operator_resolution": "User reported resolution; exact own-profile Identity Guard remains mandatory, not inferred.",
+    "previous_candidate_sha": "8991e5d4f6ffc385cdda79f416481eb537802ab9",
+    "reason": "fresh_certification_context_after_operator_resolved_ads_data_consent",
+    "renewal_migration_already_installed": {
+      "name": "dm446_certification_context_renewal_v1",
+      "sha256": "a1d1304234649132d77a1e29951b70e8cd447bce460be3aa5cfc87b270e4b31c",
+      "version": "20260930175558"
+    },
+    "scope": "Standalone Outreach only: A16-04 RFGL62SZ7NR com.instagram.android 446.0.0.49.77/385211304; bizgrowth_bmb to rex_gen_boost_ai; salut test; max_jobs=1, max_send_attempts=1."
+  },
   "dm446_fresh_context_generation": {
     "evidence_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-popup-resume-generation/BACKEND_READBACK.json": "ee1d240809c8195e49ad71407182b9f52317d258444a0a6d4125bf9486940fdc",
