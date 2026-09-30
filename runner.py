@@ -27000,6 +27000,7 @@ def _main_impl() -> int:
                     operator_review_required=True,
                 )
                 return 96
+        if supabase_mode and run_request_id and not _follow60_canary_active and not outreach_session_run:
             _follow60_engine_active = bool(_configure_follow60_mainline(
                 account_id=account_id,
                 account_username=account_username,

@@ -26,7 +26,47 @@ SELF_XML_EXACT_HUNKS = {'runner.py': [('    auto_restart_resume_policy: dict[str
 
 _DM_CERTIFICATION_RUNNER_DELTA = 'eJzNVm1vIjcQ/isW/QCcaMS+sCyRqEQJvUbXo2lIPl1OlteeJVYW79b2kkSn/Pd6lwX2BXI06UnlQwL2zDMzzzwe+1srIAoiLgCre2IPvNY5avVd5vmsP+wHFgl9Eg6YHYQULHC9Pg0Zgz5zLGY5fbA8OnSH9iAg4dBzAxqOHIeyVg+1KBGMM6LLuIHjhgbBG1jAXPBc8MH13SAY2rYfwhAsxwEYDVzb8XzihaOhRWw6cqnTH9iWR4IM9z4VD8qAffnWiiOWoSLzSUUYR1H8iONUSyD0Hic82ZQlU4HGCHOFXzfqELlU3TuRBRHw+AOQ70QGyFdJLDViK0xBah5ySjSPBSZsxZUy3xBRjd2Na8OHxkLDkzZZ1LfO1iTa0G8SECDL1cVhqECbAi1rNHRc/6WHdmTyEGWJaA0s88ScIdNIRCiNU6GxgjzFbKvC1BG3zgE/FMvjhXCFRKzRPBbQSNbuW647eluy+XpmIuHvFJTemm68fngpp4SvFOrbbrnQXDchCuI46ixBE61lx8QJ+bKH7lqT6fTP2/kNniwWlx/nn2fm68Xl4mpyM/0dz+aTX/+YXdyZCL+RSEG3e96QuEE+pYrzjQhzIXKVEG1kTvXTIfFJcw64WO4446y360qqQAqygl5Rfa9GTLcUBtacmgECkpMoi1MK+6VNWFBstb/ufTa0nF3OFzeTj9eTz/hqMv00+ThruCeEPpAl4CyXMsDOKoqXOOQQMZX7Ut0pA5TSNIadNjcjoN1D7QaTBRdm78OHA9gFjhkW/21/S3KyvOFgVJdT9jGZmUYzKHOzm2CFzjv7OnN2etXf+w6PS80+bLPt/Lghhar9Rhfj4vCZM5apr2TTren3bRquE1DX8JaRGgEbEo7U/a9LbZTbQ2sjaSMNtsfYrdBUSjBg3wEtSROMJF6p+cSmH2r8qc1/iwAarBwQQV5oVeiO7bp+5TZjEKIV4aLTRT//grjQBRdaPlfH4DHDd1zW+xilDAcjx7LqRxGeKCQaHYlwNi2vL3ScZDGNT3OQF0ANKb+CsKUyn2EgZSwPDjFlnBJgZs/oRMVirMyEMgjd4+MAT2+vr7NZtR1flxfbkb/fu76dZ+u187+7C6qG17O/bmeLDZAiIWAd52ecixRwysebAbjHkqBTKZBVTNh3sVzp4cBpjNMCfZb/K3RRZdhMKK64UJoIChl3PXQl4SK/4qamChlHVxERcCvImvCIBBEcuKtPitMQgHmiJhKUmR2dbm0c/IRu7sFA6OwkRkilCcg1V+bAkcicOBQ/ClUlDWkgkpn1syrSdySUCnhKgGbPqkxN7QNnPnfG+jmBcfYnF9gZzm9ojE/rebPv7+S+1HjP8i2/3viQG9qi52oDjonM9AFEhs4afTjmsiLyAZvmrLI4nXbtbZG/7TE8cd2u34rNxJrPNFjHD2AeI9RAd/8fFZT5HvkD9+Xryz8Js8hV'
 
+# Exact inverse of the approved standalone Outreach activation split. The
+# historical DM inverse below remains unchanged and receives its exact bytes.
+_OUTREACH_ROUTING_LINE = '        if supabase_mode and run_request_id and not _follow60_canary_active and not outreach_session_run:\n'
+_OUTREACH_ROUTING_OFFSET = 1246624
+_OUTREACH_ROUTING_CURRENT_SHA256 = '1b0f13229f975e8dbcf1d872d9193418ab0ecda5d6065d01783ccb9369240b27'
+_OUTREACH_ROUTING_BASE_SHA256 = 'b34f60c651ed4e64e8e484bb7228fe7e133ee9542368a6f971a2c94c305216ab'
+
+
+def restore_exact_outreach_routing_delta(source):
+    if hashlib.sha256(source.encode()).hexdigest() != _OUTREACH_ROUTING_CURRENT_SHA256:
+        raise AssertionError('outreach_runner_bytes_changed')
+    line, offset = _OUTREACH_ROUTING_LINE, _OUTREACH_ROUTING_OFFSET
+    if source.count(line) != 1 or source[offset:offset + len(line)] != line:
+        raise AssertionError('outreach_runner_hunk_changed')
+    restored = source[:offset] + source[offset + len(line):]
+    if hashlib.sha256(restored.encode()).hexdigest() != _OUTREACH_ROUTING_BASE_SHA256:
+        raise AssertionError('outreach_runner_inverse_mismatch')
+    return restored
+
+
+class OutreachRoutingExactInverseTests(unittest.TestCase):
+    def test_exact_baseline_and_reject_missing_altered_duplicate_moved_unrelated(self):
+        source = (ROOT / 'runner.py').read_text()
+        baseline = subprocess.check_output(['git', '-C', str(ROOT), 'show',
+            '38a2c01e6b10778fe6099f05736bdc7b062b6e7b:runner.py']).decode()
+        self.assertEqual(restore_exact_outreach_routing_delta(source), baseline)
+        line = _OUTREACH_ROUTING_LINE
+        variants = {
+            'missing': source.replace(line, '', 1),
+            'altered': source.replace(line, line.replace('not outreach_session_run', 'outreach_session_run'), 1),
+            'duplicate': source + line,
+            'moved': source.replace(line, '', 1) + line,
+            'unrelated': source + '\n# unauthorized\n',
+        }
+        for name, changed in variants.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                restore_exact_dm_certification_delta(changed)
+
+
 def restore_exact_dm_certification_delta(source):
+    source = restore_exact_outreach_routing_delta(source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_DM_CERTIFICATION_RUNNER_DELTA)))
     if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:
