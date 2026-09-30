@@ -130,6 +130,24 @@
       }
     }
   },
+  "dm446_pre_admission_cleanup_generation": {
+    "approval1": {
+      "request": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-pre-admission-cleanup/approval-1.json",
+      "request_sha256": "534e8ebcfa4c59a319cd642bc805d4f7a92397686c633ff7c435599c45dc287f",
+      "signature": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-pre-admission-cleanup/approval-1.sig",
+      "signature_sha256": "d6a7060084c00bebea6cddd6670ddbe623df190b52cef99c682800803a9295a5"
+    },
+    "external_files": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930201931_dm446_certification_pre_admission_cleanup_v1.sql": "460686ffe5c9460bccc3a505af80d7d75885b9dc7385c31f00823214e206ac76",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_pre_admission_cleanup.py": "028329b4d41fcb16f965b8bd6a27f9406368c8d8ce4f4b283a937a58cfc38efb"
+    },
+    "generation_id": "5282b04d-2fef-4db9-9cb3-a55187bcb13d",
+    "old_permit_reuse_allowed": false,
+    "production_behavior_changed": false,
+    "remote_installation_authorized": false,
+    "schema": "DM446_PRE_ADMISSION_CLEANUP_V1",
+    "worker_executables_changed": false
+  },
   "dm446_test_pin_authorization": {
     "approval-1.json": {
       "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
