@@ -66,8 +66,8 @@ class DMAdmissionTests(unittest.TestCase):
         self.assertEqual(admission.validate_binding(self.c, self.b), self.b)
 
     def test_new_recipient_exact_and_old_recipient_rejected(self):
-        self.assertEqual(admission.EXACT['recipient_username'], 'nab_youss')
-        for recipient in ('rex_gen_boost_ai', 'NAB_YOUSS', '@nab_youss', 'nab_youss ', 'other'):
+        self.assertEqual(admission.EXACT['recipient_username'], 'sunetbassonmua')
+        for recipient in ('rex_gen_boost_ai', 'nab_youss', 'SUNETBASSONMUA', '@sunetbassonmua', 'sunetbassonmua ', 'other'):
             with self.subTest(recipient=recipient), self.assertRaises(admission.CertificationStop):
                 admission.validate_claims(dict(self.c, recipient_username=recipient))
 
@@ -243,9 +243,9 @@ class DMAdmissionTests(unittest.TestCase):
             exec(compile(ast.fix_missing_locations(unit),str(ROOT/'instagram_navigation.py'),'exec'),env)
             with self.subTest(mode=mode):
                 if mode=='verification_exception':
-                    with self.assertRaises(OSError):env['send_dm_safe'](object(),'nab_youss','salut test','empty_new_thread')
+                    with self.assertRaises(OSError):env['send_dm_safe'](object(),'sunetbassonmua','salut test','empty_new_thread')
                 else:
-                    result=env['send_dm_safe'](object(),'nab_youss','salut test','existing_thread' if mode=='existing' else 'empty_new_thread')
+                    result=env['send_dm_safe'](object(),'sunetbassonmua','salut test','existing_thread' if mode=='existing' else 'empty_new_thread')
                     self.assertEqual(result['sent'],mode=='verified')
                 self.assertEqual(len(taps),0 if mode in ('disabled','existing') else 1)
 

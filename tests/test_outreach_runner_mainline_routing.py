@@ -106,7 +106,7 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
         if name == 'dm_certification_admission.py':
             # Signed certification-only recipient replacement; every other byte
             # still hashes to the original routing baseline.
-            current = b"'recipient_username': 'nab_youss'"
+            current = b"'recipient_username': 'sunetbassonmua'"
             historical = b"'recipient_username': 'rex_gen_boost_ai'"
             self.assertEqual(source.count(current), 1)
             self.assertNotIn(historical, source)
@@ -119,7 +119,7 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
     def test_certification_recipient_preservation_rejects_wrong_or_duplicate_literal(self):
         name = 'dm_certification_admission.py'
         source = (ROOT/name).read_bytes()
-        current = b"'recipient_username': 'nab_youss'"
+        current = b"'recipient_username': 'sunetbassonmua'"
         for bad in (source.replace(current, b"'recipient_username': 'rex_gen_boost_ai'"),
                     source.replace(current, b"'recipient_username': 'other'"),
                     source + b'\n# ' + current):

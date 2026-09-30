@@ -182,6 +182,28 @@
     "schema": "DM446_PRE_ADMISSION_CLEANUP_V1",
     "worker_executables_changed": false
   },
+  "dm446_sunet_recipient_generation": {
+    "approval1_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-sunet-recipient/approval-1.json": "09242061b79b49d2517c4fce3018ca1198c40bd0a832e1f683a588d252d69433",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-sunet-recipient/approval-1.sig": "0bd1f267a12bec8d0bbfc240d6fcc4b4305a166c5a8c49b85ad6b826d0601527"
+    },
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930215934_dm446_certification_sunet_recipient_v1.sql": "e7a503eca17401ca78a9722cdbacba2197f0c6affdf9bb6e78db6cc932082e1f",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_recipient.py": "a163fd578668793a90f3344472312cff78eb03891a8bb6db50ed4688f64cda80",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "b79557ced86eec67157b988a4ef2d2400df3a2a51446d9ab385693a100141601"
+    },
+    "historical_binding_reset": false,
+    "historical_consumed_permit": "21a9e846-d837-49e0-a3a9-4c5700034a66",
+    "max_jobs": 1,
+    "max_send_attempts": 1,
+    "message_body": "salut test",
+    "migration_installation_requires_separate_exact_technical_authorization": true,
+    "migration_installed": false,
+    "previous_candidate_sha": "c1c06b484c322e94d32865834e5aae68baa696bf",
+    "production_behavior_changed": false,
+    "recipient_username": "sunetbassonmua",
+    "two_dm_mode_enabled": false
+  },
   "dm446_test_pin_authorization": {
     "approval-1.json": {
       "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
