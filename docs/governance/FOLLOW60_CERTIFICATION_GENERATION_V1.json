@@ -30,6 +30,86 @@
     "version_code": 385211304,
     "version_name": "446.0.0.49.77"
   },
+  "dm446_fresh_context_generation": {
+    "evidence_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-popup-resume-generation/BACKEND_READBACK.json": "ee1d240809c8195e49ad71407182b9f52317d258444a0a6d4125bf9486940fdc",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-popup-resume-generation/ISOLATION_READBACK.json": "e4d6f8c8454afad5008c5a581e5ef15243889241b3958ad974a8e8f1d39829d4",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-context-renewal-final/EXTERNAL_FREEZE.json": "cfe76ad467ece648370218a575a5e21e6c028247dc06d487b6d15a5a91d9a421",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-context-renewal-final/FOLLOW60_MAINLINE_LOCK_V3.json": "51677aa17336d2c25b1e02d2f94d7e5abbd5d1b7c232eaa69b0fe12945fc4e43",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-context-renewal-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "78911d21bd0c4ba423e2a0b3dd932ed783d61ead26b900d5e4883073fb7d4442",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-context-renewal-final/RECERTIFICATION_RECEIPT.json": "ceb501b4c40a397bdfb3d8313c3530fa398b8fe83c9f0895b1791c2ef361d8c9",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-renewal-canary/FINAL_READBACK.json": "32beb825e9a5d7bd9846b4306ca05a9c68456c1ee0f304af071f7218363c4618",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-renewal-canary/FINAL_RESULT.json": "2396c04b1fd7949d13509ff8fd11b72fc46c68d0b4de9ec16ad29f8eedb4a086",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-renewal-canary/SIGNED_PUBLICATION.json": "2e171673485c5eb47e1f42dad2cf1e58f93048678f4c49b9c2ffa4dd7e49d8e2"
+    },
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930171826_dm446_certification_context_renewal_v1.sql": "a1d1304234649132d77a1e29951b70e8cd447bce460be3aa5cfc87b270e4b31c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_context_renewal.py": "318e6615c9506e199c67db48d468561e2f74448d176fb4ae1586b404ab43cfa4",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "e4d858945b7a66cc408ed7ba8dc8b15c5a13819a7baf49699398bd6a78e87baa",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_contract.py": "bd4c16b35314e1ba21f7a184184a60aacab390de02b67991ccf39e21f3ad1a92",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_launcher.py": "07e14ac5040fea1a9ee3e1104a655430306bb9d4ae8675e6aa53db7d3b0321db",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "1a4938495a32fe7bd1bd5b51430beb48e2970a359a88b71c9f240b49d00c4bc5"
+    },
+    "gates": "Fresh final SHA namespace, complete recertification, new Approval2, fresh permit/nonce/job/window/worker; normal signed backend preflight/admission before device readiness; old revoked bindings never reused. First failure STOP. No promotion.",
+    "operator_resolution": "User reported resolution; exact own-profile Identity Guard remains mandatory, not inferred.",
+    "previous_candidate_sha": "7ff4dc79af9c1f8f270bb8abfc37e7c9a3ca8927",
+    "reason": "fresh_certification_context_after_operator_resolved_instagram_screen",
+    "renewal_migration_already_installed": {
+      "name": "dm446_certification_context_renewal_v1",
+      "sha256": "a1d1304234649132d77a1e29951b70e8cd447bce460be3aa5cfc87b270e4b31c",
+      "version": "20260930175558"
+    },
+    "scope": "Standalone Outreach only: A16-04 RFGL62SZ7NR com.instagram.android 446.0.0.49.77/385211304; bizgrowth_bmb to rex_gen_boost_ai; salut test; max_jobs=1, max_send_attempts=1."
+  },
+  "dm446_isolated_entry": {
+    "approval1": {
+      "approval-1.json": {
+        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-isolated-entry/approval-1.json",
+        "sha256": "9ffb59c68dc85a8f143df84c2ac3ecc295df4e9610662ae8d8b82806b300287b"
+      },
+      "approval-1.sig": {
+        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-isolated-entry/approval-1.sig",
+        "sha256": "7c6bcb1f9f7545dc56dfc593a75d4fb04c21d3c56480161313566d7259d7edef"
+      }
+    },
+    "external_files": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "544a2a6f9a814e3829185755d8db226aac5222c11a3f8759f795158ce6889b52",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_contract.py": "566db18cac22ccd0ff4c0ee916567d7c87c214bbdfdde8c073328b7096792db6",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_launcher.py": "de886216291706a93b90c81f8e002966d4d7211c4954f966f7d5f0eab87349a9",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "8f242abc1ccc058a5472c71a211964538d4c3269a855ea497a4c43f6b1371a3e",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_dm_certification_sql.py": "b152c4aad136da45e6264cf5994c9eac444957f7f20992b340e7868f1b3d11df"
+    },
+    "follow_inventory_pin_files": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/business-launcher-446/canary_contract.py": "52ff1bfa9b1cd643f0d164acd417dfc958e967c9e846b50a9f6912d1b029a24b",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/business-launcher-446/tests/test_canary_launcher.py": "efaa4d4ae7c86709d8e97d6f201bf46bedb967beedfc259dcb70cec7dfb96a3a"
+    },
+    "migration": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930133710_dm446_certification_a1604_one_attempt_v1.sql",
+      "sha256": "eaf0fa0dd50b1d36651d1144a06ab4aeeca43bd530e5960685affcc476fa8630"
+    },
+    "remote_installation": false,
+    "runtime_activation": false,
+    "test_amendment": {
+      "approval-1.json": {
+        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-entry-test-amendment/approval-1.json",
+        "sha256": "ba01285c62a8ad44665f3edb1c12342bc9bc5097553e110890e2f74148bd788c"
+      },
+      "approval-1.sig": {
+        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-entry-test-amendment/approval-1.sig",
+        "sha256": "3da3731f2e7171695551d1fe70e39cc1c15abf250a5a5c2023f6029f910e7eae"
+      }
+    }
+  },
+  "dm446_test_pin_authorization": {
+    "approval-1.json": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
+      "sha256": "c01bd4a3e0fc9771922f62e9d4020de18f3764c5b0526b364850cae268b1683a"
+    },
+    "approval-1.sig": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.sig",
+      "sha256": "d80030b4f4e79d4d2dd96bae011bbba42992042589012b7135cf949f172cac97"
+    }
+  },
   "external_certification_migration": {
     "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/two-candidate-migration-installation/INSTALLATION_GATES.json",
     "installation_evidence_sha256": "ce46c6d55771139cdccdc76015fbc70f6e493cf79bd35e8ff47749cd23aad1e8",
@@ -41,8 +121,8 @@
   },
   "external_launcher_contract_version": "A0_EXTERNAL_CANARY_LAUNCHER_V1",
   "external_launcher_files_sha256": {
-    "canary_contract.py": "52ff1bfa9b1cd643f0d164acd417dfc958e967c9e846b50a9f6912d1b029a24b",
     "canary_child.py": "d4717b8fb0a023b9cf5720ff0405a3b5e7fd5a53072e00f1af2b865a7e97f597",
+    "canary_contract.py": "52ff1bfa9b1cd643f0d164acd417dfc958e967c9e846b50a9f6912d1b029a24b",
     "canary_launcher.py": "13983933191a32babb2d813be1a016ff80b1877d83e87a3e89ccc258d50689fc",
     "tests/test_canary_launcher.py": "efaa4d4ae7c86709d8e97d6f201bf46bedb967beedfc259dcb70cec7dfb96a3a"
   },
@@ -122,54 +202,5 @@
       "sha256": "dc267a6cca3f5048488fa496aebfc3a2e67d117e35adca4dd0e575b23f6ae998"
     }
   },
-  "version": 1,
-  "dm446_test_pin_authorization": {
-    "approval-1.json": {
-      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
-      "sha256": "c01bd4a3e0fc9771922f62e9d4020de18f3764c5b0526b364850cae268b1683a"
-    },
-    "approval-1.sig": {
-      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.sig",
-      "sha256": "d80030b4f4e79d4d2dd96bae011bbba42992042589012b7135cf949f172cac97"
-    }
-  },
-  "dm446_isolated_entry": {
-    "approval1": {
-      "approval-1.json": {
-        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-isolated-entry/approval-1.json",
-        "sha256": "9ffb59c68dc85a8f143df84c2ac3ecc295df4e9610662ae8d8b82806b300287b"
-      },
-      "approval-1.sig": {
-        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-isolated-entry/approval-1.sig",
-        "sha256": "7c6bcb1f9f7545dc56dfc593a75d4fb04c21d3c56480161313566d7259d7edef"
-      }
-    },
-    "external_files": {
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "544a2a6f9a814e3829185755d8db226aac5222c11a3f8759f795158ce6889b52",
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_contract.py": "566db18cac22ccd0ff4c0ee916567d7c87c214bbdfdde8c073328b7096792db6",
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_launcher.py": "de886216291706a93b90c81f8e002966d4d7211c4954f966f7d5f0eab87349a9",
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "8f242abc1ccc058a5472c71a211964538d4c3269a855ea497a4c43f6b1371a3e",
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_dm_certification_sql.py": "b152c4aad136da45e6264cf5994c9eac444957f7f20992b340e7868f1b3d11df"
-    },
-    "migration": {
-      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930133710_dm446_certification_a1604_one_attempt_v1.sql",
-      "sha256": "eaf0fa0dd50b1d36651d1144a06ab4aeeca43bd530e5960685affcc476fa8630"
-    },
-    "follow_inventory_pin_files": {
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/business-launcher-446/canary_contract.py": "52ff1bfa9b1cd643f0d164acd417dfc958e967c9e846b50a9f6912d1b029a24b",
-      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/business-launcher-446/tests/test_canary_launcher.py": "efaa4d4ae7c86709d8e97d6f201bf46bedb967beedfc259dcb70cec7dfb96a3a"
-    },
-    "runtime_activation": false,
-    "remote_installation": false,
-    "test_amendment": {
-      "approval-1.json": {
-        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-entry-test-amendment/approval-1.json",
-        "sha256": "ba01285c62a8ad44665f3edb1c12342bc9bc5097553e110890e2f74148bd788c"
-      },
-      "approval-1.sig": {
-        "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-entry-test-amendment/approval-1.sig",
-        "sha256": "3da3731f2e7171695551d1fe70e39cc1c15abf250a5a5c2023f6029f910e7eae"
-      }
-    }
-  }
+  "version": 1
 }
