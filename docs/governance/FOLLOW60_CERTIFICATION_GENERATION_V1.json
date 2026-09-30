@@ -60,6 +60,21 @@
     },
     "scope": "Standalone Outreach only: A16-04 RFGL62SZ7NR com.instagram.android 446.0.0.49.77/385211304; bizgrowth_bmb to rex_gen_boost_ai; salut test; max_jobs=1, max_send_attempts=1."
   },
+  "dm446_daily_counter_generation": {
+    "approval1_sha256": "44730a3be56631df077d5719c3e63a31accefb2c3073bd856f6398edfea9d922",
+    "approval1_signature_sha256": "5538045a6e113cf4cc133a6624bf9cbbbedf9cd21409efe4342230e53cbb4942",
+    "contract": "Move canonical ensure_dm_counter_row(aid) to validated common registration tail; Johannesburg default; no reset or quota changes",
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930225452_dm446_certification_daily_counter_v1.sql": "35683734d1e16428d69a54018a68df41e0bc2fce6651aec92e80a644752a3911",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_daily_counter.py": "7edfd35b3929a30ab446a5f67edb652eaa12b2eb8203cae0fc64be1222a91b10"
+    },
+    "max_jobs": 1,
+    "max_send_attempts": 1,
+    "migration_installed": false,
+    "previous_candidate_sha": "cfdf9771191b9a1e3c6b60bcd796f1dd10dfe037",
+    "separate_sql_authorization_required": true,
+    "worker_executables_unchanged": true
+  },
   "dm446_fresh_context_generation": {
     "evidence_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-popup-resume-generation/BACKEND_READBACK.json": "ee1d240809c8195e49ad71407182b9f52317d258444a0a6d4125bf9486940fdc",
