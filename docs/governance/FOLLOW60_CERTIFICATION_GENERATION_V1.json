@@ -214,6 +214,19 @@
     "reason": "operator_authorized_exact_certification_recipient_replacement",
     "recipient_username": "nab_youss"
   },
+  "dm446_passive_inventory_shape_generation": {
+    "base_sha": "d14b9dea8a79da7f2b1436ed51536e52e178355b",
+    "external_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "592aa5082e596131cd5e3e0e83904c4786300198dfc19c670a3078a05a156bdc",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "d2479f3002aed787b2dfdb310cab4c34ba6d98aa5a3d718e39986b9d09b0ed9d"
+    },
+    "extra_device_io": 0,
+    "requires_fresh_approval2": true,
+    "scope": "five exact passive counters only",
+    "service_acceptance_changed": false,
+    "sql_change": false,
+    "worker_executable_change": false
+  },
   "dm446_pre_admission_cleanup_generation": {
     "approval1": {
       "request": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-pre-admission-cleanup/approval-1.json",
