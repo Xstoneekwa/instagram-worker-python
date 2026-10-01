@@ -110,6 +110,25 @@
     "separate_sql_authorization_required": true,
     "worker_executables_unchanged": true
   },
+  "dm446_exact_terminal_history_generation": {
+    "approval1_scope_sha256": "54a1cd1951f3b9653b1fbe06f137b2c4ae7f0648ae5c7039275d840257284bdd",
+    "base_sha": "336cafed15b00ac51e801c982f12a8fbe5508436",
+    "generation_id": "03605f1d-cf33-4072-9498-be9bcaa3e592",
+    "generic_unknown_retry_enabled": false,
+    "historical_snapshots_sha256": "bce63ee4bddf30d2922250d9975b2565a4f535030057fdb1798857920cb5a69b",
+    "migration": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001203208_dm446_certification_exact_terminal_history_v1.sql",
+      "sha256": "8c923bb96f30c81d61621d205250bf2d9cb01fd7da6e979968213dc7f374b128"
+    },
+    "old_contexts_unchanged": true,
+    "schema": "DM446_EXACT_TERMINAL_HISTORY_GENERATION_V1",
+    "sql_installed": false,
+    "tests": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_exact_terminal_history.py",
+      "sha256": "404aa1b6cbac22d83d296045873980876aa373ec5b06903dc0f51edb68933b74"
+    },
+    "worker_executables_changed": false
+  },
   "dm446_fresh_context_generation": {
     "evidence_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-popup-resume-generation/BACKEND_READBACK.json": "ee1d240809c8195e49ad71407182b9f52317d258444a0a6d4125bf9486940fdc",
