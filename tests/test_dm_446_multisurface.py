@@ -1,0 +1,146 @@
+"""Exact retained XML, adversarial surface grammar and real-reader parity. Offline only."""
+from __future__ import annotations
+import ast,copy,hashlib,json,subprocess,types,unittest
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from unittest.mock import patch
+import dm_thread_truth as truth
+import dm_ui_446_surface as surface
+import dm_ui_446_evidence as ui
+import instagram_navigation as nav
+from test_dm_446_readers import Device,Clock,DATA,fixture,P,TARGET
+ROOT=Path(__file__).resolve().parents[1]
+BASE='37beae42d2ab3f30aa54f02960da81c642d0d1b1'
+CTX=('446.0.0.49.77',385211304,1080,2340)
+CAPTURES=json.loads((ROOT/'tests/fixtures/dm_446_multisurface.json').read_text())
+def baseline(name):return subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':'+name],text=True)
+def old_truth():
+ m=types.ModuleType('historical_truth');exec(compile(baseline('dm_thread_truth.py'),'<baseline_truth>','exec'),m.__dict__);return m
+
+def node(root,suffix):return next(n for n in root.iter('node') if n.get('resource-id','').split(':id/')[-1]==suffix)
+class MultisurfaceTests(unittest.TestCase):
+ def setUp(self):
+  self.clock=Clock();self.clock.now=0.;p=patch.object(nav,'time',self.clock);p.start();self.addCleanup(p.stop)
+  p=patch.object(nav,'log',lambda *a,**kw:None);p.start();self.addCleanup(p.stop)
+ def read(self,xmls,target,alter=None):
+  d=Device(xmls,clock=self.clock)
+  if alter:alter(d)
+  out=nav.detect_dm_thread_state(d,target,pkg=P)
+  return out,d
+ def reject(self,root,target,ctx=CTX):
+  self.assertNotEqual(truth.classify_dm_history(ET.tostring(root,encoding='unicode'),P,target,surface_context=ctx)[0],'empty_new_thread')
+ def test_exact_capture_hashes_and_positive_intro(self):
+  for name,c in CAPTURES.items():
+   with self.subTest(name=name):
+    self.assertEqual(hashlib.sha256(c['xml'].encode()).hexdigest(),c['sha256'])
+    self.assertEqual(truth.classify_dm_history(c['xml'],P,c['target'])[0],'unknown')
+    self.assertEqual(truth.classify_dm_history(c['xml'],P,c['target'],surface_context=CTX)[0],'empty_new_thread')
+ def test_actual_reader_two_distinct_observations(self):
+  for name,c in CAPTURES.items():
+   with self.subTest(name=name):
+    self.clock.now=0.;(state,proof),d=self.read(c['xml'],c['target'])
+    self.assertEqual(state,'empty_new_thread');self.assertEqual(proof['positive_empty_observations'],2)
+    self.assertEqual((d.reads,d.currents,d.dimensions),(2,4,2))
+ def test_all_node_class_role_bounds_package_visibility_mutations(self):
+  for name,c in CAPTURES.items():
+   r=ET.fromstring(c['xml'])
+   for i,n in enumerate(r.iter('node')):
+    for field,value in [('class','unknown.View'),('resource-id','unknown:id/node'),('bounds','[0,0][0,0]'),('package','foreign'),('visible-to-user','false')]:
+     with self.subTest(name=name,node=i,field=field):
+      z=copy.deepcopy(r);list(z.iter('node'))[i].set(field,value);self.reject(z,c['target'])
+ def test_invalid_context_and_wrong_recipient(self):
+  for name,c in CAPTURES.items():
+   r=ET.fromstring(c['xml'])
+   for ctx in (None,('372.0.0.48.60',377611059,1080,2340),('446.0.0.49.77',385211305,1080,2340),('446.0.0.49.77',True,1080,2340),('446.0.0.49.77',385211304,1080,2300),{'surface_ok':True}):
+    with self.subTest(name=name,ctx=ctx):self.reject(r,c['target'],ctx)
+   self.reject(r,'wrong_recipient')
+ def test_draft_send_enabled_duplicate_missing_and_cross_family(self):
+  for name,c in CAPTURES.items():
+   for kind in ('draft','enabled_send','duplicate_app','duplicate_intro','missing_intro','cross_hint'):
+    with self.subTest(name=name,kind=kind):
+     r=ET.fromstring(c['xml'])
+     if kind=='draft':node(r,'row_thread_composer_edittext').set('text','typed draft')
+     elif kind=='enabled_send':node(r,'row_thread_composer_send_button_container').set('enabled','true')
+     elif kind=='duplicate_app':r.append(copy.deepcopy(r[0]))
+     elif kind=='duplicate_intro':ml=node(r,'message_list');ml.append(copy.deepcopy(ml[0]))
+     elif kind=='missing_intro':node(r,'message_list').clear()
+     else:node(r,'row_thread_composer_edittext').set('hint','Try /silent ..' if name=='community' else 'Message…')
+     self.reject(r,c['target'])
+     if kind=='draft':self.assertIsNotNone(surface.qualify(r,P,c['target'],CTX))
+ def test_view_community_is_not_empty_authority(self):
+  c=CAPTURES['community']
+  for kind in ('wrong_parent','generic_button','changed_label','partial','duplicate','wrong_header','overlay'):
+   with self.subTest(kind=kind):
+    r=ET.fromstring(c['xml']);button=node(r,'igds_button');label=next(n for n in button if n.get('text')=='View community')
+    if kind=='wrong_parent':button.set('resource-id','generic')
+    elif kind=='generic_button':button.set('class','android.widget.Button')
+    elif kind=='changed_label':label.set('text','Community')
+    elif kind=='partial':button.remove(list(button)[-1])
+    elif kind=='duplicate':button.append(copy.deepcopy(label))
+    elif kind=='wrong_header':node(r,'header_subtitle').set('content-desc','other')
+    else:r.append(ET.Element('node',{'package':'com.android.systemui','bounds':'[0,100][1080,2205]','class':'android.view.View'}))
+    self.reject(r,c['target'])
+ def test_known_sibling_cannot_expand_over_composer(self):
+  for name,c in CAPTURES.items():
+   for role in ('direct_thread_header','direct_thread_business_chat_action_bar','new_friend_bump_sticker_banner_container'):
+    r=ET.fromstring(c['xml']);n=surface.one(r,role)
+    if n is None:continue
+    b=surface.rect(n);n.set('bounds',f'[{b[0]},{b[1]}][{b[2]},2205]')
+    with self.subTest(name=name,role=role):
+     self.reject(r,c['target'])
+     self.assertFalse(ui.composer_evidence(ET.tostring(r,encoding='unicode'),P,display_size=(1080,2340),surface_context=CTX)['visible'])
+ def test_positive_history_preserved_on_each_surface(self):
+  for name,c in CAPTURES.items():
+   r=ET.fromstring(c['xml']);ml=node(r,'message_list')
+   msg=ET.SubElement(ml,'node',{'resource-id':P+':id/message_content','class':'android.view.View','package':P,'bounds':'[100,1200][800,1300]'})
+   ET.SubElement(msg,'node',{'resource-id':P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':P,'text':'existing message','bounds':'[110,1210][790,1290]'})
+   self.assertEqual(truth.classify_dm_history(ET.tostring(r,encoding='unicode'),P,c['target'],surface_context=CTX)[0],'existing_thread')
+ def test_actual_reader_freshness_and_identity_fail_closed(self):
+  for name,c in CAPTURES.items():
+   x=c['xml'];target=c['target']
+   for kind,xmls,t,alter in [
+    ('wrong_target',x,'wrong',None),('no_target',x,'',None),('unknown',[x,'<hierarchy/>'],target,None),
+    ('exception',[x,RuntimeError()],target,None),('changed',[x,x.replace('rotation="0"','rotation="1"')],target,None),
+    ('late',x,target,lambda d:setattr(d,'cost',3)),
+    ('revoked',x,target,lambda d:setattr(d,'after_read',lambda z:setattr(z,'_instagram_446_observed_context',None))),
+    ('activity',x,target,lambda d:setattr(d,'activity','UnqualifiedOverlayActivity')),
+    ('foreground',x,target,lambda d:setattr(d,'foregrounds',[dict(package=P,activity=d.activity),dict(package='foreign',activity=d.activity)]))]:
+    with self.subTest(name=name,kind=kind):
+     self.clock.now=0.;out,d=self.read(xmls,t,alter);self.assertEqual(out[0],'unknown')
+   self.clock.now=0.;out,d=self.read([x,fixture('B_30_existing_thread')],target);self.assertEqual(out[0],'existing_thread')
+ def test_actual_selector_resolution_and_replacement(self):
+  for name,c in CAPTURES.items():
+   d=Device(c['xml']);self.assertTrue(nav._dm_446_composer(d,P)[0]);self.assertEqual((d.reads,d.currents,d.dimensions),(2,4,2))
+   d=Device([c['xml'],'<hierarchy/>']);self.assertFalse(nav._dm_446_composer(d,P)[0])
+ def test_fresh_qualification_has_no_cache(self):
+  c=CAPTURES['community'];r=ET.fromstring(c['xml']);self.assertIsNotNone(surface.qualify(r,P,c['target'],CTX))
+  r[0].set('package','foreign');self.assertIsNone(surface.qualify(r,P,c['target'],CTX))
+ def test_historical_truth_exact_differential(self):
+  old=old_truth()
+  for name,c in DATA.items():
+   package=ET.fromstring(c['xml'])[0].get('package')
+   for ctx in (None,CTX):
+    with self.subTest(name=name,ctx=ctx):self.assertEqual(old.classify_dm_history(c['xml'],package,TARGET),truth.classify_dm_history(c['xml'],package,TARGET,surface_context=ctx))
+ def test_historical_real_reader_exact_counts_and_results(self):
+  tree=ast.parse(baseline('instagram_navigation.py'));env=dict(vars(nav));names={'_dm_446_observation','_dm_446_thread_state'}
+  exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names],type_ignores=[]),'<baseline_nav>','exec'),env)
+  for name,c in DATA.items():
+   with self.subTest(name=name):
+    oldclock=Clock();oldclock.now=0.;env['time']=oldclock;self.clock.now=0.
+    a=Device(c['xml'],clock=oldclock);b=Device(c['xml'],clock=self.clock)
+    old=env['_dm_446_thread_state'](a,TARGET,P,None);new=nav._dm_446_thread_state(b,TARGET,P,None)
+    self.assertEqual(old,new);self.assertEqual((a.reads,a.currents,a.dimensions,oldclock.now),(b.reads,b.currents,b.dimensions,self.clock.now))
+ def test_scope_ast_and_truth_predicates_unchanged(self):
+  def functions(s):return {n.name:n for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+  for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state'})]:
+   old=functions(baseline(filename));new=functions((ROOT/filename).read_text());self.assertEqual(set(old),set(new))
+   self.assertEqual({n for n in old if ast.dump(old[n])!=ast.dump(new[n])},allowed)
+  # Revert only the reviewed seam; entire historical classifier must then match.
+  s=(ROOT/'dm_thread_truth.py').read_text()
+  s=s.replace('expected_username: str | None = None, *, surface_context=None)','expected_username: str | None = None)')
+  s=s.replace('    extension = None\n    if surface_context is not None:\n        from dm_ui_446_surface import qualify\n        extension = qualify(root, package, expected_username, surface_context)\n\n','')
+  s=s.replace('        if extension and row is extension[\'intro\']:\n            return "compose_recipient_intro"\n','')
+  s=s.replace("extension['identity'] if extension and rows[0] is extension['intro'] else _empty_intro_identity(rows[0], package)",'_empty_intro_identity(rows[0], package)')
+  s=s.replace("'' if extension and extension['empty_surface'] and rows[0] is extension['intro'] else _empty_surface_reason(root, message_list, package, identity)",'_empty_surface_reason(root, message_list, package, identity)')
+  self.assertEqual(ast.dump(ast.parse(s)),ast.dump(ast.parse(baseline('dm_thread_truth.py'))))
+if __name__=='__main__':unittest.main()

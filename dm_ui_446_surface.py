@@ -1,0 +1,65 @@
+"""Finite observed 446 surface grammar; no history decision or UI action."""
+from pathlib import Path
+import json,re,xml.etree.ElementTree as ET
+SCHEMAS=json.loads(Path(__file__).with_name('dm_ui_446_surface_shapes.json').read_text())
+P='com.instagram.android';VERSION=('446.0.0.49.77',385211304)
+def role(n):return n.get('resource-id','').split(':id/')[-1]
+def rect(n):
+ m=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.get('bounds',''))
+ if not m:return None
+ b=tuple(map(int,m.groups()));return b if b[0]<b[2] and b[1]<b[3] else None
+def fits(a,b):return bool(a and b and b[0]<=a[0]<a[2]<=b[2] and b[1]<=a[1]<a[3]<=b[3])
+def one(root,r):
+ ns=[n for n in root.iter('node') if n.get('resource-id')==P+':id/'+r];return ns[0] if len(ns)==1 else None
+def match(n,s,values,outer=None,opaque_list=False):
+ tag,attrs,children=s;b=rect(n)
+ if n.tag!=tag or not b or (outer and not fits(b,outer)):return False
+ actual={k:v for k,v in n.attrib.items() if k not in ('index','drawing-order','bounds')}
+ if set(actual)!=set(attrs):return False
+ for k,v in attrs.items():
+  a=actual[k]
+  if v=='$bool':
+   if a not in ('true','false'):return False
+  elif v=='$draft':pass # widget identity only; never empty-draft or Send authority
+  elif v=='$clock':
+   if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',a):return False
+  elif v=='$stats':
+   if not re.fullmatch(r'[\d.,KMkm]+ followers · [\d.,KMkm]+ posts',a):return False
+  elif v.startswith('$'):
+   if a!=values.get(v[1:]):return False
+  elif a!=v:return False
+ if role(n)=='clock' and n.get('text')!=n.get('content-desc'):return False
+ if opaque_list and role(n)=='message_list':return True
+ return len(n)==len(children) and all(match(c,t,values,b,opaque_list) for c,t in zip(n,children))
+def qualify(root,package,target,context):
+ if type(context) is not tuple or len(context)!=4 or context[:2]!=VERSION or any(type(v)is not int for v in context[1:]) or context[2:]!=(1080,2340) or package!=P:return None
+ if root.tag!='hierarchy' or root.attrib!={'rotation':'0'} or len(root)!=3 or (root.text or '').strip():return None
+ if root[0].get('package')!=P or rect(root[0])!=(0,0,1080,2340):return None
+ app=root[0];title=one(app,'header_title');sub=one(app,'header_subtitle');ml=one(app,'message_list');ed=one(app,'row_thread_composer_edittext');view=one(app,'direct_thread_content_below_action_bar');row=one(app,'row_thread_composer_container')
+ if any(n is None for n in (title,sub,ml,ed,view,row)):return None
+ handle=sub.get('content-desc','');name=title.get('text','')
+ if not re.fullmatch(r'[A-Za-z0-9_.]+',handle) or not name.strip() or name.strip().lower() in ('search','meta ai','search or ask meta ai') or (target is not None and target!=handle):return None
+ values={'name':name,'handle':handle}
+ # Qualified status/nav windows may be in either observed order; no other root.
+ systems=list(root[1:]);bands={rect(n) for n in systems}
+ if bands!={(0,0,1080,100),(0,2205,1080,2340)}:return None
+ system_templates=[s for v in SCHEMAS.values() for s in v['system']]
+ if not all(any(match(n,s,values) for s in system_templates) for n in systems):return None
+ eb=rect(ed);vb=rect(view);rb=rect(row)
+ if not fits(eb,rb) or not fits(rb,vb) or vb[1]<100 or vb[3]!=2205 or rb[3]!=vb[3]:return None
+ # Header/action-bar and sticker education are siblings, never composer hosts.
+ # Parent containment alone cannot prove they remain outside the editor.
+ header=one(app,'direct_thread_header');bar=one(app,'direct_thread_business_chat_action_bar');banner=one(app,'new_friend_bump_sticker_banner_container')
+ if header is None or not rect(header) or rect(header)[3]>vb[1]:return None
+ if bar is not None and (not rect(bar) or rect(bar)[3]>vb[1]):return None
+ if banner is not None and (not rect(banner) or rect(banner)[3]>rb[1]):return None
+ # Existing F4 rule: any visible list descendant crossing editor blocks composer.
+ for n in ml.iter('node'):
+  if n is ml:continue
+  b=rect(n)
+  if n.get('package')!=P or not b or 'dialog' in n.get('class','').lower():return None
+  if n.get('visible-to-user')!='false' and b[0]<eb[2] and eb[0]<b[2] and b[1]<eb[3] and eb[1]<b[3]:return None
+ matches=[k for k,s in SCHEMAS.items() if match(app,s['app'],values,opaque_list=True)]
+ if len(matches)!=1:return None
+ variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
+ return dict(variant=variant,identity=(name,handle),intro=intro[0] if len(intro)==1 else None,empty_surface=ed.get('text')==ed.get('hint')==SCHEMAS[variant]['hint'] and one(app,'row_thread_composer_send_button_container').get('enabled')=='false',bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')

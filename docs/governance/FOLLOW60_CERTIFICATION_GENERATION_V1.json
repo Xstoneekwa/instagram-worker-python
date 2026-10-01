@@ -227,6 +227,32 @@
       }
     }
   },
+  "dm446_multisurface_truth_seam": {
+    "approval1_sha256": "2ffdd206af6a4aaca18c5f3a0b2751774687ea7d8fdbbb3cf6d2beb0e6d0956e",
+    "base_sha": "37beae42d2ab3f30aa54f02960da81c642d0d1b1",
+    "implementation_hashes": {
+      "dm_thread_truth.py": "c52d3b1c6c3591ee0b66ebc39ce9e113a07a1d3bd9137c8c40e6ec12af2058af",
+      "dm_ui_446_evidence.py": "57c58c8bb14ae77bc82966e9e4a3223a4c58482dd84ae06c34351834f3d688a1",
+      "dm_ui_446_surface.py": "94c2fc382915fc6112284f32fb142fa3d2b28f2f50cb73aa98717913d0d5cb2b",
+      "dm_ui_446_surface_shapes.json": "a814a7ad94cdbea137b06afc223077855027c9986c03710f0d15202f74008cdb",
+      "instagram_navigation.py": "9470e2c59d46d3ef591e6ae7ad90f5ac9c43eec7b73516e901a88987ec9f201d",
+      "tests/fixtures/dm_446_multisurface.json": "149de2c0e23955f6a01f3a7b84c59267cd5fe2e1209f0ea494ca449655991a6e",
+      "tests/test_dm_446_multisurface.py": "f8b0a4d83d82c1f28431d94c14fe06efbbf276790e2cb98c58e149889ace26fc",
+      "tests/test_dm_446_observation_retention.py": "d3f1e973512d5e0d24cc36ff936388d1b754f344ceb4b58d11aceae20169a21e",
+      "tests/test_dm_446_readers.py": "ea261c1ebc97a982e23e5ecc14088c5e4286ffbf60377f134283d1f14407374b"
+    },
+    "implementation_review": "Known header/business bar bounded above content; sticker education above composer row. Proved offline known-sibling overlap rejected; no new surface accepted.",
+    "physical_gate": "Android service cessation remains UNPROVEN; no bypass/retry or prior permit reuse",
+    "promotion": false,
+    "qualified_inputs": {
+      "ADVERSARIAL_RESULT.json": "292809b81856de4c1bac0da81f3ed497b6432642008c9707463ec95d88e18559",
+      "FINAL_QUALIFICATION.json": "7ea3f4b8c1211f1a9433ed439b8d409108e7e1a7ecb00d0296104fcbb4ceef08",
+      "INTEGRATION_RESULT.json": "6c1bf452e026793d8f2fa1dd9a12087afb6f8313df1289471eafc6982ccebccd",
+      "REPORT.md": "6f8fa1f3639784476364e67b4ee4f4952efe04c009ecb0d6cc2089f04f9ffc98",
+      "RESULT.json": "a519e63bf364e33a1e38bc12ba1a9af8504c2016006d28e93996f4edb7494433"
+    },
+    "scope": "Two exact observed 446 surface grammars only; original history predicates, identity, double-read and Send unchanged"
+  },
   "dm446_nab_recipient_generation": {
     "approval1_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-nab-recipient/approval-1.json": "a3750c4acff34d4268422fb7017074ead5c9b6c02e53da257f811442a6a7dbd9",

@@ -130,10 +130,18 @@ def _history_can_occlude(root, package, composer_bounds):
     return False
 
 
-def composer_evidence(xml, package, *, display_size=None):
+def composer_evidence(xml, package, *, display_size=None, surface_context=None):
     """Fresh positive widget proof; never an EMPTY proof or cached selector."""
     failure = {"visible": False, "reason": "unqualified_composer_context"}
     try:
+        if surface_context is not None and tuple(display_size or ()) == surface_context[2:]:
+            from dm_ui_446_surface import qualify
+            extension = qualify(ET.fromstring(xml), package, None, surface_context)
+            if extension is not None:
+                return {"visible": True, "reason": "contextual_composer", "context": "thread",
+                        **{k: extension[k] for k in ("bounds", "app_viewport", "window_bounds", "focused")},
+                        "surface_context": surface_context,
+                        "ime_type": "not_exposed_by_app_xml", "ime_visible": "not_exposed_by_app_xml"}
         root = _parse(xml, package, "composer")
         if root is None:
             return failure

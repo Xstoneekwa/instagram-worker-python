@@ -9,7 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 
 
-def classify_dm_history(hierarchy: str, package: str, expected_username: str | None = None) -> tuple[str, dict]:
+def classify_dm_history(hierarchy: str, package: str, expected_username: str | None = None, *, surface_context=None) -> tuple[str, dict]:
     evidence = {"history_signal_type": "", "empty_signal_type": ""}
 
     def unknown(reason):
@@ -19,6 +19,11 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
         root = ET.fromstring(hierarchy)
     except (ET.ParseError, TypeError):
         return unknown("hierarchy_unavailable")
+
+    extension = None
+    if surface_context is not None:
+        from dm_ui_446_surface import qualify
+        extension = qualify(root, package, expected_username, surface_context)
 
     def rid(n):
         value = n.get("resource-id", "")
@@ -45,6 +50,8 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
                 if n.get("text", "").strip()]
 
     def intro(row):
+        if extension and row is extension['intro']:
+            return "compose_recipient_intro"
         ids = {rid(n) for n in row.iter()}
         if {"user_avatar", "other_user_full_name_or_username", "network_attribution"} <= ids:
             if ids <= {"", "user_avatar", "other_user_full_name_or_username", "network_attribution"} and all(not n.get("text", "").strip() or rid(n) in {
@@ -114,10 +121,10 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
     if len(rows) != 1 or len(intro_rows) != 1:
         return unknown("no_positive_empty_structure")
     # Empty proof is stricter than positive history recognition. Preserve R01/R02.
-    identity = _empty_intro_identity(rows[0], package)
+    identity = extension['identity'] if extension and rows[0] is extension['intro'] else _empty_intro_identity(rows[0], package)
     if identity is None:
         return unknown("unknown_intro_semantics")
-    surface_reason = _empty_surface_reason(root, message_list, package, identity)
+    surface_reason = '' if extension and extension['empty_surface'] and rows[0] is extension['intro'] else _empty_surface_reason(root, message_list, package, identity)
     if surface_reason:
         return unknown(surface_reason)
     display_name, handle = identity

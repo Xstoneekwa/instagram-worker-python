@@ -216,7 +216,9 @@ class RetentionTests(unittest.TestCase):
                 self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
 
     def test_frozen_truth_and_unchanged_non_dm_functions(self):
-        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'bebae2621dd05afef6af88b0860258299e108bd915e22c0786f788fd6eb1f57b')
+        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'c52d3b1c6c3591ee0b66ebc39ce9e113a07a1d3bd9137c8c40e6ec12af2058af')
+        from test_dm_446_multisurface import MultisurfaceTests
+        MultisurfaceTests().test_scope_ast_and_truth_predicates_unchanged()
         old=ast.parse(subprocess.check_output(['git','show',BASE+':instagram_navigation.py'],cwd=ROOT,text=True))
         new=ast.parse((ROOT/'instagram_navigation.py').read_text())
         a={n.name:ast.dump(n) for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}

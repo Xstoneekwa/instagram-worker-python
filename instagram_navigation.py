@@ -8198,7 +8198,8 @@ def _dm_446_observation(d, package, *, _record=None):
         if _dm_446_context(d) != context:
             raise ValueError("dm_version_context_changed")
         stage = "composer_unproved"
-        composer = composer_evidence(xml, package, display_size=display)
+        composer = composer_evidence(xml, package, display_size=display,
+                                     surface_context=(*context.version, *display))
         if _record is not None:
             _record["observation_status"] = "QUALIFIED" if composer["visible"] else "OBSERVATION_REJECTED"
             _record["observation_reason"] = "observed" if composer["visible"] else stage
@@ -8267,7 +8268,8 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
                 observation = retention.observation() if retention is not None else None
                 xml, composer = _dm_446_observation(d, package, _record=observation)
                 snap["number_of_reads"] += 1
-                state, proof = classify_dm_history(xml, package, username)
+                state, proof = classify_dm_history(xml, package, username,
+                                                   surface_context=composer.get("surface_context"))
                 if observation is not None:
                     observation["classifier"] = dict(state=state, reason=proof.get("reason"))
                 snap.update(proof, composer_visible=composer["visible"],
