@@ -246,6 +246,27 @@
       "sha256": "d80030b4f4e79d4d2dd96bae011bbba42992042589012b7135cf949f172cac97"
     }
   },
+  "dm446_view_community_observation_generation": {
+    "approval1_sha256": "44915b6cbf607e56407eee79d5a212ffd45d45f61ec9f3887641d67bd158dbb2",
+    "approval1_signature_sha256": "dd7e2c7dce719f6cd04334a67a56c4d5f672adc170cb10082bbc7c3749509273",
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001094131_dm446_certification_view_community_observation_v1.sql": "cd1e2b8e695ece1c319afd5c2a59c88d93f7b69a3c962cab8b6bed9ae22d1fc6",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_view_community_observation.py": "1c3ffd50b8a00c8dd06a0217fea0b365ab03448cffc45773d46b2f0aa10922ea",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "ed457e23edffb8ec406e27bd7b98f0d861e3a86a5655d95650a063e6f532b062",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_contract.py": "ccdc9ff52397cbef21254134df676e826d9dcd794b160afce8a0d1192f0808ab",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_launcher.py": "2c447cc42679b00590332c44dfd8d24ff1bb688d7c5e4ba8836991144272d051",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "ff3b8eca6e1b4f2a3206d746487090f95f238de8fc21df563e07719ccc827d0f"
+    },
+    "max_jobs": 0,
+    "max_observations": 1,
+    "max_send_attempts": 0,
+    "migration_installed": false,
+    "previous_candidate_sha": "725346e06f039174b12bb6d3be9531b5c5fb2c67",
+    "purpose": "Exact one-shot xstonekwa XML observation; no navigation and zero jobs/Send authority",
+    "separate_sql_authorization_required": true,
+    "transport": "Pinned installed single-attempt primitives; durable reserve before capture child creation; distinct capture CAS before device IO; no refund/replay",
+    "worker_executables_unchanged": true
+  },
   "external_certification_migration": {
     "installation_evidence_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/two-candidate-migration-installation/INSTALLATION_GATES.json",
     "installation_evidence_sha256": "ce46c6d55771139cdccdc76015fbc70f6e493cf79bd35e8ff47749cd23aad1e8",
