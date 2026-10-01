@@ -227,6 +227,36 @@
       }
     }
   },
+  "dm446_multisurface_business_resume_generation": {
+    "certification_tuple": {
+      "max_jobs": 1,
+      "max_send_attempts": 1,
+      "message_body": "salut test",
+      "package": "com.instagram.android",
+      "recipient_username": "sunetbassonmua",
+      "serial": "RFGL62SZ7NR",
+      "username": "bizgrowth_bmb",
+      "version_code": 385211304,
+      "version_name": "446.0.0.49.77"
+    },
+    "executable_bytes_changed": false,
+    "generation_id": "8bc235a8-dd8f-4468-bdc1-ed51316e5f91",
+    "old_permits_reusable": false,
+    "physical_requires_new_approval2_and_preflight": true,
+    "previous_candidate_sha": "b19b274ce884ce2062a1ae2a3b3ed5ad8332d639",
+    "previous_history_gate_required": true,
+    "previous_signed_manifest_sha256": "a2a3f450162a4dbf31d5ac9010f3782d49a4f0151dd726eeee36806360dd354e",
+    "reason": "Fresh one-job DM certification after signed multi-surface qualification and separate one-read service absence proof",
+    "runtime_behavior_activation": false,
+    "schema": "DM446_MULTISURFACE_BUSINESS_RESUME_GENERATION_V1",
+    "service_absence_evidence": {
+      "historical_failure_reclassified": false,
+      "host_cessation_path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm446-service-cessation-read-20261001/SUPERVISOR.json",
+      "host_cessation_sha256": "625a8e08114e4e5479250551fe0aa2c29b2ec7c286de77cec371b58d7abf9240",
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm446-service-cessation-read-20261001/READ_RESULT.json",
+      "sha256": "a5bce4adfe9a29e23c62961769ff86e92950d677e6880e15375a0cca510f0cd8"
+    }
+  },
   "dm446_multisurface_truth_seam": {
     "approval1_sha256": "2ffdd206af6a4aaca18c5f3a0b2751774687ea7d8fdbbb3cf6d2beb0e6d0956e",
     "base_sha": "37beae42d2ab3f30aa54f02960da81c642d0d1b1",
