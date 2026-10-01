@@ -248,6 +248,53 @@
     "supervisor_change": false,
     "worker_executable_change": false
   },
+  "dm446_service_inventory_tick_renewal_generation": {
+    "evidence_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-service-inventory-final/EXTERNAL_FREEZE.json": "fe9e1095b71a6204eade993f8e6fdc917aac3d34eba855341028e55b9c71e66e",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-service-inventory-final/FOLLOW60_MAINLINE_LOCK_V3.json": "3c0fcbd181944fc8deff1de1c4e876f1df618a3286bc99b87e908c8b6ae8c07c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-service-inventory-final/FOLLOW60_MAINLINE_LOCK_V3.sig": "192b34792c0ce7e1db7bc3dd01201c54ae5c99ef79e45a57019c12d85e9ef041",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval2-dm446-service-inventory-final/RECERTIFICATION_RECEIPT.json": "ebc6542611f29b841c59fd3475064050048284e1b08ec4a7c74908b1d3527c4d",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-service-inventory-observation/FINAL_RESULT.json": "250b98fd31bcf4530e8d51d4266a1595d29bbec2dd8040c2e49bd351a708c804",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-service-inventory-observation/INSTALLATION_PROOF.json": "9358affc30843f20a88adc6726de94e0895163849918108e8ea44656e15f6cec",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-service-inventory-observation/SIGNED_PUBLICATION.json": "935141d20454324ee62c8fec2bb3f0d0de8ca5303a51b856179123921bc7152b",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-service-inventory-observation/TICK_OVERLAP.json": "fc987df46e5231b8337885b034ffb931d30c70a0807e031ccaf0f1d54b9dd1ee",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-service-inventory-observation/run/RESULT.json": "714a39541e390b058f23c6e2ad02fccf3f8e4f5c733983dd86b5b964b2924954"
+    },
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930171826_dm446_certification_context_renewal_v1.sql": "a1d1304234649132d77a1e29951b70e8cd447bce460be3aa5cfc87b270e4b31c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930201931_dm446_certification_pre_admission_cleanup_v1.sql": "460686ffe5c9460bccc3a505af80d7d75885b9dc7385c31f00823214e206ac76",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930205800_dm446_certification_nab_recipient_v1.sql": "821784ba1e7e59b8bedea6282e46cb8d257cb6b22202b9cbf64119e0f5ea7ae7",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930215934_dm446_certification_sunet_recipient_v1.sql": "e7a503eca17401ca78a9722cdbacba2197f0c6affdf9bb6e78db6cc932082e1f",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20260930225452_dm446_certification_daily_counter_v1.sql": "35683734d1e16428d69a54018a68df41e0bc2fce6651aec92e80a644752a3911",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001010726_dm446_certification_sunet_terminal_renewal_v1.sql": "788c496b59f2b5bf051d412cd52bcfaa507e3fe0669ae1df5ea80281ac9556e1",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001094131_dm446_certification_view_community_observation_v1.sql": "cd1e2b8e695ece1c319afd5c2a59c88d93f7b69a3c962cab8b6bed9ae22d1fc6",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_context_renewal.py": "318e6615c9506e199c67db48d468561e2f74448d176fb4ae1586b404ab43cfa4",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_daily_counter.py": "902519b22a20afb0952f56ff95bb8bb5814977902cd08171d6f69bde6bfa3656",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_nab_recipient.py": "ce721907acf7f2e169de3fa38197fa2eb3cd73cf266d67b3471d3be2ef7d453a",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_pre_admission_cleanup.py": "028329b4d41fcb16f965b8bd6a27f9406368c8d8ce4f4b283a937a58cfc38efb",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_recipient.py": "a163fd578668793a90f3344472312cff78eb03891a8bb6db50ed4688f64cda80",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_terminal_renewal.py": "be3d84a3da1f59ef5f887ed542c0e20e2b5c9aeb01f5fbf5d00f1d811b046a20",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_view_community_observation.py": "1c3ffd50b8a00c8dd06a0217fea0b365ab03448cffc45773d46b2f0aa10922ea",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "e4d858945b7a66cc408ed7ba8dc8b15c5a13819a7baf49699398bd6a78e87baa",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_contract.py": "bd4c16b35314e1ba21f7a184184a60aacab390de02b67991ccf39e21f3ad1a92",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_launcher.py": "07e14ac5040fea1a9ee3e1104a655430306bb9d4ae8675e6aa53db7d3b0321db",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "b79557ced86eec67157b988a4ef2d2400df3a2a51446d9ab385693a100141601",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_dm_certification_sql.py": "ed1e7b9d1543272de107bad0f1363acee1a3eefbe4cefc4e2370fa0721b395bd",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "f2dd864f59e96b64794a55826e67c292e0be01844a2389bf5352e79e240edebb",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_contract.py": "f3684a360c9607dad484e8381f57893d919150c949acc6abfc00beef22798f7c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_launcher.py": "2c447cc42679b00590332c44dfd8d24ff1bb688d7c5e4ba8836991144272d051",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "2d93bc9aa1ad1f857d533f7614479c760b322e311f9f6d1c90a6aec3a764b38e"
+    },
+    "gates": "Canonical one-record change only; full final-byte recertification, normal-hook commit, fresh SHA namespace, Approval2, fresh permit/nonce/window/worker/execution identity, signed preflight, admission/lease, one capture, exact cleanup. First failure stops; no retry. Preserve signed bounded service preparation exactly.",
+    "migration_reinstallation": false,
+    "old_context": "REVOKED; no reset/rebind/reuse",
+    "previous_candidate_sha": "4a53f03aa47de1b453e8789163ec20494b7c2a73",
+    "prior_failure": "Rejected after tick-lock GET; persisted tick interval overlaps read. Raw rejected payload not retained. No phone action; inventory fix remains physically untested.",
+    "production_promotion": false,
+    "reason": "fresh_one_shot_observation_after_pre_admission_tick_overlap",
+    "scope": "A16-04 RFGL62SZ7NR / bizgrowth_bmb / com.instagram.android 446.0.0.49.77 code385211304 / xstonekwa; one exact read-only observation; zero navigation, zero jobs, zero Send.",
+    "worker_executables_unchanged": true
+  },
   "dm446_sunet_recipient_generation": {
     "approval1_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-sunet-recipient/approval-1.json": "09242061b79b49d2517c4fce3018ca1198c40bd0a832e1f683a588d252d69433",
