@@ -292,6 +292,24 @@
     "schema": "DM446_PRE_ADMISSION_CLEANUP_V1",
     "worker_executables_changed": false
   },
+  "dm446_proved_init_second_stage_generation": {
+    "physical_evidence_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-shape-tick-renewal-observation/FINAL_RESULT.json": "acea5fbccefe1f27c0e683c1d9cf945465797ae346855dd5475dac5c70472721",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-shape-tick-renewal-observation/SIGNED_PUBLICATION.json": "7c051b511c3231a211cc20a4abdc494567fa5bd6483523a102c7adae266501e4",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-shape-tick-renewal-observation/run/RESULT.json": "02884c1c8b5eff32351463f2f394048609a33c867a72dd5d3304b42cf9cfa1fe",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-shape-tick-renewal-observation/run/e2ad38ad48fe439fba2bd357728b37c9-result.json": "337217e53b1c92d1bc51a9d8a1584edea1fc83a1985b7a68e3a8844d54fe1647"
+    },
+    "previous_candidate_sha": "b74d57b7b2248eef473bd3d675251420463a0cd8",
+    "prior_permit": "REVOKED; never reset/reuse",
+    "production_promotion": false,
+    "proposed_external_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "6371e6975139273931451172c34b15e27891710222de28eca98f33f28e8aaab6",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "da44745701e81ef3376f56af3b6c3a84f0a4e0a695d236c9af543f3edb4b4028"
+    },
+    "qualification_sha256": "cdac94b673584813fe687c57972f8631aee634d463a14c94805e2c3e7b9743bd",
+    "required_gates": "Full recertification, normal-hook commit, fresh Approval2/namespace/permit/window; wait read-only for tick before signed preflight; one observation; zero jobs/Send; no retry",
+    "scope": "External observation service_inventory only; exact init second_stage authority; reject bracketed truncated app_process variants; no Worker executable changes"
+  },
   "dm446_service_inventory_generation": {
     "base_sha": "9a2cff72a516aaf2c93d11aa6122302bf4710aa8",
     "external_sha256": {
