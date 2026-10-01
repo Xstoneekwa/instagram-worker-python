@@ -232,6 +232,22 @@
     "schema": "DM446_PRE_ADMISSION_CLEANUP_V1",
     "worker_executables_changed": false
   },
+  "dm446_service_inventory_generation": {
+    "base_sha": "9a2cff72a516aaf2c93d11aa6122302bf4710aa8",
+    "external_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "f2dd864f59e96b64794a55826e67c292e0be01844a2389bf5352e79e240edebb",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "2d93bc9aa1ad1f857d533f7614479c760b322e311f9f6d1c90a6aec3a764b38e"
+    },
+    "finite_init_variants": [
+      "/system/bin/init",
+      "/system/bin/init second_stage"
+    ],
+    "physical_inventory_value_proved": false,
+    "requires_fresh_approval2": true,
+    "sql_change": false,
+    "supervisor_change": false,
+    "worker_executable_change": false
+  },
   "dm446_sunet_recipient_generation": {
     "approval1_sha256": {
       "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-sunet-recipient/approval-1.json": "09242061b79b49d2517c4fce3018ca1198c40bd0a832e1f683a588d252d69433",
