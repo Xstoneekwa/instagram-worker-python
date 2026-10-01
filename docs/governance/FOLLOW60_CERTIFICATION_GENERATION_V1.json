@@ -60,6 +60,28 @@
     },
     "scope": "Standalone Outreach only: A16-04 RFGL62SZ7NR com.instagram.android 446.0.0.49.77/385211304; bizgrowth_bmb to rex_gen_boost_ai; salut test; max_jobs=1, max_send_attempts=1."
   },
+  "dm446_bounded_service_preparation_generation": {
+    "base_sha": "9dc5beb29aba5e16f28e301d8db92a2f56b9b2a6",
+    "external_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_child.py": "cb2aaa2655bb327befdc70a0c574584749b16256331602047695ba192f5e8514",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/observation_contract.py": "f3684a360c9607dad484e8381f57893d919150c949acc6abfc00beef22798f7c",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-observation-446/tests/test_observation_capture.py": "54af609a9063ccb65d345b220fdbfaac9897a5e46ad601ac5f2af2bde009b489"
+    },
+    "physical_preparation_pending_new_approval2": true,
+    "policy": {
+      "jar_sha256": "ea100004a76e821f4bff4f9d674165562752af101943d2a65959a5f2ee7fb892",
+      "max_dumps": 1,
+      "max_jobs": 0,
+      "max_send_attempts": 0,
+      "max_starts": 1,
+      "port": 9008,
+      "schema": "DM446_UIAUTOMATOR_PREPARATION_V1",
+      "serial": "RFGL62SZ7NR"
+    },
+    "sql_change": false,
+    "supervisor_change": false,
+    "worker_executable_change": false
+  },
   "dm446_capture_error_retention_generation": {
     "base_sha": "6fdb42d414df7e924cb0cdba8482d6355946b2e6",
     "external_sha256": {
