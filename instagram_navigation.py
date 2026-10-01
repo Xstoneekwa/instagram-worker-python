@@ -8162,28 +8162,53 @@ def _dm_446_context(d):
     return context
 
 
-def _dm_446_observation(d, package):
+def _dm_446_observation(d, package, *, _record=None):
     """One XML read bracketed by exact foreground continuity; no action."""
     from dm_ui_446_evidence import composer_evidence
-    context = _dm_446_context(d)
-    if context is None or context.package != package:
-        raise ValueError("dm_version_context_unproved")
-    before = d.app_current() or {}
-    activity = before.get("activity")
-    if before.get("package") != package or activity not in (
-        "com.instagram.modal.ModalActivity",
-        "com.instagram.mainactivity.InstagramMainActivity",
-        "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity",
-    ):
-        raise ValueError("dm_foreground_unproved")
-    display = d.window_size()
-    xml = d.dump_hierarchy()
-    after = d.app_current() or {}
-    if (after.get("package"), after.get("activity")) != (package, activity):
-        raise ValueError("dm_foreground_changed")
-    if _dm_446_context(d) != context:
-        raise ValueError("dm_version_context_changed")
-    return xml, composer_evidence(xml, package, display_size=display)
+    stage = "version_context_invalid"
+    try:
+        context = _dm_446_context(d)
+        if context is None or context.package != package:
+            raise ValueError("dm_version_context_unproved")
+        stage = "foreground_before_invalid"
+        before = d.app_current() or {}
+        if _record is not None:
+            _record["foreground_before"] = {k: before.get(k) for k in ("package", "activity")}
+        activity = before.get("activity")
+        if before.get("package") != package or activity not in (
+            "com.instagram.modal.ModalActivity",
+            "com.instagram.mainactivity.InstagramMainActivity",
+            "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity",
+        ):
+            raise ValueError("dm_foreground_unproved")
+        stage = "viewport_read_failed"
+        display = d.window_size()
+        stage = "dump_failed"
+        xml = d.dump_hierarchy()
+        if _record is not None:
+            _record["xml"] = xml
+            _record["dump_returned"] = True
+        stage = "foreground_after_changed"
+        after = d.app_current() or {}
+        if _record is not None:
+            _record["foreground_after"] = {k: after.get(k) for k in ("package", "activity")}
+        if (after.get("package"), after.get("activity")) != (package, activity):
+            raise ValueError("dm_foreground_changed")
+        stage = "version_context_invalid"
+        if _dm_446_context(d) != context:
+            raise ValueError("dm_version_context_changed")
+        stage = "composer_unproved"
+        composer = composer_evidence(xml, package, display_size=display)
+        if _record is not None:
+            _record["observation_status"] = "QUALIFIED" if composer["visible"] else "OBSERVATION_REJECTED"
+            _record["observation_reason"] = "observed" if composer["visible"] else stage
+            _record["composer"] = dict(visible=composer["visible"], reason=composer["reason"])
+        return xml, composer
+    except Exception as exc:
+        if _record is not None:
+            _record.update(observation_status="OBSERVATION_REJECTED", observation_reason=stage,
+                           exception_class=type(exc).__name__)
+        raise
 
 
 def _dm_446_composer(d, package):
@@ -8222,59 +8247,69 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
                 has_history=False, has_history_signal=False, history_signal_type="",
                 empty_signal_type="", draft_only_fast=False, package=package,
                 username=username, positive_empty_observations=0, number_of_reads=0)
-    started = time.monotonic()
-    budget = max(0.0, float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5)))
-    if composer_timeout_s is not None:
-        budget = min(budget, max(0.0, float(composer_timeout_s)))
-    poll = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1)))
-    probe = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8)))
-    positive = 0
-    first = None
-    probe_deadline = None
-    for _ in range(9):
-        if time.monotonic() - started >= budget:
-            snap["reason"] = "dm_observation_budget_exhausted"
-            break
-        try:
-            xml, composer = _dm_446_observation(d, package)
-            snap["number_of_reads"] += 1
-            state, proof = classify_dm_history(xml, package, username)
-            snap.update(proof, composer_visible=composer["visible"],
-                        composer_signal=composer["reason"])
-        except Exception:
-            snap["reason"] = "dm_observation_unproved"
-            break
-        if time.monotonic() - started > budget:
-            snap["reason"] = "dm_observation_budget_exhausted"
-            break
-        if state == "existing_thread":
-            snap.update(thread_state=state, has_history=True, has_history_signal=True)
-            break
-        if state != "empty_new_thread" or not composer["visible"]:
-            break
-        if not username or not str(username).strip():
-            snap["reason"] = "dm_recipient_unproved"
-            break
-        # Two separate reads must prove the same recipient/conversation surface.
-        # Strict equality is deliberately local to this empty-thread proof.
-        if first is not None and xml != first:
-            snap["reason"] = "dm_empty_surface_changed"
-            break
-        first = xml
-        positive += 1
-        snap["positive_empty_observations"] = positive
-        if positive >= 2:
-            snap.update(thread_state="empty_new_thread", reason="positive_empty_rechecked")
-            break
-        if probe_deadline is None:
-            probe_deadline = time.monotonic() + probe
-        remaining = min(probe_deadline - time.monotonic(), budget - (time.monotonic() - started))
-        if remaining <= 0:
-            snap["reason"] = "dm_positive_reread_unavailable"
-            break
-        time.sleep(min(poll, remaining))
-    snap["elapsed_s"] = time.monotonic() - started
-    return snap["thread_state"], snap
+    from dm_446_observation_retention import begin
+    retention = begin(package, username)
+    try:
+        started = time.monotonic()
+        budget = max(0.0, float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5)))
+        if composer_timeout_s is not None:
+            budget = min(budget, max(0.0, float(composer_timeout_s)))
+        poll = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1)))
+        probe = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8)))
+        positive = 0
+        first = None
+        probe_deadline = None
+        for _ in range(9):
+            if time.monotonic() - started >= budget:
+                snap["reason"] = "dm_observation_budget_exhausted"
+                break
+            try:
+                observation = retention.observation() if retention is not None else None
+                xml, composer = _dm_446_observation(d, package, _record=observation)
+                snap["number_of_reads"] += 1
+                state, proof = classify_dm_history(xml, package, username)
+                if observation is not None:
+                    observation["classifier"] = dict(state=state, reason=proof.get("reason"))
+                snap.update(proof, composer_visible=composer["visible"],
+                            composer_signal=composer["reason"])
+            except Exception:
+                snap["reason"] = "dm_observation_unproved"
+                break
+            if time.monotonic() - started > budget:
+                snap["reason"] = "dm_observation_budget_exhausted"
+                break
+            if state == "existing_thread":
+                snap.update(thread_state=state, has_history=True, has_history_signal=True)
+                break
+            if state != "empty_new_thread" or not composer["visible"]:
+                break
+            if not username or not str(username).strip():
+                snap["reason"] = "dm_recipient_unproved"
+                break
+            # Two separate reads must prove the same recipient/conversation surface.
+            # Strict equality is deliberately local to this empty-thread proof.
+            if first is not None and xml != first:
+                snap["reason"] = "dm_empty_surface_changed"
+                break
+            first = xml
+            positive += 1
+            snap["positive_empty_observations"] = positive
+            if positive >= 2:
+                snap.update(thread_state="empty_new_thread", reason="positive_empty_rechecked")
+                break
+            if probe_deadline is None:
+                probe_deadline = time.monotonic() + probe
+            remaining = min(probe_deadline - time.monotonic(), budget - (time.monotonic() - started))
+            if remaining <= 0:
+                snap["reason"] = "dm_positive_reread_unavailable"
+                break
+            time.sleep(min(poll, remaining))
+        snap["elapsed_s"] = time.monotonic() - started
+        return snap["thread_state"], snap
+
+    finally:
+        if retention is not None:
+            retention.finish(snap)
 
 
 def _dm_find_focus_composer(d: u2.Device) -> Any | None:
