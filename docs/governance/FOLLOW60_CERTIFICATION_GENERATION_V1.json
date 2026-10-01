@@ -219,6 +219,23 @@
     "recipient_username": "sunetbassonmua",
     "two_dm_mode_enabled": false
   },
+  "dm446_sunet_terminal_renewal_generation": {
+    "approval1_sha256": "9d6dbcde0d75850116031a72ff6a0971f6a3ad8e884278b524031f9d0c715af1",
+    "approval1_signature_sha256": "78bc7ea72a2de757a993b1ccd1e7792c8b9e65652ae4a2571b88d19d1eef068f",
+    "exact_prior_permit_id": "fc062da2-0e9a-4eee-8849-fa62bb295559",
+    "external_files_sha256": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001010726_dm446_certification_sunet_terminal_renewal_v1.sql": "788c496b59f2b5bf051d412cd52bcfaa507e3fe0669ae1df5ea80281ac9556e1",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_terminal_renewal.py": "be3d84a3da1f59ef5f887ed542c0e20e2b5c9aeb01f5fbf5d00f1d811b046a20"
+    },
+    "historical_binding_reset": false,
+    "launchers_unchanged": true,
+    "max_jobs": 1,
+    "max_send_attempts": 1,
+    "migration_installed": false,
+    "previous_candidate_sha": "5c8c124d0244773663e1c75de5a9a790c7e66f90",
+    "separate_sql_authorization_required": true,
+    "worker_executables_unchanged": true
+  },
   "dm446_test_pin_authorization": {
     "approval-1.json": {
       "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/approval1-dm446-test-pin-amendment/approval-1.json",
