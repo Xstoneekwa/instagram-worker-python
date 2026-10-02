@@ -35,7 +35,24 @@ class CurrentSurfaceTests(unittest.TestCase):
    elif kind=='hint_only_mismatch':node('row_thread_composer_edittext').set('hint','Try /silent ..')
    elif kind=='known_text_history':
     ml=node('message_list');msg=ET.SubElement(ml,'node',{'resource-id':s.P+':id/message_content','class':'android.view.View','package':s.P,'bounds':'[100,1200][800,1300]'});ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'existing message','bounds':'[110,1210][790,1290]'})
-   check(kind,r,False,c,t)
+   # Volatile SystemUI descendants are non-authoritative chrome.
+   check(kind,r,kind in {'unknown_notification','wifi_unknown'},c,t)
+ def test_systemui_chrome_is_structural_and_volatile_children_are_ignored(self):
+  root=ET.fromstring(F['xml']);ctx=tuple(F['context']);target=F['target']
+  systems=[n for n in root if n.get('package')=='com.android.systemui']
+  self.assertEqual(len(systems),2)
+  # Reorder roots and mutate only volatile status contents.
+  root[:]=[root[2],root[0],root[1]]
+  for n in root.iter():
+   if n.get('content-desc') in {'Weather notification: ', 'Wi-Fi three bars.'}:
+    n.set('content-desc','arbitrary current value')
+  # The proposed structural rule is exercised by the proposal module.
+  self.assertIsNotNone(s.qualify(root,s.P,target,ctx))
+ def test_systemui_interfering_root_remains_fail_closed(self):
+  root=ET.fromstring(F['xml']);ctx=tuple(F['context']);target=F['target']
+  extra=ET.Element('node',{'package':'com.android.systemui','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','clickable':'false','enabled':'true'})
+  root.append(extra)
+  self.assertIsNone(s.qualify(root,s.P,target,ctx))
  def test_canonical_double_observation(self):
   x=F['xml']
   for case,xmls,target in [('two_fresh',x,F['target']),('wrong_recipient',x,'wrong'),('second_unknown',[x,'<hierarchy/>'],F['target']),('second_changed',[x,x.replace('rotation="0"','rotation="1"')],F['target'])]:

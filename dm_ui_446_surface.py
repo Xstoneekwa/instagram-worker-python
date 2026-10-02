@@ -42,10 +42,21 @@ def qualify(root,package,target,context):
  if not re.fullmatch(r'[A-Za-z0-9_.]+',handle) or not name.strip() or name.strip().lower() in ('search','meta ai','search or ask meta ai') or (target is not None and target!=handle):return None
  values={'name':name,'handle':handle}
  # Qualified status/nav windows may be in either observed order; no other root.
- systems=[n for n in root if n is not app];bands={rect(n) for n in systems}
+ systems=[n for n in root if n is not app]
+ # SystemUI is chrome, not DM business truth.  Only the two structural
+ # siblings in the reserved status/navigation bands are admissible; their
+ # volatile children (clock, notifications, radio/battery text and order)
+ # are deliberately non-authoritative. Any extra root, foreign package,
+ # geometry outside a band, or viewport overlay remains fail-closed.
+ if len(systems)!=2:return None
+ bands={rect(n) for n in systems}
  if bands!={(0,0,1080,100),(0,2205,1080,2340)}:return None
- system_templates=[s for v in SCHEMAS.values() for s in v['system']]
- if not all(any(match(n,s,values) for s in system_templates) for n in systems):return None
+ if any(n.get('package')!='com.android.systemui' or n.get('visible-to-user')=='false'
+        or n.get('clickable')!='false' or n.get('enabled')!='true'
+        or n.get('class')!='android.widget.FrameLayout'
+        or (rect(n)==(0,0,1080,100) and n.get('resource-id')!='')
+        or (rect(n)==(0,2205,1080,2340) and n.get('resource-id')!='com.android.systemui:id/navigation_bar_frame')
+        or not rect(n) for n in systems):return None
  eb=rect(ed);vb=rect(view);rb=rect(row)
  if not fits(eb,rb) or not fits(rb,vb) or vb[1]<100 or vb[3]!=2205 or rb[3]!=vb[3]:return None
  # Header/action-bar and sticker education are siblings, never composer hosts.

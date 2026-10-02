@@ -47,7 +47,14 @@ class MultisurfaceTests(unittest.TestCase):
    for i,n in enumerate(r.iter('node')):
     for field,value in [('class','unknown.View'),('resource-id','unknown:id/node'),('bounds','[0,0][0,0]'),('package','foreign'),('visible-to-user','false')]:
      with self.subTest(name=name,node=i,field=field):
-      z=copy.deepcopy(r);list(z.iter('node'))[i].set(field,value);self.reject(z,c['target'])
+      z=copy.deepcopy(r);list(z.iter('node'))[i].set(field,value)
+      # Descendants of admitted status/navigation chrome are volatile and
+      # non-authoritative; business nodes and root structural nodes stay strict.
+      original=list(r.iter('node'))[i]
+      if original.get('package') == 'com.android.systemui' and original not in r:
+       self.assertEqual(truth.classify_dm_history(ET.tostring(z,encoding='unicode'),P,c['target'],surface_context=CTX)[0],'empty_new_thread')
+      else:
+       self.reject(z,c['target'])
  def test_invalid_context_and_wrong_recipient(self):
   for name,c in CAPTURES.items():
    r=ET.fromstring(c['xml'])
