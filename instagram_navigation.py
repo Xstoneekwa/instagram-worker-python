@@ -8214,31 +8214,47 @@ def _dm_446_observation(d, package, *, _record=None):
 
 def _dm_446_composer(d, package):
     """Exact current selector, never a generic EditText fallback or a tap."""
+    from dm_446_observation_retention import begin_composer
+    record = begin_composer(package)
+    result = None
     try:
-        _xml, evidence = _dm_446_observation(d, package)
+        _xml, evidence = _dm_446_observation(d, package, **({"_record": record.observation()} if record is not None else {}))
+        if record is not None: record.first = evidence
         if not evidence["visible"]:
-            return False, evidence["reason"], None, None
+            result = False, evidence["reason"], None, None
+            return result
         rid = package + ":id/row_thread_composer_edittext"
         selector = d(resourceId=rid)
         nodes = selector.all()
+        if record is not None: record.selector_count = len(nodes)
         if len(nodes) != 1:
-            return False, "dm_composer_not_unique", None, None
+            result = False, "dm_composer_not_unique", None, None
+            return result
         info = nodes[0].info or {}
+        if record is not None:
+            record.capture_live(info, rid, evidence["bounds"])
         if (info.get("resourceName") != rid
                 or info.get("className") != "android.widget.EditText"
                 or info.get("enabled") is not True
                 or info.get("clickable") is not True
                 or info.get("focusable") is not True
                 or info.get("bounds") != evidence["bounds"]):
-            return False, "dm_composer_live_mismatch", None, None
+            result = False, "dm_composer_live_mismatch", None, None
+            return result
         # Live resolution is not atomic Android compare-and-act. Re-read the
         # context, including ancestry/occlusion, before returning any control.
-        _current_xml, current = _dm_446_observation(d, package)
+        _current_xml, current = _dm_446_observation(d, package, **({"_record": record.observation()} if record is not None else {}))
+        if record is not None: record.second = current
         if current != evidence:
-            return False, "dm_composer_context_changed", None, None
-        return True, "contextual_composer:" + evidence["context"], evidence["bounds"], nodes[0]
+            result = False, "dm_composer_context_changed", None, None
+            return result
+        result = True, "contextual_composer:" + evidence["context"], evidence["bounds"], nodes[0]
+        return result
     except Exception:
-        return False, "dm_composer_observation_unproved", None, None
+        result = False, "dm_composer_observation_unproved", None, None
+        return result
+    finally:
+        if record is not None: record.complete(result)
 
 
 def _dm_446_thread_state(d, username, package, composer_timeout_s):

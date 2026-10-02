@@ -127,6 +127,41 @@
     "transport_change": false,
     "worker_executable_change": false
   },
+  "dm446_composer_live_evidence_generation": {
+    "additional_ui_reads": 0,
+    "approval1_scope_sha256": "5a6ce37fb7bf1486ccba69a2b7553329e2a661af5a1f50cdbccd49b07b8809de",
+    "base_sha": "16bda905d306a204f2da6c1964b815ee98ffaa26",
+    "business_predicates_unchanged": true,
+    "files": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261001224427_dm446_certification_composer_terminal_v1.sql": "17252a03815af07d1af1903ae798e6e77055f0239e356382b689a892559c4dad",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_composer_terminal.py": "0f462d583ba33db12553ad581bee6c5453dd2e08ce89242d81cc43335dd53888",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_daily_counter.py": "4ce28418bcd708ea84ae6d77ea75f4e0d48ddf6753cec6d7c48a7d8202d8b083",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_terminal_renewal.py": "a945180b563e504f3dae7f7f43aef23fcd323f8e7b1da1ebe8e84adb05b6adb7",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/canary_child.py": "9f6bc829caf5dc14bd8bd1ac0a6afab84a3ecd6ff8587366a0144bbd874acc8b",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/dm-launcher-446/tests/test_canary_launcher.py": "d835fce06a17d720f6d6ad43913fa4a512f78909a65a9da41fdd8ded3083cc3e",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/dm_446_observation_retention.py": "feef3682dc121be20189ddc459655718af895c9238cf99afdb6c65d2e8979b3f",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/instagram_navigation.py": "35b4a4ca21b62c06f2a9ef6864480c525b43ec619b1ec4a113055548a5f48b64",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/test_certification_admission.py": "4f0d3767b32f3956f9260e8df2052172fce3c4f5b270cd353fc6e0336c66d80b",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/test_dm_446_composer_live_retention.py": "1d4d165c28f4c61e822e2ebd184a13cce8dc70c41b062030c8ad5572a1e488ad",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/test_dm_446_multisurface.py": "d0370b22344a146eb751f6b71998863d12b1c173d9b0fea61b2bcd4bb0a016fb",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/test_dm_446_observation_retention.py": "3d7bfdb4392902f66377c36a8e5d63b67ed48d4636c9225fd0729dd28ad84912"
+    },
+    "generation_id": "b9f634f2-4a18-4364-a7f0-c0bd4f3922d0",
+    "observability_only": true,
+    "old_permits_reusable": false,
+    "physical_timing_margin_certified": false,
+    "previous_history_gate_required": true,
+    "previous_manifest_sha256": "89c88871a288636e2715e95f18c0fb1a5f33d888905865e6232164532ffc4435",
+    "previous_terminal_receipt": {
+      "path": "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/physical-dm446-business-day-resume-canary/FINAL_RESULT.json",
+      "sha256": "5bca5fbc68fb1b47a538341d1277a50dcfce5dc45ccdb0bb6da00eab93f71620"
+    },
+    "production_activation_authorized": false,
+    "registration_and_execution_same_sast_business_day_required": true,
+    "schema": "DM446_COMPOSER_LIVE_EVIDENCE_GENERATION_V1",
+    "sql_installed": false,
+    "write_after_runner_exit": true
+  },
   "dm446_daily_counter_generation": {
     "approval1_sha256": "44730a3be56631df077d5719c3e63a31accefb2c3073bd856f6398edfea9d922",
     "approval1_signature_sha256": "5538045a6e113cf4cc133a6624bf9cbbbedf9cd21409efe4342230e53cbb4942",

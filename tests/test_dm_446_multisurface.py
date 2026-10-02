@@ -122,7 +122,7 @@ class MultisurfaceTests(unittest.TestCase):
    for ctx in (None,CTX):
     with self.subTest(name=name,ctx=ctx):self.assertEqual(old.classify_dm_history(c['xml'],package,TARGET),truth.classify_dm_history(c['xml'],package,TARGET,surface_context=ctx))
  def test_historical_real_reader_exact_counts_and_results(self):
-  tree=ast.parse(baseline('instagram_navigation.py'));env=dict(vars(nav));names={'_dm_446_observation','_dm_446_thread_state'}
+  tree=ast.parse(baseline('instagram_navigation.py'));env=dict(vars(nav));names={'_dm_446_observation','_dm_446_thread_state','_dm_446_composer'}
   exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names],type_ignores=[]),'<baseline_nav>','exec'),env)
   for name,c in DATA.items():
    with self.subTest(name=name):
@@ -132,9 +132,45 @@ class MultisurfaceTests(unittest.TestCase):
     self.assertEqual(old,new);self.assertEqual((a.reads,a.currents,a.dimensions,oldclock.now),(b.reads,b.currents,b.dimensions,self.clock.now))
  def test_scope_ast_and_truth_predicates_unchanged(self):
   def functions(s):return {n.name:n for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
-  for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state'})]:
+  for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer'})]:
    old=functions(baseline(filename));new=functions((ROOT/filename).read_text());self.assertEqual(set(old),set(new))
    self.assertEqual({n for n in old if ast.dump(old[n])!=ast.dump(new[n])},allowed)
+
+  # Approved composer instrumentation may retain evidence, never alter decisions.
+  composer=functions((ROOT/'instagram_navigation.py').read_text())['_dm_446_composer']
+  class StripApprovedComposerEvidence(ast.NodeTransformer):
+   def visit_FunctionDef(self,node):
+    node=self.generic_visit(node)
+    if node.name=='_dm_446_composer':
+     node.body=[n for n in node.body if not (isinstance(n,ast.ImportFrom) and n.module=='dm_446_observation_retention') and not (isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id in ('record','result'))]
+    return node
+   def visit_If(self,node):
+    if ast.dump(node.test)==ast.dump(ast.parse('record is not None',mode='eval').body):return None
+    return self.generic_visit(node)
+   def visit_Try(self,node):
+    # Only the exact evidence-only finally is removable.
+    expected=ast.parse('if record is not None: record.complete(result)').body
+    if ast.dump(ast.Module(body=node.finalbody,type_ignores=[]))==ast.dump(ast.Module(body=expected,type_ignores=[])):node.finalbody=[]
+    return self.generic_visit(node)
+   def visit_Assign(self,node):
+    if len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='result' and isinstance(node.value,ast.Tuple):return ast.Return(value=node.value)
+    return self.generic_visit(node)
+   def visit_Return(self,node):
+    if isinstance(node.value,ast.Name) and node.value.id=='result':return None
+    return self.generic_visit(node)
+   def visit_Call(self,node):
+    if isinstance(node.func,ast.Name) and node.func.id=='_dm_446_observation':
+     expected=ast.parse('f(**({"_record": record.observation()} if record is not None else {}))',mode='eval').body.keywords[0]
+     node.keywords=[k for k in node.keywords if ast.dump(k)!=ast.dump(expected)]
+    return self.generic_visit(node)
+  normalized=StripApprovedComposerEvidence().visit(composer)
+  self.assertEqual(ast.dump(normalized),ast.dump(functions(baseline('instagram_navigation.py'))['_dm_446_composer']))
+  from test_dm_446_composer_live_retention import ComposerRetentionTests
+  # Same actual reads/results for every live mismatch, exception and valid surface.
+  for name in ('test_multisurface_and_keyboard_equivalence','test_live_mismatches_exact_order','test_exceptions_keep_exact_io_and_results','test_second_qualified_drift_equivalent','test_inactive_no_io'):
+   check=ComposerRetentionTests(name)
+   try:getattr(check,name)()
+   finally:check.tearDown()
   # Revert only the reviewed seam; entire historical classifier must then match.
   s=(ROOT/'dm_thread_truth.py').read_text()
   s=s.replace('expected_username: str | None = None, *, surface_context=None)','expected_username: str | None = None)')

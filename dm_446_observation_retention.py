@@ -157,3 +157,166 @@ class Recorder:
         finally:
             for directory in reversed(fds):
                 os.close(directory)
+
+
+# Composer evidence is passive, bounded and drained only outside runner.main.
+# No retained UiObject, backend payload, text or lease secret.
+_COMPOSER_FIELDS = ('resourceName', 'className', 'enabled', 'clickable',
+                    'focusable', 'focused', 'bounds')
+_MAX_COMPOSER_INVOCATIONS = 128
+_MAX_COMPOSER_XML_BYTES = 32 * 1024 * 1024
+_composer_buffer = None
+
+
+def activate_composer(package, recipient):
+    global _composer_buffer
+    if _composer_buffer is not None:
+        raise CertificationStop('dm_composer_retention_already_active')
+    recorder = begin(package, recipient)
+    if recorder is None:
+        raise CertificationStop('dm_composer_retention_context_unproved')
+    from threading import get_ident
+    _composer_buffer = dict(context=recorder.context, owner=get_ident(), records=[],
+                            xml_bytes=0, incomplete=False, invocations=0)
+
+
+def begin_composer(package):
+    buffer = _composer_buffer
+    if buffer is None:
+        return None
+    from threading import get_ident
+    if package != buffer['context']['package'] or get_ident() != buffer['owner']:
+        buffer['incomplete'] = True
+        return None
+    buffer['invocations'] += 1
+    if buffer['invocations'] > _MAX_COMPOSER_INVOCATIONS:
+        buffer['incomplete'] = True
+        return None
+    return ComposerRecord(buffer)
+
+
+class ComposerRecord:
+    def __init__(self, buffer):
+        self.buffer = buffer
+        self.rows = []
+        self.first = self.second = self.selector_count = None
+        self.live = self.expected = self.result = None
+        self.invalid = False
+
+    def observation(self):
+        row = {}
+        self.rows.append(row)
+        return row
+
+    def capture_live(self, info, rid, bounds):
+        try:
+            # Read no property here. info is the already-returned dictionary.
+            if type(info) is not dict:
+                self.invalid = True
+                return
+            self.live = {k: (dict(info[k]) if k == 'bounds' and type(info[k]) is dict
+                             else info[k]) for k in _COMPOSER_FIELDS if k in info}
+            self.expected = dict(resourceName=rid, className='android.widget.EditText',
+                                 enabled=True, clickable=True, focusable=True,
+                                 bounds=dict(bounds))
+        except Exception:
+            self.invalid = True
+
+    def complete(self, result):
+        try:
+            # Do not retain result[3]: that is a live UiObject.
+            self.result = None if result is None else result[:3]
+            # Conservative UTF-8 upper bound without encoding/hashing in UI path.
+            size = sum(4 * len(r['xml']) for r in self.rows if type(r.get('xml')) is str)
+            if self.invalid or self.buffer['xml_bytes'] + size > _MAX_COMPOSER_XML_BYTES:
+                self.buffer['incomplete'] = True
+                return
+            self.buffer['xml_bytes'] += size
+            self.buffer['records'].append(self)
+        except Exception:
+            self.buffer['incomplete'] = True
+
+    def receipt(self):
+        result, live, expected = self.result, self.live or {}, self.expected or {}
+        failed = None
+        context_stages = ('foreground_before_invalid', 'foreground_after_changed',
+                          'version_context_invalid')
+        if result and result[0]:
+            failed = 'NONE'
+        elif self.first is None:
+            stage = self.rows[0].get('observation_reason') if self.rows else None
+            failed = 'foreground_or_context_changed' if stage in context_stages else 'observation_unqualified'
+        elif not self.first['visible']:
+            failed = 'observation_unqualified'
+        elif self.selector_count is not None and self.selector_count != 1:
+            failed = 'selector_not_unique'
+        elif self.live is not None:
+            for key, reason in (('resourceName', 'resource_name_mismatch'),
+                                ('className', 'class_mismatch'), ('enabled', 'enabled_mismatch'),
+                                ('clickable', 'clickable_mismatch'), ('focusable', 'focusable_mismatch'),
+                                ('bounds', 'bounds_mismatch')):
+                valid = live.get(key) is expected[key] if key in ('enabled', 'clickable', 'focusable') else live.get(key) == expected[key]
+                if not valid:
+                    failed = reason
+                    break
+            if failed is None:
+                if self.second is None:
+                    stage = self.rows[-1].get('observation_reason') if self.rows else None
+                    failed = 'foreground_or_context_changed' if stage in context_stages else 'second_observation_unqualified'
+                elif not self.second['visible']:
+                    failed = 'second_observation_unqualified'
+                elif self.second != self.first:
+                    failed = 'second_observation_drift'
+        return dict(first_failed_predicate=failed or 'other_exact_existing_reason',
+                    composer_result=bool(result and result[0]),
+                    composer_reason=result[1] if result else None,
+                    first=self.first, second=self.second, selector_count=self.selector_count,
+                    live=live, live_present_fields=[k for k in _COMPOSER_FIELDS if k in live],
+                    expected=expected, second_selector_not_unique='NOT_APPLICABLE',
+                    budget_exhausted='NOT_EVALUATED_BY_THIS_HELPER')
+
+
+def flush_composer():
+    """Always clear context; persistence failure never replaces runner outcome."""
+    global _composer_buffer
+    buffer, _composer_buffer = _composer_buffer, None
+    if buffer is None:
+        return 'INACTIVE'
+    fds = []
+    try:
+        fd = _root()
+        fds.append(fd)
+        for key in ('run_id', 'execution_id'):
+            fd = _directory(fd, buffer['context'][key], private=True, create=True)
+            fds.append(fd)
+        name = 'composer-' + uuid4().hex
+        os.mkdir(name, 0o700, dir_fd=fd)
+        fd = _directory(fd, name, private=True)
+        fds.append(fd)
+        records = []
+        for index, record in enumerate(buffer['records'], 1):
+            item = record.receipt()
+            item['observations'] = []
+            for observation, row in enumerate(record.rows, 1):
+                kept = {k: v for k, v in row.items() if k != 'xml'}
+                kept.update(xml_path=None, xml_sha256=None)
+                if row.get('xml') is not None:
+                    payload = row['xml'].encode('utf-8')
+                    filename = 'composer_%03d_observation_%d.xml' % (index, observation)
+                    _write(fd, filename, payload)
+                    kept.update(xml_path=filename, xml_sha256=hashlib.sha256(payload).hexdigest())
+                item['observations'].append(kept)
+            records.append(item)
+        status = 'UNPROVEN' if buffer['incomplete'] else 'RETAINED'
+        receipt = dict(schema='DM446_COMPOSER_LIVE_EVIDENCE_V1', context=buffer['context'],
+                       evidence_status=status, invocations=buffer['invocations'], records=records)
+        _write(fd, 'receipt.json', (json.dumps(receipt, sort_keys=True, ensure_ascii=True,
+                    allow_nan=False, indent=2) + '\n').encode())
+        for directory in reversed(fds):
+            os.fsync(directory)
+        return status
+    except Exception:
+        return 'UNPROVEN'
+    finally:
+        for directory in reversed(fds):
+            os.close(directory)
