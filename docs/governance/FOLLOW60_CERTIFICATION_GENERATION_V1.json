@@ -162,6 +162,22 @@
     "sql_installed": false,
     "write_after_runner_exit": true
   },
+  "dm446_current_surface_generation": {
+    "approval1_scope_sha256": "f2532dd4ed9608a6ea3c1e4d0aac30b9baa8a0a52fe139bfe915e38fbb44eb05",
+    "business_changed": false,
+    "files": {
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/supabase/migrations/20261002002313_dm446_certification_surface_terminal_v1.sql": "70e968148790823e76b33f35164f053b310cccbdc364d1454db8b00687564203",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_daily_counter.py": "4f8d1a4c658e5c6ea7782cb74bf623770dfff6875d19175367ef39b96c4e2e10",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_sunet_terminal_renewal.py": "1a00f866196936af2fe5a36b6dd6aed8b87786b40b5ce6966ee47c01c44f66b2",
+      "/Users/admin/Projects/instagram-a0-446-adaptation-20260925/certification-migrations/tests/test_dm446_surface_terminal.py": "155ce563cb3cccb7d048784843a74f20f4b79b0eb13462c9ab6d8f0af80bc85f",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/dm_ui_446_surface.py": "40fe0141169236c6e45b8f92bcf22a71317f7a520470559cbf271117d4545105",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/dm_ui_446_surface_shapes.json": "11fb3d3dfa942eb8f45b028146d47fc8f6a01d8e57b8c521cb95c50ece671d9d",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/fixtures/dm_446_current_surface.json": "1bef944538a8eae222ee7c4adb524226e6fe06dfeda54eee15606a11621af8ae",
+      "/Users/admin/Projects/instagram-a0-446-worker-20260925/tests/test_dm_446_current_surface.py": "98018101c13021075dd0b6d46eb1484882a58642f3bf8d011cbca7b818dda773"
+    },
+    "reason": "finite_exact_retained_surface_and_terminal_certification_renewal",
+    "ui_io_added": 0
+  },
   "dm446_daily_counter_generation": {
     "approval1_sha256": "44730a3be56631df077d5719c3e63a31accefb2c3073bd856f6398edfea9d922",
     "approval1_signature_sha256": "5538045a6e113cf4cc133a6624bf9cbbbedf9cd21409efe4342230e53cbb4942",
