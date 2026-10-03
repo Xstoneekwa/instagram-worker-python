@@ -72,6 +72,7 @@ def main() -> int:
     parser.add_argument("--lineage-receipt", required=True)
     parser.add_argument("--migration-attestation", required=True)
     parser.add_argument("--runtime-home")
+    parser.add_argument("--generation")
     args = parser.parse_args()
     source = Path(args.source).resolve(strict=True)
     release = Path(args.release).resolve()
@@ -152,6 +153,17 @@ def main() -> int:
         os.environ["PHONEFARM_RUNTIME_HOME"] = str(Path(args.runtime_home).resolve())
         os.environ.pop("PHONEFARM_RUNTIME_ROOT", None)
     evidence_dir = deployment_evidence_dir(candidate_sha)
+    if args.generation:
+        generation = str(args.generation).strip()
+        if (not generation or Path(generation).is_absolute() or len(Path(generation).parts) != 1
+                or generation in {".", ".."}
+                or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for ch in generation)):
+            raise SystemExit("generation_selector_invalid")
+        evidence_dir = (evidence_dir / generation).resolve()
+        try:
+            evidence_dir.relative_to(deployment_evidence_dir(candidate_sha))
+        except ValueError:
+            raise SystemExit("generation_selector_outside_sha")
     if evidence_dir.exists() or evidence_dir.is_symlink():
         raise SystemExit("deployment_evidence_target_already_exists")
     evidence_dir.mkdir(parents=True)

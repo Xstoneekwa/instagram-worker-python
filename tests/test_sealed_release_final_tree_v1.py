@@ -19,6 +19,13 @@ def _canonical_hash(payload: dict) -> str:
 
 
 class SealedReleaseFinalTreeV1Tests(unittest.TestCase):
+    def test_generation_publication_is_explicit_and_bounded(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "scripts/create-certified-phonefarm-release-v1.py").read_text(encoding="utf-8")
+        self.assertIn('parser.add_argument("--generation")', source)
+        self.assertIn("generation_selector_invalid", source)
+        self.assertIn("generation_selector_outside_sha", source)
+        self.assertIn("evidence_dir / generation", source)
+
     def test_external_evidence_binds_final_clean_tree(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)

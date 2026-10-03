@@ -91,6 +91,25 @@ class RuntimeArtifactsV1Tests(unittest.TestCase):
                     (external_manifest.resolve(), external_signature.resolve()),
                 )
 
+    def test_signed_context_generation_selects_exact_subnamespace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw); release = base / "release"; release.mkdir()
+            runtime = base / "runtime"; sha = "c" * 40; generation = "authority-renewal-v3"
+            evidence = runtime / "deployment-evidence" / sha / generation
+            evidence.mkdir(parents=True)
+            (evidence / artifacts.FOLLOW60_MANIFEST_NAME).write_text("manifest")
+            (evidence / artifacts.FOLLOW60_SIGNATURE_NAME).write_bytes(b"sig")
+            with mock.patch.dict(os.environ, {"PHONEFARM_RUNTIME_HOME": str(runtime), "PHONEFARM_FOLLOW60_GENERATION": generation}, clear=False), mock.patch.object(artifacts, "git_commit_sha", return_value=sha):
+                self.assertEqual(artifacts.follow60_certification_paths(release), (evidence / artifacts.FOLLOW60_MANIFEST_NAME, evidence / artifacts.FOLLOW60_SIGNATURE_NAME))
+
+    def test_generation_missing_incomplete_and_unsafe_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw); release = base / "release"; release.mkdir(); runtime = base / "runtime"; sha = "d" * 40
+            with mock.patch.dict(os.environ, {"PHONEFARM_RUNTIME_HOME": str(runtime), "PHONEFARM_FOLLOW60_GENERATION": "missing"}, clear=False), mock.patch.object(artifacts, "git_commit_sha", return_value=sha), self.assertRaisesRegex(RuntimeError, "generation_missing"):
+                artifacts.follow60_certification_paths(release)
+            with mock.patch.dict(os.environ, {"PHONEFARM_RUNTIME_HOME": str(runtime), "PHONEFARM_FOLLOW60_GENERATION": "../escape"}, clear=False), mock.patch.object(artifacts, "git_commit_sha", return_value=sha), self.assertRaisesRegex(RuntimeError, "selector_invalid"):
+                artifacts.follow60_certification_paths(release)
+
     def test_named_runtime_modules_have_no_release_relative_log_root(self) -> None:
         root = Path(__file__).resolve().parents[1]
         names = (

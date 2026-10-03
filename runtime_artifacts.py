@@ -116,6 +116,28 @@ def follow60_certification_paths(root: Path) -> tuple[Path, Path]:
     root = Path(root).resolve(strict=True)
     sha = git_commit_sha(root)
     external = deployment_evidence_dir(sha)
+    generation = str(os.environ.get("PHONEFARM_FOLLOW60_GENERATION") or "").strip()
+    if generation:
+        generation_path = Path(generation)
+        if (
+            generation_path.is_absolute()
+            or len(generation_path.parts) != 1
+            or generation in {".", ".."}
+            or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for ch in generation)
+        ):
+            raise RuntimeError("follow60_generation_selector_invalid")
+        external = (external / generation).resolve()
+        try:
+            external.relative_to(deployment_evidence_dir(sha))
+        except ValueError as exc:
+            raise RuntimeError("follow60_generation_selector_outside_sha") from exc
+        if not external.is_dir():
+            raise RuntimeError("follow60_generation_missing")
+        manifest = external / FOLLOW60_MANIFEST_NAME
+        signature = external / FOLLOW60_SIGNATURE_NAME
+        if not manifest.is_file() or not signature.is_file():
+            raise RuntimeError("follow60_generation_pair_incomplete")
+        return manifest.resolve(), signature.resolve()
     manifest = external / FOLLOW60_MANIFEST_NAME
     signature = external / FOLLOW60_SIGNATURE_NAME
     # Once any SHA-bound external evidence exists, it is the sole authority.
