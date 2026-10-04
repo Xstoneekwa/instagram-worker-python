@@ -50,6 +50,7 @@ class CountDevice(Device):
                         if d.failure=='info':raise RuntimeError('info')
                         v=self.n.info;v.update(d.edit)
                         if d.mode=='missing':v.pop('resourceName',None)
+                        for key in d.missing_fields:v.pop(key,None)
                         return v
                 return [N(n) for n in nodes]
         return Selection()
@@ -61,10 +62,10 @@ def buffer():
 
 class ComposerRetentionTests(unittest.TestCase):
     def tearDown(self):retention._composer_buffer=None
-    def compare(self,xml=None,edit=None,mode='',failure=None,active=True):
+    def compare(self,xml=None,edit=None,mode='',failure=None,active=True,missing_fields=()):
         results=[];calls=[];b=buffer()
         for fun in (baseline,nav._dm_446_composer):
-            d=CountDevice(xml or CAPS['business']['xml']);d.edit=edit or {};d.mode=mode;d.failure=failure
+            d=CountDevice(xml or CAPS['business']['xml']);d.edit=edit or {};d.mode=mode;d.failure=failure;d.missing_fields=set(missing_fields)
             retention._composer_buffer=b if active and fun is nav._dm_446_composer else None
             r=fun(d,PKG);results.append((*r[:3],r[3] is not None));calls.append(d.events)
         self.assertEqual(results[0],results[1]);self.assertEqual(calls[0],calls[1])
@@ -78,6 +79,30 @@ class ComposerRetentionTests(unittest.TestCase):
         for key,val,reason in [('resourceName','', 'resource_name_mismatch'),('className','android.view.View','class_mismatch'),('enabled',False,'enabled_mismatch'),('clickable',False,'clickable_mismatch'),('focusable',None,'focusable_mismatch'),('bounds',{},'bounds_mismatch')]:
             with self.subTest(key=key):
                 b,r=self.compare(edit={key:val});self.assertEqual(r[1],'dm_composer_live_mismatch');self.assertEqual(b['records'][0].receipt()['first_failed_predicate'],reason)
+    def test_exact_selector_comparison_retained(self):
+        b, _ = self.compare()
+        receipt = b['records'][0].receipt()
+        self.assertEqual(receipt['final_selector_comparison'], 'MATCH')
+        self.assertIsNone(receipt['first_failed_field'])
+        self.assertEqual([x['field'] for x in receipt['comparison_fields']],
+                         ['resourceName', 'className', 'enabled', 'clickable', 'focusable', 'bounds'])
+        self.assertTrue(all(x['equal'] for x in receipt['comparison_fields']))
+
+    def test_each_selector_field_absence_is_retained(self):
+        for field in ('resourceName', 'className', 'enabled', 'clickable', 'focusable', 'bounds'):
+            with self.subTest(field=field):
+                b, _ = self.compare(missing_fields=(field,))
+                receipt = b['records'][0].receipt()
+                self.assertEqual(receipt['final_selector_comparison'], 'FIELD_ABSENT')
+                self.assertEqual(receipt['first_failed_field'], field)
+                self.assertFalse(next(x for x in receipt['comparison_fields'] if x['field'] == field)['equal'])
+
+    def test_selector_comparison_classifications(self):
+        b, _ = self.compare(mode='zero')
+        self.assertEqual(b['records'][0].receipt()['final_selector_comparison'], 'SELECTOR_ABSENT')
+        b, _ = self.compare(mode='duplicate')
+        self.assertEqual(b['records'][0].receipt()['final_selector_comparison'], 'SELECTOR_AMBIGUOUS')
+
     def test_missing_is_not_null(self):
         a,_=self.compare(mode='missing');b,_=self.compare(edit={'resourceName':None})
         self.assertNotIn('resourceName',a['records'][0].receipt()['live_present_fields'])

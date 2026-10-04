@@ -8233,6 +8233,7 @@ def _dm_446_composer(d, package):
         info = nodes[0].info or {}
         if record is not None:
             record.capture_live(info, rid, evidence["bounds"])
+            record.compare_live(info, rid, evidence["bounds"])
         if (info.get("resourceName") != rid
                 or info.get("className") != "android.widget.EditText"
                 or info.get("enabled") is not True

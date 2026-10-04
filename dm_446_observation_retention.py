@@ -201,6 +201,9 @@ class ComposerRecord:
         self.rows = []
         self.first = self.second = self.selector_count = None
         self.live = self.expected = self.result = None
+        self.comparison_fields = []
+        self.first_failed_field = None
+        self.final_selector_comparison = None
         self.invalid = False
 
     def observation(self):
@@ -220,6 +223,45 @@ class ComposerRecord:
                                  enabled=True, clickable=True, focusable=True,
                                  bounds=dict(bounds))
         except Exception:
+            self.invalid = True
+
+    def compare_live(self, info, rid, bounds):
+        """Retain the exact already-read comparator inputs; never drive the verdict."""
+        try:
+            fields = ('resourceName', 'className', 'enabled', 'clickable', 'focusable', 'bounds')
+            expected = self.expected or dict(resourceName=rid, className='android.widget.EditText',
+                                             enabled=True, clickable=True, focusable=True,
+                                             bounds=dict(bounds))
+            if type(info) is not dict:
+                self.final_selector_comparison = 'OBSERVATION_EXCEPTION'
+                return
+            details = []
+            for key in fields:
+                expected_present = key in expected
+                live_present = key in info
+                expected_value = expected.get(key)
+                live_value = info.get(key)
+                normalized_expected = dict(expected_value) if key == 'bounds' and type(expected_value) is dict else expected_value
+                normalized_live = dict(live_value) if key == 'bounds' and type(live_value) is dict else live_value
+                if key in ('enabled', 'clickable', 'focusable'):
+                    equal = expected_present and live_present and normalized_expected is True and normalized_live is True
+                else:
+                    equal = expected_present and live_present and normalized_expected == normalized_live
+                details.append(dict(field=key, expected_present=expected_present, expected_value=expected_value,
+                                    live_present=live_present, live_value=live_value,
+                                    normalized_expected=normalized_expected, normalized_live=normalized_live,
+                                    equal=bool(equal)))
+                if self.first_failed_field is None and not equal:
+                    self.first_failed_field = key
+            self.comparison_fields = details
+            if self.first_failed_field is None:
+                self.final_selector_comparison = 'MATCH'
+            elif not next(item for item in details if item['field'] == self.first_failed_field)['live_present']:
+                self.final_selector_comparison = 'FIELD_ABSENT'
+            else:
+                self.final_selector_comparison = 'FIELD_MISMATCH'
+        except Exception:
+            self.final_selector_comparison = 'OBSERVATION_EXCEPTION'
             self.invalid = True
 
     def complete(self, result):
@@ -267,12 +309,23 @@ class ComposerRecord:
                     failed = 'second_observation_unqualified'
                 elif self.second != self.first:
                     failed = 'second_observation_drift'
+        final_selector_comparison = self.final_selector_comparison
+        if final_selector_comparison is None:
+            if self.invalid or (result and len(result) > 1 and result[1] == 'dm_composer_observation_unproved'):
+                final_selector_comparison = 'OBSERVATION_EXCEPTION'
+            elif self.selector_count == 0:
+                final_selector_comparison = 'SELECTOR_ABSENT'
+            elif self.selector_count is not None and self.selector_count != 1:
+                final_selector_comparison = 'SELECTOR_AMBIGUOUS'
         return dict(first_failed_predicate=failed or 'other_exact_existing_reason',
                     composer_result=bool(result and result[0]),
                     composer_reason=result[1] if result else None,
                     first=self.first, second=self.second, selector_count=self.selector_count,
                     live=live, live_present_fields=[k for k in _COMPOSER_FIELDS if k in live],
-                    expected=expected, second_selector_not_unique='NOT_APPLICABLE',
+                    expected=expected, comparison_fields=self.comparison_fields,
+                    first_failed_field=self.first_failed_field,
+                    final_selector_comparison=final_selector_comparison,
+                    second_selector_not_unique='NOT_APPLICABLE',
                     budget_exhausted='NOT_EVALUATED_BY_THIS_HELPER')
 
 
