@@ -104,7 +104,7 @@ class Recorder:
         self.finished = False
 
     def observation(self):
-        if self.finished or len(self.rows) >= 9:
+        if self.finished or len(self.rows) >= 10:
             raise CertificationStop('dm_exact_observation_sequence_invalid')
         row = dict(index=len(self.rows) + 1,
                    observed_at=datetime.now(timezone.utc).isoformat(), xml=None,

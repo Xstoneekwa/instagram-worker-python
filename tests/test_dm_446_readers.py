@@ -107,11 +107,16 @@ class DM446Tests(unittest.TestCase):
             with self.subTest(name=name):
                 d=Device(fixture(name));state,s=self.state(d)
                 self.assertEqual(state,'existing_thread');self.assertTrue(s['has_history']);self.assertEqual(d.reads,1)
-    def test_real_positive_empty_requires_two_reads(self):
+    def test_positive_empty_completes_a0_history_probe(self):
         for name in ('B_37_new_thread_search','B_62_profile_message'):
             with self.subTest(name=name):
-                d=Device(fixture(name));state,s=self.state(d)
-                self.assertEqual(state,'empty_new_thread');self.assertEqual(d.reads,2);self.assertEqual(s['positive_empty_observations'],2)
+                self.clock.now=0.;d=Device(fixture(name),clock=self.clock)
+                state,s=self.state(d)
+                self.assertEqual(state,'empty_new_thread')
+                self.assertEqual(s['reason'],'a0_history_probe_completed')
+                self.assertGreaterEqual(self.clock.now,0.8)
+                self.assertEqual(s['positive_empty_observations'],d.reads)
+                self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
     def test_composer_does_not_turn_b42_b43_b44_into_empty(self):
         for name in ('B_42_compose_result_open','B_43_new_composer_focus','B_44_new_keyboard_back'):
             with self.subTest(name=name):
@@ -124,9 +129,13 @@ class DM446Tests(unittest.TestCase):
         a=fixture('B_37_new_thread_search')
         for b,expected in [(RuntimeError(),'unknown'),('<hierarchy/>','unknown'),(fixture('B_30_existing_thread'),'existing_thread'),(fixture('B_44_new_keyboard_back'),'unknown')]:
             with self.subTest(expected=expected,b=str(b)[:30]):self.assertEqual(self.state(Device([a,b]))[0],expected)
-    def test_changed_empty_surface_denies_empty(self):
+    def test_changed_qualified_display_name_preserves_recipient_truth(self):
         a=fixture('B_37_new_thread_search');b=a.replace('Vincent Favre','Another Display Name')
-        self.assertNotEqual(a,b);self.assertEqual(self.state(Device([a,b]))[0],'unknown')
+        self.assertNotEqual(a,b)
+        state,s=self.state(Device([a,b]))
+        self.assertEqual(state,'empty_new_thread')
+        self.assertEqual(s['reason'],'a0_history_probe_completed')
+        self.assertEqual(self.state(Device([a,b.replace(TARGET,'wrong_recipient')]))[0],'unknown')
     def test_late_positive_reply_not_accepted(self):
         d=Device(fixture('B_37_new_thread_search'),clock=self.clock);d.cost=3
         self.assertEqual(self.state(d)[0],'unknown');self.assertEqual(d.reads,1)

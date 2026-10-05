@@ -8270,7 +8270,7 @@ def _dm_446_composer(d, package):
 
 
 def _dm_446_thread_state(d, username, package, composer_timeout_s):
-    """446-only frozen A truth. No composer-based inference of EMPTY."""
+    """A0 composer phase then history probe, using the qualified 446 UI reader."""
     from dm_thread_truth import classify_dm_history
     snap = dict(thread_state="unknown", composer_visible=False, composer_signal="",
                 has_history=False, has_history_signal=False, history_signal_type="",
@@ -8278,66 +8278,69 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
                 username=username, positive_empty_observations=0, number_of_reads=0)
     from dm_446_observation_retention import begin
     retention = begin(package, username)
-    try:
-        started = time.monotonic()
-        budget = max(0.0, float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5)))
-        if composer_timeout_s is not None:
-            budget = min(budget, max(0.0, float(composer_timeout_s)))
-        poll = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1)))
-        probe = max(0.0, float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8)))
-        positive = 0
-        first = None
-        probe_deadline = None
-        for _ in range(9):
-            if time.monotonic() - started >= budget:
-                snap["reason"] = "dm_observation_budget_exhausted"
-                break
-            try:
-                observation = retention.observation() if retention is not None else None
-                xml, composer = _dm_446_observation(d, package, _record=observation)
-                snap["number_of_reads"] += 1
-                state, proof = classify_dm_history(xml, package, username,
-                                                   surface_context=composer.get("surface_context"))
-                if observation is not None:
-                    observation["classifier"] = dict(state=state, reason=proof.get("reason"))
-                snap.update(proof, composer_visible=composer["visible"],
-                            composer_signal=composer["reason"])
-            except Exception:
-                snap["reason"] = "dm_observation_unproved"
-                break
-            if time.monotonic() - started > budget:
-                snap["reason"] = "dm_observation_budget_exhausted"
-                break
-            if state == "existing_thread":
-                snap.update(thread_state=state, has_history=True, has_history_signal=True)
-                break
-            if state != "empty_new_thread" or not composer["visible"]:
-                break
-            if not username or not str(username).strip():
-                snap["reason"] = "dm_recipient_unproved"
-                break
-            # Two separate reads must prove the same recipient/conversation surface.
-            # Strict equality is deliberately local to this empty-thread proof.
-            if first is not None and xml != first:
-                snap["reason"] = "dm_empty_surface_changed"
-                break
-            first = xml
-            positive += 1
-            snap["positive_empty_observations"] = positive
-            if positive >= 2:
-                snap.update(thread_state="empty_new_thread", reason="positive_empty_rechecked")
-                break
-            if probe_deadline is None:
-                probe_deadline = time.monotonic() + probe
-            remaining = min(probe_deadline - time.monotonic(), budget - (time.monotonic() - started))
-            if remaining <= 0:
-                snap["reason"] = "dm_positive_reread_unavailable"
-                break
-            time.sleep(min(poll, remaining))
-        snap["elapsed_s"] = time.monotonic() - started
-        return snap["thread_state"], snap
+    started = time.monotonic()
 
+    def observe():
+        try:
+            observation = retention.observation() if retention is not None else None
+            xml, composer = _dm_446_observation(d, package, _record=observation)
+            snap["number_of_reads"] += 1
+            state, proof = classify_dm_history(xml, package, username,
+                                               surface_context=composer.get("surface_context"))
+            if observation is not None:
+                observation["classifier"] = dict(state=state, reason=proof.get("reason"))
+            snap.update(proof, composer_visible=composer["visible"],
+                        composer_signal=composer["reason"])
+            if state == "existing_thread":
+                snap.update(thread_state=state, has_history=True, has_history_signal=True,
+                            draft_only_fast=False)
+                return "existing"
+            elif state != "empty_new_thread" or not composer["visible"]:
+                snap["thread_state"] = "unknown"
+                return "unknown"
+            elif not username or not str(username).strip():
+                snap.update(thread_state="unknown", reason="dm_recipient_unproved")
+                return "unknown"
+            else:
+                snap["positive_empty_observations"] += 1
+                return "empty"
+        except Exception:
+            snap.update(thread_state="unknown", reason="dm_observation_unproved")
+            return "unknown"
+
+    try:
+        timeout = float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5)) if composer_timeout_s is None else float(composer_timeout_s)
+        if timeout <= 0:
+            snap["reason"] = "dm_composer_budget_exhausted"
+            return snap["thread_state"], snap
+        first_state = observe()
+        empty = first_state == "empty"
+        if first_state == "existing":
+            return snap["thread_state"], snap
+        if first_state == "unknown":
+            return snap["thread_state"], snap
+        if time.monotonic() - started > timeout:
+            snap.update(thread_state="unknown", reason="dm_composer_budget_exhausted")
+            return snap["thread_state"], snap
+        if not empty:
+            return snap["thread_state"], snap
+        # A0 probes for history after composer admission. An in-flight history
+        # read is evaluated before the next loop-deadline check, as in A0.
+        snap["draft_only_fast"] = True
+        probe_s = float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8))
+        poll_s = float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1))
+        probe_deadline = time.monotonic() + probe_s
+        while time.monotonic() < probe_deadline:
+            state = observe()
+            if state == "existing":
+                return snap["thread_state"], snap
+            if state == "unknown":
+                return snap["thread_state"], snap
+            time.sleep(poll_s)
+        snap.update(thread_state="empty_new_thread", reason="a0_history_probe_completed")
+        return snap["thread_state"], snap
     finally:
+        snap["elapsed_s"] = time.monotonic() - started
         if retention is not None:
             retention.finish(snap)
 

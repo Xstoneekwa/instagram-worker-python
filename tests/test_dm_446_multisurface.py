@@ -35,12 +35,15 @@ class MultisurfaceTests(unittest.TestCase):
     self.assertEqual(hashlib.sha256(c['xml'].encode()).hexdigest(),c['sha256'])
     self.assertEqual(truth.classify_dm_history(c['xml'],P,c['target'])[0],'unknown')
     self.assertEqual(truth.classify_dm_history(c['xml'],P,c['target'],surface_context=CTX)[0],'empty_new_thread')
- def test_actual_reader_two_distinct_observations(self):
+ def test_actual_reader_completes_a0_history_probe(self):
   for name,c in CAPTURES.items():
    with self.subTest(name=name):
     self.clock.now=0.;(state,proof),d=self.read(c['xml'],c['target'])
-    self.assertEqual(state,'empty_new_thread');self.assertEqual(proof['positive_empty_observations'],2)
-    self.assertEqual((d.reads,d.currents,d.dimensions),(2,4,2))
+    self.assertEqual(state,'empty_new_thread')
+    self.assertEqual(proof['reason'],'a0_history_probe_completed')
+    self.assertGreaterEqual(self.clock.now,0.8)
+    self.assertEqual(proof['positive_empty_observations'],d.reads)
+    self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
  def test_all_node_class_role_bounds_package_visibility_mutations(self):
   for name,c in CAPTURES.items():
    r=ET.fromstring(c['xml'])
@@ -107,7 +110,7 @@ class MultisurfaceTests(unittest.TestCase):
    x=c['xml'];target=c['target']
    for kind,xmls,t,alter in [
     ('wrong_target',x,'wrong',None),('no_target',x,'',None),('unknown',[x,'<hierarchy/>'],target,None),
-    ('exception',[x,RuntimeError()],target,None),('changed',[x,x.replace('rotation="0"','rotation="1"')],target,None),
+    ('exception',[x,RuntimeError()],target,None),('changed_recipient',[x,x.replace(target,'wrong_recipient')],target,None),
     ('late',x,target,lambda d:setattr(d,'cost',3)),
     ('revoked',x,target,lambda d:setattr(d,'after_read',lambda z:setattr(z,'_instagram_446_observed_context',None))),
     ('activity',x,target,lambda d:setattr(d,'activity','UnqualifiedOverlayActivity')),
@@ -128,7 +131,7 @@ class MultisurfaceTests(unittest.TestCase):
    package=ET.fromstring(c['xml'])[0].get('package')
    for ctx in (None,CTX):
     with self.subTest(name=name,ctx=ctx):self.assertEqual(old.classify_dm_history(c['xml'],package,TARGET),truth.classify_dm_history(c['xml'],package,TARGET,surface_context=ctx))
- def test_historical_real_reader_exact_counts_and_results(self):
+ def test_historical_reader_truth_and_a0_phase_timing(self):
   tree=ast.parse(baseline('instagram_navigation.py'));env=dict(vars(nav));names={'_dm_446_observation','_dm_446_thread_state','_dm_446_composer'}
   exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names],type_ignores=[]),'<baseline_nav>','exec'),env)
   for name,c in DATA.items():
@@ -136,7 +139,11 @@ class MultisurfaceTests(unittest.TestCase):
     oldclock=Clock();oldclock.now=0.;env['time']=oldclock;self.clock.now=0.
     a=Device(c['xml'],clock=oldclock);b=Device(c['xml'],clock=self.clock)
     old=env['_dm_446_thread_state'](a,TARGET,P,None);new=nav._dm_446_thread_state(b,TARGET,P,None)
-    self.assertEqual(old,new);self.assertEqual((a.reads,a.currents,a.dimensions,oldclock.now),(b.reads,b.currents,b.dimensions,self.clock.now))
+    self.assertEqual(old[0],new[0])
+    if new[0]=='empty_new_thread':
+     self.assertEqual(new[1]['reason'],'a0_history_probe_completed')
+     self.assertGreaterEqual(self.clock.now,0.8)
+    else:self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
  def test_scope_ast_and_truth_predicates_unchanged(self):
   def functions(s):return {n.name:n for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
   for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer'})]:

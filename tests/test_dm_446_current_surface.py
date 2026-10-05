@@ -53,13 +53,18 @@ class CurrentSurfaceTests(unittest.TestCase):
   extra=ET.Element('node',{'package':'com.android.systemui','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','clickable':'false','enabled':'true'})
   root.append(extra)
   self.assertIsNone(s.qualify(root,s.P,target,ctx))
- def test_canonical_double_observation(self):
+ def test_a0_probe_with_qualified_current_surface(self):
   x=F['xml']
-  for case,xmls,target in [('two_fresh',x,F['target']),('wrong_recipient',x,'wrong'),('second_unknown',[x,'<hierarchy/>'],F['target']),('second_changed',[x,x.replace('rotation="0"','rotation="1"')],F['target'])]:
+  for case,xmls,target in [('stable',x,F['target']),('wrong_recipient',x,'wrong'),('second_unknown',[x,'<hierarchy/>'],F['target']),('qualified_change',[x,x.replace('rotation="0"','rotation="1"')],F['target'])]:
    with self.subTest(case=case):
     clock=Clock();clock.now=0;d=Device(xmls,clock=clock)
     with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None):out=nav.detect_dm_thread_state(d,target,pkg=P)
-    self.assertEqual(out[0],'empty_new_thread' if case=='two_fresh' else 'unknown')
-    self.assertEqual((d.reads,d.currents,d.dimensions),(1,2,1) if case=='wrong_recipient' else (2,4,2))
-    if case=='two_fresh':self.assertEqual(out[1]['positive_empty_observations'],2)
+    self.assertEqual(out[0],'empty_new_thread' if case == 'stable' else 'unknown')
+    self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
+    if case == 'stable':
+     self.assertEqual(out[1]['reason'],'a0_history_probe_completed')
+     self.assertGreaterEqual(clock.now,0.8)
+     self.assertEqual(out[1]['positive_empty_observations'],d.reads)
+    elif case == 'qualified_change': self.assertEqual(out[1]['reason'],'conversation_path_unqualified')
+    else:self.assertEqual(d.reads,1 if case=='wrong_recipient' else 2)
 if __name__=='__main__':unittest.main()

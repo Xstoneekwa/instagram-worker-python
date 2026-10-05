@@ -113,22 +113,24 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(r['observations'][0]['classifier']['state'], 'unknown')
             self.assertIsNotNone(r['observations'][0]['xml_path'])
 
-    def test_two_separate_empty_and_discordant(self):
-        first = self.xml(); second = first.replace('Vincent Favre', 'Vincent Other')
-        state, snap, d = self.run_read([first, second])
-        self.assertEqual(state, 'unknown'); self.assertEqual(snap['reason'], 'dm_empty_surface_changed')
-        p, r = self.receipts()[0]
-        self.assertEqual(len(r['observations']), 2)
-        self.assertEqual([x['index'] for x in r['observations']], [1, 2])
+    def test_qualified_semantic_change_retained_without_byte_equality_gate(self):
+        first=self.xml();second=first.replace('Vincent Favre','Vincent Other')
+        state,snap,d=self.run_read([first,second])
+        self.assertEqual(state,'empty_new_thread')
+        self.assertEqual(snap['reason'],'a0_history_probe_completed')
+        p,r=self.receipts()[0]
+        self.assertEqual(len(r['observations']),d.reads)
+        self.assertEqual([x['index'] for x in r['observations']],list(range(1,d.reads+1)))
         self.assertTrue(all(x['classifier']['state']=='empty_new_thread' for x in r['observations']))
-        self.assertNotEqual(*[x['xml_sha256'] for x in r['observations']])
+        self.assertNotEqual(r['observations'][0]['xml_sha256'],r['observations'][1]['xml_sha256'])
+        self.assertGreaterEqual(self.clock.now,0.8)
 
     def test_budget_reason_does_not_replace_classifier(self):
         d = fixtures.Device(self.xml(), clock=self.clock); d.cost = 3
         state, _ = fixtures.nav.detect_dm_thread_state(d, self.c['recipient_username'], pkg=fixtures.P)
         r = self.receipts()[0][1]
         self.assertEqual(state, 'unknown')
-        self.assertEqual(r['runtime']['reason'], 'dm_observation_budget_exhausted')
+        self.assertEqual(r['runtime']['reason'], 'dm_composer_budget_exhausted')
         self.assertEqual(r['observations'][0]['classifier']['reason'], 'positive_empty_structure')
 
     def test_composer_rejection_retains_pure_truth_separately(self):
@@ -200,20 +202,22 @@ class RetentionTests(unittest.TestCase):
             state, _, _ = self.run_read(self.xml())
         self.assertEqual(state, 'empty_new_thread'); self.assertEqual(self.receipts(), [])
 
-    def test_actual_baseline_parity_counts_and_timing(self):
-        source = subprocess.check_output(['git','show',BASE+':instagram_navigation.py'],cwd=ROOT,text=True)
-        tree = ast.parse(source)
-        names = {'_dm_446_observation','_dm_446_thread_state'}
-        env = dict(vars(fixtures.nav))
+    def test_baseline_truth_preserved_except_removed_byte_equality_gate(self):
+        source=subprocess.check_output(['git','show',BASE+':instagram_navigation.py'],cwd=ROOT,text=True)
+        tree=ast.parse(source);env=dict(vars(fixtures.nav))
+        names={'_dm_446_observation','_dm_446_thread_state'}
         exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names],type_ignores=[]),'<baseline>','exec'),env)
-        for xmls in [self.xml(), '<bad', [self.xml(), self.xml().replace('Vincent Favre','Changed Name')], self.xml('B_30b_thread_stable')]:
+        for xmls in [self.xml(),'<bad',self.xml('B_30b_thread_stable')]:
             with self.subTest(kind=str(xmls)[:20]):
-                oldclock=fixtures.Clock(); env['time']=oldclock
-                a=fixtures.Device(xmls,clock=oldclock); b=fixtures.Device(xmls,clock=self.clock)
+                oldclock=fixtures.Clock();oldclock.now=0.;env['time']=oldclock;self.clock.now=0.
+                a=fixtures.Device(xmls,clock=oldclock);b=fixtures.Device(xmls,clock=self.clock)
                 old=env['_dm_446_thread_state'](a,self.c['recipient_username'],fixtures.P,None)
                 new=fixtures.nav._dm_446_thread_state(b,self.c['recipient_username'],fixtures.P,None)
-                self.assertEqual(old,new)
-                self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
+                self.assertEqual(old[0],new[0])
+                if new[0]=='empty_new_thread':
+                    self.assertEqual(new[1]['reason'],'a0_history_probe_completed')
+                    self.assertGreaterEqual(self.clock.now,0.8)
+                else:self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
 
     def test_frozen_truth_and_unchanged_non_dm_functions(self):
         self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'c52d3b1c6c3591ee0b66ebc39ce9e113a07a1d3bd9137c8c40e6ec12af2058af')
