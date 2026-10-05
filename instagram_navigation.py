@@ -8225,12 +8225,23 @@ def _dm_446_composer(d, package):
             return result
         rid = package + ":id/row_thread_composer_edittext"
         selector = d(resourceId=rid)
-        nodes = selector.all()
-        if record is not None: record.selector_count = len(nodes)
-        if len(nodes) != 1:
+        try:
+            selector_count = selector.count
+            if record is not None:
+                record.selector_count = selector_count
+        except Exception as exc:
+            if record is not None:
+                record.record_exception("selector_count", exc)
+            raise
+        if selector_count != 1:
             result = False, "dm_composer_not_unique", None, None
             return result
-        info = nodes[0].info or {}
+        try:
+            info = selector.info or {}
+        except Exception as exc:
+            if record is not None:
+                record.record_exception("selector_info", exc)
+            raise
         if record is not None:
             record.capture_live(info, rid, evidence["bounds"])
             record.compare_live(info, rid, evidence["bounds"])
@@ -8249,7 +8260,7 @@ def _dm_446_composer(d, package):
         if current != evidence:
             result = False, "dm_composer_context_changed", None, None
             return result
-        result = True, "contextual_composer:" + evidence["context"], evidence["bounds"], nodes[0]
+        result = True, "contextual_composer:" + evidence["context"], evidence["bounds"], selector
         return result
     except Exception:
         result = False, "dm_composer_observation_unproved", None, None

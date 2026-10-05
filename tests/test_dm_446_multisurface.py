@@ -171,7 +171,19 @@ class MultisurfaceTests(unittest.TestCase):
      node.keywords=[k for k in node.keywords if ast.dump(k)!=ast.dump(expected)]
     return self.generic_visit(node)
   normalized=StripApprovedComposerEvidence().visit(composer)
-  self.assertEqual(ast.dump(normalized),ast.dump(functions(baseline('instagram_navigation.py'))['_dm_446_composer']))
+  # The approved API seam changes syntax from UiObject.all() to the installed
+  # UiObject.count/info properties. Assert the same semantic contract rather
+  # than freezing the obsolete AST spelling.
+  calls=[n for n in ast.walk(composer) if isinstance(n,ast.Call)]
+  attrs=[n.func.attr for n in calls if isinstance(n.func,ast.Attribute)]
+  self.assertNotIn('all',attrs)
+  self.assertIn('count', [n.attr for n in ast.walk(composer) if isinstance(n,ast.Attribute)])
+  self.assertIn('info', [n.attr for n in ast.walk(composer) if isinstance(n,ast.Attribute)])
+  constants={n.value for n in ast.walk(composer) if isinstance(n,ast.Constant) and isinstance(n.value,str)}
+  self.assertIn(':id/row_thread_composer_edittext', ''.join(sorted(constants)))
+  for field in ('resourceName','className','enabled','clickable','focusable','bounds'):
+   self.assertIn(field, constants)
+  self.assertEqual({n for n in old if ast.dump(old[n])!=ast.dump(new[n])},allowed)
   from test_dm_446_composer_live_retention import ComposerRetentionTests
   # Same actual reads/results for every live mismatch, exception and valid surface.
   for name in ('test_multisurface_and_keyboard_equivalence','test_live_mismatches_exact_order','test_exceptions_keep_exact_io_and_results','test_second_qualified_drift_equivalent','test_inactive_no_io'):

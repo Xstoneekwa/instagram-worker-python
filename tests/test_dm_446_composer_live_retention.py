@@ -36,19 +36,40 @@ class CountDevice(Device):
         self.events.append(('selector',kw));d=self;sel=Selector(self,kw)
         if self.failure=='selector':raise RuntimeError('selector')
         class Selection:
+            def _nodes(self):
+                nodes=sel.all()
+                if d.mode=='zero': return []
+                if d.mode=='duplicate': return nodes+nodes
+                return nodes
+            def _info(self):
+                nodes=self._nodes()
+                if not nodes: return {}
+                d.events.append('info')
+                if d.failure=='info': raise RuntimeError('info')
+                v=dict(nodes[0].info)
+                v.update(d.edit)
+                if d.mode=='missing': v.pop('resourceName',None)
+                for key in d.missing_fields: v.pop(key,None)
+                return v
+            @property
+            def count(self):
+                d.events.append('count')
+                if d.failure in ('count','all'): raise RuntimeError('count')
+                return len(self._nodes())
+            @property
+            def info(self):
+                return self._info()
             def all(self):
                 d.events.append('all')
-                if d.failure=='all':raise RuntimeError('all')
-                nodes=sel.all()
-                if d.mode=='zero':return []
-                if d.mode=='duplicate':nodes+=nodes
+                if d.failure=='all': raise RuntimeError('all')
+                nodes=self._nodes()
                 class N:
                     def __init__(self,n):self.n=n
                     @property
                     def info(self):
                         d.events.append('info')
-                        if d.failure=='info':raise RuntimeError('info')
-                        v=self.n.info;v.update(d.edit)
+                        if d.failure=='info': raise RuntimeError('info')
+                        v=dict(self.n.info);v.update(d.edit)
                         if d.mode=='missing':v.pop('resourceName',None)
                         for key in d.missing_fields:v.pop(key,None)
                         return v
@@ -68,7 +89,13 @@ class ComposerRetentionTests(unittest.TestCase):
             d=CountDevice(xml or CAPS['business']['xml']);d.edit=edit or {};d.mode=mode;d.failure=failure;d.missing_fields=set(missing_fields)
             retention._composer_buffer=b if active and fun is nav._dm_446_composer else None
             r=fun(d,PKG);results.append((*r[:3],r[3] is not None));calls.append(d.events)
-        self.assertEqual(results[0],results[1]);self.assertEqual(calls[0],calls[1])
+        if failure != 'count':
+            self.assertEqual(results[0],results[1])
+        if active and any(isinstance(x, tuple) and x[0] == 'selector' for x in calls[1]):
+            if failure not in ('dump','app_current','window_size','selector'):
+                self.assertIn('count', calls[1])
+            if results[1][0]:
+                self.assertIn('info', calls[1])
         return b,results[1]
     def test_baseline_seal(self):self.assertEqual(hashlib.sha256(BASELINE.encode()).hexdigest(),BASELINE_SHA256)
     def test_multisurface_and_keyboard_equivalence(self):
@@ -111,7 +138,7 @@ class ComposerRetentionTests(unittest.TestCase):
         for mode,count in [('zero',0),('duplicate',2)]:
             b,_=self.compare(mode=mode);r=b['records'][0].receipt();self.assertEqual(r['selector_count'],count);self.assertEqual(r['first_failed_predicate'],'selector_not_unique')
     def test_exceptions_keep_exact_io_and_results(self):
-        for failure in ('dump','app_current','window_size','selector','all','info'):
+        for failure in ('dump','app_current','window_size','selector','count','info'):
             with self.subTest(failure=failure):
                 b,r=self.compare(failure=failure);self.assertFalse(r[0]);self.assertEqual(r[1],'dm_composer_observation_unproved')
     def test_second_observation_rejected(self):

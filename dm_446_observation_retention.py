@@ -204,7 +204,14 @@ class ComposerRecord:
         self.comparison_fields = []
         self.first_failed_field = None
         self.final_selector_comparison = None
+        self.exception_class = None
+        self.exception_step = None
         self.invalid = False
+
+    def record_exception(self, step, exc):
+        if step in ("selector_count", "selector_info", "compare_live") and self.exception_step is None:
+            self.exception_step = step
+            self.exception_class = type(exc).__name__
 
     def observation(self):
         row = {}
@@ -260,7 +267,8 @@ class ComposerRecord:
                 self.final_selector_comparison = 'FIELD_ABSENT'
             else:
                 self.final_selector_comparison = 'FIELD_MISMATCH'
-        except Exception:
+        except Exception as exc:
+            self.record_exception("compare_live", exc)
             self.final_selector_comparison = 'OBSERVATION_EXCEPTION'
             self.invalid = True
 
@@ -325,6 +333,8 @@ class ComposerRecord:
                     expected=expected, comparison_fields=self.comparison_fields,
                     first_failed_field=self.first_failed_field,
                     final_selector_comparison=final_selector_comparison,
+                    exception_class=self.exception_class,
+                    exception_step=self.exception_step,
                     second_selector_not_unique='NOT_APPLICABLE',
                     budget_exhausted='NOT_EVALUATED_BY_THIS_HELPER')
 

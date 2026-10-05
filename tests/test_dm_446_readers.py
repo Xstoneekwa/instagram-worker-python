@@ -58,6 +58,9 @@ class Selector:
             if good:out.append(Node(n))
         return out
     @property
+    def count(self):return len(self.all())
+
+    @property
     def info(self):return self.all()[0].info if self.all() else {}
     def exists(self,**kw):return bool(self.all())
     def wait(self,**kw):return bool(self.all())
