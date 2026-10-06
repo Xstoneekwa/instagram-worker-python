@@ -53,6 +53,22 @@ class CurrentSurfaceTests(unittest.TestCase):
   extra=ET.Element('node',{'package':'com.android.systemui','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','clickable':'false','enabled':'true'})
   root.append(extra)
   self.assertIsNone(s.qualify(root,s.P,target,ctx))
+ def test_keyboard_viewport_transition_remains_qualified(self):
+  p=Path('/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5b4ac365-f400-461d-837e-e5d5e29ced73/9c8141e1-bca1-49da-97d3-0b33aff08654/composer-5d24e129a8b7466f80d47bfb87986c74/composer_003_observation_1.xml')
+  root=ET.fromstring(p.read_text());ctx=tuple(F['context']);target=F['target']
+  self.assertIsNotNone(s.qualify(root,s.P,target,ctx))
+  next(n for n in root.iter('node') if s.role(n)=='row_thread_composer_container').set('bounds','[0,1963][1080,2206]')
+  self.assertIsNone(s.qualify(root,s.P,target,ctx))
+ def test_exact_post_focus_adbkeyboard_no_tray_shape_is_qualified(self):
+  p=Path('/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5b4ac365-f400-461d-837e-e5d5e29ced73/9c8141e1-bca1-49da-97d3-0b33aff08654/composer-5d24e129a8b7466f80d47bfb87986c74/composer_003_observation_1.xml')
+  root=ET.fromstring(p.read_text())
+  self.assertIsNotNone(s.qualify(root,s.P,F['target'],tuple(F['context'])))
+  bad=copy.deepcopy(root)
+  next(n for n in bad if n.get('package')=='com.android.adbkeyboard').set('bounds','[0,2000][1080,2340]')
+  self.assertIsNone(s.qualify(bad,s.P,F['target'],tuple(F['context'])))
+  bad=copy.deepcopy(root)
+  next(n for n in bad if n.get('package')=='com.android.adbkeyboard').set('package','com.example.keyboard')
+  self.assertIsNone(s.qualify(bad,s.P,F['target'],tuple(F['context'])))
  def test_a0_probe_with_qualified_current_surface(self):
   x=F['xml']
   for case,xmls,target in [('stable',x,F['target']),('wrong_recipient',x,'wrong'),('second_unknown',[x,'<hierarchy/>'],F['target']),('qualified_change',[x,x.replace('rotation="0"','rotation="1"')],F['target'])]:

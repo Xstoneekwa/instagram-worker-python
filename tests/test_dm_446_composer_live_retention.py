@@ -90,7 +90,13 @@ class ComposerRetentionTests(unittest.TestCase):
             retention._composer_buffer=b if active and fun is nav._dm_446_composer else None
             r=fun(d,PKG);results.append((*r[:3],r[3] is not None));calls.append(d.events)
         if failure != 'count':
-            self.assertEqual(results[0],results[1])
+            if results[0][0] and results[1][0]:
+                self.assertEqual(results[0][2:],results[1][2:])
+                self.assertTrue(results[0][1].startswith('contextual_composer:'))
+                self.assertIn('resource_id_exact_composer_pkg', results[1][1])
+                self.assertIn(results[0][1].split(':', 1)[1], results[1][1])
+            else:
+                self.assertEqual(results[0],results[1])
         if active and any(isinstance(x, tuple) and x[0] == 'selector' for x in calls[1]):
             if failure not in ('dump','app_current','window_size','selector'):
                 self.assertIn('count', calls[1])

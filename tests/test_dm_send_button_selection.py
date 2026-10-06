@@ -767,6 +767,27 @@ class DmSendButtonSelectionTest(unittest.TestCase):
         self.assertIsNone(reason)
         audit_mock.assert_not_called()
 
+    def test_composer_resolve_accepts_a0_compatible_contextual_exact_rid_signal(self) -> None:
+        device = MagicMock()
+        composer = MagicMock()
+        composer.info = {"bounds": {"left": 1, "top": 2, "right": 3, "bottom": 4}}
+        snapshot = {
+            "composer_visible": True,
+            "composer_signal": "resource_id_exact_composer_pkg+contextual_composer:thread",
+        }
+        with (
+            patch.object(dm_sender_engine, "_check_dm_sender_permission_blocker", return_value=False),
+            patch.object(dm_sender_engine, "_dm_audit_non_text_action_candidates") as audit_mock,
+            patch.object(dm_sender_engine, "_dm_find_focus_composer", return_value=composer),
+        ):
+            resolved, reason = dm_sender_engine._resolve_dm_text_composer(
+                device, pkg="com.instagram.android", username="user", caller="real_send",
+                dm_type="outreach", thread_state="empty_new_thread", thread_snapshot=snapshot,
+            )
+        self.assertIs(resolved, composer)
+        self.assertIsNone(reason)
+        audit_mock.assert_not_called()
+
     def test_composer_resolve_fast_path_fallback_audits_without_snapshot(self) -> None:
         device = MagicMock()
         composer = MagicMock()

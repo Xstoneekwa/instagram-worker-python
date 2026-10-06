@@ -8260,7 +8260,12 @@ def _dm_446_composer(d, package):
         if current != evidence:
             result = False, "dm_composer_context_changed", None, None
             return result
-        result = True, "contextual_composer:" + evidence["context"], evidence["bounds"], selector
+        result = (
+            True,
+            "resource_id_exact_composer_pkg+contextual_composer:" + evidence["context"],
+            evidence["bounds"],
+            selector,
+        )
         return result
     except Exception:
         result = False, "dm_composer_observation_unproved", None, None
