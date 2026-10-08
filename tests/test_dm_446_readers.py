@@ -216,7 +216,7 @@ class DM446Tests(unittest.TestCase):
         old=ast.parse(subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':instagram_navigation.py'],text=True))
         new=ast.parse((ROOT/'instagram_navigation.py').read_text())
         a={n.name:n for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))};b={n.name:n for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
-        allowed={'_dm_find_focus_composer','_dm_detect_composer_signal','detect_dm_thread_state'}
+        allowed={'_dm_find_focus_composer','_dm_detect_composer_signal','detect_dm_thread_state','_dm_outbound_expected_message_match_mode'}
         for k in a:
             if k not in allowed:
                 with self.subTest(function=k):self.assertEqual(ast.dump(a[k]),ast.dump(b[k]))

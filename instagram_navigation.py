@@ -7132,6 +7132,48 @@ def _dm_outbound_expected_message_match_mode(
     except Exception:
         return ""
     compact_expected = re.sub(r"\s+", "", expected)
+    # Instagram 446 invite threads render the newly sent text in an
+    # unclassified TextView and disable the composer after the invite.  Keep
+    # this branch narrowly bound to the complete observed invite surface;
+    # generic TextViews, composer text, or either invite label alone remain
+    # insufficient evidence.
+    package = str(
+        getattr(config, "INSTAGRAM_PACKAGE", "com.instagram.android")
+        or "com.instagram.android"
+    )
+    invite_title = False
+    invite_explanation = False
+    composer_present = False
+    send_enabled = False
+    message_list = None
+    for node in root.iter():
+        rid = str(node.attrib.get("resource-id") or "")
+        if rid == f"{package}:id/thread_disabled_title":
+            invite_title = node.attrib.get("text", "").strip() == "Invite sent"
+        elif rid == f"{package}:id/thread_disabled_bottom_description":
+            invite_explanation = (
+                node.attrib.get("text", "").strip()
+                == "You can send more messages after your invite is accepted."
+            )
+        elif rid == f"{package}:id/row_thread_composer_edittext":
+            composer_present = True
+        elif rid == f"{package}:id/row_thread_composer_send_button_container":
+            send_enabled = node.attrib.get("enabled", "").lower() == "true"
+        elif rid == f"{package}:id/message_list":
+            message_list = node
+    message_nodes = set(message_list.iter()) if message_list is not None else set()
+    if invite_title and invite_explanation and not composer_present and not send_enabled:
+        for node in root.iter():
+            rid = str(node.attrib.get("resource-id") or "")
+            if (
+                node.attrib.get("package") == package
+                and node.attrib.get("class") == "android.widget.TextView"
+                and not rid
+                and expected in _normalize_dm_message_text(node.attrib.get("text", ""))
+            ):
+                if message_list is not None and node not in message_nodes:
+                    continue
+                return "invite_postsend_exact"
     for node in root.iter():
         rid = str(node.attrib.get("resource-id") or "").lower()
         if "composer" in rid:

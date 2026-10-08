@@ -227,7 +227,7 @@ class RetentionTests(unittest.TestCase):
         new=ast.parse((ROOT/'instagram_navigation.py').read_text())
         a={n.name:ast.dump(n) for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         b={n.name:ast.dump(n) for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
-        for name in a.keys()-{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer'}:
+        for name in a.keys()-{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer','_dm_outbound_expected_message_match_mode'}:
             self.assertEqual(a[name],b[name],name)
 
 
