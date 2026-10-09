@@ -23,10 +23,10 @@ EXACT = {
     'app_instance_id': '7f84f24b-1ad7-4839-adff-7b9639fb91b2',
     'serial': 'RFGL62SZ7NR', 'package': 'com.instagram.android',
     'version_name': '446.0.0.49.77', 'version_code': 385211304,
-    'recipient_username': 'sunetbassonmua', 'message_body': 'salut test',
+    'message_body': 'salut test',
     'dm_type': 'outreach', 'max_jobs': 1, 'max_send_attempts': 1,
 }
-FIELDS = frozenset(EXACT) | {
+FIELDS = frozenset(EXACT) | {'recipient_username'} | {
     'schema', 'permit_id', 'nonce', 'job_id', 'candidate_sha', 'candidate_tree',
     'certification_not_before', 'certification_expires_at', 'message_sha256',
     'launcher_sha256',
@@ -73,6 +73,9 @@ def validate_claims(claims, *, now=None):
     for key, value in EXACT.items():
         require(type(claims[key]) is type(value) and claims[key] == value,
                 'dm_certification_tuple:'+key)
+    recipient = claims['recipient_username']
+    require(type(recipient) is str and re.fullmatch(r'[A-Za-z0-9._]{1,30}', recipient),
+            'dm_certification_recipient')
     for key in ('permit_id', 'nonce', 'job_id', 'account_id', 'device_id', 'app_instance_id'):
         try:
             require(type(claims[key]) is str and str(UUID(claims[key])) == claims[key], 'dm_certification_uuid:'+key)

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def claims():
     now = datetime.now(timezone.utc)
-    return dict(admission.EXACT, schema=admission.SCHEMA, permit_id=str(uuid4()),
+    return dict(admission.EXACT, recipient_username='janecandika', schema=admission.SCHEMA, permit_id=str(uuid4()),
                 nonce=str(uuid4()), job_id=str(uuid4()), candidate_sha='a'*40,
                 candidate_tree='b'*40, launcher_sha256='c'*64,
                 message_sha256=admission.digest(b'salut test'),
@@ -65,9 +65,9 @@ class DMAdmissionTests(unittest.TestCase):
         self.assertEqual(admission.validate_claims(self.c), self.c)
         self.assertEqual(admission.validate_binding(self.c, self.b), self.b)
 
-    def test_new_recipient_exact_and_old_recipient_rejected(self):
-        self.assertEqual(admission.EXACT['recipient_username'], 'sunetbassonmua')
-        for recipient in ('rex_gen_boost_ai', 'nab_youss', 'SUNETBASSONMUA', '@sunetbassonmua', 'sunetbassonmua ', 'other'):
+    def test_signed_claim_recipient_is_exact_and_fail_closed(self):
+        self.assertEqual(admission.validate_claims(self.c)['recipient_username'], 'janecandika')
+        for recipient in ('', ' ', '@janecandika', 'janecandika ', 'a'*31, None, True):
             with self.subTest(recipient=recipient), self.assertRaises(admission.CertificationStop):
                 admission.validate_claims(dict(self.c, recipient_username=recipient))
 

@@ -23,7 +23,7 @@ from dm_real_send_flags import resolve_outreach_dm_real_send_enabled, resolve_we
 ROOT = Path(__file__).resolve().parents[1]
 ADDITION = '        if supabase_mode and run_request_id and not _follow60_canary_active and not outreach_session_run:\n'
 BASELINE_RUNNER_SHA256 = 'b34f60c651ed4e64e8e484bb7228fe7e133ee9542368a6f971a2c94c305216ab'
-PRESERVED = {'supabase/functions/outreach-enqueue/index.ts': '4af73cb69f955d3ead51f0bb3c92bf9d041f3a528ac4483c079b09baa365aee1', 'account_session_orchestrator.py': 'e57bde7972243c6e8a3a096bb996be7e9edfec38cc5c3858cf157e03c2514dad', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652', 'unfollow_session_orchestrator.py': '64e032439844e701d644d4c04dc33d7602c0ac28d9274f50a329e8a0c3c9083d', 'auto_restart_dispatcher_tick.py': '2c05c8eecc2cdee74b26eefa4b915a991f016fd3bfdaea77634ee555849819c9', 'supabase/migrations/20260531185200_create_account_package_summary.sql': '3573f4d50654f44fc5bc8e7df8c0d72050580d64b2dd891b13f9e8d5cb02efc9', 'config.py': '23514e1d6ab0217566f100e501ebb41f58ac15968b1949f4f7bd09a9da0a665f', 'dm_certification_admission.py': '8084408a4050268f59259f825d640583d32f61ffbd898b7b9000be50ad63315a', 'welcome_session_orchestrator.py': '9c094874aa4ea3dc45d89eb1127740ffb82a3351616a7fa49cb833f89ce18a3b'}
+PRESERVED = {'supabase/functions/outreach-enqueue/index.ts': '4af73cb69f955d3ead51f0bb3c92bf9d041f3a528ac4483c079b09baa365aee1', 'account_session_orchestrator.py': 'e57bde7972243c6e8a3a096bb996be7e9edfec38cc5c3858cf157e03c2514dad', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652', 'unfollow_session_orchestrator.py': '64e032439844e701d644d4c04dc33d7602c0ac28d9274f50a329e8a0c3c9083d', 'auto_restart_dispatcher_tick.py': '2c05c8eecc2cdee74b26eefa4b915a991f016fd3bfdaea77634ee555849819c9', 'supabase/migrations/20260531185200_create_account_package_summary.sql': '3573f4d50654f44fc5bc8e7df8c0d72050580d64b2dd891b13f9e8d5cb02efc9', 'config.py': '23514e1d6ab0217566f100e501ebb41f58ac15968b1949f4f7bd09a9da0a665f', 'dm_certification_admission.py': '492e2dbf94c0687f45d5c5bb280c598a30a485e87dd3c370e8355dddc41a0da4', 'welcome_session_orchestrator.py': '9c094874aa4ea3dc45d89eb1127740ffb82a3351616a7fa49cb833f89ce18a3b'}
 
 
 class OutreachRunnerRoutingTests(unittest.TestCase):
@@ -104,13 +104,9 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
 
     def assert_preserved_bytes(self, name, source):
         if name == 'dm_certification_admission.py':
-            # Signed certification-only recipient replacement; every other byte
-            # still hashes to the original routing baseline.
-            current = b"'recipient_username': 'sunetbassonmua'"
-            historical = b"'recipient_username': 'rex_gen_boost_ai'"
-            self.assertEqual(source.count(current), 1)
-            self.assertNotIn(historical, source)
-            source = source.replace(current, historical)
+            # The certification recipient is claim-bound; no historical fixed
+            # recipient literal may remain in the validator.
+            self.assertNotIn(b"'recipient_username': 'sunetbassonmua'", source)
         self.assertEqual(hashlib.sha256(source).hexdigest(), PRESERVED[name])
 
     def assert_preserved(self, name):
