@@ -43,7 +43,12 @@ def qualify(root,package,target,context):
  app=apps[0];title=one(app,'header_title');sub=one(app,'header_subtitle');ml=one(app,'message_list');ed=one(app,'row_thread_composer_edittext');view=one(app,'direct_thread_content_below_action_bar');row=one(app,'row_thread_composer_container')
  if any(n is None for n in (title,sub,ml,ed,view,row)):return None
  handle=sub.get('content-desc','');name=title.get('text','')
- if not re.fullmatch(r'[A-Za-z0-9_.]+',handle) or not name.strip() or name.strip().lower() in ('search','meta ai','search or ask meta ai') or (target is not None and target!=handle):return None
+ generic_business = handle == 'Business chat'
+ if generic_business:
+  if target is not None and name.strip().casefold() != target.strip().casefold():return None
+ elif not re.fullmatch(r'[A-Za-z0-9_.]+',handle):
+  return None
+ if not name.strip() or name.strip().lower() in ('search','meta ai','search or ask meta ai') or (target is not None and not generic_business and target!=handle):return None
  values={'name':name,'handle':handle}
  # Qualified status/nav windows may be in either observed order; no other root.
  systems=[n for n in root if n is not app]
@@ -91,4 +96,7 @@ def qualify(root,package,target,context):
  matches=[k for k,s in SCHEMAS.items() if any(match(app,t,values,opaque_list=True,allow_no_tray=True) for t in [s['app']]+s.get('app_alternates',[]))]
  if len(matches)!=1:return None
  variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
- return dict(variant=variant,identity=(name,handle),intro=intro[0] if len(intro)==1 else None,empty_surface=ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and one(app,'row_thread_composer_send_button_container').get('enabled')=='false',bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')
+ identity_handle = target if generic_business else handle
+ send_button=one(app,'row_thread_composer_send_button_container')
+ empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and ((send_button is None and variant=='business_chat_sticker_empty') or (send_button is not None and send_button.get('enabled')=='false'))
+ return dict(variant=variant,identity=(name,identity_handle),intro=intro[0] if len(intro)==1 else None,empty_surface=empty_surface,bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')

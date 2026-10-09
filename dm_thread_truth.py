@@ -134,8 +134,14 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
     headers = by_id.get("header_title", []) + by_id.get("header_subtitle", [])
     header_values = [norm(n.get(channel, "")) for n in headers
                      for channel in ("text", "content-desc") if norm(n.get(channel, ""))]
-    recipient_header = (bool(header_values) and norm(handle) in header_values
+    generic_business_header = (extension is not None
+                               and extension.get('variant') == 'business_chat_sticker_empty'
+                               and expected_username is not None
+                               and norm(display_name) == norm(expected_username)
+                               and norm(handle) == norm(expected_username))
+    recipient_header = ((bool(header_values) and norm(handle) in header_values
                         and all(v in {norm(display_name), norm(handle)} for v in header_values))
+                        or generic_business_header)
     # Only the observed selected-recipient container proves the picker identity.
     chips = [n for container in by_id.get("recipients_container", []) for n in container
              if n.get("class") == "android.widget.TextView" and n.get("clickable") == "true"]

@@ -5,6 +5,21 @@ import dm_ui_446_surface as s,dm_thread_truth as truth,instagram_navigation as n
 from test_dm_446_readers import Device,Clock,P
 F=json.loads((Path(__file__).parent/'fixtures/dm_446_current_surface.json').read_text())
 class CurrentSurfaceTests(unittest.TestCase):
+ def test_janecandika_business_chat_sticker_shape_v1_v6(self):
+  j=F['janecandika']; x=j['xml']; ctx=tuple(j['context']); target=j['target']
+  self.assertEqual(s.qualify(ET.fromstring(x),s.P,target,ctx)['variant'],'business_chat_sticker_empty')
+  self.assertEqual(truth.classify_dm_history(x,s.P,target,surface_context=ctx)[0],'empty_new_thread')
+  cases=[('wrong_recipient',x,'wrong','unknown'),('no_target',x,'','unknown')]
+  r=ET.fromstring(x); ml=next(n for n in r.iter('node') if s.role(n)=='message_list'); msg=ET.SubElement(ml,'node',{'resource-id':s.P+':id/message_content','class':'android.view.View','package':s.P,'bounds':'[100,1200][800,1300]'}); ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'existing message','bounds':'[110,1210][790,1290]'})
+  cases.append(('real_history',ET.tostring(r,encoding='unicode'),target,'existing_thread'))
+  r=ET.fromstring(x); r.append(ET.Element('node',{'package':'com.android.systemui','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','clickable':'false','enabled':'true'})); cases.append(('overlay',ET.tostring(r,encoding='unicode'),target,'unknown'))
+  r=ET.fromstring(x); next(n for n in r.iter('node') if s.role(n)=='row_thread_composer_edittext').set('visible-to-user','false'); cases.append(('missing_composer',ET.tostring(r,encoding='unicode'),target,'unknown'))
+  for name,xml,target_i,expected in cases:
+   with self.subTest(case=name): self.assertEqual(truth.classify_dm_history(xml,s.P,target_i,surface_context=ctx)[0],expected)
+ def test_janecandika_reader_excludes_only_qualified_sticker_tray(self):
+  j=F['janecandika']; clock=Clock(); d=Device(j['xml'],clock=clock)
+  with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None): state,proof=nav.detect_dm_thread_state(d,j['target'],pkg=s.P)
+  self.assertEqual(state,'empty_new_thread'); self.assertEqual(proof['reason'],'a0_history_probe_completed')
  def test_exact_retained_xml(self):
   self.assertEqual(hashlib.sha256(F['xml'].encode()).hexdigest(),F['sha256'])
   self.assertEqual(truth.classify_dm_history(F['xml'],s.P,F['target'],surface_context=tuple(F['context']))[0],'empty_new_thread')

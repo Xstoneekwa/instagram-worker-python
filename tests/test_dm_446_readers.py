@@ -99,7 +99,7 @@ class DM446Tests(unittest.TestCase):
         for key,data in DATA.items():
             with self.subTest(key=key):self.assertEqual(hashlib.sha256(data['xml'].encode()).hexdigest(),data['sha256'])
     def test_frozen_history_bytes(self):
-        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'c52d3b1c6c3591ee0b66ebc39ce9e113a07a1d3bd9137c8c40e6ec12af2058af')
+        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'fdcda43c896ea2d89e9abe3e984ff3980efb62d640186f32ad4424c67707b5b2')
         from test_dm_446_multisurface import MultisurfaceTests
         MultisurfaceTests().test_scope_ast_and_truth_predicates_unchanged()
     def test_real_existing_compose_bubbles_never_empty(self):
@@ -216,7 +216,7 @@ class DM446Tests(unittest.TestCase):
         old=ast.parse(subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':instagram_navigation.py'],text=True))
         new=ast.parse((ROOT/'instagram_navigation.py').read_text())
         a={n.name:n for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))};b={n.name:n for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
-        allowed={'_dm_find_focus_composer','_dm_detect_composer_signal','detect_dm_thread_state','_dm_outbound_expected_message_match_mode'}
+        allowed={'_dm_find_focus_composer','_dm_detect_composer_signal','_dm_detect_history_signal','detect_dm_thread_state','_dm_outbound_expected_message_match_mode'}
         for k in a:
             if k not in allowed:
                 with self.subTest(function=k):self.assertEqual(ast.dump(a[k]),ast.dump(b[k]))

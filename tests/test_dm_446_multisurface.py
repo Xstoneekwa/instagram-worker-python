@@ -146,7 +146,7 @@ class MultisurfaceTests(unittest.TestCase):
     else:self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
  def test_scope_ast_and_truth_predicates_unchanged(self):
   def functions(s):return {n.name:n for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
-  for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer','_dm_outbound_expected_message_match_mode'})]:
+  for filename,allowed in [('dm_thread_truth.py',{'classify_dm_history'}),('dm_ui_446_evidence.py',{'composer_evidence'}),('instagram_navigation.py',{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer','_dm_detect_history_signal','_dm_outbound_expected_message_match_mode'})]:
    old=functions(baseline(filename));new=functions((ROOT/filename).read_text());self.assertEqual(set(old),set(new))
    self.assertEqual({n for n in old if ast.dump(old[n])!=ast.dump(new[n])},allowed)
 
@@ -204,5 +204,6 @@ class MultisurfaceTests(unittest.TestCase):
   s=s.replace('        if extension and row is extension[\'intro\']:\n            return "compose_recipient_intro"\n','')
   s=s.replace("extension['identity'] if extension and rows[0] is extension['intro'] else _empty_intro_identity(rows[0], package)",'_empty_intro_identity(rows[0], package)')
   s=s.replace("'' if extension and extension['empty_surface'] and rows[0] is extension['intro'] else _empty_surface_reason(root, message_list, package, identity)",'_empty_surface_reason(root, message_list, package, identity)')
+  s=s.replace("    generic_business_header = (extension is not None\n                               and extension.get('variant') == 'business_chat_sticker_empty'\n                               and expected_username is not None\n                               and norm(display_name) == norm(expected_username)\n                               and norm(handle) == norm(expected_username))\n    recipient_header = ((bool(header_values) and norm(handle) in header_values\n                        and all(v in {norm(display_name), norm(handle)} for v in header_values))\n                        or generic_business_header)\n", "    recipient_header = (bool(header_values) and norm(handle) in header_values\n                        and all(v in {norm(display_name), norm(handle)} for v in header_values))\n")
   self.assertEqual(ast.dump(ast.parse(s)),ast.dump(ast.parse(baseline('dm_thread_truth.py'))))
 if __name__=='__main__':unittest.main()

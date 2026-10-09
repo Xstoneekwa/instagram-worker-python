@@ -8660,6 +8660,9 @@ def _dm_detect_history_signal(
                     b = (el.info or {}).get("bounds") or {}
                     top = int(b.get("top", 0))
                     bottom = int(b.get("bottom", 0))
+                    resource_id = str((el.info or {}).get("resourceName", "") or (el.info or {}).get("resource-id", ""))
+                    if resource_id.endswith(":id/direct_new_friend_bump_tray_horizontal_section_recyclerview"):
+                        continue
                     if bottom <= composer_top and top < composer_top:
                         return True, True, "recycler_list_above_composer"
             except Exception:

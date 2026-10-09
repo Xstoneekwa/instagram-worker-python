@@ -7611,5 +7611,1859 @@
       ]
     ],
     "hint": "Message…"
+  },
+  "business_chat_sticker_empty": {
+    "app": [
+      "node",
+      {
+        "text": "",
+        "resource-id": "",
+        "class": "android.widget.FrameLayout",
+        "package": "com.instagram.android",
+        "content-desc": "",
+        "checkable": "false",
+        "checked": "false",
+        "clickable": "false",
+        "enabled": "true",
+        "focusable": "false",
+        "focused": "false",
+        "scrollable": "false",
+        "long-clickable": "false",
+        "password": "false",
+        "selected": "false",
+        "visible-to-user": "true",
+        "hint": "",
+        "display-id": "0"
+      },
+      [
+        [
+          "node",
+          {
+            "text": "",
+            "resource-id": "",
+            "class": "android.widget.LinearLayout",
+            "package": "com.instagram.android",
+            "content-desc": "",
+            "checkable": "false",
+            "checked": "false",
+            "clickable": "false",
+            "enabled": "true",
+            "focusable": "false",
+            "focused": "false",
+            "scrollable": "false",
+            "long-clickable": "false",
+            "password": "false",
+            "selected": "false",
+            "visible-to-user": "true",
+            "hint": "",
+            "display-id": "0"
+          },
+          [
+            [
+              "node",
+              {
+                "text": "",
+                "resource-id": "",
+                "class": "android.widget.FrameLayout",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "false",
+                "enabled": "true",
+                "focusable": "false",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              [
+                [
+                  "node",
+                  {
+                    "text": "",
+                    "resource-id": "com.instagram.android:id/action_bar_root",
+                    "class": "android.widget.LinearLayout",
+                    "package": "com.instagram.android",
+                    "content-desc": "",
+                    "checkable": "false",
+                    "checked": "false",
+                    "clickable": "false",
+                    "enabled": "true",
+                    "focusable": "false",
+                    "focused": "false",
+                    "scrollable": "false",
+                    "long-clickable": "false",
+                    "password": "false",
+                    "selected": "false",
+                    "visible-to-user": "true",
+                    "hint": "",
+                    "display-id": "0"
+                  },
+                  [
+                    [
+                      "node",
+                      {
+                        "text": "",
+                        "resource-id": "android:id/content",
+                        "class": "android.widget.FrameLayout",
+                        "package": "com.instagram.android",
+                        "content-desc": "",
+                        "checkable": "false",
+                        "checked": "false",
+                        "clickable": "false",
+                        "enabled": "true",
+                        "focusable": "false",
+                        "focused": "false",
+                        "scrollable": "false",
+                        "long-clickable": "false",
+                        "password": "false",
+                        "selected": "false",
+                        "visible-to-user": "true",
+                        "hint": "",
+                        "display-id": "0"
+                      },
+                      [
+                        [
+                          "node",
+                          {
+                            "text": "",
+                            "resource-id": "com.instagram.android:id/layout_container_parent",
+                            "class": "android.view.ViewGroup",
+                            "package": "com.instagram.android",
+                            "content-desc": "",
+                            "checkable": "false",
+                            "checked": "false",
+                            "clickable": "false",
+                            "enabled": "true",
+                            "focusable": "false",
+                            "focused": "false",
+                            "scrollable": "false",
+                            "long-clickable": "false",
+                            "password": "false",
+                            "selected": "false",
+                            "visible-to-user": "true",
+                            "hint": "",
+                            "display-id": "0"
+                          },
+                          [
+                            [
+                              "node",
+                              {
+                                "text": "",
+                                "resource-id": "com.instagram.android:id/layout_container_main",
+                                "class": "android.widget.FrameLayout",
+                                "package": "com.instagram.android",
+                                "content-desc": "",
+                                "checkable": "false",
+                                "checked": "false",
+                                "clickable": "false",
+                                "enabled": "true",
+                                "focusable": "false",
+                                "focused": "false",
+                                "scrollable": "false",
+                                "long-clickable": "false",
+                                "password": "false",
+                                "selected": "false",
+                                "visible-to-user": "true",
+                                "hint": "",
+                                "display-id": "0"
+                              },
+                              [
+                                [
+                                  "node",
+                                  {
+                                    "text": "",
+                                    "resource-id": "com.instagram.android:id/thread_fragment_container",
+                                    "class": "android.widget.FrameLayout",
+                                    "package": "com.instagram.android",
+                                    "content-desc": "",
+                                    "checkable": "false",
+                                    "checked": "false",
+                                    "clickable": "false",
+                                    "enabled": "true",
+                                    "focusable": "true",
+                                    "focused": "false",
+                                    "scrollable": "false",
+                                    "long-clickable": "false",
+                                    "password": "false",
+                                    "selected": "false",
+                                    "visible-to-user": "true",
+                                    "hint": "",
+                                    "display-id": "0"
+                                  },
+                                  [
+                                    [
+                                      "node",
+                                      {
+                                        "text": "",
+                                        "resource-id": "com.instagram.android:id/thread_background_view_container",
+                                        "class": "android.widget.LinearLayout",
+                                        "package": "com.instagram.android",
+                                        "content-desc": "",
+                                        "checkable": "false",
+                                        "checked": "false",
+                                        "clickable": "false",
+                                        "enabled": "true",
+                                        "focusable": "false",
+                                        "focused": "false",
+                                        "scrollable": "false",
+                                        "long-clickable": "false",
+                                        "password": "false",
+                                        "selected": "false",
+                                        "visible-to-user": "true",
+                                        "hint": "",
+                                        "display-id": "0"
+                                      },
+                                      [
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/thread_background_view",
+                                            "class": "android.widget.ImageView",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "false",
+                                            "enabled": "true",
+                                            "focusable": "false",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          []
+                                        ]
+                                      ]
+                                    ],
+                                    [
+                                      "node",
+                                      {
+                                        "text": "",
+                                        "resource-id": "com.instagram.android:id/message_actions_fragment",
+                                        "class": "android.widget.FrameLayout",
+                                        "package": "com.instagram.android",
+                                        "content-desc": "",
+                                        "checkable": "false",
+                                        "checked": "false",
+                                        "clickable": "false",
+                                        "enabled": "true",
+                                        "focusable": "false",
+                                        "focused": "false",
+                                        "scrollable": "false",
+                                        "long-clickable": "false",
+                                        "password": "false",
+                                        "selected": "false",
+                                        "visible-to-user": "true",
+                                        "hint": "",
+                                        "display-id": "0"
+                                      },
+                                      []
+                                    ],
+                                    [
+                                      "node",
+                                      {
+                                        "text": "",
+                                        "resource-id": "com.instagram.android:id/direct_thread_header",
+                                        "class": "android.widget.LinearLayout",
+                                        "package": "com.instagram.android",
+                                        "content-desc": "",
+                                        "checkable": "false",
+                                        "checked": "false",
+                                        "clickable": "false",
+                                        "enabled": "true",
+                                        "focusable": "false",
+                                        "focused": "false",
+                                        "scrollable": "false",
+                                        "long-clickable": "false",
+                                        "password": "false",
+                                        "selected": "false",
+                                        "visible-to-user": "true",
+                                        "hint": "",
+                                        "display-id": "0"
+                                      },
+                                      [
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/header_left_button",
+                                            "class": "android.widget.ImageView",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "Back",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "true",
+                                            "enabled": "true",
+                                            "focusable": "true",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          []
+                                        ],
+                                        [
+                                          "node",
+                                          {
+                                            "NAF": "true",
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/header_avatar",
+                                            "class": "android.widget.FrameLayout",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "true",
+                                            "enabled": "true",
+                                            "focusable": "true",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          [
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "com.instagram.android:id/header_avatar",
+                                                "class": "android.widget.ImageView",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "false",
+                                                "enabled": "true",
+                                                "focusable": "false",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              []
+                                            ]
+                                          ]
+                                        ],
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/header_title_subtitle_container",
+                                            "class": "android.widget.Button",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "true",
+                                            "enabled": "true",
+                                            "focusable": "true",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          [
+                                            [
+                                              "node",
+                                              {
+                                                "text": "$name",
+                                                "resource-id": "com.instagram.android:id/header_title",
+                                                "class": "android.widget.Button",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "$name",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "true",
+                                                "enabled": "true",
+                                                "focusable": "false",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              []
+                                            ],
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "com.instagram.android:id/header_subtitle",
+                                                "class": "android.widget.Button",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "Business chat",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "true",
+                                                "enabled": "true",
+                                                "focusable": "true",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              []
+                                            ]
+                                          ]
+                                        ],
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/header_right_buttons",
+                                            "class": "android.widget.LinearLayout",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "false",
+                                            "enabled": "true",
+                                            "focusable": "false",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          [
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "",
+                                                "class": "android.widget.ImageView",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "Audio call",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "true",
+                                                "enabled": "true",
+                                                "focusable": "true",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              []
+                                            ],
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "",
+                                                "class": "android.widget.ImageView",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "Video call",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "true",
+                                                "enabled": "true",
+                                                "focusable": "true",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              []
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ],
+                                    [
+                                      "node",
+                                      {
+                                        "text": "",
+                                        "resource-id": "com.instagram.android:id/direct_thread_content_below_action_bar",
+                                        "class": "android.view.ViewGroup",
+                                        "package": "com.instagram.android",
+                                        "content-desc": "",
+                                        "checkable": "false",
+                                        "checked": "false",
+                                        "clickable": "false",
+                                        "enabled": "true",
+                                        "focusable": "false",
+                                        "focused": "false",
+                                        "scrollable": "false",
+                                        "long-clickable": "false",
+                                        "password": "false",
+                                        "selected": "false",
+                                        "visible-to-user": "true",
+                                        "hint": "",
+                                        "display-id": "0"
+                                      },
+                                      [
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/thread_toggle_child_fragment_container",
+                                            "class": "android.widget.FrameLayout",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "false",
+                                            "enabled": "true",
+                                            "focusable": "false",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          [
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "com.instagram.android:id/thread_view_root",
+                                                "class": "android.widget.LinearLayout",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "false",
+                                                "enabled": "true",
+                                                "focusable": "false",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              [
+                                                [
+                                                  "node",
+                                                  {
+                                                    "text": "",
+                                                    "resource-id": "com.instagram.android:id/message_thread_container",
+                                                    "class": "android.widget.FrameLayout",
+                                                    "package": "com.instagram.android",
+                                                    "content-desc": "",
+                                                    "checkable": "false",
+                                                    "checked": "false",
+                                                    "clickable": "false",
+                                                    "enabled": "true",
+                                                    "focusable": "false",
+                                                    "focused": "false",
+                                                    "scrollable": "false",
+                                                    "long-clickable": "false",
+                                                    "password": "false",
+                                                    "selected": "false",
+                                                    "visible-to-user": "true",
+                                                    "hint": "",
+                                                    "display-id": "0"
+                                                  },
+                                                  [
+                                                    [
+                                                      "node",
+                                                      {
+                                                        "text": "",
+                                                        "resource-id": "com.instagram.android:id/message_list_refresh_container",
+                                                        "class": "android.widget.FrameLayout",
+                                                        "package": "com.instagram.android",
+                                                        "content-desc": "",
+                                                        "checkable": "false",
+                                                        "checked": "false",
+                                                        "clickable": "false",
+                                                        "enabled": "true",
+                                                        "focusable": "false",
+                                                        "focused": "false",
+                                                        "scrollable": "false",
+                                                        "long-clickable": "false",
+                                                        "password": "false",
+                                                        "selected": "false",
+                                                        "visible-to-user": "true",
+                                                        "hint": "",
+                                                        "display-id": "0"
+                                                      },
+                                                      [
+                                                        [
+                                                          "node",
+                                                          {
+                                                            "text": "",
+                                                            "resource-id": "com.instagram.android:id/message_list",
+                                                            "class": "androidx.recyclerview.widget.RecyclerView",
+                                                            "package": "com.instagram.android",
+                                                            "content-desc": "",
+                                                            "checkable": "false",
+                                                            "checked": "false",
+                                                            "clickable": "false",
+                                                            "enabled": "true",
+                                                            "focusable": "true",
+                                                            "focused": "false",
+                                                            "scrollable": "true",
+                                                            "long-clickable": "false",
+                                                            "password": "false",
+                                                            "selected": "false",
+                                                            "visible-to-user": "true",
+                                                            "hint": "",
+                                                            "display-id": "0"
+                                                          },
+                                                          [
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "",
+                                                                "resource-id": "",
+                                                                "class": "com.facebook.compose.view.MetaComposeView",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "false",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "true",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              [
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "",
+                                                                    "class": "android.view.View",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "false",
+                                                                    "enabled": "true",
+                                                                    "focusable": "false",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  [
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "NAF": "true",
+                                                                        "text": "",
+                                                                        "resource-id": "",
+                                                                        "class": "android.view.View",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "true",
+                                                                        "enabled": "true",
+                                                                        "focusable": "true",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      [
+                                                                        [
+                                                                          "node",
+                                                                          {
+                                                                            "text": "",
+                                                                            "resource-id": "",
+                                                                            "class": "android.view.View",
+                                                                            "package": "com.instagram.android",
+                                                                            "content-desc": "",
+                                                                            "checkable": "false",
+                                                                            "checked": "false",
+                                                                            "clickable": "false",
+                                                                            "enabled": "true",
+                                                                            "focusable": "false",
+                                                                            "focused": "false",
+                                                                            "scrollable": "false",
+                                                                            "long-clickable": "false",
+                                                                            "password": "false",
+                                                                            "selected": "false",
+                                                                            "visible-to-user": "true",
+                                                                            "hint": "",
+                                                                            "display-id": "0"
+                                                                          },
+                                                                          []
+                                                                        ]
+                                                                      ]
+                                                                    ],
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "janecandika",
+                                                                        "resource-id": "",
+                                                                        "class": "android.widget.TextView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ],
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "7 followers · 0 posts",
+                                                                        "resource-id": "",
+                                                                        "class": "android.widget.TextView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ],
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "You don't follow each other on Instagram",
+                                                                        "resource-id": "",
+                                                                        "class": "android.widget.TextView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ],
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "You started a chat with janecandika. We use information from this chat to improve your experience. Learn about business chats and your privacy.",
+                                                                        "resource-id": "",
+                                                                        "class": "android.widget.TextView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ],
+                                                    [
+                                                      "node",
+                                                      {
+                                                        "text": "",
+                                                        "resource-id": "com.instagram.android:id/meta_ai_voice_container",
+                                                        "class": "android.widget.FrameLayout",
+                                                        "package": "com.instagram.android",
+                                                        "content-desc": "",
+                                                        "checkable": "false",
+                                                        "checked": "false",
+                                                        "clickable": "false",
+                                                        "enabled": "true",
+                                                        "focusable": "false",
+                                                        "focused": "false",
+                                                        "scrollable": "false",
+                                                        "long-clickable": "false",
+                                                        "password": "false",
+                                                        "selected": "false",
+                                                        "visible-to-user": "true",
+                                                        "hint": "",
+                                                        "display-id": "0"
+                                                      },
+                                                      []
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ],
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/direct_command_picker_container",
+                                            "class": "android.widget.FrameLayout",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "false",
+                                            "enabled": "true",
+                                            "focusable": "false",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          []
+                                        ],
+                                        [
+                                          "node",
+                                          {
+                                            "text": "",
+                                            "resource-id": "com.instagram.android:id/message_composer_bar",
+                                            "class": "android.widget.FrameLayout",
+                                            "package": "com.instagram.android",
+                                            "content-desc": "",
+                                            "checkable": "false",
+                                            "checked": "false",
+                                            "clickable": "false",
+                                            "enabled": "true",
+                                            "focusable": "false",
+                                            "focused": "false",
+                                            "scrollable": "false",
+                                            "long-clickable": "false",
+                                            "password": "false",
+                                            "selected": "false",
+                                            "visible-to-user": "true",
+                                            "hint": "",
+                                            "display-id": "0"
+                                          },
+                                          [
+                                            [
+                                              "node",
+                                              {
+                                                "text": "",
+                                                "resource-id": "com.instagram.android:id/message_composer_reply_bar_container",
+                                                "class": "android.widget.LinearLayout",
+                                                "package": "com.instagram.android",
+                                                "content-desc": "",
+                                                "checkable": "false",
+                                                "checked": "false",
+                                                "clickable": "false",
+                                                "enabled": "true",
+                                                "focusable": "false",
+                                                "focused": "false",
+                                                "scrollable": "false",
+                                                "long-clickable": "false",
+                                                "password": "false",
+                                                "selected": "false",
+                                                "visible-to-user": "true",
+                                                "hint": "",
+                                                "display-id": "0"
+                                              },
+                                              [
+                                                [
+                                                  "node",
+                                                  {
+                                                    "text": "",
+                                                    "resource-id": "com.instagram.android:id/message_composer_tray_container",
+                                                    "class": "android.widget.LinearLayout",
+                                                    "package": "com.instagram.android",
+                                                    "content-desc": "",
+                                                    "checkable": "false",
+                                                    "checked": "false",
+                                                    "clickable": "false",
+                                                    "enabled": "true",
+                                                    "focusable": "false",
+                                                    "focused": "false",
+                                                    "scrollable": "false",
+                                                    "long-clickable": "false",
+                                                    "password": "false",
+                                                    "selected": "false",
+                                                    "visible-to-user": "true",
+                                                    "hint": "",
+                                                    "display-id": "0"
+                                                  },
+                                                  [
+                                                    [
+                                                      "node",
+                                                      {
+                                                        "text": "",
+                                                        "resource-id": "com.instagram.android:id/new_friend_bump_sticker_banner_container",
+                                                        "class": "android.widget.LinearLayout",
+                                                        "package": "com.instagram.android",
+                                                        "content-desc": "",
+                                                        "checkable": "false",
+                                                        "checked": "false",
+                                                        "clickable": "false",
+                                                        "enabled": "true",
+                                                        "focusable": "false",
+                                                        "focused": "false",
+                                                        "scrollable": "false",
+                                                        "long-clickable": "false",
+                                                        "password": "false",
+                                                        "selected": "false",
+                                                        "visible-to-user": "true",
+                                                        "hint": "",
+                                                        "display-id": "0"
+                                                      },
+                                                      [
+                                                        [
+                                                          "node",
+                                                          {
+                                                            "text": "",
+                                                            "resource-id": "com.instagram.android:id/divider",
+                                                            "class": "android.view.View",
+                                                            "package": "com.instagram.android",
+                                                            "content-desc": "",
+                                                            "checkable": "false",
+                                                            "checked": "false",
+                                                            "clickable": "false",
+                                                            "enabled": "true",
+                                                            "focusable": "false",
+                                                            "focused": "false",
+                                                            "scrollable": "false",
+                                                            "long-clickable": "false",
+                                                            "password": "false",
+                                                            "selected": "false",
+                                                            "visible-to-user": "true",
+                                                            "hint": "",
+                                                            "display-id": "0"
+                                                          },
+                                                          []
+                                                        ],
+                                                        [
+                                                          "node",
+                                                          {
+                                                            "text": "",
+                                                            "resource-id": "com.instagram.android:id/text_container",
+                                                            "class": "android.widget.LinearLayout",
+                                                            "package": "com.instagram.android",
+                                                            "content-desc": "",
+                                                            "checkable": "false",
+                                                            "checked": "false",
+                                                            "clickable": "false",
+                                                            "enabled": "true",
+                                                            "focusable": "false",
+                                                            "focused": "false",
+                                                            "scrollable": "false",
+                                                            "long-clickable": "false",
+                                                            "password": "false",
+                                                            "selected": "false",
+                                                            "visible-to-user": "true",
+                                                            "hint": "",
+                                                            "display-id": "0"
+                                                          },
+                                                          [
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "Say hello by sending a sticker",
+                                                                "resource-id": "com.instagram.android:id/centered_text_view",
+                                                                "class": "android.widget.TextView",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "false",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              []
+                                                            ],
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "NAF": "true",
+                                                                "text": "",
+                                                                "resource-id": "com.instagram.android:id/close_button",
+                                                                "class": "android.widget.ImageView",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "true",
+                                                                "enabled": "true",
+                                                                "focusable": "true",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              []
+                                                            ]
+                                                          ]
+                                                        ],
+                                                        [
+                                                          "node",
+                                                          {
+                                                            "text": "",
+                                                            "resource-id": "com.instagram.android:id/horizontal_scroll_container",
+                                                            "class": "android.widget.LinearLayout",
+                                                            "package": "com.instagram.android",
+                                                            "content-desc": "",
+                                                            "checkable": "false",
+                                                            "checked": "false",
+                                                            "clickable": "false",
+                                                            "enabled": "true",
+                                                            "focusable": "false",
+                                                            "focused": "false",
+                                                            "scrollable": "false",
+                                                            "long-clickable": "false",
+                                                            "password": "false",
+                                                            "selected": "false",
+                                                            "visible-to-user": "true",
+                                                            "hint": "",
+                                                            "display-id": "0"
+                                                          },
+                                                          [
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "",
+                                                                "resource-id": "com.instagram.android:id/direct_new_friend_bump_tray_horizontal_section_recyclerview",
+                                                                "class": "androidx.recyclerview.widget.RecyclerView",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "true",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              [
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/store_sticker_parent",
+                                                                    "class": "android.widget.FrameLayout",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  [
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "",
+                                                                        "resource-id": "com.instagram.android:id/store_sticker_image",
+                                                                        "class": "android.widget.ImageView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "Send this sticker",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ]
+                                                                  ]
+                                                                ],
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/store_sticker_parent",
+                                                                    "class": "android.widget.FrameLayout",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  [
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "",
+                                                                        "resource-id": "com.instagram.android:id/store_sticker_image",
+                                                                        "class": "android.widget.ImageView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "Send this sticker",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ]
+                                                                  ]
+                                                                ],
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/store_sticker_parent",
+                                                                    "class": "android.widget.FrameLayout",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  [
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "",
+                                                                        "resource-id": "com.instagram.android:id/store_sticker_image",
+                                                                        "class": "android.widget.ImageView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "Send this sticker",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ]
+                                                                  ]
+                                                                ],
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/store_sticker_parent",
+                                                                    "class": "android.widget.FrameLayout",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  [
+                                                                    [
+                                                                      "node",
+                                                                      {
+                                                                        "text": "",
+                                                                        "resource-id": "com.instagram.android:id/store_sticker_image",
+                                                                        "class": "android.widget.ImageView",
+                                                                        "package": "com.instagram.android",
+                                                                        "content-desc": "Send this sticker",
+                                                                        "checkable": "false",
+                                                                        "checked": "false",
+                                                                        "clickable": "false",
+                                                                        "enabled": "true",
+                                                                        "focusable": "false",
+                                                                        "focused": "false",
+                                                                        "scrollable": "false",
+                                                                        "long-clickable": "false",
+                                                                        "password": "false",
+                                                                        "selected": "false",
+                                                                        "visible-to-user": "true",
+                                                                        "hint": "",
+                                                                        "display-id": "0"
+                                                                      },
+                                                                      []
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ],
+                                                [
+                                                  "node",
+                                                  {
+                                                    "text": "",
+                                                    "resource-id": "com.instagram.android:id/row_thread_composer_container",
+                                                    "class": "android.widget.FrameLayout",
+                                                    "package": "com.instagram.android",
+                                                    "content-desc": "",
+                                                    "checkable": "false",
+                                                    "checked": "false",
+                                                    "clickable": "false",
+                                                    "enabled": "true",
+                                                    "focusable": "false",
+                                                    "focused": "false",
+                                                    "scrollable": "false",
+                                                    "long-clickable": "false",
+                                                    "password": "false",
+                                                    "selected": "false",
+                                                    "visible-to-user": "true",
+                                                    "hint": "",
+                                                    "display-id": "0"
+                                                  },
+                                                  [
+                                                    [
+                                                      "node",
+                                                      {
+                                                        "text": "",
+                                                        "resource-id": "com.instagram.android:id/blurred_text_area_background",
+                                                        "class": "android.widget.ImageView",
+                                                        "package": "com.instagram.android",
+                                                        "content-desc": "",
+                                                        "checkable": "false",
+                                                        "checked": "false",
+                                                        "clickable": "false",
+                                                        "enabled": "true",
+                                                        "focusable": "false",
+                                                        "focused": "false",
+                                                        "scrollable": "false",
+                                                        "long-clickable": "false",
+                                                        "password": "false",
+                                                        "selected": "false",
+                                                        "visible-to-user": "true",
+                                                        "hint": "",
+                                                        "display-id": "0"
+                                                      },
+                                                      []
+                                                    ],
+                                                    [
+                                                      "node",
+                                                      {
+                                                        "text": "",
+                                                        "resource-id": "",
+                                                        "class": "android.widget.LinearLayout",
+                                                        "package": "com.instagram.android",
+                                                        "content-desc": "",
+                                                        "checkable": "false",
+                                                        "checked": "false",
+                                                        "clickable": "false",
+                                                        "enabled": "true",
+                                                        "focusable": "false",
+                                                        "focused": "false",
+                                                        "scrollable": "false",
+                                                        "long-clickable": "false",
+                                                        "password": "false",
+                                                        "selected": "false",
+                                                        "visible-to-user": "true",
+                                                        "hint": "",
+                                                        "display-id": "0"
+                                                      },
+                                                      [
+                                                        [
+                                                          "node",
+                                                          {
+                                                            "text": "",
+                                                            "resource-id": "com.instagram.android:id/row_thread_composer_textarea_container",
+                                                            "class": "android.widget.LinearLayout",
+                                                            "package": "com.instagram.android",
+                                                            "content-desc": "",
+                                                            "checkable": "false",
+                                                            "checked": "false",
+                                                            "clickable": "false",
+                                                            "enabled": "true",
+                                                            "focusable": "false",
+                                                            "focused": "false",
+                                                            "scrollable": "false",
+                                                            "long-clickable": "false",
+                                                            "password": "false",
+                                                            "selected": "false",
+                                                            "visible-to-user": "true",
+                                                            "hint": "",
+                                                            "display-id": "0"
+                                                          },
+                                                          [
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "",
+                                                                "resource-id": "com.instagram.android:id/row_thread_composer_shortcut_viewgroup",
+                                                                "class": "android.widget.FrameLayout",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "false",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              [
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/row_thread_composer_button_camera",
+                                                                    "class": "android.widget.ImageView",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "Camera",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  []
+                                                                ]
+                                                              ]
+                                                            ],
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "",
+                                                                "resource-id": "com.instagram.android:id/composer_content_container",
+                                                                "class": "android.widget.LinearLayout",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "false",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              [
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "Message…",
+                                                                    "resource-id": "com.instagram.android:id/row_thread_composer_edittext",
+                                                                    "class": "android.widget.EditText",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "true",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "Message…",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  []
+                                                                ]
+                                                              ]
+                                                            ],
+                                                            [
+                                                              "node",
+                                                              {
+                                                                "text": "",
+                                                                "resource-id": "com.instagram.android:id/row_thread_composer_buttons_container",
+                                                                "class": "android.view.ViewGroup",
+                                                                "package": "com.instagram.android",
+                                                                "content-desc": "",
+                                                                "checkable": "false",
+                                                                "checked": "false",
+                                                                "clickable": "false",
+                                                                "enabled": "true",
+                                                                "focusable": "false",
+                                                                "focused": "false",
+                                                                "scrollable": "false",
+                                                                "long-clickable": "false",
+                                                                "password": "false",
+                                                                "selected": "false",
+                                                                "visible-to-user": "true",
+                                                                "hint": "",
+                                                                "display-id": "0"
+                                                              },
+                                                              [
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/row_thread_composer_voice",
+                                                                    "class": "android.widget.ImageView",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "Voice message, press and hold to record",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  []
+                                                                ],
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/row_thread_composer_button_gallery",
+                                                                    "class": "android.widget.ImageView",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "Gallery",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  []
+                                                                ],
+                                                                [
+                                                                  "node",
+                                                                  {
+                                                                    "text": "",
+                                                                    "resource-id": "com.instagram.android:id/row_thread_composer_button_sticker",
+                                                                    "class": "android.widget.ImageView",
+                                                                    "package": "com.instagram.android",
+                                                                    "content-desc": "Stickers",
+                                                                    "checkable": "false",
+                                                                    "checked": "false",
+                                                                    "clickable": "true",
+                                                                    "enabled": "true",
+                                                                    "focusable": "true",
+                                                                    "focused": "false",
+                                                                    "scrollable": "false",
+                                                                    "long-clickable": "false",
+                                                                    "password": "false",
+                                                                    "selected": "false",
+                                                                    "visible-to-user": "true",
+                                                                    "hint": "",
+                                                                    "display-id": "0"
+                                                                  },
+                                                                  []
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ]
+    ],
+    "intro": [
+      "node",
+      {
+        "text": "",
+        "resource-id": "",
+        "class": "com.facebook.compose.view.MetaComposeView",
+        "package": "com.instagram.android",
+        "content-desc": "",
+        "checkable": "false",
+        "checked": "false",
+        "clickable": "false",
+        "enabled": "true",
+        "focusable": "false",
+        "focused": "false",
+        "scrollable": "false",
+        "long-clickable": "true",
+        "password": "false",
+        "selected": "false",
+        "visible-to-user": "true",
+        "hint": "",
+        "display-id": "0"
+      },
+      [
+        [
+          "node",
+          {
+            "text": "",
+            "resource-id": "",
+            "class": "android.view.View",
+            "package": "com.instagram.android",
+            "content-desc": "",
+            "checkable": "false",
+            "checked": "false",
+            "clickable": "false",
+            "enabled": "true",
+            "focusable": "false",
+            "focused": "false",
+            "scrollable": "false",
+            "long-clickable": "false",
+            "password": "false",
+            "selected": "false",
+            "visible-to-user": "true",
+            "hint": "",
+            "display-id": "0"
+          },
+          [
+            [
+              "node",
+              {
+                "NAF": "true",
+                "text": "",
+                "resource-id": "",
+                "class": "android.view.View",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "true",
+                "enabled": "true",
+                "focusable": "true",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              [
+                [
+                  "node",
+                  {
+                    "text": "",
+                    "resource-id": "",
+                    "class": "android.view.View",
+                    "package": "com.instagram.android",
+                    "content-desc": "",
+                    "checkable": "false",
+                    "checked": "false",
+                    "clickable": "false",
+                    "enabled": "true",
+                    "focusable": "false",
+                    "focused": "false",
+                    "scrollable": "false",
+                    "long-clickable": "false",
+                    "password": "false",
+                    "selected": "false",
+                    "visible-to-user": "true",
+                    "hint": "",
+                    "display-id": "0"
+                  },
+                  []
+                ]
+              ]
+            ],
+            [
+              "node",
+              {
+                "text": "janecandika",
+                "resource-id": "",
+                "class": "android.widget.TextView",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "false",
+                "enabled": "true",
+                "focusable": "false",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              []
+            ],
+            [
+              "node",
+              {
+                "text": "7 followers · 0 posts",
+                "resource-id": "",
+                "class": "android.widget.TextView",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "false",
+                "enabled": "true",
+                "focusable": "false",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              []
+            ],
+            [
+              "node",
+              {
+                "text": "You don't follow each other on Instagram",
+                "resource-id": "",
+                "class": "android.widget.TextView",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "false",
+                "enabled": "true",
+                "focusable": "false",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              []
+            ],
+            [
+              "node",
+              {
+                "text": "You started a chat with janecandika. We use information from this chat to improve your experience. Learn about business chats and your privacy.",
+                "resource-id": "",
+                "class": "android.widget.TextView",
+                "package": "com.instagram.android",
+                "content-desc": "",
+                "checkable": "false",
+                "checked": "false",
+                "clickable": "false",
+                "enabled": "true",
+                "focusable": "false",
+                "focused": "false",
+                "scrollable": "false",
+                "long-clickable": "false",
+                "password": "false",
+                "selected": "false",
+                "visible-to-user": "true",
+                "hint": "",
+                "display-id": "0"
+              },
+              []
+            ]
+          ]
+        ]
+      ]
+    ],
+    "system": [],
+    "hint": "Message…",
+    "app_alternates": [],
+    "empty_hints": [
+      "Message…"
+    ]
   }
 }
