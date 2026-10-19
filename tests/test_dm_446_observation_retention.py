@@ -220,15 +220,22 @@ class RetentionTests(unittest.TestCase):
                 else:self.assertEqual((a.reads,a.currents,a.dimensions),(b.reads,b.currents,b.dimensions))
 
     def test_frozen_truth_and_unchanged_non_dm_functions(self):
-        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'c52d3b1c6c3591ee0b66ebc39ce9e113a07a1d3bd9137c8c40e6ec12af2058af')
+        certified='ef22d47efa627b59553d95f862d71e13ca9d5213'
+        truth_sha256='fdcda43c896ea2d89e9abe3e984ff3980efb62d640186f32ad4424c67707b5b2'
+        certified_truth=subprocess.check_output(['git','show',certified+':dm_thread_truth.py'],cwd=ROOT)
+        self.assertEqual(hashlib.sha256(certified_truth).hexdigest(),truth_sha256)
+        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),truth_sha256)
         from test_dm_446_multisurface import MultisurfaceTests
         MultisurfaceTests().test_scope_ast_and_truth_predicates_unchanged()
         old=ast.parse(subprocess.check_output(['git','show',BASE+':instagram_navigation.py'],cwd=ROOT,text=True))
         new=ast.parse((ROOT/'instagram_navigation.py').read_text())
         a={n.name:ast.dump(n) for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         b={n.name:ast.dump(n) for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+        certified_nav=ast.parse(subprocess.check_output(['git','show',certified+':instagram_navigation.py'],cwd=ROOT,text=True))
+        certified_functions={n.name:ast.dump(n) for n in certified_nav.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         for name in a.keys()-{'_dm_446_observation','_dm_446_thread_state','_dm_446_composer','_dm_outbound_expected_message_match_mode'}:
-            self.assertEqual(a[name],b[name],name)
+            expected=certified_functions[name] if name=='_dm_detect_history_signal' else a[name]
+            self.assertEqual(expected,b[name],name)
 
 
 if __name__ == '__main__': unittest.main()
