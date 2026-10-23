@@ -18,6 +18,7 @@ from typing import Any
 from logs import log
 from runtime_artifacts import runtime_artifact_path
 import ui_continuity_v1
+import instagram_ui_profile_v1
 
 
 class DeviceActionBlocked(RuntimeError):
@@ -71,13 +72,14 @@ def assert_device_action_allowed(action: str) -> None:
             raise DeviceActionBlocked(f"device_action_blocked_after_stop:{action}")
 
 
-def _before(action: str) -> None:
+def _before(action: str, device: Any = None) -> None:
     global _ACTIVE_ACTIONS
     ui_continuity_v1.check("device_action:" + action)
     with _LOCK:
         if _ENABLED and _STOP_REQUESTED:
             log("warning", "follow_60s_device_action_blocked", action=action, **dict(_TRACE))
             raise DeviceActionBlocked(f"device_action_blocked_after_stop:{action}")
+        instagram_ui_profile_v1.begin_dispatch(device)
         _ACTIVE_ACTIONS += 1
         _TRACE["last_device_action_at"] = _now()
         _TRACE["last_device_action"] = action
@@ -85,6 +87,7 @@ def _before(action: str) -> None:
 
 def _after() -> None:
     global _ACTIVE_ACTIONS
+    instagram_ui_profile_v1.end_dispatch()
     with _LOCK:
         _ACTIVE_ACTIONS = max(0, _ACTIVE_ACTIONS - 1)
         if _STOP_REQUESTED and _ACTIVE_ACTIONS == 0 and "device_actions_quiesced_at" not in _TRACE:
@@ -92,7 +95,7 @@ def _after() -> None:
 
 
 def install_device_guard(device: Any) -> Any:
-    if (not _ENABLED and not ui_continuity_v1.armed()) or getattr(device, "_follow60_action_guard_installed", False):
+    if (not _ENABLED and not ui_continuity_v1.armed() and not instagram_ui_profile_v1.armed()) or getattr(device, "_follow60_action_guard_installed", False):
         return device
     for name in (
         "click",
@@ -114,7 +117,7 @@ def install_device_guard(device: Any) -> Any:
             continue
 
         def guarded(self: Any, *args: Any, __name: str = name, __original: Any = original, **kwargs: Any) -> Any:
-            _before(__name)
+            _before(__name, self)
             try:
                 result = __original(*args, **kwargs)
                 ui_continuity_v1.check(__name + ":after")
@@ -126,20 +129,21 @@ def install_device_guard(device: Any) -> Any:
     original_shell = getattr(device, "shell", None)
     if callable(original_shell):
         def guarded_shell(self: Any, command: Any, *args: Any, **kwargs: Any) -> Any:
-            ui_continuity_v1.check("shell:before")
-            command_text = " ".join(command) if isinstance(command, (list, tuple)) else str(command or "")
-            is_ui_action = any(token in command_text.lower() for token in ("input tap", "input swipe", "input keyevent", "monkey "))
-            if not is_ui_action:
-                result = original_shell(command, *args, **kwargs)
-                ui_continuity_v1.check("shell:after")
-                return result
-            _before("shell_ui_action")
-            try:
-                result = original_shell(command, *args, **kwargs)
-                ui_continuity_v1.check("shell_ui_action:after")
-                return result
-            finally:
-                _after()
+            with instagram_ui_profile_v1.dispatch(self):
+                ui_continuity_v1.check("shell:before")
+                command_text = " ".join(command) if isinstance(command, (list, tuple)) else str(command or "")
+                is_ui_action = any(token in command_text.lower() for token in ("input tap", "input swipe", "input keyevent", "monkey "))
+                if not is_ui_action:
+                    result = original_shell(command, *args, **kwargs)
+                    ui_continuity_v1.check("shell:after")
+                    return result
+                _before("shell_ui_action", self)
+                try:
+                    result = original_shell(command, *args, **kwargs)
+                    ui_continuity_v1.check("shell_ui_action:after")
+                    return result
+                finally:
+                    _after()
         setattr(device, "shell", MethodType(guarded_shell, device))
     # Lowest RPC dispatch also covers UiObject/direct JSON RPC routes. Check
     # after reads/writes: a capture interrupted in flight is not fresh proof.
@@ -149,12 +153,13 @@ def install_device_guard(device: Any) -> Any:
             continue
 
         def observed(self: Any, *args: Any, __name: str = name, __original: Any = original, **kwargs: Any) -> Any:
+            instagram_ui_profile_v1.check_device(self)
             # Positive allowlist only. Unknown/direct JSON RPCs may mutate UI.
             read_only = __name != "jsonrpc_call" or (
                 (args[0] if args else kwargs.get("method")) in {"dumpWindowHierarchy", "deviceInfo"}
             )
             if not read_only:
-                _before("jsonrpc_mutation")
+                _before("jsonrpc_mutation", self)
                 try:
                     result = __original(*args, **kwargs)
                     ui_continuity_v1.check(__name + ":after")

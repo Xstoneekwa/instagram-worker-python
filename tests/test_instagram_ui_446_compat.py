@@ -114,6 +114,24 @@ class Tests(unittest.TestCase):
             parents={c:p for p in r.iter() for c in p};parents[node(r,'action_bar_title')].set('visible-to-user','false')
         self.assertEqual(read(xml_mutation(change)),'unknown')
 
+
+
+class LockedProfileContextTests(unittest.TestCase):
+    def test_same_446_observation_keeps_context_object(self):
+        d = Device(fixture()); bind(d)
+        original = vars(d)[compat.CONTEXT_KEY]
+        compat.retain_context(d, serial=d.serial, package=PACKAGE,
+                              version_name=compat.VERSION[0], version_code=compat.VERSION[1], unsafe=False)
+        self.assertIs(vars(d)[compat.CONTEXT_KEY], original)
+
+    def test_locked_profile_calls_existing_retention_validator(self):
+        from instagram_ui_profile_v1 import UIProfileStopped
+        d = Device(fixture())
+        with patch('instagram_ui_profile_v1.retention_allowed', side_effect=UIProfileStopped('wrong_profile')):
+            with self.assertRaises(UIProfileStopped):bind(d)
+        self.assertNotIn(compat.CONTEXT_KEY, vars(d))
+
+
 if __name__=='__main__':unittest.main()
 
 # A16-03 one-shot post-search_tab capture; no query or header action executed.

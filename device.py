@@ -183,6 +183,8 @@ def runner_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) -> tuple[int, str, str]:
+    import instagram_ui_profile_v1
+    instagram_ui_profile_v1.check_adb(serial, argv)
     ui_continuity_v1.check("adb:before")
     adb_path = resolve_adb_path()
     if not adb_path:
@@ -212,6 +214,8 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
 def _adb_shell_stdin(serial: str | None, shell_line: str, *, timeout_s: float = 10.0) -> tuple[int, str, str]:
     """Run `adb shell` with commands from stdin so sensitive input stays out of argv."""
 
+    import instagram_ui_profile_v1
+    instagram_ui_profile_v1.check_adb(serial, ["shell", shell_line])
     ui_continuity_v1.check("adb_stdin:before")
 
     adb_path = resolve_adb_path()
@@ -750,13 +754,22 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
     Inspect IG version + lock-related signals; update strict unsafe_for_automation
     when installed build diverges from lock_state.json baseline.
     """
-    # Revoke before any read: a failed re-check cannot retain Search authority.
-    vars(d)["_instagram_search_observed_version"] = None
+    from instagram_ui_profile_v1 import armed, check_device, validate_lock_observation
+    # Legacy unbound readers revoke locally. A bound attempt is immutable and
+    # latches failures; never erase its authority just to re-read the same build.
+    if armed():
+        check_device(d)
+    else:
+        vars(d)["_instagram_search_observed_version"] = None
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
     serial = get_device_serial(d)
     strict = bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False))
 
-    vn, vc = _fetch_package_version(serial, pkg)
+    try:
+        vn, vc = _fetch_package_version(serial, pkg)
+    except Exception:
+        validate_lock_observation(d, serial, pkg, None, None, True)
+        raise
     log(
         "info",
         "instagram_version_detected",
@@ -846,6 +859,7 @@ def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
                 "instagram_strict_lock_version_mismatch",
                 **payload,
             )
+    validate_lock_observation(d, serial, pkg, vn, vc, unsafe)
     # Version-scoped evidence reuse: no additional device read on either version.
     if (vn, vc) == ("446.0.0.49.77", 385211304) or "_instagram_446_observed_context" in vars(d):
         from instagram_ui_446_compat import retain_context

@@ -203,7 +203,9 @@ def create_early_resume_plan(
         return {"persisted": False, "reason": "write_failed", "error": str(exc)[:300]}
 
 
-def _patch_plan_by_run_id(run_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+def _patch_plan_by_run_id(run_id: str, patch: dict[str, Any], *,
+                          expected_updated_at: str | None = None,
+                          bounded: bool = False) -> dict[str, Any]:
     rid = _clean(run_id)
     if not rid:
         return {"persisted": False, "reason": "missing_run_id"}
@@ -215,7 +217,9 @@ def _patch_plan_by_run_id(run_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         rows = supabase_client._request_json(
             "PATCH",
             _TABLE,
-            query={"run_id": f"eq.{rid}"},
+            query={"run_id": f"eq.{rid}",
+                   **({"last_updated_at": "eq." + expected_updated_at} if expected_updated_at else {})},
+            **({"request_timeout": 5.0, "max_retries": 0} if bounded else {}),
             body=body,
             prefer_representation=True,
         )
@@ -313,6 +317,36 @@ def record_terminal_failure(
     return result
 
 
+def bind_run_ui_profile(*, run_id: str, binding: dict[str, Any]) -> dict[str, Any]:
+    """Bind only UI metadata in the existing capsule before UI automation."""
+    from instagram_ui_profile_v1 import PLAN_KEY, from_dict
+    value = from_dict(binding)
+    row = load_resume_plan(run_id=run_id, request_timeout=5.0, max_retries=0) or {}
+    if (value.run_id != run_id or row.get("run_id") != run_id
+            or row.get("run_request_id") != value.request_id
+            or row.get("account_id") != value.account_id
+            or row.get("device_id") != value.device_id
+            or row.get("app_instance_id") != value.app_instance_id
+            or row.get("expected_package") != value.package):
+        return {"persisted": False, "reason": "ui_profile_capsule_mismatch"}
+    plan = dict(row.get("plan") or {})
+    if (plan.get("root_business_session_id") != value.root_business_session_id
+            or plan.get("execution_attempt_no") != value.attempt_id
+            or PLAN_KEY in plan and plan[PLAN_KEY] != binding):
+        return {"persisted": False, "reason": "ui_profile_plan_mismatch"}
+    if PLAN_KEY not in plan:
+        updated = row.get("last_updated_at")
+        if type(updated) is not str or not updated:
+            return {"persisted": False, "reason": "ui_profile_plan_snapshot_unproved"}
+        plan[PLAN_KEY] = value.to_dict()
+        _patch_plan_by_run_id(run_id, {"plan": plan}, expected_updated_at=updated, bounded=True)
+    confirmed = load_resume_plan(run_id=run_id, request_timeout=5.0, max_retries=0) or {}
+    return {"persisted": confirmed.get("plan") == plan
+            and all(confirmed.get(k) == row.get(k) for k in
+                    ("run_id", "run_request_id", "account_id", "device_id", "app_instance_id", "expected_package")),
+            "reason": "ui_profile_readback"}
+
+
 def record_end_of_session(
     *,
     run_id: str,
@@ -320,11 +354,15 @@ def record_end_of_session(
     session_status: str | None,
 ) -> dict[str, Any]:
     """Persist and confirm the terminal lifecycle transition exactly once."""
-    plan = dict(session_plan or {})
+    from instagram_ui_profile_v1 import PLAN_KEY, carry_plan
+    plan = carry_plan(session_plan or {})
     try:
         existing = load_resume_plan(run_id=run_id) or {}
         existing_plan = existing.get("plan")
         if isinstance(existing_plan, dict):
+            if PLAN_KEY in existing_plan and PLAN_KEY in plan and existing_plan[PLAN_KEY] != plan[PLAN_KEY]:
+                return {"persisted": False, "reason": "resume_plan_reconciliation_required",
+                        "error": "ui_profile_binding_changed"}
             plan = {**existing_plan, **plan}
     except Exception as exc:
         return {

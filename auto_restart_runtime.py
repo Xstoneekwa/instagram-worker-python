@@ -313,6 +313,7 @@ def load_prior_run_summary(account_id: str, prior_run_id: str) -> dict[str, Any]
         "restart_eligibility": performance.get("restart_eligibility"),
         "restart_block_reason": performance.get("restart_block_reason"),
         "auto_restart_resume_plan": _extract_resume_plan_from_run_row(row),
+        **({"instagram_ui_binding": performance["instagram_ui_binding"]} if "instagram_ui_binding" in performance else {}),
         "auto_restart_restart_allowed": performance.get("auto_restart_restart_allowed"),
     }
 
@@ -483,6 +484,8 @@ def _validate_human_confirmed_resume_at_claim(
             **(request_attempt_context or {}),
         },
     }
+    if "instagram_ui_binding" in durable_plan:
+        policy["instagram_ui_binding"] = durable_plan["instagram_ui_binding"]
     return True, "", policy
 
 
@@ -677,6 +680,10 @@ def validate_auto_restart_request_at_claim(
             **retry_context,
         },
     }
+    if "instagram_ui_binding" in canonical_plan:
+        policy["instagram_ui_binding"] = canonical_plan["instagram_ui_binding"]
+    elif "instagram_ui_binding" in summary:
+        policy["instagram_ui_binding"] = summary["instagram_ui_binding"]
     if follow60_armed_control:
         # The scheduler has already projected a validated armed control onto an
         # exact Follow-only request. Preserve that immutable request contract

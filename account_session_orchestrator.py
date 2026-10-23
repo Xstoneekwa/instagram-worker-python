@@ -6258,6 +6258,8 @@ def run_account_session(
                 "retry_index": canonical_execution_attempt_no - 1,
             }
         )
+        from instagram_ui_profile_v1 import carry_plan
+        auto_restart_resume_plan = carry_plan(auto_restart_resume_plan)
         auto_restart_restart_allowed = bool(
             auto_restart_resume_plan.get("restart_allowed")
         )

@@ -36,6 +36,9 @@ def _node(root: ET.Element, suffix: str) -> ET.Element:
 
 class AnticipatoryComposerPostsendTests(unittest.TestCase):
     def setUp(self) -> None:
+        package_patch = patch.object(nav.config, "INSTAGRAM_PACKAGE", PACKAGE)
+        package_patch.start()
+        self.addCleanup(package_patch.stop)
         self.clock = Clock()
         self.clock.now = 0.0
         self.time_patch = patch.object(nav, "time", self.clock)
@@ -118,6 +121,7 @@ class AnticipatoryComposerPostsendTests(unittest.TestCase):
             },
         )
         cases["generic_text_outside_message_list"] = ET.tostring(generic, encoding="unicode")
+        cases["wrong_instagram_instance"] = xml.replace(PACKAGE, "com.instagram.androif")
         for name, candidate in cases.items():
             with self.subTest(name=name):
                 sig = nav._dm_thread_message_signature(

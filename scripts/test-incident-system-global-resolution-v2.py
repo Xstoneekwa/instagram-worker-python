@@ -274,7 +274,10 @@ def main():
                     self.wfile.write(data)
                     connection.close()
                 do_GET = do_POST = do_PATCH = do_HEAD = handle_rpc
-            adapter = ThreadingHTTPServer(('127.0.0.1', 0), Adapter)
+            class AdapterHTTPServer(ThreadingHTTPServer):
+                request_queue_size = socket.SOMAXCONN
+
+            adapter = AdapterHTTPServer(('127.0.0.1', 0), Adapter)
             threading.Thread(target=adapter.serve_forever, daemon=True).start()
             testenv = {**env, 'SUPABASE_URL': f'http://127.0.0.1:{adapter.server_port}',
                        'SUPABASE_SERVICE_ROLE_KEY': token, 'RESTRICTION_TEST_SOCKET': tmp,

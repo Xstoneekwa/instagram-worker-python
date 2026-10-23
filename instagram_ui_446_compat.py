@@ -19,15 +19,21 @@ class ObservedContext:
 
 def retain_context(device, *, serial, package, version_name, version_code, unsafe):
     """Consumes existing version-lock result, not a second metadata observation."""
+    from instagram_ui_profile_v1 import retention_allowed
+    retention_allowed(device, serial, package, version_name, version_code, unsafe)
     values = vars(device)
     if (version_name, version_code) == VERSION and not unsafe and serial and package:
-        values[CONTEXT_KEY] = ObservedContext(str(serial), str(package), VERSION, id(device))
+        retained = values.get(CONTEXT_KEY)
+        if not (type(retained) is ObservedContext and retained == ObservedContext(str(serial), str(package), VERSION, id(device))):
+            values[CONTEXT_KEY] = ObservedContext(str(serial), str(package), VERSION, id(device))
     elif CONTEXT_KEY in values or (version_name, version_code) == VERSION:
         # Revocation must not route a previously qualified446 device into legacy.
         values[CONTEXT_KEY] = None
 
 
 def context_matches(context, device, serial, package):
+    from instagram_ui_profile_v1 import retention_allowed
+    retention_allowed(device, serial, package, VERSION[0], VERSION[1], False)
     return (type(context) is ObservedContext and context.device_identity == id(device)
             and context.serial == serial and context.package == package
             and context.version == VERSION)

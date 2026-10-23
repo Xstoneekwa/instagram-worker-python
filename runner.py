@@ -60,6 +60,7 @@ from ambiguous_mutation_reconciliation import decide_reconciliation
 import deferred_projection_outbox
 import device_action_latch
 import ui_continuity_v1
+import instagram_ui_profile_v1
 import storage_health
 from runtime_artifacts import runtime_artifact_path
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
@@ -5747,6 +5748,7 @@ def _update_run_status_safe(
     defer_until_cleanup: bool = True,
 ) -> str:
     global _PENDING_TERMINAL_RUN_STATUS
+    performance_summary = instagram_ui_profile_v1.carry_plan(performance_summary or {})
     if (
         status in {"completed", "failed", "stopped"}
         and defer_until_cleanup
@@ -26453,18 +26455,7 @@ def _main_impl() -> int:
                 assignment_package = str(dispatch_ctx.get("package_name") or "").strip()
                 if assignment_package:
                     if cli_package_name and assignment_package != cli_package_name:
-                        # Divergence between the dispatcher claim-time package and the
-                        # fresh assignment read: keep the fresher assignment value; the
-                        # identity guard remains the final safe-stop either way.
-                        log(
-                            "warning",
-                            "runner_package_dispatch_mismatch",
-                            account_id=account_id or None,
-                            run_type=dispatch_run_type or None,
-                            cli_package=cli_package_name,
-                            assignment_package=assignment_package,
-                            resolution="assignment_package_used",
-                        )
+                        raise instagram_ui_profile_v1.UIProfileStopped("instagram_ui_assignment_package_mismatch")
                     config.INSTAGRAM_PACKAGE = assignment_package
                 log("info", "account_assignment_dispatch_resolved", **dispatch_log_fields)
                 _orf_set_runtime_context(
@@ -27231,7 +27222,7 @@ def _main_impl() -> int:
                 account_id=account_id,
                 assignment_id=dispatch_ctx.get("assignment_id"),
                 device_id=dispatch_ctx.get("device_id"),
-                app_instance_id=dispatch_ctx.get("clone_id")
+                app_instance_id=dispatch_ctx.get("app_instance_id")
                 or str(getattr(args, "expected_app_instance_id", "") or "").strip()
                 or None,
                 expected_username=account_username,
@@ -27325,8 +27316,15 @@ def _main_impl() -> int:
             timezone.utc
         ).isoformat()
 
+    # The canonical device-activity gate above still precedes any ADB work.
+    # Resolve and persist the exact build before connection/lifecycle/UI actions.
+    _prepare_instagram_ui_profile(
+        dispatch_ctx, device_serial, account_id, run_id, run_request_id,
+        args=args, account_session_run=account_session_run,
+    )
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
+    instagram_ui_profile_v1.attach(d)
     startup_evidence["device_connected_at"] = datetime.now(timezone.utc).isoformat()
     _CURRENT_DEVICE = d
     if account_session_run or unfollow_session_run or _follow60_canary_active:
@@ -29612,6 +29610,20 @@ def main() -> int:
             )
         # External supervisor owns process/request/lease cleanup. No UI cleanup.
         return 1
+    except instagram_ui_profile_v1.UIProfileStopped as exc:
+        summary = {**exc.summary, "session_counters": dict(_SESSION_COUNTERS)}
+        log("error", "instagram_ui_profile_safe_stop", run_id=_CURRENT_RUN_ID,
+            request_id=_CURRENT_RUN_REQUEST_ID, **summary)
+        if _CURRENT_RUN_ID:
+            _update_run_status_safe(
+                run_id=_CURRENT_RUN_ID, status="failed",
+                totals={"total": int(_RUNTIME_FOLLOW_COUNT or 0),
+                        "success": int(_RUNTIME_FOLLOW_COUNT or 0), "failed": 0},
+                performance_summary=summary, defer_until_cleanup=False,
+            )
+        # No UI cleanup with changed/unproved instance or build. Dispatcher and
+        # supervisor retain their existing request/process/lease finalization.
+        return 1
     except ui_continuity_v1.UiContinuityLost as exc:
         # No device cleanup gesture with an unproved post-suspension surface.
         # Durable intents/receipts are untouched; a tap interrupted in flight
@@ -29812,6 +29824,94 @@ def main() -> int:
         if certification_admission.is_enabled():
             certification_admission.mark_terminal('certification_runner_exit')
 
+
+
+def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_id,
+                                  *, args, account_session_run):
+    """Freeze only proved identity; metadata/env projections cannot select a profile."""
+    import json
+    from auto_restart_device_lock import device_lock_binding_from_request
+    from auto_restart_runtime import _claimed_request_lineage, load_resume_policy_from_env
+    from account_run_control import get_account_run_request
+    from account_session_resume_plan_store import bind_run_ui_profile
+    ui = instagram_ui_profile_v1
+    if ui.armed():
+        raise ui.UIProfileStopped("instagram_ui_binding_already_bound")
+    try:
+        package = str(config.INSTAGRAM_PACKAGE or "")
+        instance = str(context.get("app_instance_id") or "")
+        device_id = str(context.get("device_id") or "")
+        if not serial or not instance or not device_id or context.get("adb_serial") != serial:
+            raise ui.UIProfileStopped("instagram_app_instance_unproved")
+        for expected, actual in ((getattr(args, "package_name", ""), package),
+                                 (getattr(args, "expected_app_instance_id", ""), instance),
+                                 (getattr(args, "device_serial", ""), serial)):
+            if expected and expected != actual:
+                raise ui.UIProfileStopped("instagram_ui_dispatch_identity_mismatch")
+        request = get_account_run_request(request_id, bounded_pre_device=True) or {}
+        if (request.get("id") != request_id or request.get("account_id") != account_id
+                or request.get("run_id") != run_id):
+            raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
+        for key, value in (("device_id", device_id), ("app_instance_id", instance)):
+            if request.get(key) != value:
+                raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
+        meta = request.get("metadata_safe") or {}
+        lineage = _claimed_request_lineage(account_id, request, meta)
+        lease = device_lock_binding_from_request(
+            {"metadata_safe": {"device_lock_binding": json.loads(os.environ.get("FLEET_DEVICE_LOCK_BINDING_JSON", "null"))}},
+            account_id=account_id, request_id=request_id, device_id=device_id,
+        )
+        row = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
+        if row.get("id") != run_id or row.get("account_id") != account_id or row.get("status") not in ("running", "pending"):
+            raise ui.UIProfileStopped("instagram_ui_run_identity_mismatch")
+        installed = ui.read_metadata(serial, package)
+        binding = ui.RunUIBinding(
+            account_id, request_id, run_id, lineage["root_business_session_id"],
+            lineage["execution_attempt_no"], device_id, serial, instance, package,
+            installed.version_name, installed.version_code, ui.resolve(installed, package), lease["lease_id"],
+        )
+        parent = None
+        prior = str(meta.get("prior_run_id") or meta.get("original_run_id") or "")
+        if binding.attempt_id > 1 or load_resume_policy_from_env():
+            if not prior:
+                raise ui.UIProfileStopped("instagram_ui_parent_binding_required")
+            old = supabase_client.load_run_row(prior, request_timeout=5.0, max_retries=0) or {}
+            if old.get("id") != prior or old.get("account_id") != account_id:
+                raise ui.UIProfileStopped("instagram_ui_parent_identity_mismatch")
+            parent = (old.get("performance_summary") or {}).get(ui.PLAN_KEY)
+            ui.validate_parent(parent, binding, prior)
+            projected = (load_resume_policy_from_env() or {}).get(ui.PLAN_KEY)
+            if projected is not None and projected != parent:
+                raise ui.UIProfileStopped("instagram_ui_parent_projection_mismatch")
+        updated = row.get("updated_at")
+        if type(updated) is not str or not updated:
+            raise ui.UIProfileStopped("instagram_ui_run_snapshot_unproved")
+        performance = dict(row.get("performance_summary") or {})
+        performance = ui.carry_plan(performance, binding.to_dict())
+        # Existing JSON column and authenticated transport. Preserve every other
+        # summary field and all status/counters; one write, canonical readback.
+        try:
+            supabase_client._request_json(
+                "PATCH", "ig_runs", query={"id": "eq." + run_id, "account_id": "eq." + account_id,
+                                             "updated_at": "eq." + updated, "status": "eq." + row["status"]},
+                body={"performance_summary": performance}, request_timeout=5.0, max_retries=0,
+            )
+        except Exception:
+            pass  # Never retry a write; only its exact durable readback can win.
+        confirmed = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
+        if (confirmed.get("id") != run_id or confirmed.get("account_id") != account_id
+                or confirmed.get("performance_summary") != performance):
+            raise ui.UIProfileStopped("instagram_ui_binding_persistence_unproved")
+        if account_session_run:
+            result = bind_run_ui_profile(run_id=run_id, binding=binding.to_dict())
+            if not result.get("persisted"):
+                raise ui.UIProfileStopped("instagram_ui_resume_binding_persistence_unproved")
+        ui.arm(binding, lambda: ui.read_metadata(serial, package), parent=parent)
+        return binding
+    except ui.UIProfileStopped:
+        raise
+    except Exception as exc:
+        raise ui.UIProfileStopped("instagram_ui_binding_unproved") from exc
 
 
 def _device_lock_token_for_initial_gate(account_id, request_id, worker_id):

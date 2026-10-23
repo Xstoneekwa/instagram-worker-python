@@ -583,4 +583,7 @@ def build_account_session_resume_plan(
         unsafe_markers=unsafe,
         reason=reason,
     )
+    from instagram_ui_profile_v1 import PLAN_KEY, carry_plan
+    if PLAN_KEY in safe_summary:
+        plan = carry_plan(plan, safe_summary[PLAN_KEY])
     return plan
