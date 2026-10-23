@@ -5503,11 +5503,23 @@ def _return_with_cleanup(d, code: int) -> int:
             )
     except Exception:
         pass
-    cleanup_ok = _cleanup_session_apps(d)
+    from outreach_slot_contract import active as outreach_slot_active
+    outreach_slot = outreach_slot_active()
+    if outreach_slot:
+        code = _outreach_cleanup_and_finish(d, code)
+        cleanup_ok = bool(outreach_slot.finished and outreach_slot.terminal.get('cleanup_ok') is True)
+    else:
+        cleanup_ok = _cleanup_session_apps(d)
     _RUNNER_SESSION_CLEANUP_COMPLETE = True
     pending = _PENDING_TERMINAL_RUN_STATUS
     _PENDING_TERMINAL_RUN_STATUS = None
     if pending:
+        if outreach_slot:
+            if code != 0:
+                pending = {**pending, 'status': 'failed'}
+            if outreach_slot.finished:
+                pending = {**pending, 'performance_summary': {**(pending.get('performance_summary') or {}),
+                    'outreach_slot_terminal': outreach_slot.terminal}}
         summary = pending.get("performance_summary") or {}
         if "restriction_preflight_terminal_contract" in summary:
             summary["preflight_cleanup_completed"] = cleanup_ok is True
@@ -26396,6 +26408,11 @@ def _main_impl() -> int:
     device_serial = str(args.device_serial or "").strip() or config.DEVICE_SERIAL
 
     dispatch_run_type = _parse_run_type(args)
+    if os.environ.get("OUTREACH_SLOT_CONTEXT_V1"):
+        from outreach_slot_contract import initialize_from_environment
+        initialize_from_environment(account_id=str(getattr(args, "account_id", "") or ""),
+            serial=device_serial, package=str(getattr(args, "package_name", "") or ""), run_type=dispatch_run_type)
+
     # Dispatcher-resolved clone package (assignment DB -> app_instance -> package).
     # Applied before app readiness so the worker only ever opens the assigned
     # clone; the identity guard then proves the username inside that clone.
@@ -28750,6 +28767,11 @@ def _main_impl() -> int:
         return _return_with_cleanup(d, parent_exit)
 
     if outreach_session_run:
+        from outreach_slot_contract import active as outreach_slot_active
+        dedicated_slot = outreach_slot_active()
+        if dedicated_slot:
+            dedicated_slot.bind_device(d)
+            dedicated_slot.check()
         if not supabase_mode or not account_id:
             log("error", "run_aborted", reason="outreach_session_missing_account")
             return _return_with_cleanup(d, 11)
@@ -29582,18 +29604,24 @@ def _main_impl() -> int:
     return _return_with_cleanup(d, 1 if failures > 0 else 0)
 
 
-def main() -> int:
+def _main_with_existing_handlers() -> int:
     import dm_certification_admission as dm_certification
     try:
         if certification_admission.is_enabled():
             certification_admission.validate_execution_context()
         return _main_impl()
     except dm_certification.CertificationStop as exc:
+        from outreach_slot_contract import active as outreach_slot_active
+        if outreach_slot_active():
+            outreach_slot_active().unsafe_ui_continuity = True
         log('error', 'dm_certification_stopped', reason=str(exc),
             account_id=_CURRENT_ACCOUNT_ID, run_id=_CURRENT_RUN_ID,
             request_id=_CURRENT_RUN_REQUEST_ID, safe_to_continue_ui=False)
         return 1
     except certification_admission.CertificationStop as exc:
+        from outreach_slot_contract import active as outreach_slot_active
+        if outreach_slot_active():
+            outreach_slot_active().unsafe_ui_continuity = True
         # Certification admission is a run-level stop, never a candidate skip.
         summary = dict(exc.summary)
         summary['session_counters'] = dict(_SESSION_COUNTERS)
@@ -29611,6 +29639,9 @@ def main() -> int:
         # External supervisor owns process/request/lease cleanup. No UI cleanup.
         return 1
     except instagram_ui_profile_v1.UIProfileStopped as exc:
+        from outreach_slot_contract import active as outreach_slot_active
+        if outreach_slot_active():
+            outreach_slot_active().unsafe_ui_continuity = True
         summary = {**exc.summary, "session_counters": dict(_SESSION_COUNTERS)}
         log("error", "instagram_ui_profile_safe_stop", run_id=_CURRENT_RUN_ID,
             request_id=_CURRENT_RUN_REQUEST_ID, **summary)
@@ -29625,6 +29656,9 @@ def main() -> int:
         # supervisor retain their existing request/process/lease finalization.
         return 1
     except ui_continuity_v1.UiContinuityLost as exc:
+        from outreach_slot_contract import active as outreach_slot_active
+        if outreach_slot_active():
+            outreach_slot_active().unsafe_ui_continuity = True
         # No device cleanup gesture with an unproved post-suspension surface.
         # Durable intents/receipts are untouched; a tap interrupted in flight
         # stays ambiguous for the existing P0C reconciliation contract.
@@ -29642,6 +29676,9 @@ def main() -> int:
             )
         return 1
     except Exception as exc:
+        from outreach_slot_contract import SlotBlocked
+        if isinstance(exc, SlotBlocked):
+            raise
         if dm_certification.is_present():
             # The external supervisor alone owns certification teardown.
             log('error', 'dm_certification_unexpected_stop',
@@ -29912,6 +29949,79 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
         raise
     except Exception as exc:
         raise ui.UIProfileStopped("instagram_ui_binding_unproved") from exc
+
+
+def _outreach_cleanup_and_finish(d, code, *, allow_device_cleanup=True):
+    from outreach_slot_contract import active
+    from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_success
+    slot = active()
+    if slot is None:
+        return code
+    if getattr(slot, 'cleanup_attempted', False):
+        try:
+            terminal = validate_terminal_receipt(slot.terminal, slot.context, run_id=_CURRENT_RUN_ID) if slot.finished else None
+            return code if terminal and receipt_allows_success(terminal) else 1
+        except (ValueError, AttributeError):
+            return 1
+    slot.cleanup_attempted = True
+    set_wait_event_callback(None)
+    started = time.monotonic()
+    slot.event('outreach_slot_cleanup_started')
+    cleanup_ok = d is not None and allow_device_cleanup
+    if cleanup_ok:
+        # Dedicated outreach always attempts both cleanup operations. Existing
+        # full_cycle CLOSE_APPS/HOME behavior is untouched.
+        try:
+            from device import shell
+            exit_status, _, _ = shell(d, 'am force-stop ' + slot.context['package_name'])
+            if exit_status != 0:
+                raise RuntimeError('outreach_cleanup_force_stop_nonzero')
+        except Exception as exc:
+            cleanup_ok = False
+            log('error','outreach_cleanup_force_stop_failed',error=str(exc)[:160])
+        try:
+            d.press('home')
+        except Exception as exc:
+            cleanup_ok = False
+            log('error','outreach_cleanup_home_failed',error=str(exc)[:160])
+    try:
+        terminal = slot.finish(cleanup_ok=cleanup_ok,
+            cleanup_ms=max(0,(time.monotonic()-started)*1000),code=code,run_id=_CURRENT_RUN_ID)
+        from cooperative_business_stop import StopContext, read_stop, acknowledge_stop
+        context = StopContext.from_env()
+        if context and read_stop(context):
+            acknowledge_stop(context,phase='outreach_cleanup',safe_boundary='cleanup_attempted',
+                session_termination_class=terminal['terminal_class'])
+        terminal = validate_terminal_receipt(terminal, slot.context, run_id=_CURRENT_RUN_ID)
+        return code if receipt_allows_success(terminal) else 1
+    except Exception as exc:
+        log('error','outreach_terminal_persistence_failed',error=str(exc)[:160])
+        return 1
+
+
+def main() -> int:
+    # Only dedicated outreach gets this outer cleanup guarantee. Existing safety
+    # handlers still own challenge/restriction/identity semantics.
+    from outreach_slot_contract import active, SlotBlocked
+    code = 1
+    try:
+        code = _main_with_existing_handlers()
+    except SlotBlocked as exc:
+        slot = active()
+        if slot:
+            slot.stop_reason = str(exc)
+        code = 0 if str(exc) == 'slot_deadline' else 1
+    except Exception:
+        if active() is None:
+            raise
+        log('error','outreach_unhandled_exception',exc_info=True)
+        code = 1
+    finally:
+        slot = active()
+        if slot and not getattr(slot, 'cleanup_attempted', False):
+            code = _outreach_cleanup_and_finish(_CURRENT_DEVICE,code,
+                allow_device_cleanup=not getattr(slot,'unsafe_ui_continuity',False))
+    return code
 
 
 def _device_lock_token_for_initial_gate(account_id, request_id, worker_id):

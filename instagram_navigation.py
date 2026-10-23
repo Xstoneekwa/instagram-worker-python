@@ -66711,6 +66711,10 @@ def send_dm_safe(
         phase="dm",
         preceding_action="dm_send_pre_tap",
     )
+    from outreach_slot_contract import active as outreach_slot_active
+    slot = outreach_slot_active()
+    if slot:
+        slot.before_send(job_id)
     try:
         btn.click()
         out["send_tapped"] = True

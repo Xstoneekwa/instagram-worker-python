@@ -210,6 +210,13 @@ def resolve_account_assignment_runtime_context(
         )
         return ctx
 
+    if assignment_type == "outreach_only" and (assignment.get("metadata") or {}).get("outreach_slot_grid_v1", {}).get("enabled") is True:
+        gate = _evaluate_schedule_gate(aid, rtype)
+        if not gate or gate.get("ok") is not True:
+            return _empty_context(account_id=aid, run_type=rtype,
+                reason=str((gate or {}).get("reason") or "outreach_slot_authority_missing"), require_assignment=True, fallback_used=False)
+        assignment = {**assignment, "starts_at": gate.get("starts_at"), "ends_at": gate.get("ends_at")}
+
     if enforce_window and not _window_contains_now(
         assignment.get("starts_at"),
         assignment.get("ends_at"),

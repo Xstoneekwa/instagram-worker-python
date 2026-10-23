@@ -4240,6 +4240,11 @@ def requeue_stale_outreach_dm_jobs(
     stale_minutes: int,
 ) -> list[dict[str, Any]]:
     """Requeue stale reserved/running outreach jobs before a controlled V1 run."""
+    from outreach_slot_contract import active as outreach_slot_active
+    if outreach_slot_active():
+        # Exact owned pre-send reservations are handled by the slot transaction.
+        # Never requeue unrelated campaign jobs through this legacy helper.
+        return []
     aid = str(account_id or "").strip()
     minutes = max(1, int(stale_minutes or 1))
     if not aid:

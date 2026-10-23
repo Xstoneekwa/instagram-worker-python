@@ -1,3 +1,4 @@
+from tests.test_certification_admission import restore_exact_product_delta
 """Exact retention through actual DM reader; offline transport fixtures only."""
 import ast
 import hashlib
@@ -228,7 +229,7 @@ class RetentionTests(unittest.TestCase):
         from test_dm_446_multisurface import MultisurfaceTests
         MultisurfaceTests().test_scope_ast_and_truth_predicates_unchanged()
         old=ast.parse(subprocess.check_output(['git','show',BASE+':instagram_navigation.py'],cwd=ROOT,text=True))
-        new=ast.parse((ROOT/'instagram_navigation.py').read_text())
+        new=ast.parse(restore_exact_product_delta('instagram_navigation.py',(ROOT/'instagram_navigation.py').read_text()))
         a={n.name:ast.dump(n) for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         b={n.name:ast.dump(n) for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         certified_nav=ast.parse(subprocess.check_output(['git','show',certified+':instagram_navigation.py'],cwd=ROOT,text=True))

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -27,6 +29,13 @@ def _canonical_device_lease(worker_id, *, transferred=False):
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
     def setUp(self) -> None:
+        # Actual Fleet isolation writes remain enabled, but only in this test's
+        # private directory, never in the installed runtime or its journals.
+        isolated = tempfile.TemporaryDirectory(prefix="outreach-consumer-fixture-", dir="/private/tmp")
+        self.addCleanup(isolated.cleanup)
+        artifacts = patch.object(consumer, "runtime_artifact_path", side_effect=lambda *parts: Path(isolated.name).joinpath(*parts))
+        artifacts.start()
+        self.addCleanup(artifacts.stop)
         self.package_runtime_contract = patch.object(
             consumer,
             "_load_package_runtime_contract",
@@ -645,7 +654,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(
                 consumer.supabase_client,
                 "_request_json",
-                side_effect=[requests, runs],
+                side_effect=[requests, runs, []],
             ),
             patch.object(
                 consumer,

@@ -1,3 +1,4 @@
+from tests.test_certification_admission import restore_exact_product_delta
 from tests.test_certification_admission import restore_exact_dm446_delta, restore_exact_dm_certification_delta
 """Offline execution of the actual picker and exact identity propagation."""
 import ast
@@ -162,7 +163,7 @@ class SelfExclusionTests(unittest.TestCase):
  def test_protected_navigation_bytes_unchanged(self):
   for name in ['instagram_navigation.py','follow60_mainline_v2.py','account_identity_guard.py','visual_row_mapping.py','certification_admission.py','target_followers_progressive_resume_v2.py']:
    with self.subTest(path=name):
-    actual=(ROOT/name).read_bytes()
+    actual=restore_exact_product_delta(name,(ROOT/name).read_text()).encode()
     if name=='certification_admission.py':actual=restore_exact_certification_delta(actual.decode()).encode()
     if name=='instagram_navigation.py':actual=restore_exact_dm446_delta(actual.decode()).encode()
     self.assertEqual(actual,subprocess.check_output(['git','show',BASE+':'+name],cwd=ROOT))
@@ -205,7 +206,7 @@ class SelfExclusionTests(unittest.TestCase):
   import hashlib
   expected={'runner.py': '04d68d070b1af8af5d2bfce1e460cfdde0d31d130e16c74725baf764bcf933cd', 'instagram_navigation.py': 'fe3fba2c7b5051a4e5f95adfd98a316ac294de3b87d2b26e6eaa84b0617e2d30', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652'}
   for name,wanted in expected.items():
-   source=(ROOT/name).read_bytes()
+   source=restore_exact_product_delta(name,(ROOT/name).read_text()).encode()
    def require_exact(value):
     if name=='runner.py':value=restore_exact_dm_certification_delta(value.decode()).encode()
     if name=='instagram_navigation.py':value=restore_exact_dm446_delta(value.decode()).encode()

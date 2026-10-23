@@ -483,6 +483,8 @@ async function validateCommon(
     priority: number;
     metadata: Record<string, string>;
     settings: Record<string, any>;
+    managedCampaign: boolean;
+    authUserId: string | null;
   }
   | { ok: false; error: string; status?: number }
 > {
@@ -500,6 +502,16 @@ async function validateCommon(
 
   const campaignResult = normalizeOptionalUuid(payload.campaign_id, "campaign_id");
   if (!campaignResult.ok) return { ok: false, error: campaignResult.error, status: 400 };
+  const campaignMode = await supabaseJson("/rest/v1/rpc/outreach_campaign_mode_v1", {
+    method: "POST", body: JSON.stringify({ p_account_id: accountId, p_campaign_id: campaignResult.value }),
+  });
+  if (!campaignMode || typeof campaignMode.managed_campaign !== "boolean") {
+    return { ok: false, error: "campaign_authority_unavailable", status: 503 };
+  }
+  // Operational allowlists never establish managed client provenance.
+  if (campaignMode.managed_campaign && ownership.mode !== "db") {
+    return { ok: false, error: "campaign_database_entitlement_required", status: 403 };
+  }
 
   const metadataResult = sanitizeMetadata(payload.metadata);
   if (!metadataResult.ok) return { ok: false, error: metadataResult.error, status: 400 };
@@ -529,6 +541,8 @@ async function validateCommon(
     priority,
     metadata: metadataResult.metadata,
     settings,
+    managedCampaign: campaignMode.managed_campaign,
+    authUserId: auth.authUserId,
   };
 }
 
@@ -562,10 +576,18 @@ async function enqueueOne(
     };
   }
 
+  const membership = common.managedCampaign ? await supabaseJson("/rest/v1/rpc/resolve_outreach_campaign_admission_v1", {
+    method: "POST", body: JSON.stringify({ p_account_id: common.accountId, p_campaign_id: common.campaignId,
+      p_auth_user_id: common.authUserId, p_recipient_username: usernameResult.username }),
+  }) : null;
+  if (common.managedCampaign && (membership?.ok !== true || membership.origin !== "CLIENT_LIST"
+      || membership.campaign_id !== common.campaignId || membership.managed_campaign !== true)) {
+    return { ok: false, error: "campaign_recipient_not_authorized", recipient_username: usernameResult.username };
+  }
   const existing = await findExistingJob(common.accountId, usernameResult.username, common.campaignId);
   const rendered = renderDmTemplate(common.bodyTemplate, {
     recipientUsername: usernameResult.username,
-    recipientName: String(payload.recipient_name || payload.name || "").trim(),
+    recipientName: String(common.managedCampaign ? membership.recipient_name || "" : payload.recipient_name || payload.name || "").trim(),
     accountUsername: common.accountUsername,
   });
   if (!rendered.ok) {
@@ -586,9 +608,13 @@ async function enqueueOne(
     p_metadata: common.metadata,
   };
 
-  const row = await supabaseJson("/rest/v1/rpc/enqueue_outreach_dm_job", {
+  const row = await supabaseJson(common.managedCampaign ? "/rest/v1/rpc/admit_outreach_campaign_job_v1" : "/rest/v1/rpc/enqueue_outreach_dm_job", {
     method: "POST",
-    body: JSON.stringify(rpcPayload),
+    body: JSON.stringify(common.managedCampaign ? {
+      p_account_id: common.accountId, p_campaign_id: common.campaignId, p_auth_user_id: common.authUserId,
+      p_recipient_username: usernameResult.username, p_message_body: rendered.renderedBody,
+      p_template_id: common.templateId, p_priority: common.priority,
+    } : rpcPayload),
   });
   if (!row || !row.id) {
     return {
@@ -737,7 +763,7 @@ async function handleBulk(
   }, headers);
 }
 
-async function handleRequest(req: Request): Promise<Response> {
+export async function handleRequest(req: Request): Promise<Response> {
   const headers = corsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (req.method !== "POST") return jsonResponse(405, { ok: false, error: "method_not_allowed" }, headers);

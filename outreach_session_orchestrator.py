@@ -7,6 +7,8 @@ existing DM sender engine with dm_type='outreach'.
 from __future__ import annotations
 
 import time
+import json
+import os
 from typing import Any
 
 import uiautomator2 as u2
@@ -22,6 +24,25 @@ from dm_sender_engine import (
 from logs import log
 
 _LAST_OUTREACH_SESSION_SUMMARY: dict[str, Any] = {}
+
+
+def _managed_campaign_context(account_id: str, run_id: str | None) -> dict[str, Any] | None:
+    raw = os.environ.get("OUTREACH_CAMPAIGN_CONTEXT_V1")
+    if not raw:
+        return None
+    expected = json.loads(raw)
+    if (not isinstance(expected, dict) or expected.get("account_id") != account_id or not run_id
+            or any(type(expected.get(k)) is not str or not expected[k].strip()
+                   for k in ("account_id", "client_id", "campaign_id"))
+            or type(expected.get("campaign_revision")) is not int or expected["campaign_revision"] < 1):
+        raise RuntimeError("outreach_managed_context_invalid")
+    actual = supabase_client.call_rpc_once("resolve_outreach_campaign_context_v1", {
+        "p_account_id": account_id, "p_run_id": run_id,
+    }, timeout_seconds=5.0)
+    if not isinstance(actual, dict) or actual.get("managed_campaign") is not True or any(
+            actual.get(k) != expected.get(k) for k in ("account_id", "client_id", "campaign_id", "campaign_revision")):
+        raise RuntimeError("outreach_managed_context_changed")
+    return actual
 
 
 def get_last_outreach_session_summary() -> dict[str, Any]:
@@ -163,12 +184,13 @@ def prepare_outreach_session(
         _publish_summary(out)
         return out
 
+    managed = _managed_campaign_context(aid, run_id)
     stale_minutes = _as_nonnegative_int(
         getattr(config, "STALE_OUTREACH_JOB_MINUTES", 30),
         30,
     )
     try:
-        stale_requeued = supabase_client.requeue_stale_outreach_dm_jobs(
+        stale_requeued = [] if managed else supabase_client.requeue_stale_outreach_dm_jobs(
             aid,
             stale_minutes=stale_minutes,
         )
@@ -204,12 +226,28 @@ def prepare_outreach_session(
         _publish_summary(out)
         return out
 
-    prep = prepare_dm_sender_jobs(
+    if managed:
+        from outreach_slot_contract import active
+        if active():
+            raise RuntimeError("outreach_slot_prepared_claim_forbidden")
+        jobs = supabase_client.call_rpc_once("claim_outreach_campaign_jobs_v1", {
+            "p_account_id": aid, "p_run_id": run_id, "p_reserved_by": str(run_id),
+            "p_limit": int(quota["max_jobs_effective"]),
+        }, timeout_seconds=5.0)
+        if not isinstance(jobs, list) or any(not isinstance(job, dict)
+                or job.get("account_id") != aid or job.get("campaign_id") != managed["campaign_id"]
+                or (job.get("metadata") or {}).get("client_id") != managed["client_id"]
+                or (job.get("metadata") or {}).get("campaign_revision") != managed["campaign_revision"]
+                or job.get("dm_type") != "outreach" for job in jobs):
+            raise RuntimeError("outreach_scoped_claim_invalid")
+        prep = {"jobs": jobs, "prepare_ms": 0.0}
+    else:
+        prep = prepare_dm_sender_jobs(
         d,
         account_id=aid,
         dm_type="outreach",
         max_jobs=int(quota["max_jobs_effective"]),
-    )
+        )
     jobs = list(prep.get("jobs") or [])
     rejected_unfollow_handoff_jobs: list[dict[str, Any]] = []
     if reject_unfollow_handoff_jobs:
@@ -299,6 +337,18 @@ def run_outreach_session(
     prepared_jobs = list(prepared.get("prepared_jobs") or [])
     settings = dict(prepared.get("settings") or {})
     using_prepared_jobs = bool(prepared_outreach is not None)
+    managed = _managed_campaign_context(aid, run_id)
+    if managed:
+        from outreach_slot_contract import active
+        if not active() and not using_prepared_jobs:
+            raise RuntimeError("outreach_managed_preparation_required")
+        for job in prepared_jobs:
+            if (not isinstance(job, dict) or job.get("dm_type") != "outreach"
+                    or job.get("account_id") != aid or job.get("campaign_id") != managed["campaign_id"]
+                    or not isinstance(job.get("metadata"), dict)
+                    or job["metadata"].get("client_id") != managed["client_id"]
+                    or (job.get("metadata") or {}).get("campaign_revision") != managed["campaign_revision"]):
+                raise RuntimeError("outreach_prepared_campaign_mismatch")
     if not settings:
         try:
             settings = supabase_client.get_account_dm_settings(aid) or {}
@@ -412,7 +462,7 @@ def run_outreach_session(
             30,
         )
         try:
-            stale_requeued = supabase_client.requeue_stale_outreach_dm_jobs(
+            stale_requeued = [] if managed else supabase_client.requeue_stale_outreach_dm_jobs(
                 aid,
                 stale_minutes=stale_minutes,
             )
@@ -474,7 +524,9 @@ def run_outreach_session(
     session_status = str(sender_summary.get("sender_status") or "")
     if not session_status:
         session_status = "success" if int(code) == 0 else "failed"
-    if jobs_sent > 0 and (jobs_failed > 0 or jobs_skipped > 0):
+    if sender_summary.get("stop_reason"):
+        session_status = str(sender_summary.get("sender_status") or "blocked_slot_contract")
+    elif jobs_sent > 0 and (jobs_failed > 0 or jobs_skipped > 0):
         session_status = "completed_partial"
     elif jobs_sent > 0 and jobs_failed == 0 and jobs_skipped == 0:
         session_status = "completed_clean"

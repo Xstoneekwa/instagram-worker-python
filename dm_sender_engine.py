@@ -3968,6 +3968,9 @@ def execute_dm_job_real_send(
                             "post_finalize_partial": fail_reason == "post_finalize_partial",
                         },
                     )
+                    from outreach_slot_contract import active as outreach_slot_active, SlotBlocked
+                    if dm_type == 'outreach' and outreach_slot_active() and (updated_job or {}).get('status') != 'sent':
+                        raise SlotBlocked('outreach_send_completion_unconfirmed')
                     outcome = "sent"
                     final_status = str((updated_job or {}).get("status") or "sent")
                     send_confirmed = True
@@ -4019,6 +4022,10 @@ def execute_dm_job_real_send(
     finally:
         t_post_job = time.perf_counter()
         post_job_restore = _get_dm_sender_post_job_restore()
+        from outreach_slot_contract import active as outreach_slot_active
+        cleanup_slot = outreach_slot_active() if dm_type == 'outreach' else None
+        if cleanup_slot and (cleanup_slot.remaining_ms() <= 0 or cleanup_slot.stop_reason):
+            navigation_finished = False
         if not navigation_finished:
             log(
                 "warning",
@@ -4413,11 +4420,33 @@ def run_dm_sender_send(
             log("error", "dm_sender_settings_load_failed", error=str(e))
             settings = {}
 
+    from outreach_slot_contract import active as outreach_slot_active, SlotBlocked
+    slot = outreach_slot_active() if dm_type_resolved == "outreach" else None
+    slot_stop_reason = None
+    if slot:
+        slot.context["run_id"] = run_id
+        # Product target counts confirmed sends; technical limits still bound
+        # attempts, including skips/failures and claims from prior attempts.
+        slot.refresh()
+        counters = supabase_client.get_account_dm_counter_today(aid)
+        from outreach_session_orchestrator import _is_valid_counter_row
+        if not _is_valid_counter_row(counters):
+            raise SlotBlocked('outreach_counters_unavailable')
+        max_jobs = slot.remaining_claim_budget(settings, counters)
+        if using_prepared_jobs:
+            raise SlotBlocked("outreach_prepared_jobs_forbidden")
     last_result: dict[str, Any] = {}
     last_recipient_username = ""
     previous_restore_mode = ""
     for job_index in range(max_jobs):
-        if using_prepared_jobs:
+        if slot:
+            try:
+                job = slot.claim()
+            except SlotBlocked as exc:
+                slot_stop_reason = str(exc)
+                break
+            claim_ms = 0.0
+        elif using_prepared_jobs:
             job = prepared_job_list[job_index] if job_index < len(prepared_job_list) else None
             claim_ms = 0.0
         else:
@@ -4473,26 +4502,40 @@ def run_dm_sender_send(
             continue
 
         skip_post_job_restore = bool(using_prepared_jobs and max_jobs == 1)
-        last_result = execute_dm_job_real_send(
-            d,
-            job,
-            settings=settings,
-            account_id=aid,
-            account_username=acct_user,
-            run_id=run_id,
-            previous_username=(
-                last_recipient_username
-                if dm_type_resolved == "outreach"
-                else None
-            ),
-            restore_search_after_job=not (
-                dm_type_resolved == "outreach" and job_index >= max_jobs - 1
-            ),
-            skip_post_job_restore=skip_post_job_restore,
-            parent_search_ready=parent_search_ready,
-            job_index=job_index,
-            jobs_total=max_jobs,
-        )
+        if slot:
+            try:
+                slot.begin_unit()
+            except SlotBlocked as exc:
+                slot_stop_reason = str(exc)
+                break
+        try:
+            last_result = execute_dm_job_real_send(
+                d,
+                job,
+                settings=settings,
+                account_id=aid,
+                account_username=acct_user,
+                run_id=run_id,
+                previous_username=(
+                    last_recipient_username
+                    if dm_type_resolved == "outreach"
+                    else None
+                ),
+                restore_search_after_job=not (
+                    dm_type_resolved == "outreach" and job_index >= max_jobs - 1
+                ),
+                skip_post_job_restore=skip_post_job_restore,
+                parent_search_ready=parent_search_ready,
+                job_index=job_index,
+                jobs_total=max_jobs,
+            )
+        except SlotBlocked as exc:
+            slot_stop_reason = str(exc)
+            if slot:
+                slot.stop_reason = slot_stop_reason
+            break
+        if slot:
+            slot.record_unit(last_result, job_id=job.get("id"))
         if job_index > 0:
             inter_job_ms = float(
                 last_result.get("navigation_to_username_typed_total_ms") or 0.0
@@ -4603,6 +4646,9 @@ def run_dm_sender_send(
             summary["jobs_failed_count"] += 1
             summary["failed_recipients"].append(recipient)
 
+        if slot and slot.remaining_ms() <= 0:
+            slot_stop_reason = "slot_deadline"
+            break
         if _dm_sender_session_should_abort():
             log(
                 "error",
@@ -4613,6 +4659,14 @@ def run_dm_sender_send(
             )
             break
 
+    if slot_stop_reason:
+        slot.stop_reason = slot_stop_reason
+        summary["stop_reason"] = slot_stop_reason
+        normal_stop = slot_stop_reason in ("slot_deadline", "outreach_insufficient_next_unit_budget")
+        summary["sender_status"] = "completed_partial" if normal_stop else "blocked_slot_contract"
+        slot.event("outreach_partial_completion" if normal_stop else "outreach_slot_blocked", stop_reason=slot_stop_reason)
+        summary["total_ms"] = round((time.perf_counter()-t0)*1000, 2)
+        return (0 if normal_stop else 1), summary
     total_ms = (time.perf_counter() - t0) * 1000.0
     claimed = int(summary["jobs_claimed_count"])
     failed = int(summary["jobs_failed_count"])

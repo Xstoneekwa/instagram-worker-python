@@ -663,7 +663,7 @@ def summarize_active_account_run_requests(limit: int = 20) -> dict[str, Any]:
     }
 
 
-def reconcile_requests_with_terminal_runs(
+def _reconcile_legacy_requests_with_terminal_runs(
     cfg: DispatcherConfig,
     *,
     limit: int = 20,
@@ -679,7 +679,8 @@ def reconcile_requests_with_terminal_runs(
             "GET",
             "account_run_requests",
             query={
-                "select": "id,account_id,status,run_id,requested_run_type",
+                "select": "id,account_id,status,run_id,requested_run_type,metadata_safe",
+                "metadata_safe->outreach_slot_v1": "is.null",
                 "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})",
                 "run_id": "not.is.null",
                 "order": "created_at.asc",
@@ -726,6 +727,8 @@ def reconcile_requests_with_terminal_runs(
     terminalized = 0
     for request in requests:
         if not isinstance(request, dict):
+            continue
+        if isinstance(request.get("metadata_safe"), dict) and "outreach_slot_v1" in request["metadata_safe"]:
             continue
         request_id = normalize_request_uuid(request.get("id"))
         run_id = str(request.get("run_id") or "").strip()
@@ -779,6 +782,202 @@ def reconcile_requests_with_terminal_runs(
             )
             continue
         terminalized += 1
+        log(
+            "info",
+            "terminal_run_request_reconciled",
+            worker_id=cfg.worker_id,
+            request_id=request_id,
+            run_id=run_id,
+            run_status=run_status,
+            request_status=request_status,
+            persisted=True,
+        )
+    return {"ok": True, "observed": len(requests), "terminalized": terminalized}
+
+
+def reconcile_requests_with_terminal_runs(cfg: DispatcherConfig, *, limit: int = 20) -> dict[str, Any]:
+    legacy = _reconcile_legacy_requests_with_terminal_runs(cfg, limit=limit)
+    try:
+        probe = supabase_client._request_json("GET", "account_run_requests", query={
+            "select": "id,metadata_safe", "metadata_safe->outreach_slot_v1": "not.is.null",
+            "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})", "run_id": "not.is.null", "limit": "1",
+        }, request_timeout=5.0, max_retries=0) or []
+        if not any(isinstance(r, dict) and isinstance(r.get("metadata_safe"), dict)
+                   and "outreach_slot_v1" in r["metadata_safe"] for r in probe):
+            return legacy
+        managed = _reconcile_managed_requests_with_terminal_runs(cfg, limit=limit)
+        return {"ok": legacy.get("ok") is True and managed.get("ok") is True,
+                "observed": legacy.get("observed", 0) + managed.get("observed", 0),
+                "terminalized": legacy.get("terminalized", 0) + managed.get("terminalized", 0)}
+    except Exception as exc:
+        if supabase_client.is_transient_control_plane_exception(exc):
+            raise
+        return {**legacy, "ok": False, "error": "managed_terminal_read_failed"}
+
+
+def _reconcile_managed_requests_with_terminal_runs(cfg: DispatcherConfig, *, limit: int = 20) -> dict[str, Any]:
+    """One durable, owner-scoped fair page; no business retry or receipt deadline."""
+    from reconciliation_scan import ReconciliationScan, OPERATOR_ESCALATION_DELAY
+    with ReconciliationScan(cfg.worker_id) as scan:
+        if scan is None:
+            log('info', 'terminal_reconciliation_scan_busy', worker_id=cfg.worker_id)
+            return {'ok': True, 'observed': 0, 'terminalized': 0}
+        try:
+            return _reconcile_terminal_page(cfg, limit=limit, scan=scan)
+        finally:
+            log('info', 'terminal_reconciliation_pass_v24', worker_id=cfg.worker_id,
+                operator_escalation_delay=OPERATOR_ESCALATION_DELAY, **scan.metrics)
+
+
+def _reconcile_terminal_page(
+    cfg: DispatcherConfig,
+    *,
+    limit: int = 20,
+    scan,
+) -> dict[str, Any]:
+    """Idempotently close active queue rows whose linked run is terminal.
+
+    A terminal ``ig_runs`` row is the legacy recovery marker. Dedicated outreach
+    additionally requires its exact durable receipt. Missing proof is revisited;
+    invalid visible proof is held for operator review, without business retry.
+    """
+    try:
+        requests = scan.fetch(supabase_client._request_json, {
+            "select": "id,created_at,account_id,status,run_id,requested_run_type,metadata_safe",
+            "metadata_safe->outreach_slot_v1": "not.is.null",
+            "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})",
+            "run_id": "not.is.null",
+        }, max(1, int(limit)), log=log)
+        run_ids = [
+            str(row.get("run_id") or "").strip()
+            for row in requests
+            if isinstance(row, dict) and str(row.get("run_id") or "").strip()
+        ]
+        if not run_ids:
+            return {"ok": True, "observed": 0, "terminalized": 0}
+        runs = supabase_client._request_json(
+            "GET",
+            "ig_runs",
+            query={
+                "select": "id,status,finished_at,updated_at",
+                "id": f"in.({','.join(run_ids)})",
+            },
+            request_timeout=5.0,
+            max_retries=0,
+        ) or []
+    except Exception as exc:
+        log(
+            "warning",
+            "terminal_run_request_reconciliation_read_failed",
+            worker_id=cfg.worker_id,
+            error=str(exc)[:200],
+        )
+        if supabase_client.is_transient_control_plane_exception(exc):
+            raise
+        return {"ok": False, "observed": 0, "terminalized": 0, "error": str(exc)[:200]}
+
+    terminal_runs = {
+        str(row.get("id") or "").strip(): dict(row)
+        for row in runs
+        if isinstance(row, dict)
+        and str(row.get("status") or "").strip().lower()
+        in {"completed", "failed", "stopped", "canceled", "blocked", "aborted"}
+    }
+    terminalized = 0
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        request_id = normalize_request_uuid(request.get("id"))
+        run_id = str(request.get("run_id") or "").strip()
+        run = terminal_runs.get(run_id)
+        if not request_id or not run:
+            continue
+        scan.metrics['rows_evaluated'] += 1
+        run_status = str(run.get("status") or "").strip().lower()
+        request_status = {
+            "completed": "completed",
+            "stopped": "canceled",
+            "canceled": "canceled",
+            "blocked": "blocked",
+        }.get(run_status, "failed")
+        metadata = request.get('metadata_safe')
+        if (str(request.get('requested_run_type') or '').strip().lower() == 'outreach_session'
+                or isinstance(metadata, dict) and ('outreach_slot_v1' in metadata or 'outreach_campaign_v1' in metadata)):
+            from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_success, InvalidTerminalReceipt
+            if scan.held(request_id, run_id):
+                scan.metrics['rows_operator_required'] += 1
+                log('warning', 'outreach_terminal_reconciliation_operator_required',
+                    request_id=request_id, run_id=run_id, reason='invalid_receipt_held', business_retry=False)
+                continue
+            receipt = None
+            try:
+                context = metadata.get('outreach_slot_v1') if isinstance(metadata, dict) else None
+                expected = dict(context) if isinstance(context, dict) else {}
+                expected.update(request_id=request_id, account_id=request.get('account_id'))
+                receipt = supabase_client.call_rpc_once(
+                    'read_outreach_terminal_v2', {'p_request_id':request_id}, timeout_seconds=5.0)
+                scan.metrics['rows_validated'] += 1
+                receipt = validate_terminal_receipt(receipt, expected, run_id=run_id)
+                # Neither a completed run nor a valid *failure* receipt implies success.
+                if request_status == 'completed' and not receipt_allows_success(receipt):
+                    request_status = 'failed'
+            except Exception as exc:
+                # Absence and transport failure remain recheckable without a clock.
+                # Only the shared validator can classify a visible receipt invalid.
+                if receipt is not None and isinstance(exc, InvalidTerminalReceipt):
+                    scan.hold(request_id, run_id, exc)
+                    scan.metrics['rows_operator_required'] += 1
+                    log('warning', 'outreach_terminal_reconciliation_operator_required',
+                        request_id=request_id, run_id=run_id, worker_id=cfg.worker_id,
+                        reason='invalid_receipt_held', error=str(exc)[:200], business_retry=False)
+                else:
+                    scan.metrics['rows_deferred'] += 1
+                log('warning','outreach_terminal_reconciliation_pending',
+                    request_id=request_id, run_id=run_id, worker_id=cfg.worker_id,
+                    reason='terminal_receipt_unproven', error=str(exc)[:200],
+                    business_retry=False)
+                continue
+        try:
+            result = _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                request_status,
+                error_code=(
+                    None
+                    if request_status in {"completed", "canceled"}
+                    else f"linked_run_{run_status}"
+                ),
+                error_message_safe=(
+                    None
+                    if request_status in {"completed", "canceled"}
+                    else "Linked worker session reached a terminal failure state."
+                ),
+                bounded_control_plane=True,
+            )
+        except Exception as exc:
+            log(
+                "warning",
+                "terminal_run_request_reconciliation_write_failed",
+                worker_id=cfg.worker_id,
+                request_id=request_id,
+                run_id=run_id,
+                run_status=run_status,
+                error=str(exc)[:200],
+            )
+            continue
+        if not result:
+            log(
+                "warning",
+                "terminal_run_request_reconciliation_not_persisted",
+                worker_id=cfg.worker_id,
+                request_id=request_id,
+                run_id=run_id,
+                run_status=run_status,
+                request_status=request_status,
+            )
+            continue
+        terminalized += 1
+        scan.metrics['rows_progressed'] += 1
         log(
             "info",
             "terminal_run_request_reconciled",
@@ -2654,6 +2853,24 @@ def _finalize_manual_run_after_subprocess(
         or (request_snapshot or {}).get("metadata_safe")
         or {}
     )
+    if run_type == 'outreach_session' and request_metadata.get('outreach_slot_v1'):
+        from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_success
+        terminal = None
+        try:
+            terminal = supabase_client.call_rpc_once('read_outreach_terminal_v2', {'p_request_id': request_id}, timeout_seconds=5.0)
+            if not terminal and timed_out:
+                terminal = supabase_client.call_rpc_once('finish_outreach_slot_v2', {
+                    'p_request_id':request_id, 'p_reason':'dispatcher_watchdog',
+                    'p_cleanup_ok':False, 'p_observations':{}}, timeout_seconds=5.0)
+            expected = dict(request_metadata['outreach_slot_v1'])
+            expected.update(request_id=request_id, account_id=account_id)
+            terminal = validate_terminal_receipt(terminal, expected, run_id=run_id)
+        except Exception as exc:
+            terminal = None
+            log('error','outreach_terminal_projection_unavailable',request_id=request_id,error=str(exc)[:160])
+        cleanup_completed = bool(terminal and terminal.get('cleanup_ok'))
+        if exit_code == 0 and (not terminal or not receipt_allows_success(terminal)):
+            exit_code = 1
     if latest.get("claimed_at"):
         request_metadata.setdefault("claimed_at", latest.get("claimed_at"))
 
@@ -3222,6 +3439,7 @@ def _wait_for_subprocess(
     business_action_deadline: str | None = None,
     scheduled_session_end: str | None = None,
     diagnostics: dict[str, Any] | None = None,
+    outreach_cleanup_grace_ms: int | None = None,
 ) -> tuple[int, bool]:
     if device_lock_renewal:
         try:
@@ -3302,27 +3520,34 @@ def _wait_for_subprocess(
                 )
                 last_control_plane_error_logged_at = now
         if latest and (latest.get("status") == "canceled" or latest.get("cancel_requested_at")):
-            log(
-                "info",
-                "manual_run_subprocess_cancel_requested",
-                account_id=account_id,
-                request_id=request_id,
-                worker_id=cfg.worker_id,
-            )
-            if stop_context is not None:
-                record_termination_origin(stop_context, reason="human_manual_stop")
-            # The scoped Follow 60s canary may need to replay one verified Follow intent and
-            # flush bounded deferred projections. Keep every other account on
-            # the exact Golden 30-second termination contract.
-            if _follow60_control_applies(
-                account_id=account_id,
-                run_id=str(latest.get("run_id") or ""),
-                request_id=request_id,
-            ):
-                return _terminate_subprocess(
-                    proc, graceful_timeout_seconds=90.0
-                ), False
-            return _terminate_subprocess(proc), False
+            if outreach_cleanup_grace_ms is not None and stop_context is not None:
+                if not soft_stop_requested:
+                    request_cooperative_stop(stop_context,reason='human_manual_stop')
+                    soft_stop_requested = True
+                    manual_end = datetime.now(timezone.utc) + timedelta(milliseconds=outreach_cleanup_grace_ms)
+                    hard_deadline = min(hard_deadline, manual_end) if hard_deadline else manual_end
+            else:
+                log(
+                    "info",
+                    "manual_run_subprocess_cancel_requested",
+                    account_id=account_id,
+                    request_id=request_id,
+                    worker_id=cfg.worker_id,
+                )
+                if stop_context is not None:
+                    record_termination_origin(stop_context, reason="human_manual_stop")
+                # The scoped Follow 60s canary may need to replay one verified Follow intent and
+                # flush bounded deferred projections. Keep every other account on
+                # the exact Golden 30-second termination contract.
+                if _follow60_control_applies(
+                    account_id=account_id,
+                    run_id=str(latest.get("run_id") or ""),
+                    request_id=request_id,
+                ):
+                    return _terminate_subprocess(
+                        proc, graceful_timeout_seconds=90.0
+                    ), False
+                return _terminate_subprocess(proc), False
 
         request_lease_now = time.monotonic()
         if latest and request_lease_now >= next_request_lease_renew:
@@ -3677,6 +3902,27 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             return
 
     ok_assignment, assignment_reason, dispatch_ctx = _validate_assignment(account_id, run_type, cfg)
+    managed_outreach = isinstance(request.get("metadata_safe"), dict) and any(key in request["metadata_safe"] for key in ("outreach_campaign_v1", "outreach_slot_v1"))
+    if ok_assignment and managed_outreach:
+        try:
+            gate = supabase_client.call_rpc_once("validate_outreach_dispatch_v1", {
+                "p_account_id": account_id, "p_run_type": run_type, "p_request_id": request_id,
+            }, timeout_seconds=5.0)
+            if not isinstance(gate, dict):
+                raise ValueError("outreach_dispatch_authority_missing")
+            if gate.get("applies") is not True or not isinstance(gate.get("campaign"), dict):
+                raise ValueError("outreach_managed_dispatch_not_authorized")
+            dispatch_ctx["outreach_campaign_v1"] = gate["campaign"]
+            if gate.get("mode") == "slot" and run_type == "outreach_session":
+                slot = gate["slot"]
+                for key in ("account_id", "assignment_id", "device_id", "app_instance_id", "adb_serial", "package_name"):
+                    if slot.get(key) != dispatch_ctx.get(key):
+                        raise ValueError("outreach_dispatch_binding_mismatch:" + key)
+                dispatch_ctx["outreach_slot_v1"] = slot
+            elif gate.get("mode") != "prepared" or run_type != "account_session":
+                raise ValueError("outreach_managed_dispatch_mode_mismatch")
+        except Exception as exc:
+            ok_assignment, assignment_reason = False, "outreach_dispatch_blocked:" + str(exc)[:160]
     safe_dispatch = sensitive_log_fields(dispatch_ctx)
     if not ok_assignment:
         error_code = assignment_reason or "assignment_blocked"
@@ -4170,11 +4416,21 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             run_type=run_type,
             **protection_metadata,
         )
+    if dispatch_ctx.get("outreach_slot_v1"):
+        subprocess_env = {**subprocess_env, "OUTREACH_SLOT_CONTEXT_V1": json.dumps(dispatch_ctx["outreach_slot_v1"])}
+    if dispatch_ctx.get("outreach_campaign_v1"):
+        subprocess_env = {**subprocess_env, "OUTREACH_CAMPAIGN_CONTEXT_V1": json.dumps(dispatch_ctx["outreach_campaign_v1"])}
     deadline_env: dict[str, str] = {}
+    if dispatch_ctx.get("outreach_slot_v1"):
+        slot = dispatch_ctx["outreach_slot_v1"]
+        from outreach_measurements import dispatcher_deadlines
+        deadline_env = dispatcher_deadlines(slot)
+
     cooperative_stop_context: StopContext | None = None
     cooperative_stop_diagnostics: dict[str, Any] = {}
-    if run_type == "account_session":
-        deadline_env = _account_session_deadline_env(request_metadata, dispatch_ctx)
+    if run_type == "account_session" or dispatch_ctx.get("outreach_slot_v1"):
+        if run_type == "account_session":
+            deadline_env = _account_session_deadline_env(request_metadata, dispatch_ctx)
         business_session_id = str(
             request_metadata.get("business_session_id")
             or request_metadata.get("schedule_session_id")
@@ -4295,6 +4551,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             business_action_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
             scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
             diagnostics=cooperative_stop_diagnostics,
+            outreach_cleanup_grace_ms=(dispatch_ctx.get('outreach_slot_v1') or {}).get('execution_policy',{}).get('cleanup_grace_ms'),
          device_lock_binding=device_lock_binding)
 
     lock_released = False
@@ -4306,12 +4563,25 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 request_id=request_id,
              expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
         else:
-            release_result = release_device_lock(
-                device_id=device_id,
-                worker_id=lock_owner_worker_id,
-                request_id=request_id,
-             expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
-            lock_released = bool((release_result or {}).get("released"))
+            if dispatch_ctx.get('outreach_slot_v1'):
+                try:
+                    release_result = release_device_lock(
+                        device_id=device_id,
+                        worker_id=lock_owner_worker_id,
+                        request_id=request_id,
+                     expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                    lock_released = bool((release_result or {}).get("released"))
+                except Exception as exc:
+                    log('error','outreach_device_lease_release_failed',request_id=request_id,error=str(exc)[:160])
+                if not lock_released:
+                    exit_code = 1
+            else:
+                release_result = release_device_lock(
+                    device_id=device_id,
+                    worker_id=lock_owner_worker_id,
+                    request_id=request_id,
+                 expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                lock_released = bool((release_result or {}).get("released"))
 
     _finalize_manual_run_after_subprocess(
         cfg,

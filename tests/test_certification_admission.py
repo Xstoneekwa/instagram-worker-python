@@ -38,6 +38,51 @@ _OUTREACH_ROUTING_BASE_SHA256 = 'b34f60c651ed4e64e8e484bb7228fe7e133ee9542368a6f
 _PROFILE_EXACT_INVERSE = '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'
 
 
+# Exact inverse of the signed managed-Outreach/slot delta against certified 9165651.
+# Full hashes plus positional hunks reject moved, duplicated, weakened or unrelated
+# edits; historical inverse layers and their expected bytes remain unchanged.
+_PRODUCT_EXACT_INVERSE = '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'
+
+
+def restore_exact_product_delta(name, source):
+    import base64, zlib
+    records = json.loads(zlib.decompress(base64.b64decode(_PRODUCT_EXACT_INVERSE)))
+    if name not in records:
+        return source
+    record = records[name]
+    if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:
+        raise AssertionError('product_source_changed:' + name)
+    for hunk in reversed(record['hunks']):
+        offset, new = hunk['offset'], hunk['new']
+        if source[offset:offset + len(new)] != new:
+            raise AssertionError('product_hunk_changed:' + name)
+        source = source[:offset] + hunk['old'] + source[offset + len(new):]
+    if hashlib.sha256(source.encode()).hexdigest() != record['base_sha256']:
+        raise AssertionError('product_inverse_mismatch:' + name)
+    return source
+
+
+class ProductExactInverseTests(unittest.TestCase):
+    def test_restores_entire_certified_base_and_rejects_mutations(self):
+        import base64,zlib
+        records=json.loads(zlib.decompress(base64.b64decode(_PRODUCT_EXACT_INVERSE)))
+        for name,record in records.items():
+            source=(ROOT/name).read_text()
+            expected=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
+            with self.subTest(name=name):
+                self.assertEqual(restore_exact_product_delta(name,source),expected)
+                self.assertEqual(hashlib.sha256(expected.encode()).hexdigest(),record['base_sha256'])
+            hunk=next(q for q in record['hunks'] if q['new'])
+            at=hunk['offset'];new=hunk['new']
+            variants=[source+'\n',source[:at]+source[at+len(new):],
+                      source[:at]+new+new+source[at+len(new):],
+                      source[:at]+source[at+len(new):]+new,
+                      source[:at]+'# unapproved\n'+source[at:]]
+            for bad in variants:
+                with self.subTest(name=name,mutation=hashlib.sha256(bad.encode()).hexdigest()), self.assertRaises(AssertionError):
+                    restore_exact_product_delta(name,bad)
+
+
 def restore_exact_ui_profile_delta(name, source):
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_PROFILE_EXACT_INVERSE)))[name]
@@ -69,7 +114,7 @@ def restore_exact_outreach_routing_delta(source):
 
 class OutreachRoutingExactInverseTests(unittest.TestCase):
     def test_exact_baseline_and_reject_missing_altered_duplicate_moved_unrelated(self):
-        source = (ROOT / 'runner.py').read_text()
+        source = restore_exact_product_delta('runner.py', (ROOT/'runner.py').read_text())
         baseline = subprocess.check_output(['git', '-C', str(ROOT), 'show',
             '38a2c01e6b10778fe6099f05736bdc7b062b6e7b:runner.py']).decode()
         self.assertEqual(restore_exact_outreach_routing_delta(source), baseline)
@@ -378,7 +423,7 @@ class AdmissionTests(unittest.TestCase):
 class RunnerIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source=(ROOT/'runner.py').read_text();cls.tree=ast.parse(cls.source)
+        cls.source=restore_exact_product_delta('runner.py', (ROOT/'runner.py').read_text());cls.tree=ast.parse(cls.source)
         cls.baseline=ast.parse(subprocess.check_output(['git','show',BASE+':runner.py'],cwd=ROOT).decode())
 
     def test_every_actual_open_is_immediately_guarded(self):
@@ -497,17 +542,17 @@ class RunnerIntegrationTests(unittest.TestCase):
 
     def test_navigation_exact_a0_bytes(self):
         for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
-            self._assert_navigation_a0_with_exact_446_delta(name, (ROOT/name).read_bytes())
+            self._assert_navigation_a0_with_exact_446_delta(name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode())
 
     def test_navigation_freeze_rejects_unrelated_byte_changes(self):
         for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
             with self.subTest(name=name), self.assertRaises(AssertionError):
                 self._assert_navigation_a0_with_exact_446_delta(
-                    name, (ROOT/name).read_bytes() + b'\n# unrelated change\n')
+                    name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode() + b'\n# unrelated change\n')
 
     def test_navigation_freeze_rejects_changed_or_missing_approved_hunk(self):
         for name, hunks in self._APPROVED_446_HUNKS.items():
-            source = (ROOT/name).read_bytes()
+            source = restore_exact_product_delta(name, (ROOT/name).read_text()).encode()
             if name == "device.py":
                 source = restore_exact_ui_profile_delta(name, source.decode()).encode()
             for current, original in hunks:
@@ -523,7 +568,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         import base64, zlib
         records = json.loads(zlib.decompress(base64.b64decode(_PROFILE_EXACT_INVERSE)))
         for name, record in records.items():
-            source = (ROOT / name).read_text()
+            source = restore_exact_product_delta(name, (ROOT/name).read_text())
             baseline = subprocess.check_output(['git', 'show', 'baf0bf85701e0c28e65ca8ebe71b9537e7293b73:' + name], cwd=ROOT, text=True)
             self.assertEqual(restore_exact_ui_profile_delta(name, source), baseline)
             for hunk in record['hunks']:
@@ -542,7 +587,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             for current, _ in hunks:
                 with self.subTest(name=name), self.assertRaises(AssertionError):
                     self._assert_navigation_a0_with_exact_446_delta(
-                        name, (ROOT/name).read_bytes() + current)
+                        name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode() + current)
 
     def test_no_ui_dependency_or_bare_except(self):
         tree=ast.parse((ROOT/'certification_admission.py').read_text())
@@ -558,7 +603,7 @@ if __name__=='__main__':unittest.main()
 
 class LikeBudgetExactFreezeTests(unittest.TestCase):
     def test_exact_hunks_reconstruct_signed_baseline(self):
-        source = (ROOT / 'instagram_navigation.py').read_text()
+        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
         expected = subprocess.check_output(['git','show',
             '8519f1c16284a7f4f4185e898b0b281d8ea27e72:instagram_navigation.py'],cwd=ROOT,text=True)
         self.assertEqual(restore_exact_like_budget_delta(source),expected)
@@ -566,7 +611,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
             self.assertEqual(source.count(approved),1)
 
     def test_missing_changed_duplicate_and_moved_hunks_fail(self):
-        source = (ROOT / 'instagram_navigation.py').read_text()
+        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
         for approved, original in LIKE_BUDGET_EXACT_HUNKS:
             for mutated in (source.replace(approved,original,1),
                             source.replace(approved,approved+'# unauthorized byte\n',1),
@@ -576,7 +621,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
                     restore_exact_like_budget_delta(mutated)
 
     def test_unrelated_semantic_and_business_mutations_fail(self):
-        source = (ROOT / 'instagram_navigation.py').read_text()
+        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
         names = ('_ui_post_viewer_action_button_liked_strict',
                  '_ui_post_viewer_liked_state_for_verify','visual_verify_post_liked',
                  '_visual_filled_heart_red_ratio','_hierarchy_liked_state_for_post_verify',
@@ -603,7 +648,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
             if hashlib.sha256(content).hexdigest() != hashes[name]:
                 raise AssertionError('business_companion_changed:' + name)
         for name in hashes:
-            content = (ROOT/name).read_bytes()
+            content = restore_exact_product_delta(name, (ROOT/name).read_text()).encode()
             if name == "runner.py":
                 content = restore_exact_self_xml_delta(name, content.decode()).encode()
             assert_exact(name,content)
@@ -615,7 +660,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
 class SelfXmlExactFreezeTests(unittest.TestCase):
     def test_exact_inverse_and_missing_altered_duplicate_or_moved_hunks(self):
         for name, hunks in SELF_XML_EXACT_HUNKS.items():
-            source = (ROOT/name).read_text()
+            source = restore_exact_product_delta(name, (ROOT/name).read_text())
             restored = restore_exact_self_xml_delta(name, source)
             self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), SELF_XML_BASE_HASHES[name])
             for approved, original in hunks:
@@ -629,7 +674,7 @@ class SelfXmlExactFreezeTests(unittest.TestCase):
     def test_business_and_orchestrator_mutations_remain_rejected(self):
         for name, surfaces in [('runner.py', ('reentry', 'Follow', 'Mute', 'Return CT', 'checkpoint/resume', 'extra byte')),
                                ('account_session_orchestrator.py', ('Target Availability', 'rotation', 'unapproved propagation'))]:
-            source = (ROOT/name).read_text()
+            source = restore_exact_product_delta(name, (ROOT/name).read_text())
             tree = ast.parse(source)
             # Inject a byte inside real functions as well as at file end. Nothing
             # outside the authorized hunks may be swallowed by normalization.
@@ -1111,12 +1156,12 @@ class CanonicalCycleAdmissionTests(unittest.TestCase):
 
 class DM446ExactFreezeTests(unittest.TestCase):
     def test_exact_delta_restores_signed_baseline(self):
-        source = (ROOT/'instagram_navigation.py').read_text()
+        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
         expected = subprocess.check_output(['git','show','ea69818bfb3445dba3459ea56156d3c6206031c5:instagram_navigation.py'],cwd=ROOT,text=True)
         self.assertEqual(restore_exact_dm446_delta(source),expected)
 
     def test_outer_hash_and_inner_position_checks_reject_mutations(self):
-        source = (ROOT/'instagram_navigation.py').read_text()
+        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
         for offset, approved, original in DM446_EXACT_HUNKS:
             without = source[:offset]+source[offset+len(approved):]
             mutations = (without,source[:offset]+'# altered\n'+source[offset+1:],approved+without,source+approved)

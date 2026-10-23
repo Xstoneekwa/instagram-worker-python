@@ -1,6 +1,7 @@
 import {
   accessDecision,
   findTemplateTokens,
+  handleRequest,
   normalizeUsername,
   parseAllowedAccountIds,
   renderDmTemplate,
@@ -20,6 +21,148 @@ Deno.test("normalizes and validates Instagram usernames", () => {
   if (validateUsername("bad@@").ok) {
     throw new Error("invalid username accepted");
   }
+});
+
+// Same scoped environment + fetch substitution used by dashboard-actions tests.
+// Deno runs without --allow-net: an unmocked request cannot reach any provider.
+const ACCOUNT = "10000000-0000-4000-8000-000000000001";
+const CLIENT = "20000000-0000-4000-8000-000000000001";
+const ACTOR = "30000000-0000-4000-8000-000000000001";
+const CAMPAIGN = "40000000-0000-4000-8000-000000000001";
+const TEMPLATE = "50000000-0000-4000-8000-000000000001";
+type Call = { path: string; method: string; body: Record<string, unknown> };
+type EdgeFixture = {
+  internal?: boolean; legacy?: boolean; ownership?: boolean; fallback?: boolean;
+  mode?: Record<string, unknown>; membership?: Record<string, unknown>;
+  modeFailure?: boolean; membershipFailure?: boolean; existing?: boolean;
+  templateAccount?: string; templateBody?: string; disabled?: boolean; pending?: number;
+};
+function expectFixture(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+async function withEdgeFixture(options: EdgeFixture, test: (run: (
+  payload?: Record<string, unknown>, bulk?: boolean, authorized?: boolean,
+) => Promise<{ response: Response; body: Record<string, any> }>, calls: Call[]) => Promise<void>) {
+  const environment: Record<string, string> = {
+    SUPABASE_URL: "https://edge-fixture.invalid", SUPABASE_SERVICE_ROLE_KEY: "service-role-not-real",
+    OUTREACH_ENQUEUE_INTERNAL_API_TOKEN: "internal-token-not-real", OUTREACH_ENQUEUE_ALLOWED_ORIGINS: "",
+    OUTREACH_ENQUEUE_ALLOWLIST_FALLBACK_ENABLED: options.fallback ? "true" : "false",
+    OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS: ACCOUNT, OUTREACH_ENQUEUE_MAX_PENDING_PER_ACCOUNT: "500",
+    OUTREACH_ENQUEUE_MAX_BATCH_SIZE: "100",
+  };
+  const previous = Object.fromEntries(Object.keys(environment).map(key => [key, Deno.env.get(key)]));
+  const previousFetch = globalThis.fetch;
+  const calls: Call[] = [];
+  const reply = (value: unknown, status = 200, headers?: HeadersInit) => new Response(JSON.stringify(value), { status, headers });
+  const job = { id: "60000000-0000-4000-8000-000000000001", status: "pending", account_id: ACCOUNT,
+    campaign_id: CAMPAIGN, source: "campaign", recipient_username: "offline_alice", recipient_username_normalized: "offline_alice", message_body: "frozen" };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    expectFixture(url.origin === environment.SUPABASE_URL, "unexpected host in offline fixture");
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const method = init?.method || "GET";
+    calls.push({ path: url.pathname, method, body });
+    if (url.pathname === "/auth/v1/user") return reply({ id: ACTOR });
+    if (url.pathname.endsWith("/client_can_enqueue_outreach") || url.pathname.endsWith("/client_account_has_outreach_entitlement")) return reply(options.ownership !== false);
+    if (url.pathname.endsWith("/outreach_campaign_mode_v1")) return options.modeFailure ? reply({ error: "offline_mode_failure" }, 503) : reply(options.mode || { managed_campaign: !options.legacy, campaign_id: CAMPAIGN });
+    if (url.pathname === "/rest/v1/ig_account_dm_settings") return reply([{ outreach_enabled: !options.disabled }]);
+    if (url.pathname === "/rest/v1/ig_dm_templates") return reply([{ id: TEMPLATE, account_id: options.templateAccount || ACCOUNT, template_type: "outreach", active: true, body: options.templateBody || "salut {name} / {username} / {account_username}" }]);
+    if (url.pathname === "/rest/v1/ig_accounts") return reply([{ username: "offline_owner" }]);
+    if (url.pathname === "/rest/v1/ig_dm_jobs") {
+      expectFixture(method === "GET", "direct job write forbidden");
+      if (new Headers(init?.headers).get("prefer")?.includes("count=exact")) return reply([], 200, { "content-range": `0-0/${options.pending || 0}` });
+      return reply(options.existing ? [job] : []);
+    }
+    if (url.pathname.endsWith("/resolve_outreach_campaign_admission_v1")) return options.membershipFailure ? reply({ error: "offline_foreign_campaign" }, 403) : reply({ ok: true, managed_campaign: true, campaign_id: CAMPAIGN, client_id: CLIENT, campaign_revision: 1, origin: "CLIENT_LIST", recipient_name: "Server Alice", ...options.membership });
+    if (url.pathname.endsWith("/admit_outreach_campaign_job_v1") || url.pathname.endsWith("/enqueue_outreach_dm_job")) return reply({ ...job, recipient_username: body.p_recipient_username, message_body: body.p_message_body });
+    throw new Error("unmocked offline route: " + url.pathname);
+  }) as typeof fetch;
+  for (const [key, value] of Object.entries(environment)) Deno.env.set(key, value);
+  try {
+    await test(async (payload = {}, bulk = false, authorized = true) => {
+      const response = await handleRequest(new Request("https://edge-fixture.invalid/" + (bulk ? "outreach/bulk-enqueue" : "outreach/enqueue"), {
+        method: "POST", headers: { "content-type": "application/json", ...(authorized ? { authorization: "Bearer " + (options.internal ? "internal-token-not-real" : "client-token-not-real") } : {}) },
+        body: JSON.stringify({ account_id: ACCOUNT, campaign_id: CAMPAIGN, source: "campaign", template_id: TEMPLATE,
+          recipient_username: "offline_alice", recipient_name: "FORGED OPERATOR NAME", ...payload }),
+      }));
+      return { response, body: await response.json() };
+    }, calls);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value == null) Deno.env.delete(key); else Deno.env.set(key, value);
+    }
+  }
+}
+const admissions = (calls: Call[]) => calls.filter(call => /\/(?:admit_outreach_campaign_job_v1|enqueue_outreach_dm_job)$/.test(call.path));
+
+Deno.test("managed CLIENT_LIST renders only persisted server names and uses canonical admission", async () => {
+  await withEdgeFixture({}, async (run, calls) => {
+    const { response, body } = await run({ metadata: { client_id: "forged", origin: "AI_AGENT", campaign_revision: "99" } });
+    expectFixture(response.status === 200 && body.ok, "managed enqueue failed");
+    const jobs = admissions(calls); expectFixture(jobs.length === 1 && jobs[0].path.endsWith("/admit_outreach_campaign_job_v1"), "managed admission bypassed");
+    expectFixture(jobs[0].body.p_message_body === "salut Server Alice / offline_alice / offline_owner", "untrusted recipient name rendered");
+    expectFixture(jobs[0].body.p_account_id === ACCOUNT && jobs[0].body.p_campaign_id === CAMPAIGN && jobs[0].body.p_auth_user_id === ACTOR, "owner/account/campaign binding lost");
+    expectFixture(!("p_metadata" in jobs[0].body) && !("p_source" in jobs[0].body), "operator provenance propagated");
+  });
+});
+Deno.test("internal managed producer still requires database entitlement and canonical campaign admission", async () => {
+  await withEdgeFixture({ internal: true }, async (run, calls) => {
+    expectFixture((await run()).body.ok, "internal managed enqueue failed");
+    expectFixture(calls.some(c => c.path.endsWith("/client_account_has_outreach_entitlement")), "database entitlement bypassed");
+    expectFixture(admissions(calls)[0].body.p_auth_user_id === null, "internal actor fabricated");
+  });
+});
+Deno.test("managed bulk admits each recipient through the same canonical path", async () => {
+  await withEdgeFixture({}, async (run, calls) => {
+    const { body } = await run({ recipients: ["offline_alice", "offline_bob"] }, true);
+    expectFixture(body.ok && body.summary.accepted === 2, "bulk result mismatch");
+    expectFixture(admissions(calls).length === 2 && admissions(calls).every(c => c.path.endsWith("/admit_outreach_campaign_job_v1")), "bulk bypassed canonical admission");
+    expectFixture(calls.filter(c => c.path.endsWith("/resolve_outreach_campaign_admission_v1")).length === 2, "bulk recipient membership missing");
+  });
+});
+Deno.test("managed duplicate retains native idempotent job identity", async () => {
+  await withEdgeFixture({ existing: true }, async (run, calls) => {
+    const { body } = await run();
+    expectFixture(body.ok && body.result === "duplicate_existing" && body.job_id === "60000000-0000-4000-8000-000000000001", "duplicate identity changed");
+    expectFixture(admissions(calls).length === 1, "duplicate did not use native admission");
+  });
+});
+Deno.test("unmanaged legacy producer preserves its original enqueue and template contract", async () => {
+  await withEdgeFixture({ internal: true, legacy: true }, async (run, calls) => {
+    const { body } = await run({ recipient_name: "Legacy Name", metadata: { note: "legacy" } });
+    const jobs = admissions(calls);expectFixture(body.ok && jobs.length === 1 && jobs[0].path.endsWith("/enqueue_outreach_dm_job"), "legacy enqueue changed");
+    expectFixture(jobs[0].body.p_message_body === "salut Legacy Name / offline_alice / offline_owner", "legacy rendering changed");
+    expectFixture(JSON.stringify(jobs[0].body.p_metadata) === JSON.stringify({ note: "legacy" }), "legacy metadata changed");
+    expectFixture(!calls.some(c => c.path.endsWith("/resolve_outreach_campaign_admission_v1")), "legacy path acquired managed membership");
+  });
+});
+for (const [name, options] of [
+  ["AI producer remains reserved", { membership: { origin: "AI_AGENT" } }],
+  ["foreign campaign response rejected", { membership: { campaign_id: "foreign" } }],
+  ["malformed membership rejected", { membership: { ok: false } }],
+  ["missing managed proof rejected", { membership: { managed_campaign: false } }],
+  ["nonselected or foreign recipient RPC failure stops", { membershipFailure: true }],
+  ["malformed campaign mode rejected", { mode: {} }],
+  ["campaign authority RPC failure stops", { modeFailure: true }],
+  ["foreign template rejected", { templateAccount: ACTOR }],
+  ["unsupported template token rejected", { templateBody: "{password}" }],
+  ["disabled Outreach refuses admission", { disabled: true }],
+  ["pending queue cap preserved", { pending: 500 }],
+  ["foreign tenant cannot enqueue", { ownership: false }],
+  ["operational allowlist cannot establish managed authority", { ownership: false, fallback: true, internal: true }],
+] as [string, EdgeFixture][]) Deno.test(name, async () => {
+  await withEdgeFixture(options, async (run, calls) => {
+    const { response, body } = await run();
+    expectFixture(response.status >= 400 && !body.ok, "unsafe request accepted: " + name);
+    expectFixture(admissions(calls).length === 0, "unsafe request fell back or admitted: " + name);
+  });
+});
+Deno.test("missing authentication creates no job and reads no backend authority", async () => {
+  await withEdgeFixture({}, async (run, calls) => {
+    const { response } = await run({}, false, false);
+    expectFixture(response.status === 401 && calls.length === 0, "unauthenticated request reached backend");
+  });
 });
 
 Deno.test("allows only Outreach producer sources", () => {

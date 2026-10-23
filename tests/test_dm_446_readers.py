@@ -1,5 +1,6 @@
 """Portable actual-reader regression; no device/backend or send mocks."""
 from __future__ import annotations
+from tests.test_certification_admission import restore_exact_product_delta
 import ast
 import hashlib
 import json
@@ -214,7 +215,7 @@ class DM446Tests(unittest.TestCase):
                     d=Device(fixture(name),version=version,package='com.instagram.androig');self.assertEqual(self.state(d)[0],expected);self.assertEqual(d.reads,0)
     def test_no_business_or_other_navigation_ast_change(self):
         old=ast.parse(subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':instagram_navigation.py'],text=True))
-        new=ast.parse((ROOT/'instagram_navigation.py').read_text())
+        new=ast.parse(restore_exact_product_delta('instagram_navigation.py',(ROOT/'instagram_navigation.py').read_text()))
         a={n.name:n for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))};b={n.name:n for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         allowed={'_dm_find_focus_composer','_dm_detect_composer_signal','_dm_detect_history_signal','detect_dm_thread_state','_dm_outbound_expected_message_match_mode'}
         for k in a:

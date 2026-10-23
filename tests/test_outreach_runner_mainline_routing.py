@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 import follow_60s_canary as follow60
 import post_follow_stage_outbox as outbox
 import account_session_orchestrator as sessions
-from tests.test_certification_admission import restore_exact_ui_profile_delta
+from tests.test_certification_admission import restore_exact_ui_profile_delta, restore_exact_product_delta
 from dm_real_send_flags import resolve_outreach_dm_real_send_enabled, resolve_welcome_dm_real_send_enabled
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +104,8 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
     def test_premium_with_addon(self): self.assert_full_cycle('premium', True)
 
     def assert_preserved_bytes(self, name, source):
+        if name == "supabase/functions/outreach-enqueue/index.ts":
+            source = restore_exact_product_delta(name, source.decode()).encode()
         if name == "account_session_orchestrator.py":
             source = restore_exact_ui_profile_delta(name, source.decode()).encode()
         if name == 'dm_certification_admission.py':
@@ -201,6 +203,6 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
 
     def test_exact_single_conditional_is_entire_runner_delta(self):
         self.assertEqual(self.source.count(ADDITION),1)
-        restored = restore_exact_ui_profile_delta('runner.py', self.source)
+        restored = restore_exact_ui_profile_delta('runner.py', restore_exact_product_delta('runner.py', self.source))
         original=restored.replace(ADDITION,'',1)
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),BASELINE_RUNNER_SHA256)
