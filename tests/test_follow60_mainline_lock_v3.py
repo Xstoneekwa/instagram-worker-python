@@ -70,7 +70,89 @@ def _write_contract(root: Path, protected: dict[str, str], *, approval_id: str =
 
 class Follow60MainlineLockV3Tests(unittest.TestCase):
     def setUp(self):
+        local_names = subprocess.check_output(
+            ["git", "rev-parse", "--local-env-vars"], cwd=ROOT, text=True
+        ).splitlines()
+        isolated = {key: value for key, value in os.environ.items() if key not in local_names}
+        context = patch.dict(os.environ, isolated, clear=True)
+        context.start()
+        self.addCleanup(context.stop)
         self.verifier = _load_verifier()
+
+    def test_linked_hook_context_cannot_change_parent_repository(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp) / "parent"
+            linked = Path(temp) / "linked"
+            subprocess.check_call(["git", "init", "-q", str(parent)])
+            subprocess.check_call(["git", "-C", str(parent), "config", "user.email", "parent@example.invalid"])
+            subprocess.check_call(["git", "-C", str(parent), "config", "user.name", "Parent"])
+            (parent / "original.txt").write_text("parent\n", encoding="utf-8")
+            subprocess.check_call(["git", "-C", str(parent), "add", "."])
+            subprocess.check_call(["git", "-C", str(parent), "commit", "-qm", "parent"])
+            subprocess.check_call(["git", "-C", str(parent), "worktree", "add", "-q", "--detach", str(linked)])
+            common = parent / ".git"
+            linked_git = Path(subprocess.check_output(
+                ["git", "-C", str(linked), "rev-parse", "--absolute-git-dir"], text=True
+            ).strip())
+            metadata = [common / name for name in ("config", "HEAD", "index")]
+            metadata += [linked_git / name for name in ("HEAD", "index")]
+            before = {str(path): path.read_bytes() for path in metadata}
+            inherited = {
+                "GIT_DIR": str(linked_git), "GIT_COMMON_DIR": str(common),
+                "GIT_WORK_TREE": str(linked), "GIT_INDEX_FILE": str(linked_git / "index"),
+                "GIT_PREFIX": "", "PHONEFARM_FIXTURE_SENTINEL": "preserve-me",
+            }
+            with patch.dict(os.environ, inherited):
+                calling_environment = dict(os.environ)
+                probe = Follow60MainlineLockV3Tests("test_exact_head_passes")
+                try:
+                    probe.setUp()
+                    for name in inherited:
+                        if name.startswith("GIT_"):
+                            self.assertNotIn(name, os.environ)
+                    self.assertEqual("preserve-me", os.environ["PHONEFARM_FIXTURE_SENTINEL"])
+                    self.assertEqual(calling_environment["PATH"], os.environ["PATH"])
+                    temporary, root, manifest, approval = probe._repo()
+                    probe.addCleanup(temporary.cleanup)
+                    self.assertTrue(probe.verifier.verify(root, manifest, approval)["ok"])
+                    temporary, root, manifest, signature, public_key = probe._signed_v31_repo()
+                    probe.addCleanup(temporary.cleanup)
+                    self.assertTrue(verify_repository(
+                        root, manifest, signature_path=signature, public_key_path=public_key
+                    )["ok"])
+                    (root / "protected.py").write_text("VALUE = 2\n", encoding="utf-8")
+                    subprocess.check_call(["git", "-C", str(root), "add", "protected.py"])
+                    subprocess.check_call(["git", "-C", str(root), "commit", "-qm", "synthetic tamper"])
+                    result = verify_repository(
+                        root, manifest, signature_path=signature, public_key_path=public_key
+                    )
+                    self.assertFalse(result["ok"])
+                    self.assertEqual("protected_entry_mismatch", result["reason"])
+                finally:
+                    probe.doCleanups()
+                self.assertEqual(calling_environment, dict(os.environ))
+            self.assertEqual(before, {str(path): path.read_bytes() for path in metadata})
+            self.assertEqual("", subprocess.check_output(
+                ["git", "-C", str(parent), "status", "--porcelain"], text=True
+            ).strip())
+            self.assertEqual("", subprocess.check_output(
+                ["git", "-C", str(linked), "status", "--porcelain"], text=True
+            ).strip())
+
+    def test_fixture_environment_cleanup_runs_after_setup_failure(self):
+        inherited = {"GIT_PREFIX": "parent/", "PHONEFARM_FIXTURE_SENTINEL": "keep"}
+        with patch.dict(os.environ, inherited):
+            calling_environment = dict(os.environ)
+            probe = Follow60MainlineLockV3Tests("test_exact_head_passes")
+            try:
+                with patch(__name__ + "._load_verifier", side_effect=RuntimeError("synthetic setup failure")):
+                    with self.assertRaisesRegex(RuntimeError, "synthetic setup failure"):
+                        probe.setUp()
+                self.assertNotIn("GIT_PREFIX", os.environ)
+                self.assertEqual("keep", os.environ["PHONEFARM_FIXTURE_SENTINEL"])
+            finally:
+                probe.doCleanups()
+            self.assertEqual(calling_environment, dict(os.environ))
 
     def test_git_read_trust_is_exact_process_scoped_and_sanitized(self):
         with tempfile.TemporaryDirectory() as temp:
