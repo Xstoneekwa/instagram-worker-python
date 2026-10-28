@@ -683,8 +683,8 @@ DM_SENDER_ONLY_JOB_ID = ""
 DM_SENDER_FAILED_RETRY_DELAY_SECONDS = 300
 # Outreach standalone hard safety caps. These are local guardrails only; business
 # quotas still belong to Supabase/orchestrator policy.
-OUTREACH_HARD_MAX_PER_SESSION = max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 5))
-OUTREACH_HARD_MAX_PER_DAY = max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 40))
+OUTREACH_HARD_MAX_PER_SESSION = min(30, max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 30)))
+OUTREACH_HARD_MAX_PER_DAY = min(30, max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 30)))
 STALE_OUTREACH_JOB_MINUTES = max(1, _env_int("STALE_OUTREACH_JOB_MINUTES", 30))
 
 # Unfollow budgets are planned once at the Follow -> Unfollow handoff.  The

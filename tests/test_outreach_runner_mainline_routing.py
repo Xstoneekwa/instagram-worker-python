@@ -24,7 +24,7 @@ from dm_real_send_flags import resolve_outreach_dm_real_send_enabled, resolve_we
 ROOT = Path(__file__).resolve().parents[1]
 ADDITION = '        if supabase_mode and run_request_id and not _follow60_canary_active and not outreach_session_run:\n'
 BASELINE_RUNNER_SHA256 = 'b34f60c651ed4e64e8e484bb7228fe7e133ee9542368a6f971a2c94c305216ab'
-PRESERVED = {'supabase/functions/outreach-enqueue/index.ts': '4af73cb69f955d3ead51f0bb3c92bf9d041f3a528ac4483c079b09baa365aee1', 'account_session_orchestrator.py': 'e57bde7972243c6e8a3a096bb996be7e9edfec38cc5c3858cf157e03c2514dad', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652', 'unfollow_session_orchestrator.py': '64e032439844e701d644d4c04dc33d7602c0ac28d9274f50a329e8a0c3c9083d', 'auto_restart_dispatcher_tick.py': '2c05c8eecc2cdee74b26eefa4b915a991f016fd3bfdaea77634ee555849819c9', 'supabase/migrations/20260531185200_create_account_package_summary.sql': '3573f4d50654f44fc5bc8e7df8c0d72050580d64b2dd891b13f9e8d5cb02efc9', 'config.py': '23514e1d6ab0217566f100e501ebb41f58ac15968b1949f4f7bd09a9da0a665f', 'dm_certification_admission.py': '492e2dbf94c0687f45d5c5bb280c598a30a485e87dd3c370e8355dddc41a0da4', 'welcome_session_orchestrator.py': '9c094874aa4ea3dc45d89eb1127740ffb82a3351616a7fa49cb833f89ce18a3b'}
+PRESERVED = {'supabase/functions/outreach-enqueue/index.ts': '4af73cb69f955d3ead51f0bb3c92bf9d041f3a528ac4483c079b09baa365aee1', 'account_session_orchestrator.py': 'e57bde7972243c6e8a3a096bb996be7e9edfec38cc5c3858cf157e03c2514dad', 'follow60_mainline_v2.py': '572a6a9e66c6cf434ef7335675f85e73ab215593eb6e86d99f2677c1c7ba0652', 'unfollow_session_orchestrator.py': '64e032439844e701d644d4c04dc33d7602c0ac28d9274f50a329e8a0c3c9083d', 'auto_restart_dispatcher_tick.py': '2c05c8eecc2cdee74b26eefa4b915a991f016fd3bfdaea77634ee555849819c9', 'supabase/migrations/20260531185200_create_account_package_summary.sql': '3573f4d50654f44fc5bc8e7df8c0d72050580d64b2dd891b13f9e8d5cb02efc9', 'config.py': 'eb48834ebdccd5af5f72f6a48cfa8ce11101d574987e88c4c455a4146b15144a', 'dm_certification_admission.py': '492e2dbf94c0687f45d5c5bb280c598a30a485e87dd3c370e8355dddc41a0da4', 'welcome_session_orchestrator.py': '9c094874aa4ea3dc45d89eb1127740ffb82a3351616a7fa49cb833f89ce18a3b'}
 
 
 class OutreachRunnerRoutingTests(unittest.TestCase):
@@ -156,7 +156,15 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
     def test_unfollow_unchanged(self): self.assert_preserved('unfollow_session_orchestrator.py')
     def test_scheduler_unchanged(self): self.assert_preserved('auto_restart_dispatcher_tick.py')
     def test_onboarding_defaults_unchanged(self): self.assert_preserved('supabase/migrations/20260531185200_create_account_package_summary.sql')
-    def test_caps_and_flags_unchanged(self): self.assert_preserved('config.py')
+    def test_caps_and_flags_unchanged(self):
+        self.assert_preserved('config.py')
+        source = (ROOT / 'config.py').read_text()
+        old = source.replace('min(30, max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 30)))',
+                             'max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 5))').replace(
+                             'min(30, max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 30)))',
+                             'max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 40))')
+        self.assertEqual(hashlib.sha256(old.encode()).hexdigest(),
+                         '23514e1d6ab0217566f100e501ebb41f58ac15968b1949f4f7bd09a9da0a665f')
     def test_standalone_not_converted_to_full_cycle(self):
         self.assert_standalone()
         self.assert_preserved('dm_certification_admission.py')

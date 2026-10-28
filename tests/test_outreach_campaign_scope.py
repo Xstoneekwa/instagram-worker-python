@@ -144,3 +144,44 @@ class ManagedCampaignTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OwnerUpperBoundTests(unittest.TestCase):
+    def test_budget30_preserves_lower_caps_daily_and_shared_remaining(self):
+        settings = dict(outreach_per_session_limit=30, outreach_per_day_limit=30, total_dm_per_day_limit=100)
+        counter = dict(outreach_sent_count=0, total_dm_sent_count=0)
+        with patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_SESSION', 30), patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_DAY', 30):
+            self.assertEqual(orchestrator._resolve_effective_max_jobs(settings, counter)['max_jobs_effective'], 30)
+            for lower in (0, 1, 5, 25):
+                self.assertEqual(orchestrator._resolve_effective_max_jobs(dict(settings, outreach_per_session_limit=lower), counter)['max_jobs_effective'], lower)
+            self.assertEqual(orchestrator._resolve_effective_max_jobs(settings, dict(counter,outreach_sent_count=29))['max_jobs_effective'], 1)
+            self.assertEqual(orchestrator._resolve_effective_max_jobs(settings, dict(counter,total_dm_sent_count=100))['max_jobs_effective'], 0)
+
+    def test_higher_runtime_override_cannot_raise_owner_ceiling(self):
+        settings = dict(outreach_per_session_limit=80, outreach_per_day_limit=80, total_dm_per_day_limit=100)
+        for limit in (30, 31, 80):
+            with self.subTest(limit=limit), patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_SESSION', limit), patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_DAY', limit):
+                self.assertEqual(orchestrator._resolve_effective_max_jobs(settings, {})['max_jobs_effective'], 30)
+        with patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_SESSION', 5):
+            self.assertEqual(orchestrator._resolve_effective_max_jobs(settings, {})['max_jobs_effective'], 5)
+
+    def test_existing_config_override_expressions_allow_only_zero_to30(self):
+        import ast
+        from pathlib import Path
+        source = ast.parse((Path(orchestrator.__file__).parent / 'config.py').read_text())
+        names = ('OUTREACH_HARD_MAX_PER_SESSION', 'OUTREACH_HARD_MAX_PER_DAY')
+        for node in source.body:
+            if isinstance(node, ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in node.targets):
+                for override in (None, -1, 0, 1, 5, 30, 31, 80):
+                    value = eval(compile(ast.Expression(node.value), '<existing-config-expression>', 'eval'),
+                        {'_env_int':lambda key, default: default if override is None else override})
+                    self.assertEqual(value,30 if override is None else max(0,min(30,override)))
+
+    def test_thirty_claims_are_persistent_across_attempts_not_refilled(self):
+        fixture = slot_fixtures.SlotTests();fixture.setUp()
+        slot = fixture.budget(claimed_jobs_in_slot=29, sent_confirmed_in_slot=20)
+        settings=dict(outreach_per_session_limit=30,outreach_per_day_limit=30,total_dm_per_day_limit=100)
+        with patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_SESSION', 30), patch.object(orchestrator.config, 'OUTREACH_HARD_MAX_PER_DAY', 30):
+            self.assertEqual(slot.remaining_claim_budget(settings,dict(outreach_sent_count=20,total_dm_sent_count=20)),1)
+            slot.claimed=30
+            self.assertEqual(slot.remaining_claim_budget(settings,dict(outreach_sent_count=20,total_dm_sent_count=20)),0)

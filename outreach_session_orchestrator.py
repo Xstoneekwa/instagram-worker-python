@@ -83,8 +83,8 @@ def _resolve_effective_max_jobs(settings: dict[str, Any], counter: dict[str, Any
     session_limit = _as_nonnegative_int(settings.get("outreach_per_session_limit"), 0)
     day_limit = _as_nonnegative_int(settings.get("outreach_per_day_limit"), 0)
     total_day_limit = _as_nonnegative_int(settings.get("total_dm_per_day_limit"), 0)
-    hard_session = _as_nonnegative_int(getattr(config, "OUTREACH_HARD_MAX_PER_SESSION", 5), 5)
-    hard_day = _as_nonnegative_int(getattr(config, "OUTREACH_HARD_MAX_PER_DAY", 40), 40)
+    hard_session = min(30, _as_nonnegative_int(getattr(config, "OUTREACH_HARD_MAX_PER_SESSION", 30), 30))
+    hard_day = min(30, _as_nonnegative_int(getattr(config, "OUTREACH_HARD_MAX_PER_DAY", 30), 30))
     outreach_sent_today = _as_nonnegative_int(counter.get("outreach_sent_count"), 0)
     total_sent_today = _as_nonnegative_int(counter.get("total_dm_sent_count"), 0)
 
