@@ -26433,12 +26433,30 @@ def _main_impl() -> int:
     dispatch_ctx: dict[str, Any] = {}
     dispatch_log_fields: dict[str, Any] = {}
     _t_assignment = time.perf_counter()
+    # A dispatcher-bound run must prove its assignment even when the older
+    # optional assignment-dispatch rollout is off. CLI values never replace
+    # the canonical resolver or authorize a device/instance on their own.
+    dispatcher_bound_assignment = bool(
+        supabase_mode and run_request_id and cli_package_name
+        and getattr(args, "expected_app_instance_id", "")
+        and getattr(args, "device_serial", "")
+    )
     if dm_certification_context is not None:
         dispatch_ctx = dm_certification.routing(account_id, account_username, run_id, run_request_id)
         device_serial = dispatch_ctx['adb_serial']
         config.INSTAGRAM_PACKAGE = dispatch_ctx['package_name']
         dispatch_log_fields = dict(dispatch_ctx)
         log('info', 'dm_certification_routing', **dispatch_log_fields)
+    elif dispatcher_bound_assignment:
+        dispatch_ctx = _resolve_dispatched_instagram_assignment(account_id, dispatch_run_type)
+        dispatch_log_fields = sensitive_log_fields(dispatch_ctx, include_sensitive=False)
+        # Keep the selected CLI identity unchanged. The profile guard below
+        # compares it with this DB lookup, the admitted request and live lease.
+        log("info", "account_assignment_dispatch_resolved", **dispatch_log_fields)
+        _orf_set_runtime_context(
+            assignment_id=dispatch_ctx.get("assignment_id"),
+            device_id=dispatch_ctx.get("device_id"), clone_id=dispatch_ctx.get("clone_id"),
+        )
     elif bool(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)):
         dispatch_run_types = _account_assignment_dispatch_run_types()
         if dispatch_run_type not in dispatch_run_types:
@@ -29863,11 +29881,41 @@ def _main_with_existing_handlers() -> int:
 
 
 
+def _resolve_dispatched_instagram_assignment(account_id, run_type):
+    """Read identity through the existing DB loader for an already admitted run.
+
+    This does not reclassify a manual request as an automatic schedule check.
+    Admission, deadlines and the authenticated device lease remain mandatory.
+    """
+    from assignment_dispatch_resolver import SUPPORTED_RUN_ASSIGNMENT_TYPES
+    ui = instagram_ui_profile_v1
+    row = supabase_client.load_open_account_assignment_for_dispatch(account_id) or {}
+    device = row.get("phone_device") or {}
+    instance = row.get("phone_app_instance") or {}
+    if (row.get("account_id") != account_id or not row.get("id")
+            or row.get("status") not in ("reserved", "active")
+            or row.get("assignment_type") not in SUPPORTED_RUN_ASSIGNMENT_TYPES.get(run_type, set())
+            or not row.get("device_id") or device.get("id") != row.get("device_id")
+            or not row.get("app_instance_id") or instance.get("id") != row.get("app_instance_id")
+            or not device.get("adb_serial") or not instance.get("package_name")):
+        raise ui.UIProfileStopped("instagram_app_instance_unproved")
+    return {
+        "assignment_found": True, "fallback_used": False,
+        "account_id": account_id, "assignment_id": row["id"],
+        "assignment_type": row["assignment_type"], "device_id": row["device_id"],
+        "clone_id": row.get("clone_id"), "app_instance_id": row["app_instance_id"],
+        "adb_serial": device["adb_serial"], "package_name": instance["package_name"],
+        "slot_kind": row.get("slot_kind"), "schedule_mode": row.get("schedule_mode"),
+        "starts_at": row.get("starts_at"), "ends_at": row.get("ends_at"),
+        "source": "account_assignments", "reason": "assignment_resolved", "run_type": run_type,
+    }
+
+
 def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_id,
                                   *, args, account_session_run):
     """Freeze only proved identity; metadata/env projections cannot select a profile."""
     import json
-    from auto_restart_device_lock import device_lock_binding_from_request
+    from auto_restart_device_lock import device_lock_binding_from_request, _load_device_lock
     from auto_restart_runtime import _claimed_request_lineage, load_resume_policy_from_env
     from account_run_control import get_account_run_request
     from account_session_resume_plan_store import bind_run_ui_profile
@@ -29880,6 +29928,10 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
         device_id = str(context.get("device_id") or "")
         if not serial or not instance or not device_id or context.get("adb_serial") != serial:
             raise ui.UIProfileStopped("instagram_app_instance_unproved")
+        if context.get("package_name") != package:
+            raise ui.UIProfileStopped("instagram_ui_assignment_package_mismatch")
+        if context.get("account_id") not in (None, account_id):
+            raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
         for expected, actual in ((getattr(args, "package_name", ""), package),
                                  (getattr(args, "expected_app_instance_id", ""), instance),
                                  (getattr(args, "device_serial", ""), serial)):
@@ -29889,15 +29941,54 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
         if (request.get("id") != request_id or request.get("account_id") != account_id
                 or request.get("run_id") != run_id):
             raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
-        for key, value in (("device_id", device_id), ("app_instance_id", instance)):
-            if request.get(key) != value:
-                raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
+        if request.get("status") not in ("claimed", "starting", "running"):
+            raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
         meta = request.get("metadata_safe") or {}
+        if not isinstance(meta, dict):
+            raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
+        # Atomic fleet admission stores these identities in its protected
+        # payload, not top-level account_run_requests columns. Compare every
+        # present canonical projection; none may select a different instance.
+        identities = []
+        if any(request.get(key) is not None for key in ("device_id", "app_instance_id")):
+            identities.append(request)
+        admitted = meta.get("fleet_atomic_enqueue_payload")
+        if admitted is not None:
+            if (not isinstance(admitted, dict) or admitted.get("account_id") != account_id
+                    or admitted.get("requested_run_type") != request.get("requested_run_type")):
+                raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
+            identities.append(admitted)
+        if not identities:
+            raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
+        if any(identity.get(key) != value for identity in identities
+               for key, value in (("device_id", device_id), ("app_instance_id", instance))):
+            raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
+        slot = meta.get("outreach_slot_v1")
+        if slot is not None:
+            if not isinstance(slot, dict) or any(slot.get(key) != value for key, value in (
+                    ("account_id", account_id), ("device_id", device_id),
+                    ("app_instance_id", instance), ("assignment_id", context.get("assignment_id")),
+                    ("package_name", package), ("adb_serial", serial))):
+                raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
         lineage = _claimed_request_lineage(account_id, request, meta)
         lease = device_lock_binding_from_request(
+            request, account_id=account_id, request_id=request_id, device_id=device_id,
+        )
+        transported_lease = device_lock_binding_from_request(
             {"metadata_safe": {"device_lock_binding": json.loads(os.environ.get("FLEET_DEVICE_LOCK_BINDING_JSON", "null"))}},
             account_id=account_id, request_id=request_id, device_id=device_id,
         )
+        if any(transported_lease.get(key) != lease.get(key) for key in (
+                "device_id", "account_id", "request_id", "worker_id", "lease_id",
+                "generation", "app_instance_id", "lease_seconds", "lease_expires_at")):
+            raise ui.UIProfileStopped("instagram_ui_lease_identity_mismatch")
+        live_lease = _load_device_lock(device_id) or {}
+        if (lease.get("app_instance_id") != instance
+                or any(live_lease.get(key) != lease.get(key) for key in (
+                    "device_id", "account_id", "request_id", "worker_id", "lease_id"))
+                or not isinstance(live_lease.get("lease_expires_at"), str)
+                or datetime.fromisoformat(live_lease["lease_expires_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc)):
+            raise ui.UIProfileStopped("instagram_ui_lease_identity_mismatch")
         row = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
         if row.get("id") != run_id or row.get("account_id") != account_id or row.get("status") not in ("running", "pending"):
             raise ui.UIProfileStopped("instagram_ui_run_identity_mismatch")

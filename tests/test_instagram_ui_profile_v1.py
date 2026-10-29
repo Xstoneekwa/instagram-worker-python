@@ -27,6 +27,7 @@ import account_run_control
 import account_session_resume_engine as plans
 import account_session_resume_plan_store as store
 import auto_restart_runtime as resume
+import auto_restart_device_lock as device_leases
 
 P = 'com.instagram.android'
 A, D, I, Q, ROOT_ID, L, RUN, PRIOR = [f'00000000-0000-4000-8000-{i:012d}' for i in range(1, 9)]
@@ -343,17 +344,91 @@ class SessionTests(Isolated):
         with self.assertRaises(ui.UIProfileStopped):ui.carry_plan(original, None)
 
 
+class DispatchedAssignmentTests(Isolated):
+    def setUp(self):
+        super().setUp()
+        self.row = dict(id=ROOT_ID, account_id=A, device_id=D, app_instance_id=I,
+                        clone_id=None, assignment_type='outreach_only', status='reserved',
+                        slot_kind='manual_only', schedule_mode='manual_only', starts_at=None, ends_at=None,
+                        metadata={'outreach_slot_grid_v1': {'enabled': True}})
+        self.device_row = dict(id=D, adb_serial='serial-a')
+        self.instance_row = dict(id=I, package_name=P)
+        self.reads = []
+        def read(method, table, **kw):
+            self.assertEqual(method, 'GET')
+            self.reads.append(table)
+            return copy.deepcopy({'account_assignments': [self.row], 'phone_devices': [self.device_row],
+                                  'phone_app_instances': [self.instance_row]}[table])
+        p = patch.object(supabase_client, '_request_json', side_effect=read)
+        p.start();self.addCleanup(p.stop)
+        p = patch.object(supabase_client, 'call_rpc', side_effect=AssertionError('NO_READMISSION_OR_AUTO_SCHEDULE'))
+        p.start();self.addCleanup(p.stop)
+
+    def route(self, run_type='outreach_session', complete_cli=True):
+        tree = ast.parse(Path(runner.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_main_impl')
+        start = next(i for i,n in enumerate(main.body) if isinstance(n, ast.AnnAssign)
+                     and isinstance(n.target, ast.Name) and n.target.id == 'dispatch_ctx')
+        end = next(i for i,n in enumerate(main.body) if i>start and isinstance(n, ast.If)
+                   and ast.unparse(n.test) == 'dm_certification_context is not None')
+        fn = ast.parse('def route_native():\n    return dispatch_ctx\n').body[0]
+        fn.body = copy.deepcopy(main.body[start:end+1]) + fn.body
+        ns = dict(supabase_mode=True, run_request_id=Q, run_id=RUN, account_id=A, account_username='sender',
+                  cli_package_name=P, device_serial='serial-a', dispatch_run_type=run_type,
+                  args=SimpleNamespace(expected_app_instance_id=I if complete_cli else '', device_serial='serial-a'),
+                  config=config, dm_certification_context=None, time=__import__('time'), Any=object,
+                  log=lambda *_a,**_k:None, _orf_set_runtime_context=lambda **_k:None,
+                  _resolve_dispatched_instagram_assignment=runner._resolve_dispatched_instagram_assignment,
+                  sensitive_log_fields=runner.sensitive_log_fields,
+                  _account_assignment_dispatch_run_types=runner._account_assignment_dispatch_run_types)
+        with patch.object(config, 'ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED', False):
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),runner.__file__,'exec'),ns)
+            return ns['route_native']()
+
+    def test_native_manual_request_routes_when_optional_flag_is_off(self):
+        ctx = self.route()
+        self.assertEqual((ctx['account_id'],ctx['device_id'],ctx['app_instance_id']), (A,D,I))
+        self.assertEqual((ctx['adb_serial'],ctx['package_name']), ('serial-a',P))
+        self.assertEqual((ctx['schedule_mode'],ctx['starts_at'],ctx['ends_at']), ('manual_only',None,None))
+        self.assertFalse(ctx['fallback_used'])
+        self.assertEqual(self.reads, ['account_assignments','phone_devices','phone_app_instances'])
+
+    def test_full_cycle_uses_same_identity_loader_without_touching_schedule(self):
+        self.row.update(assignment_type='full_cycle', schedule_mode='scheduled',
+                        starts_at='2026-10-29T00:00:00Z',ends_at='2026-10-29T06:00:00Z')
+        ctx = self.route('account_session')
+        self.assertEqual(ctx['assignment_id'],ROOT_ID)
+        self.assertEqual(ctx['starts_at'],self.row['starts_at'])
+        self.assertEqual(ctx['ends_at'],self.row['ends_at'])
+
+    def test_incomplete_cli_does_not_enable_canonical_route(self):
+        self.assertEqual(self.route(complete_cli=False), {})
+        self.assertEqual(self.reads, [])
+
+    def test_missing_wrong_or_released_assignment_is_refused(self):
+        old = copy.deepcopy(self.row)
+        for change in [{'account_id': Q}, {'status': 'released'}, {'assignment_type': 'other'},
+                       {'device_id': Q}, {'app_instance_id': Q}, {'id': None}]:
+            self.row = {**old, **change}
+            with self.subTest(change=change), self.assertRaisesRegex(ui.UIProfileStopped,'app_instance_unproved'):
+                self.route()
+
+
 class RunnerTests(Isolated):
     def setUp(self):
         super().setUp()
         self.context = dict(device_id=D, app_instance_id=I, adb_serial='serial-a', package_name=P)
         self.args = SimpleNamespace(package_name=P, expected_app_instance_id=I, device_serial='serial-a')
         self.request = dict(id=Q, account_id=A, run_id=RUN, device_id=D, app_instance_id=I,
+                            status='running', requested_run_type='account_session',
                             root_business_session_id=ROOT_ID, execution_attempt_no=1, retry_index=0, metadata_safe={})
         self.row = dict(id=RUN, account_id=A, status='running', updated_at='2026-10-23T00:00:00Z',
                         performance_summary={'existing_field': 'preserve'})
         self.lease = dict(device_id=D, request_id=Q, account_id=A, worker_id='worker', lease_id=L,
-                          generation=L, lease_seconds=300)
+                          app_instance_id=I, generation=L, lease_seconds=300,
+                          lease_expires_at='2099-01-01T00:00:00Z')
+        self.request['metadata_safe']['device_lock_binding'] = copy.deepcopy(self.lease)
+        self.live_lease = copy.deepcopy(self.lease)
         self.operations = []
         def load(rid, **kw):
             self.assertEqual(kw, {'request_timeout': 5.0, 'max_retries': 0})
@@ -370,6 +445,7 @@ class RunnerTests(Isolated):
         for p in [patch.object(account_run_control, 'get_account_run_request', side_effect=lambda *a, **k:copy.deepcopy(self.request)),
                   patch.object(supabase_client, 'load_run_row', side_effect=load),
                   patch.object(supabase_client, '_request_json', side_effect=patch_run),
+                  patch.object(device_leases, '_load_device_lock', side_effect=lambda *_a:copy.deepcopy(self.live_lease)),
                   patch.object(ui, 'read_metadata', return_value=metadata()),
                   patch.dict(os.environ, FLEET_DEVICE_LOCK_BINDING_JSON=json.dumps(self.lease), AUTO_RESTART_RESUME_PLAN_V1='')]:
             p.start(); self.addCleanup(p.stop)
@@ -385,6 +461,106 @@ class RunnerTests(Isolated):
         self.assertEqual(len(self.operations), 1)
         self.assertIn('updated_at', self.operations[0]['query'])
         self.assertTrue(ui.armed())
+
+    def atomic_request(self):
+        self.request.pop('device_id', None)
+        self.request.pop('app_instance_id', None)
+        self.request['requested_run_type'] = 'outreach_session'
+        self.context.update(account_id=A, assignment_id=ROOT_ID)
+        self.request['metadata_safe'].update(
+            fleet_atomic_enqueue_payload=dict(account_id=A, device_id=D, app_instance_id=I,
+                                             requested_run_type='outreach_session'),
+            outreach_slot_v1=dict(account_id=A, device_id=D, app_instance_id=I,
+                                  assignment_id=ROOT_ID, package_name=P, adb_serial='serial-a',
+                                  schedule_mode='manual_only'))
+
+    def test_native_atomic_request_without_top_level_instance_binds_446(self):
+        self.atomic_request()
+        self.assertEqual(self.prepare(), binding())
+        self.assertEqual(len(self.operations), 1)
+
+    def test_native_atomic_request_preserves_372_version_fence(self):
+        self.atomic_request()
+        with patch.object(ui, 'read_metadata', return_value=metadata(372)):
+            self.assertEqual(self.prepare(), binding(372))
+
+    def test_atomic_payload_cannot_replace_db_assignment_or_sender(self):
+        self.atomic_request()
+        payload = self.request['metadata_safe']['fleet_atomic_enqueue_payload']
+        for key, value in [('account_id', Q), ('device_id', Q), ('app_instance_id', Q),
+                           ('requested_run_type', 'account_session')]:
+            old = payload[key];payload[key] = value
+            with self.subTest(key=key), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaises(ui.UIProfileStopped):self.prepare()
+                adb.assert_not_called()
+            payload[key] = old
+        self.assertEqual(self.operations, [])
+
+    def test_present_legacy_projection_cannot_disagree_with_atomic_payload(self):
+        self.atomic_request();self.request['device_id'] = Q
+        with self.assertRaisesRegex(ui.UIProfileStopped, 'request_instance_mismatch'):self.prepare()
+        self.assertEqual(self.operations, [])
+
+    def test_missing_or_malformed_canonical_payload_is_not_an_env_fallback(self):
+        self.atomic_request()
+        for value in [None, {}, [], 'operator-projection']:
+            self.request['metadata_safe']['fleet_atomic_enqueue_payload'] = value
+            with self.subTest(value=value), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaises(ui.UIProfileStopped):self.prepare()
+                adb.assert_not_called()
+        self.assertEqual(self.operations, [])
+
+    def test_slot_identity_must_match_actual_assignment_package_and_serial(self):
+        self.atomic_request();slot = self.request['metadata_safe']['outreach_slot_v1']
+        for key in ['account_id', 'device_id', 'app_instance_id', 'assignment_id', 'package_name', 'adb_serial']:
+            old = slot[key];slot[key] = 'other'
+            with self.subTest(key=key), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaisesRegex(ui.UIProfileStopped, 'request_instance_mismatch'):self.prepare()
+                adb.assert_not_called()
+            slot[key] = old
+        self.assertEqual(self.operations, [])
+
+    def test_db_package_and_account_cannot_be_overridden_by_cli(self):
+        for key, value in [('package_name', 'com.instagram.other'), ('account_id', Q)]:
+            old = self.context.get(key);self.context[key] = value
+            with self.subTest(key=key), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaises(ui.UIProfileStopped):self.prepare()
+                adb.assert_not_called()
+            if old is None:self.context.pop(key)
+            else:self.context[key] = old
+
+    def test_failed_or_canceled_request_stops_before_adb(self):
+        for status in ['failed', 'canceled', 'completed', None]:
+            self.request['status'] = status
+            with self.subTest(status=status), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaises(ui.UIProfileStopped):self.prepare()
+                adb.assert_not_called()
+        self.assertEqual(self.operations, [])
+
+    def test_only_transported_lease_cannot_authorize_ui(self):
+        self.request['metadata_safe'].pop('device_lock_binding')
+        with patch.object(ui, 'read_metadata') as adb:
+            with self.assertRaises(ui.UIProfileStopped):self.prepare()
+            adb.assert_not_called()
+        self.assertEqual(self.operations, [])
+
+    def test_stale_missing_or_misbound_live_lease_stops_before_adb(self):
+        original = copy.deepcopy(self.live_lease)
+        for changes in [None, {'lease_id': Q}, {'worker_id': 'other'}, {'request_id': PRIOR},
+                        {'account_id': Q}, {'device_id': Q},
+                        {'lease_expires_at': '2000-01-01T00:00:00Z'}]:
+            self.live_lease = {} if changes is None else {**original, **changes}
+            with self.subTest(changes=changes), patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaisesRegex(ui.UIProfileStopped, 'lease_identity_mismatch'):self.prepare()
+                adb.assert_not_called()
+        self.assertEqual(self.operations, [])
+
+    def test_request_and_transported_lease_generation_must_agree(self):
+        self.request['metadata_safe']['device_lock_binding']['lease_id'] = Q
+        self.request['metadata_safe']['device_lock_binding']['generation'] = Q
+        with patch.object(ui, 'read_metadata') as adb:
+            with self.assertRaisesRegex(ui.UIProfileStopped, 'lease_identity_mismatch'):self.prepare()
+            adb.assert_not_called()
 
     def test_unknown_build_before_any_binding_write(self):
         with patch.object(ui, 'read_metadata', side_effect=ui.UIProfileStopped('unknown')):
@@ -442,7 +618,7 @@ class RunnerTests(Isolated):
         old = binding(run_id=PRIOR)
         self.prior_row = dict(id=PRIOR, account_id=A, performance_summary={ui.PLAN_KEY: old.to_dict()})
         self.request.update(execution_attempt_no=2, retry_index=1,
-                            metadata_safe={'prior_run_id': PRIOR})
+                            metadata_safe={**self.request['metadata_safe'], 'prior_run_id': PRIOR})
         with patch.dict(os.environ, AUTO_RESTART_RESUME_PLAN_V1=json.dumps({ui.PLAN_KEY: old.to_dict()})):
             value = self.prepare()
         self.assertEqual(value.attempt_id, 2)
@@ -450,13 +626,13 @@ class RunnerTests(Isolated):
         self.assertEqual(ui.carry_plan({ui.PLAN_KEY: old.to_dict()})[ui.PLAN_KEY], value.to_dict())
 
     def test_manual_parent_json_cannot_supply_missing_canonical_binding(self):
-        self.request.update(execution_attempt_no=2, retry_index=1, metadata_safe={'prior_run_id': PRIOR})
+        self.request.update(execution_attempt_no=2, retry_index=1, metadata_safe={**self.request['metadata_safe'], 'prior_run_id': PRIOR})
         with patch.dict(os.environ, AUTO_RESTART_RESUME_PLAN_V1=json.dumps({ui.PLAN_KEY: binding(run_id=PRIOR).to_dict()})):
             with self.assertRaises(ui.UIProfileStopped):self.prepare()
         self.assertEqual(self.operations, [])
 
     def test_replaced_parent_projection_and_profile_rejected(self):
-        self.request.update(execution_attempt_no=2, retry_index=1, metadata_safe={'prior_run_id': PRIOR})
+        self.request.update(execution_attempt_no=2, retry_index=1, metadata_safe={**self.request['metadata_safe'], 'prior_run_id': PRIOR})
         self.prior_row = dict(id=PRIOR, account_id=A, performance_summary={ui.PLAN_KEY: binding(372, run_id=PRIOR).to_dict()})
         with self.assertRaises(ui.UIProfileStopped):self.prepare()
         self.assertEqual(self.operations, [])
