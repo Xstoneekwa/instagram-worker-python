@@ -98,5 +98,5 @@ def qualify(root,package,target,context):
  variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
  identity_handle = target if generic_business else handle
  send_button=one(app,'row_thread_composer_send_button_container')
- empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and ((send_button is None and variant=='business_chat_sticker_empty') or (send_button is not None and send_button.get('enabled')=='false'))
+ empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and ((send_button is None and variant in ('business_chat_sticker_empty','personal_mutual_sticker_empty')) or (send_button is not None and send_button.get('enabled')=='false'))
  return dict(variant=variant,identity=(name,identity_handle),intro=intro[0] if len(intro)==1 else None,empty_surface=empty_surface,bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')

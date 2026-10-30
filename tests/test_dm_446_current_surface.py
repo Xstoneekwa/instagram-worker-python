@@ -98,4 +98,66 @@ class CurrentSurfaceTests(unittest.TestCase):
      self.assertEqual(out[1]['positive_empty_observations'],d.reads)
     elif case == 'qualified_change': self.assertEqual(out[1]['reason'],'conversation_path_unqualified')
     else:self.assertEqual(d.reads,1 if case=='wrong_recipient' else 2)
+ def test_personal_mutual_sticker_empty_exact_observation(self):
+  from dm_ui_446_evidence import composer_evidence
+  f=F['personal_mutual_sticker_empty']; x=f['xml']; ctx=tuple(f['context'])
+  self.assertEqual(hashlib.sha256(x.encode('utf-8')).hexdigest(),f['sha256'])
+  self.assertEqual(f['native_source_sha256'],'5de3ef242720909e8e6dee92fa2ccf5788fa099e787554fcdb530642952fff46')
+  out=s.qualify(ET.fromstring(x),s.P,f['target'],ctx)
+  self.assertEqual(out['variant'],'personal_mutual_sticker_empty')
+  self.assertTrue(out['empty_surface'])
+  self.assertEqual(out['identity'],('Surface Fixture User',f['target']))
+  self.assertTrue(composer_evidence(x,s.P,display_size=ctx[2:],surface_context=ctx)['visible'])
+  state,proof=truth.classify_dm_history(x,s.P,f['target'],surface_context=ctx)
+  self.assertEqual(state,'empty_new_thread')
+  self.assertEqual(proof['reason'],'positive_empty_structure')
+ def test_personal_mutual_sticker_refusals_and_positive_history(self):
+  from dm_ui_446_evidence import composer_evidence
+  f=F['personal_mutual_sticker_empty']; original=ET.fromstring(f['xml']); ctx=tuple(f['context'])
+  kinds=('wrong_target','wrong_header','generic_business_subtitle','wrong_version','draft',
+         'composer_hidden','composer_disabled','hint_mismatch','duplicate_composer',
+         'unknown_intro','unknown_row','list_over_editor','foreign_window','rotated','known_history')
+  for kind in kinds:
+   root=copy.deepcopy(original); target=f['target']; context=ctx
+   def node(role):return next(n for n in root.iter('node') if s.role(n)==role)
+   if kind=='wrong_target':target='different_recipient'
+   elif kind=='wrong_header':node('header_subtitle').set('content-desc','different_recipient')
+   elif kind=='generic_business_subtitle':node('header_subtitle').set('content-desc','Business chat')
+   elif kind=='wrong_version':context=('372.0.0.48.60',377611059,1080,2340)
+   elif kind=='draft':node('row_thread_composer_edittext').set('text','Unsent draft')
+   elif kind=='composer_hidden':node('row_thread_composer_edittext').set('visible-to-user','false')
+   elif kind=='composer_disabled':node('row_thread_composer_edittext').set('enabled','false')
+   elif kind=='hint_mismatch':node('row_thread_composer_edittext').set('hint','Unrecognized placeholder')
+   elif kind=='duplicate_composer':node('row_thread_composer_container').append(copy.deepcopy(node('row_thread_composer_edittext')))
+   elif kind=='unknown_intro':
+    next(n for n in node('message_list').iter('node') if n.get('text')=='You follow each other on Instagram').set('text','Unrecognized relationship education')
+   elif kind=='unknown_row':
+    ET.SubElement(node('message_list'),'node',{'package':s.P,'class':'android.widget.TextView','text':'Unknown content','bounds':'[100,1200][800,1300]'})
+   elif kind=='list_over_editor':
+    ET.SubElement(node('message_list'),'node',{'package':s.P,'class':'android.view.View','visible-to-user':'true','bounds':node('row_thread_composer_edittext').get('bounds')})
+   elif kind=='foreign_window':
+    root.append(ET.Element('node',{'package':'com.example.overlay','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','enabled':'true','clickable':'false'}))
+   elif kind=='rotated':root.set('rotation','1')
+   elif kind=='known_history':
+    msg=ET.SubElement(node('message_list'),'node',{'resource-id':s.P+':id/message_content','class':'android.view.View','package':s.P,'bounds':'[100,1200][800,1300]'})
+    ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'Existing message','bounds':'[110,1210][790,1290]'})
+   xml=ET.tostring(root,encoding='unicode')
+   with self.subTest(case=kind):
+    self.assertEqual(truth.classify_dm_history(xml,s.P,target,surface_context=context)[0],
+                     'existing_thread' if kind=='known_history' else 'unknown')
+    if kind in ('composer_hidden','composer_disabled','duplicate_composer','foreign_window','list_over_editor','rotated','wrong_version'):
+     self.assertFalse(composer_evidence(xml,s.P,display_size=ctx[2:],surface_context=context)['visible'])
+ def test_personal_mutual_sticker_keeps_a0_probe_and_recipient_gate(self):
+  f=F['personal_mutual_sticker_empty']; x=f['xml']
+  for case,xmls,target in [('stable',x,f['target']),('no_target',x,''),('wrong_target',x,'different_recipient'),('second_unknown',[x,'<hierarchy/>'],f['target'])]:
+   clock=Clock();clock.now=0;d=Device(xmls,clock=clock)
+   with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None):state,proof=nav.detect_dm_thread_state(d,target,pkg=P)
+   with self.subTest(case=case):
+    self.assertEqual(state,'empty_new_thread' if case=='stable' else 'unknown')
+    self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
+    if case=='stable':
+     self.assertEqual(proof['reason'],'a0_history_probe_completed')
+     self.assertGreaterEqual(clock.now,0.8)
+     self.assertEqual(proof['positive_empty_observations'],d.reads)
+    else:self.assertEqual(d.reads,2 if case=='second_unknown' else 1)
 if __name__=='__main__':unittest.main()
