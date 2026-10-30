@@ -8322,16 +8322,20 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
     snap = dict(thread_state="unknown", composer_visible=False, composer_signal="",
                 has_history=False, has_history_signal=False, history_signal_type="",
                 empty_signal_type="", draft_only_fast=False, package=package,
-                username=username, positive_empty_observations=0, number_of_reads=0)
+                username=username, positive_empty_observations=0, number_of_reads=0,
+                diagnostic_446=True, observation_reason="", observation_exception_class="")
     from dm_446_observation_retention import begin
     retention = begin(package, username)
     started = time.monotonic()
 
     def observe():
+        observation = {}
         try:
-            observation = retention.observation() if retention is not None else None
+            observation = retention.observation() if retention is not None else observation
             xml, composer = _dm_446_observation(d, package, _record=observation)
             snap["number_of_reads"] += 1
+            snap.update(observation_reason=observation.get("observation_reason", ""),
+                        observation_exception_class="")
             state, proof = classify_dm_history(xml, package, username,
                                                surface_context=composer.get("surface_context"))
             if observation is not None:
@@ -8351,8 +8355,10 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
             else:
                 snap["positive_empty_observations"] += 1
                 return "empty"
-        except Exception:
-            snap.update(thread_state="unknown", reason="dm_observation_unproved")
+        except Exception as exc:
+            snap.update(thread_state="unknown", reason="dm_observation_unproved",
+                        observation_reason=observation.get("observation_reason", ""),
+                        observation_exception_class=type(exc).__name__)
             return "unknown"
 
     try:
@@ -9468,6 +9474,15 @@ def open_dm_thread_from_profile(
         thread_state=thread_state,
         dm_thread_detect_ms=round(float(dm_thread_detect_ms), 2),
         message_click_attempts=int(message_click_attempts),
+        **({
+            "classification_reason": snap.get("reason") if snap.get("reason") in ('ancestor_surface_unqualified', 'a0_history_probe_completed', 'background_surface_unqualified', 'conversation_bounds_unqualified', 'conversation_path_unqualified', 'dm_composer_budget_exhausted', 'dm_observation_unproved', 'dm_recipient_unproved', 'effective_visibility_incomplete', 'header_or_picker_overlaps_conversation', 'hierarchy_unavailable', 'message_list_not_unique_or_missing', 'message_list_visibility_incomplete', 'modal_obscures_thread', 'new_thread_context_not_proven', 'no_positive_empty_structure', 'overlay_container_not_empty', 'positive_empty_structure', 'positive_history', 'recipient_not_positively_proven', 'recipient_target_mismatch', 'sibling_surface_unqualified', 'topmost_surface_unqualified', 'unknown_intro_semantics', 'unqualified_surface_descendant') else "unreported",
+            "observation_reason": snap.get("observation_reason") if snap.get("observation_reason") in ('observed', 'version_context_invalid', 'foreground_before_invalid', 'viewport_read_failed', 'dump_failed', 'foreground_after_changed', 'composer_unproved') else "unreported",
+            "observation_exception_class": snap.get("observation_exception_class") if snap.get("observation_exception_class") in ('ValueError', 'RuntimeError', 'TimeoutError', 'ConnectionError', 'OSError', 'AssertionError', 'TypeError', 'KeyError', 'AttributeError', 'ParseError') else ("OtherError" if snap.get("observation_exception_class") else None),
+            "composer_visible": snap.get("composer_visible") is True,
+            "has_history": snap.get("has_history") is True,
+            "number_of_reads": min(10000, max(0, int(snap.get("number_of_reads") or 0))),
+            "positive_empty_observations": min(10000, max(0, int(snap.get("positive_empty_observations") or 0))),
+        } if snap.get("diagnostic_446") is True else {}),
     )
 
     if thread_state not in ("unknown", "dm_not_available"):
