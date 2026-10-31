@@ -3682,6 +3682,28 @@ def certify_account_startup_foreground_v1(
             and bool(capsule.get("instagram_foreground_verified_at"))
         ):
             return {"ok": True, "idempotent": True, "reconciled": True}
+        rows = _request_json(
+            "GET", "account_run_requests",
+            query={"id": f"eq.{request_id}", "run_id": f"eq.{run_id}",
+                   "select": "id,run_id,claimed_by,status,requested_run_type,metadata_safe",
+                   "limit": "1"},
+            request_timeout=5.0, max_retries=0,
+        ) or []
+        row = rows[0] if rows else {}
+        proof = (row.get("metadata_safe") or {}).get("startup_evidence") or {}
+        if (
+            row.get("id") == str(request_id) and row.get("run_id") == str(run_id)
+            and row.get("claimed_by") == str(worker_id)
+            and row.get("requested_run_type") == "outreach_session"
+            and row.get("status") in {"starting", "running"}
+            and proof.get("request_id") == str(request_id)
+            and proof.get("run_id") == str(run_id)
+            and proof.get("worker_id") == str(worker_id)
+            and proof.get("foreground_package") == str(foreground_package)
+            and proof.get("device_connected_at")
+            and proof.get("instagram_foreground_verified_at")
+        ):
+            return {"ok": True, "idempotent": True, "reconciled": True}
         raise
     return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 

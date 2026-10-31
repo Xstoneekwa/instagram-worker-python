@@ -2505,6 +2505,9 @@ def _publish_run_failure_incident(
                         return
                 if performance_summary is None and isinstance(raw_summary, dict):
                     performance_summary = raw_summary
+                if run_type == "outreach_session" and performance_summary:
+                    from terminal_summary_projection import project_terminal_summary
+                    performance_summary = project_terminal_summary(performance_summary)
                 if run_type == "account_session" and run_status in {"failed", "aborted"}:
                     effective_row = {**run_row, "performance_summary": {
                         **(raw_summary if isinstance(raw_summary, dict) else {}),
@@ -3338,6 +3341,20 @@ def _finalize_manual_run_after_subprocess(
         return
 
     structured_summary = dict(summary or {})
+    if run_type == "outreach_session" and run_id:
+        from terminal_summary_projection import project_terminal_summary
+        try:
+            native_run = supabase_client.load_run_row(
+                run_id, request_timeout=5.0, max_retries=0,
+            ) or {}
+            if native_run.get("id") == run_id and native_run.get("account_id") == account_id:
+                structured_summary = project_terminal_summary(
+                    dict(native_run.get("performance_summary") or {})
+                )
+        except Exception as exc:
+            log("warning", "run_incident_summary_load_failed",
+                account_id=account_id, request_id=request_id, run_id=run_id,
+                error=type(exc).__name__)
     is_auto_login = _is_login_run_type(run_type)
     internal_reason = str(
         structured_summary.get("reason_code")
@@ -3363,11 +3380,16 @@ def _finalize_manual_run_after_subprocess(
             }
         )
     else:
+        from terminal_summary_projection import native_reason_code
+        terminal_code = (
+            native_reason_code(internal_reason)
+            if run_type == "outreach_session" else ""
+        ) or "worker_exit_nonzero"
         terminal_result = _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "failed",
-            error_code="worker_exit_nonzero",
+            error_code=terminal_code,
             error_message_safe=f"Worker subprocess exited with code {exit_code}.",
         ) or {}
         _reconcile_linked_run(
@@ -3403,7 +3425,7 @@ def _finalize_manual_run_after_subprocess(
         exit_code=exit_code,
         timed_out=False,
         canceled=canceled,
-        worker_summary=structured_summary if is_auto_login else None,
+        worker_summary=structured_summary if is_auto_login or run_type == "outreach_session" else None,
         request_snapshot=request_snapshot,
         request_metadata=request_metadata,
         cleanup_completed=cleanup_completed,

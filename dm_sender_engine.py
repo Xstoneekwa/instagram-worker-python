@@ -4534,6 +4534,18 @@ def run_dm_sender_send(
             if slot:
                 slot.stop_reason = slot_stop_reason
             break
+        if dm_type_resolved == "outreach" and not summary.get("first_causal_reason"):
+            # The job already persisted its native failure. Retain that cause
+            # before later jobs/cleanup can replace the last-result projection.
+            native_job = last_result.get("job") or {}
+            native_reason = str(native_job.get("last_error") or "")
+            if native_reason and last_result.get("outcome") in (
+                "failed_retry", "failed_terminal", "send_unverified",
+            ):
+                from terminal_summary_projection import native_reason_code
+                native_reason = native_reason_code(native_reason)
+                if native_reason:
+                    summary["first_causal_reason"] = native_reason
         if slot:
             slot.record_unit(last_result, job_id=job.get("id"))
         if job_index > 0:

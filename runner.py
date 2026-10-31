@@ -27712,7 +27712,9 @@ def _main_impl() -> int:
     startup_evidence["instagram_foreground_verified_at"] = datetime.now(
         timezone.utc
     ).isoformat()
-    if account_session_run and admitted_run_id:
+    if (account_session_run and admitted_run_id) or (
+        outreach_session_run and run_request_id and run_id
+    ):
         try:
             active_evidence = supabase_client.certify_account_startup_foreground_v1(
                 run_id=run_id,
@@ -28830,6 +28832,7 @@ def _main_impl() -> int:
                 run_id=run_id or None,
             )
         out_summary = get_last_outreach_session_summary()
+        from terminal_summary_projection import project_terminal_summary
         if supabase_mode and run_id:
             _update_run_status_safe(
                 run_id=run_id,
@@ -28839,12 +28842,12 @@ def _main_impl() -> int:
                     "success": 1 if out_code == 0 else 0,
                     "failed": 0 if out_code == 0 else 1,
                 },
-                performance_summary={
+                performance_summary=project_terminal_summary({
                     "run_type": "outreach_session",
                     "exit_code": out_code,
                     "account_username": account_username,
                     "outreach_session_summary": out_summary,
-                },
+                }),
             )
         reset_perf_counters()
         _emit_performance_summary(

@@ -2,6 +2,13 @@
 from __future__ import annotations
 
 from typing import Any
+import re
+
+
+def native_reason_code(value: Any) -> str:
+    """Only the existing safe native code, never a message or traceback."""
+    code = str(value or "").strip()
+    return code if re.fullmatch(r"[a-z][a-z0-9_]{0,119}", code) else ""
 
 
 def terminal_reason(*sources: dict[str, Any], fallback: str = "unknown") -> str:
@@ -19,6 +26,17 @@ def project_terminal_summary(summary: dict[str, Any], *,
                              persisted_follow_count: int | None = None) -> dict[str, Any]:
     out = dict(summary)
     reason = terminal_reason(out)
+    outreach = out.get("outreach_session_summary")
+    if isinstance(outreach, dict):
+        sender = outreach.get("sender_summary")
+        sender = sender if isinstance(sender, dict) else {}
+        native = native_reason_code(terminal_reason(outreach, sender, fallback=""))
+        if native and reason in {
+            "unknown", "worker_exit_nonzero", "cleanup_failure", "outreach_failed",
+        }:
+            if reason not in {"unknown", native}:
+                out.setdefault("secondary_failure_code", reason)
+            reason = native
     if reason != "unknown":
         out.update(first_causal_reason=reason, reason_code=reason,
                    reason=reason, follow_stop_reason=reason)
