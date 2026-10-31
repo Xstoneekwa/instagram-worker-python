@@ -15,6 +15,27 @@ from unittest.mock import patch
 
 import certification_admission as ca
 
+# Exact inverse of the owner-scoped ordinary refusal evidence delta only.
+_ORDINARY_RECORDER_EXACT_INVERSE = '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'
+
+
+def restore_ordinary_recorder_delta(name, source):
+    import base64, zlib
+    record = json.loads(zlib.decompress(base64.b64decode(_ORDINARY_RECORDER_EXACT_INVERSE))).get(name)
+    if record is None:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:
+        raise AssertionError('ordinary_recorder_source_changed:' + name)
+    for hunk in reversed(record['hunks']):
+        offset, new = hunk['offset'], hunk['new']
+        if source[offset:offset+len(new)] != new:
+            raise AssertionError('ordinary_recorder_hunk_changed:' + name)
+        source = source[:offset] + hunk['old'] + source[offset+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest() != record['base_sha256']:
+        raise AssertionError('ordinary_recorder_inverse_mismatch:' + name)
+    return source
+
+
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'a0d995be8df3ea1a773c572bc900aa1d3a360df6'
 
@@ -67,6 +88,7 @@ def restore_consolidated_projection_delta(name, source):
 
 
 def restore_exact_product_delta(name, source):
+    source = restore_ordinary_recorder_delta(name, source)
     source = restore_consolidated_projection_delta(name, source)
     import base64, zlib
     records = json.loads(zlib.decompress(base64.b64decode(_PRODUCT_EXACT_INVERSE)))

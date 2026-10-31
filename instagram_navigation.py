@@ -8225,6 +8225,11 @@ def _dm_446_observation(d, package, *, _record=None):
             raise ValueError("dm_foreground_unproved")
         stage = "viewport_read_failed"
         display = d.window_size()
+        if _record is not None:
+            from datetime import datetime, timezone
+            _record.setdefault("observed_at", datetime.now(timezone.utc).isoformat())
+            _record.update(version_name=context.version[0], version_code=context.version[1],
+                           display_size=list(display))
         stage = "dump_failed"
         xml = d.dump_hierarchy()
         if _record is not None:
@@ -8327,6 +8332,7 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
     from dm_446_observation_retention import begin
     retention = begin(package, username)
     started = time.monotonic()
+    refusal_observation = {}
 
     def observe():
         observation = {}
@@ -8347,6 +8353,8 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
                             draft_only_fast=False)
                 return "existing"
             elif state != "empty_new_thread" or not composer["visible"]:
+                if retention is None:
+                    refusal_observation.update(observation)
                 snap["thread_state"] = "unknown"
                 return "unknown"
             elif not username or not str(username).strip():
@@ -8396,6 +8404,14 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
         snap["elapsed_s"] = time.monotonic() - started
         if retention is not None:
             retention.finish(snap)
+        elif refusal_observation:
+            try:
+                from dm_446_observation_retention import retain_first_ordinary_refusal
+                retained = retain_first_ordinary_refusal(package, refusal_observation, snap)
+                if retained["status"] not in ("NOT_APPLICABLE", "ALREADY_ATTEMPTED"):
+                    log("info", "dm446_refusal_evidence_retention", **retained)
+            except Exception:
+                pass  # Diagnostic IO/logging cannot replace the original refusal.
 
 
 def _dm_find_focus_composer(d: u2.Device) -> Any | None:
@@ -9479,6 +9495,7 @@ def open_dm_thread_from_profile(
             "observation_reason": snap.get("observation_reason") if snap.get("observation_reason") in ('observed', 'version_context_invalid', 'foreground_before_invalid', 'viewport_read_failed', 'dump_failed', 'foreground_after_changed', 'composer_unproved') else "unreported",
             "observation_exception_class": snap.get("observation_exception_class") if snap.get("observation_exception_class") in ('ValueError', 'RuntimeError', 'TimeoutError', 'ConnectionError', 'OSError', 'AssertionError', 'TypeError', 'KeyError', 'AttributeError', 'ParseError') else ("OtherError" if snap.get("observation_exception_class") else None),
             "composer_visible": snap.get("composer_visible") is True,
+            "composer_signal": snap.get("composer_signal") if snap.get("composer_signal") in ("contextual_composer", "unqualified_composer_context", "unqualified_display_anchor", "unqualified_composer_occlusion") else "unreported",
             "has_history": snap.get("has_history") is True,
             "number_of_reads": min(10000, max(0, int(snap.get("number_of_reads") or 0))),
             "positive_empty_observations": min(10000, max(0, int(snap.get("positive_empty_observations") or 0))),

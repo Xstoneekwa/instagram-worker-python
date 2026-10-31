@@ -1,4 +1,4 @@
-"""Private same-observation evidence for the existing signed DM canary only.
+"""Private same-observation evidence for signed canaries and ordinary refusals.
 
 No transport, backend call, screenshot or background writer. Serialization and
 disk IO occur after the classifier has fixed its final decision.
@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 import stat
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from certification_admission import CertificationStop
 
@@ -166,6 +166,95 @@ _COMPOSER_FIELDS = ('resourceName', 'className', 'enabled', 'clickable',
 _MAX_COMPOSER_INVOCATIONS = 128
 _MAX_COMPOSER_XML_BYTES = 32 * 1024 * 1024
 _composer_buffer = None
+
+# Ordinary runs share the private exact-observation writer, not canary authority.
+# One runner process owns one RUN; the exclusive packet directory also prevents
+# a second packet from another invocation/process for that same RUN.
+_ordinary_refusal_attempt = None
+
+
+def retain_first_ordinary_refusal(package, observation, snapshot):
+    """Persist an already-decided refusal; never read UI or alter its outcome."""
+    global _ordinary_refusal_attempt
+    if (snapshot.get('thread_state') != 'unknown'
+            or observation.get('observation_reason') != 'composer_unproved'
+            or (observation.get('composer') or {}).get('visible') is not False):
+        return {'status': 'NOT_APPLICABLE'}
+    fds = []
+    run_id = None
+    try:
+        from run_latency_observability_v1 import current_context
+        # Existing runner-correlated identity only; no message, lease or permit.
+        correlated = current_context()
+        run_id = correlated.get('run_id')
+        request_id = correlated.get('request_id')
+        worker_sha = correlated.get('worker_sha')
+        if not all(type(v) is str and v for v in (run_id, request_id, worker_sha)):
+            return {'status': 'UNAVAILABLE_CONTEXT'}
+        try:
+            identifiers_exact = str(UUID(run_id)) == run_id and str(UUID(request_id)) == request_id
+        except ValueError:
+            return {'status': 'UNAVAILABLE_CONTEXT'}
+        if (not identifiers_exact or len(worker_sha) != 40
+                or any(c not in '0123456789abcdef' for c in worker_sha)):
+            return {'status': 'UNAVAILABLE_CONTEXT'}
+        attempt = (os.getpid(), run_id)
+        if _ordinary_refusal_attempt == attempt:
+            return {'status': 'ALREADY_ATTEMPTED'}
+        _ordinary_refusal_attempt = attempt
+        raw = observation.get('xml')
+        if type(raw) is not str:
+            return {'status': 'UNAVAILABLE_XML', 'run_id': run_id}
+        payload = raw.encode('utf-8')
+        if len(payload) > _MAX_COMPOSER_XML_BYTES:
+            return {'status': 'UNAVAILABLE_SIZE_LIMIT', 'run_id': run_id}
+        context = {k: correlated[k] for k in (
+            'run_id', 'request_id', 'worker_sha', 'account_id', 'device_id',
+            'app_instance_id') if k in correlated}
+        context.update(package=package,
+                       version_name=observation.get('version_name'),
+                       version_code=observation.get('version_code'),
+                       display_size=observation.get('display_size'))
+        fd = _root()
+        fds.append(fd)
+        fd = _directory(fd, run_id, private=True, create=True)
+        fds.append(fd)
+        name = 'ordinary-first-composer-refusal'
+        try:
+            os.mkdir(name, 0o700, dir_fd=fd)
+        except FileExistsError:
+            return {'status': 'ALREADY_ATTEMPTED', 'run_id': run_id}
+        fd = _directory(fd, name, private=True)
+        fds.append(fd)
+        xml_hash = hashlib.sha256(payload).hexdigest()
+        _write(fd, 'observation_01.xml', payload)
+        row = {k: observation.get(k) for k in (
+            'observed_at', 'dump_returned', 'foreground_before', 'foreground_after',
+            'observation_status', 'observation_reason', 'composer', 'classifier')}
+        row.update(index=1, read_index=snapshot.get('number_of_reads'),
+                   xml_path='observation_01.xml', xml_sha256=xml_hash)
+        receipt = dict(schema='DM446_EXACT_OBSERVATION_V1',
+                       capture_policy='FIRST_ORDINARY_COMPOSER_UNPROVED_PER_RUN',
+                       recorded_at=datetime.now(timezone.utc).isoformat(),
+                       context=context, observations=[row],
+                       runtime={k: snapshot.get(k) for k in (
+                           'thread_state', 'reason', 'composer_signal',
+                           'number_of_reads', 'positive_empty_observations', 'elapsed_s')})
+        _write(fd, 'receipt.json', (json.dumps(receipt, sort_keys=True,
+               ensure_ascii=True, allow_nan=False, indent=2) + '\n').encode('utf-8'))
+        for directory in reversed(fds):
+            os.fsync(directory)
+        return {'status': 'RETAINED', 'run_id': run_id, 'xml_sha256': xml_hash}
+    except Exception:
+        # A failed diagnostic never replaces the original admission refusal.
+        return {'status': 'UNAVAILABLE_STORAGE'}
+    finally:
+        for directory in reversed(fds):
+            try:
+                os.close(directory)
+            except OSError:
+                pass
+
 
 
 def activate_composer(package, recipient):
