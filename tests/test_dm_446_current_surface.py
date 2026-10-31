@@ -160,4 +160,74 @@ class CurrentSurfaceTests(unittest.TestCase):
      self.assertGreaterEqual(clock.now,0.8)
      self.assertEqual(proof['positive_empty_observations'],d.reads)
     else:self.assertEqual(d.reads,2 if case=='second_unknown' else 1)
+
+ def test_personal_mirrored_header_exact_retained_observation(self):
+  from dm_ui_446_evidence import composer_evidence
+  f=F['personal_mutual_sticker_mirrored_header'];x=f['xml'];ctx=tuple(f['context'])
+  self.assertEqual(hashlib.sha256(x.encode('utf-8')).hexdigest(),f['sha256'])
+  self.assertEqual(f['native_source_sha256'],'5d70b6ea423f760fc103e0e34f5fece2d4efd8e274c5031fc74d6a62d14d20c7')
+  out=s.qualify(ET.fromstring(x),s.P,f['target'],ctx)
+  self.assertEqual(out['variant'],'personal_mutual_sticker_empty')
+  self.assertEqual(out['identity'],('Surface Fixture User',f['target']))
+  self.assertTrue(out['empty_surface'])
+  self.assertTrue(composer_evidence(x,s.P,display_size=ctx[2:],surface_context=ctx)['visible'])
+  state,proof=truth.classify_dm_history(x,s.P,f['target'],surface_context=ctx)
+  self.assertEqual((state,proof['reason']),('empty_new_thread','positive_empty_structure'))
+ def test_personal_mirrored_header_dynamic_identity_remains_bound(self):
+  f=F['personal_mutual_sticker_mirrored_header'];ctx=tuple(f['context'])
+  for display,handle in [('Another Display Name','another_handle.7'),('Dynamic Person','independent_target_2')]:
+   x=f['xml'].replace('Surface Fixture User',display).replace(f['target'],handle)
+   with self.subTest(display=display,handle=handle):
+    out=s.qualify(ET.fromstring(x),s.P,handle,ctx)
+    self.assertEqual(out['identity'],(display,handle))
+    self.assertEqual(truth.classify_dm_history(x,s.P,handle,surface_context=ctx)[0],'empty_new_thread')
+    self.assertIsNone(s.qualify(ET.fromstring(x),s.P,'wrong_recipient',ctx))
+    self.assertEqual(truth.classify_dm_history(x,s.P,'',surface_context=ctx)[0],'unknown')
+    root=ET.fromstring(x)
+    next(n for n in root.iter('node') if s.role(n)=='header_title').set('content-desc','Different display name')
+    self.assertIsNone(s.qualify(root,s.P,handle,ctx))
+ def test_personal_mirrored_header_refusals_and_positive_history(self):
+  from dm_ui_446_evidence import composer_evidence
+  f=F['personal_mutual_sticker_mirrored_header'];ctx=tuple(f['context'])
+  for kind in ('wrong_target','wrong_subtitle','wrong_description','unknown_intro','unknown_row',
+               'missing_composer','duplicate_composer','composer_hidden','composer_disabled',
+               'list_over_editor','foreign_overlay','draft','wrong_version','known_history'):
+   root=ET.fromstring(f['xml']);target=f['target'];context=ctx
+   def node(role):return next(n for n in root.iter('node') if s.role(n)==role)
+   if kind=='wrong_target':target='different_recipient'
+   elif kind=='wrong_subtitle':node('header_subtitle').set('content-desc','different_recipient')
+   elif kind=='wrong_description':node('header_title').set('content-desc','Unrelated description')
+   elif kind=='unknown_intro':
+    next(n for n in node('message_list').iter('node') if n.get('text')=='You follow each other on Instagram').set('text','Unrecognized relationship education')
+   elif kind=='unknown_row':ET.SubElement(node('message_list'),'node',{'package':s.P,'class':'android.widget.TextView','text':'Unknown content','bounds':'[100,1200][800,1300]'})
+   elif kind=='missing_composer':
+    ed=node('row_thread_composer_edittext');next(p for p in root.iter() if ed in list(p)).remove(ed)
+   elif kind=='duplicate_composer':node('row_thread_composer_container').append(copy.deepcopy(node('row_thread_composer_edittext')))
+   elif kind=='composer_hidden':node('row_thread_composer_edittext').set('visible-to-user','false')
+   elif kind=='composer_disabled':node('row_thread_composer_edittext').set('enabled','false')
+   elif kind=='list_over_editor':ET.SubElement(node('message_list'),'node',{'package':s.P,'class':'android.view.View','visible-to-user':'true','bounds':node('row_thread_composer_edittext').get('bounds')})
+   elif kind=='foreign_overlay':root.append(ET.Element('node',{'package':'com.example.overlay','class':'android.widget.FrameLayout','bounds':'[0,100][1080,2205]','visible-to-user':'true','enabled':'true','clickable':'false'}))
+   elif kind=='draft':node('row_thread_composer_edittext').set('text','Unsent draft')
+   elif kind=='wrong_version':context=('372.0.0.48.60',377611059,1080,2340)
+   elif kind=='known_history':
+    msg=ET.SubElement(node('message_list'),'node',{'resource-id':s.P+':id/message_content','class':'android.view.View','package':s.P,'bounds':'[100,1200][800,1300]'})
+    ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'Existing message','bounds':'[110,1210][790,1290]'})
+   xml=ET.tostring(root,encoding='unicode')
+   with self.subTest(case=kind):
+    self.assertEqual(truth.classify_dm_history(xml,s.P,target,surface_context=context)[0],'existing_thread' if kind=='known_history' else 'unknown')
+    if kind in ('missing_composer','duplicate_composer','composer_hidden','composer_disabled','list_over_editor','foreign_overlay','wrong_version'):
+     self.assertFalse(composer_evidence(xml,s.P,display_size=ctx[2:],surface_context=context)['visible'])
+ def test_personal_mirrored_header_keeps_a0_probe_and_recipient_gate(self):
+  f=F['personal_mutual_sticker_mirrored_header'];x=f['xml']
+  for case,xmls,target in [('stable',x,f['target']),('no_target',x,''),('wrong_target',x,'different_recipient'),('second_unknown',[x,'<hierarchy/>'],f['target'])]:
+   clock=Clock();clock.now=0;d=Device(xmls,clock=clock)
+   with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None):state,proof=nav.detect_dm_thread_state(d,target,pkg=P)
+   with self.subTest(case=case):
+    self.assertEqual(state,'empty_new_thread' if case=='stable' else 'unknown')
+    self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
+    if case=='stable':
+     self.assertEqual(proof['reason'],'a0_history_probe_completed')
+     self.assertGreaterEqual(clock.now,0.8)
+     self.assertEqual(proof['positive_empty_observations'],d.reads)
+    else:self.assertEqual(d.reads,2 if case=='second_unknown' else 1)
 if __name__=='__main__':unittest.main()
