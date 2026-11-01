@@ -240,147 +240,227 @@ class RetentionTests(unittest.TestCase):
 
 
 
-class OrdinaryRefusalRetentionTests(unittest.TestCase):
-    """Only the five owner-requested ordinary-recorder behaviors, offline."""
 
+class PersistentScopeFixture:
+    """Existing ordinary context and transport fixtures; no permit or physical IO."""
     def setUp(self):
+        import types
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         (self.root/'logs').mkdir(mode=0o700)
-        self.context = dict(run_id='a0000000-0000-4000-8000-000000000001',
-                            request_id='b0000000-0000-4000-8000-000000000001',
-                            worker_sha='5e79a58170c1c69f2f1571a7b8f91272e35d801d',
-                            account_id='c0000000-0000-4000-8000-000000000001',
-                            device_id='d0000000-0000-4000-8000-000000000001',
-                            app_instance_id='e0000000-0000-4000-8000-000000000001',
-                            message_body='PRIVATE_MESSAGE', lease_id='PRIVATE_LEASE',
-                            source_profile_username='PRIVATE_HANDLE')
-        self.events = []
-        for p in (patch.dict(os.environ, PHONEFARM_RUNTIME_ROOT=str(self.root)),
+        self.scope = dict(retention._CERTIFICATION_SCOPE)
+        self.run_id = 'a0000000-0000-4000-8000-000000000001'
+        self.request_id = 'b0000000-0000-4000-8000-000000000001'
+        self.context = dict(self.scope, run_id=self.run_id, request_id=self.request_id,
+                            worker_sha='a'*40)
+        self.slot_context = dict(self.scope, request_id=self.request_id,
+            package_name=self.scope['package'], adb_serial=self.scope['serial'], managed_campaign=True)
+        self.trace = []
+        self.slot = types.SimpleNamespace(context=self.slot_context, stop_reason=None,
+            remaining_ms=lambda: 100000,
+            before_send=lambda job: self.trace.append(('before_send',job)))
+        self.clock = fixtures.Clock()
+        self.clock.now = 0.
+        self.logs = []
+        for p in (patch.dict(os.environ, PHONEFARM_RUNTIME_ROOT=str(self.root),
+                              DM446_CERTIFICATION_RECORDER_ENABLED='true'),
+                  patch.object(retention, '_composer_buffer', None),
                   patch.object(admission, 'is_present', return_value=False),
-                  patch.object(retention, '_ordinary_refusal_attempt', None),
-                  patch('run_latency_observability_v1.current_context',
-                        side_effect=lambda: dict(self.context)),
-                  patch.object(fixtures.nav, 'log',
-                               side_effect=lambda *a, **kw: self.events.append((a, kw)))):
-            p.start()
-            self.addCleanup(p.stop)
+                  patch('run_latency_observability_v1.current_context', side_effect=lambda: dict(self.context)),
+                  patch('outreach_slot_contract.active', side_effect=lambda: self.slot),
+                  patch('logs.log', side_effect=lambda *a, **kw: self.logs.append((a,kw))),
+                  patch.object(fixtures.nav, 'time', self.clock),
+                  patch.object(fixtures.nav, 'log', lambda *a, **kw: None)):
+            p.start(); self.addCleanup(p.stop)
 
-    def rejected_xml(self):
-        return fixtures.fixture('B_37_new_thread_search').replace(
-            'android.widget.EditText', 'android.widget.TextView')
+    def device(self, xml=None, *, version=446):
+        import instagram_ui_446_compat as compat
+        d=fixtures.Device(xml or fixtures.fixture('B_37_new_thread_search'),version=version,clock=self.clock)
+        d.serial=self.scope['serial']
+        name,code=compat.VERSION if version==446 else ('372.0.0.48.60',377611059)
+        d._instagram_search_observed_version=(id(d),d.serial,fixtures.P,name,code)
+        compat.retain_context(d,serial=d.serial,package=fixtures.P,
+                             version_name=name,version_code=code,unsafe=False)
+        return d
 
-    def read(self, xml, *, enabled=True):
-        clock = fixtures.Clock()
-        clock.now = 0.
-        d = fixtures.Device(xml, clock=clock)
-        with patch.object(fixtures.nav, 'time', clock):
-            if enabled:
-                result = fixtures.nav._dm_446_thread_state(d, fixtures.TARGET, fixtures.P, 2.5)
-            else:
-                with patch.object(retention, 'retain_first_ordinary_refusal',
-                                  return_value={'status': 'NOT_APPLICABLE'}):
-                    result = fixtures.nav._dm_446_thread_state(d, fixtures.TARGET, fixtures.P, 2.5)
-        return result, (d.reads, d.currents, d.dimensions, clock.now)
+    def session(self,d):
+        return retention.certification_session(d,account_id=self.scope['account_id'],run_id=self.run_id)
 
     def receipts(self):
-        return list(self.root.rglob('receipt.json'))
+        return [(p,json.loads(p.read_bytes())) for p in self.root.rglob('receipt.json')]
 
-    def test_01_first_refusal_keeps_exact_already_read_xml_once(self):
-        xml = self.rejected_xml()
-        result, reads = self.read(xml)
-        self.assertEqual(result[0], 'unknown')
-        self.assertEqual(reads[:3], (1, 2, 1))
-        receipt_path, = self.receipts()
-        self.assertEqual((receipt_path.parent/'observation_01.xml').read_bytes(), xml.encode())
-        # Same RUN, including another process-local invocation, cannot replace it.
-        retention._ordinary_refusal_attempt = None
-        self.read(xml.replace(fixtures.TARGET, 'different_private_recipient'))
-        self.assertEqual(self.receipts(), [receipt_path])
-        self.assertEqual((receipt_path.parent/'observation_01.xml').read_bytes(), xml.encode())
+    def reject_xml(self):
+        return fixtures.fixture('B_37_new_thread_search').replace(
+            'android.widget.EditText','android.widget.TextView')
 
-    def test_02_receipt_sha_context_private_modes_and_byte_bound(self):
-        xml = self.rejected_xml()
-        result, _ = self.read(xml)
-        receipt_path, = self.receipts()
-        r = json.loads(receipt_path.read_bytes())
-        self.assertEqual(r['schema'], 'DM446_EXACT_OBSERVATION_V1')
-        row, = r['observations']
-        self.assertEqual(row['xml_sha256'], hashlib.sha256(xml.encode()).hexdigest())
-        self.assertEqual(row['foreground_before'], row['foreground_after'])
-        self.assertEqual(row['observation_reason'], 'composer_unproved')
-        self.assertEqual(row['composer']['reason'], result[1]['composer_signal'])
-        self.assertEqual(r['runtime']['reason'], result[1]['reason'])
-        self.assertEqual(r['context']['run_id'], self.context['run_id'])
-        self.assertEqual(r['context']['request_id'], self.context['request_id'])
-        self.assertEqual(r['context']['worker_sha'], self.context['worker_sha'])
-        self.assertEqual((r['context']['version_name'], r['context']['version_code']),
-                         ('446.0.0.49.77', 385211304))
-        self.assertEqual(r['context']['display_size'], [1080, 2340])
-        self.assertTrue(row['observed_at'])
-        from tests.test_dm_446_unknown_diagnostic_v1 import event
-        self.assertEqual(event(result[1])['composer_signal'], result[1]['composer_signal'])
-        self.assertNotIn('composer_signal', event({}))
-        self.assertEqual(event(dict(diagnostic_446=True, composer_signal='PRIVATE_SIGNAL'))['composer_signal'], 'unreported')
-        for value in ('PRIVATE_MESSAGE', 'PRIVATE_LEASE', 'PRIVATE_HANDLE'):
-            self.assertNotIn(value, receipt_path.read_text())
-            self.assertNotIn(value, str(self.events))
+
+class PersistentCertificationTests(PersistentScopeFixture, unittest.TestCase):
+    def test_initial_success_and_first_failure_keep_same_native_xml_privately(self):
+        xml=fixtures.fixture('B_37_new_thread_search')
+        for i,body in enumerate((xml,self.reject_xml()),1):
+            self.context['run_id']=self.run_id='a0000000-0000-4000-8000-%012d'%i
+            d=self.device(body)
+            with self.session(d):
+                state,snap=fixtures.nav._dm_446_thread_state(d,fixtures.TARGET,fixtures.P,2.5)
+            p,r=self.receipts()[-1] if i==1 else next((p,r) for p,r in self.receipts() if r['context']['run_id']==self.run_id)
+            self.assertEqual(state,'empty_new_thread' if i==1 else 'unknown')
+            rows=r['thread_records'][0]['observations']
+            self.assertEqual(len(rows),d.reads)
+            for row in rows:
+                self.assertEqual((p.parent/row['xml_path']).read_bytes(),body.encode())
+                self.assertEqual(row['xml_sha256'],hashlib.sha256(body.encode()).hexdigest())
+                self.assertEqual(row['foreground_before'],row['foreground_after'])
+            self.assertEqual(r['context']['worker_sha'],'a'*40)
+            self.assertEqual(r['context']['request_id'],self.request_id)
+            self.assertNotIn('permit_id',r['context'])
         for p in (self.root/'logs/dm446-exact-observations').rglob('*'):
-            self.assertEqual(stat.S_IMODE(p.stat().st_mode),
-                             0o700 if p.is_dir() else 0o600)
-        self.context['run_id'] = 'a0000000-0000-4000-8000-000000000002'
-        with patch.object(retention, '_MAX_COMPOSER_XML_BYTES', len(xml.encode())-1):
-            self.read(xml)
-        self.assertEqual(self.receipts(), [receipt_path])
-        self.assertEqual(self.events[-1][1]['status'], 'UNAVAILABLE_SIZE_LIMIT')
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode),0o700 if p.is_dir() else 0o600)
 
-    def test_03_accepted_composer_creates_no_evidence_or_writer_call(self):
-        with patch.object(retention, '_root', side_effect=AssertionError('unnecessary IO')):
-            result, _ = self.read(fixtures.fixture('B_37_new_thread_search'))
-        self.assertEqual(result[0], 'empty_new_thread')
-        self.assertEqual(self.receipts(), [])
+    def test_same_switch_survives_distinct_runs_and_valid_worker_change(self):
+        for i,worker in enumerate(('a'*40,'b'*40),1):
+            self.context.update(run_id='a0000000-0000-4000-8000-%012d'%i,
+                                request_id='b0000000-0000-4000-8000-%012d'%i,
+                                worker_sha=worker)
+            self.run_id=self.context['run_id'];self.slot_context['request_id']=self.context['request_id']
+            with self.session(self.device()):
+                self.assertIsNotNone(retention._ordinary_buffer())
+                retention.capture_event('success',result=True)
+            self.assertIsNone(retention._composer_buffer)
+            self.assertEqual(os.environ[retention._CERTIFICATION_ENV],'true')
+        self.assertEqual({r['context']['worker_sha'] for _,r in self.receipts()},{'a'*40,'b'*40})
+        self.assertEqual(len(self.receipts()),2)
 
-    def test_04_storage_failure_preserves_original_fail_closed_result(self):
-        xml = self.rejected_xml()
-        before = self.read(xml, enabled=False)
-        with patch.object(retention, '_write', side_effect=OSError('PRIVATE_DISK_DETAIL')) as write:
-            after = self.read(xml)
-            self.read(xml)
-        self.assertEqual(before, after)
-        self.assertEqual(write.call_count, 1)
-        self.assertEqual(after[0][0], 'unknown')
-        self.assertIn('UNAVAILABLE_STORAGE', str(self.events))
-        self.assertNotIn('PRIVATE_DISK_DETAIL', str(self.events))
-        self.assertEqual(self.receipts(), [])
+    def test_default_and_production_cutover_off_do_not_retain(self):
+        for value in (None,'false'):
+            with patch.dict(os.environ):
+                if value is None:os.environ.pop(retention._CERTIFICATION_ENV,None)
+                else:os.environ[retention._CERTIFICATION_ENV]=value
+                with patch.object(retention,'_root',side_effect=AssertionError('no disk IO')):
+                    with self.session(self.device()):
+                        self.assertIsNone(retention._ordinary_buffer())
+                        retention.capture_event('not_retained',actual_text='PRIVATE')
+                        result=fixtures.nav._dm_446_thread_state(self.device(self.reject_xml()),fixtures.TARGET,fixtures.P,2.5)
+                        self.assertEqual(result[0],'unknown')
+        self.assertEqual(self.receipts(),[])
 
-    def test_05_enabled_disabled_business_and_device_reads_are_identical(self):
-        for i, xml in enumerate((self.rejected_xml(),
-                                 fixtures.fixture('B_37_new_thread_search'),
-                                 fixtures.fixture('B_30_existing_thread'),
-                                 RuntimeError('PRIVATE_DEVICE_ERROR')), 10):
-            with self.subTest(case=i):
-                self.context['run_id'] = 'a0000000-0000-4000-8000-%012d' % i
-                self.assertEqual(self.read(xml, enabled=False), self.read(xml))
-        from tests.test_certification_admission import restore_ordinary_recorder_delta
-        tree = ast.parse((ROOT/'instagram_navigation.py').read_text())
-        old = ast.parse(subprocess.check_output(['git', 'show',
-            '5e79a58170c1c69f2f1571a7b8f91272e35d801d:instagram_navigation.py'], cwd=ROOT, text=True))
-        for name in ('_dm_446_context', '_dm_446_composer', 'detect_dm_thread_state',
-                     '_dm_find_focus_composer', 'verify_dm_composer_safe',
-                     'type_dm_draft_only', '_dm_outbound_expected_message_match_mode'):
-            def body(t):
-                return ast.dump(next(n for n in t.body if isinstance(n, ast.FunctionDef) and n.name==name))
-            self.assertEqual(body(tree), body(old), name)
-        for name in ('dm_thread_truth.py', 'dm_ui_446_evidence.py', 'dm_ui_446_surface.py', 'dm_sender_engine.py'):
-            self.assertEqual((ROOT/name).read_bytes(), subprocess.check_output(['git', 'show',
-                '5e79a58170c1c69f2f1571a7b8f91272e35d801d:'+name], cwd=ROOT))
-        for name in ('instagram_navigation.py', 'dm_446_observation_retention.py'):
-            source = (ROOT/name).read_text()
-            base = subprocess.check_output(['git', 'show',
-                '5e79a58170c1c69f2f1571a7b8f91272e35d801d:'+name], cwd=ROOT, text=True)
-            self.assertEqual(restore_ordinary_recorder_delta(name, source), base)
-            with self.assertRaises(AssertionError):
-                restore_ordinary_recorder_delta(name, source+'\n')
+    def test_scope_excludes_other_accounts_devices_instances_versions_and_pipelines(self):
+        cases=[('account_id','foreign'),('device_id','foreign'),('app_instance_id','foreign'),
+               ('request_id','foreign'),('worker_sha','unproved')]
+        for field,value in cases:
+            with self.subTest(field=field):
+                target=self.slot_context if field in ('device_id','app_instance_id') else self.context
+                with patch.dict(target,{field:value}):
+                    with self.session(self.device()):
+                        self.assertIsNone(retention._ordinary_buffer())
+        with self.session(self.device(version=372)):
+            self.assertIsNone(retention._ordinary_buffer())
+        with patch('outreach_slot_contract.active',return_value=None):
+            with self.session(self.device()):
+                self.assertIsNone(retention._ordinary_buffer())
+        self.assertEqual(self.receipts(),[])
+
+    def test_historical_canary_is_not_activated_or_reinterpreted(self):
+        with patch.object(admission,'is_present',return_value=True), patch.object(
+                retention,'activate_composer',side_effect=AssertionError('no canary activation')):
+            with self.session(self.device()):
+                self.assertIsNone(retention._ordinary_buffer())
+        self.assertEqual(self.receipts(),[])
+
+    def test_storage_error_preserves_original_return_and_exception(self):
+        sentinel=ValueError('PRIMARY_NATIVE_REASON')
+        for failed_step in ('_root','_write','_receipt_fields'):
+            for error in (None,sentinel):
+                with patch.object(retention,failed_step,side_effect=OSError('PRIVATE_DISK_DETAIL')):
+                    try:
+                        with self.session(self.device()):
+                            retention.capture_event('native_result',failure=error is not None,
+                                                    actual_text='PRIVATE_TEXT')
+                            if error is not None:raise error
+                            result=17
+                    except ValueError as got:
+                        self.assertIs(got,sentinel)
+                    else:self.assertEqual(result,17)
+                self.assertIsNone(retention._composer_buffer)
+        self.assertEqual(self.receipts(),[])
+        self.assertNotIn('PRIVATE_TEXT',str(self.logs))
+        self.assertNotIn('PRIVATE_DISK_DETAIL',str(self.logs))
+        self.assertTrue(any(k.get('status')=='UNPROVEN' for _,k in self.logs))
+
+    def test_context_and_general_log_failures_preserve_business_result(self):
+        sentinel=RuntimeError('ORIGINAL_FAILURE')
+        for error in (None,sentinel):
+            with patch.object(retention,'_scope_context',side_effect=ValueError('PRIVATE_CONTEXT')), \
+                 patch('logs.log',side_effect=OSError('PRIVATE_LOG')):
+                try:
+                    with self.session(self.device()):
+                        self.assertIsNone(retention._ordinary_buffer())
+                        if error is not None:raise error
+                        result=23
+                except RuntimeError as got:self.assertIs(got,sentinel)
+                else:self.assertEqual(result,23)
+        self.assertEqual(self.receipts(),[])
+
+    def test_volume_limit_keeps_existing_open_evidence_and_never_blocks(self):
+        with self.session(self.device()):
+            retention.capture_event('first',result=True)
+        p,_=self.receipts()[0];before=p.read_bytes()
+        self.context['run_id']=self.run_id='a0000000-0000-4000-8000-000000000002'
+        with patch.object(retention,'_MAX_CERTIFICATION_DISK_BYTES',1):
+            with self.session(self.device()):
+                retention.capture_event('second',result=True)
+                result='business_return'
+        self.assertEqual(result,'business_return')
+        self.assertEqual(len(self.receipts()),1)
+        self.assertEqual(p.read_bytes(),before)
+        self.assertTrue(any(k.get('status')=='UNPROVEN_VOLUME_LIMIT' for _,k in self.logs))
+
+    def test_hashes_and_private_text_metadata_without_lease_or_message_leak(self):
+        text='Private diagnostic 🙂\nSecond line'
+        with self.session(self.device()):
+            retention.bind_job('job','recipient')
+            retention.capture_event('exact',actual_text=text,expected_text=text,
+                lease_id='PRIVATE_LEASE',message_body='PRIVATE_BODY',result=True)
+        p,r=self.receipts()[0];field=r['events'][-1]['fields']
+        self.assertEqual(field['actual_text']['sha256'],hashlib.sha256(text.encode()).hexdigest())
+        self.assertEqual(field['actual_text']['utf16_units'],len(text.encode('utf-16-le'))//2)
+        for private in (text,'PRIVATE_LEASE','PRIVATE_BODY'):
+            self.assertNotIn(private,p.read_text());self.assertNotIn(private,str(self.logs))
+
+    def test_event_bound_keeps_first_failure_and_no_in_path_write(self):
+        with patch.object(retention,'_MAX_CERTIFICATION_EVENTS',2):
+            with self.session(self.device()):
+                with patch.object(retention,'_write',side_effect=AssertionError('UI path disk IO')) as write:
+                    retention.capture_event('positive1',result=True)
+                    retention.capture_event('positive2',result=True)
+                    retention.capture_event('fatal',failure=True,branch='FIELD_ABSENT')
+                    retention.capture_event('fatal',failure=True,branch='MUST_NOT_REPLACE_FIRST')
+                    write.assert_not_called()
+        _,r=self.receipts()[0]
+        fatal=[x for x in r['events'] if x['stage']=='fatal']
+        self.assertEqual(len(fatal),1)
+        self.assertEqual(fatal[0]['fields']['branch'],'FIELD_ABSENT')
+        self.assertEqual(r['evidence_status'],'UNPROVEN')
+
+    def test_existing_native_xml_keeps_first_and_last_without_new_dump(self):
+        d=self.device()
+        with self.session(d):
+            for xml in ('<first/>','<middle/>','<last/>'):
+                retention.capture_xml('already_read',xml)
+        self.assertEqual(d.reads,0)
+        p,r=self.receipts()[0]
+        self.assertEqual([(p.parent/x['xml_path']).read_text() for x in r['native_observations']],
+                         ['<first/>','<last/>'])
+
+    def test_already_returned_backend_completion_is_selected_without_rpc(self):
+        with self.session(self.device()):
+            retention.bind_job('job','recipient')
+            retention.capture_backend_completion('job',dict(id='job',status='sent',sent_at='native-time',
+                                                           message_body='PRIVATE',lease_id='LEASE'),outcome='sent')
+        _,r=self.receipts()[0]
+        field=next(x['fields'] for x in r['events'] if x['stage']=='backend_completion')
+        self.assertEqual(field['returned_row'],dict(id='job',status='sent',sent_at='native-time',attempts=None,max_attempts=None))
+        self.assertNotIn('PRIVATE',str(r));self.assertNotIn('LEASE',str(r))
+
 
 if __name__ == '__main__': unittest.main()

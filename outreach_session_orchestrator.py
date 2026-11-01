@@ -499,17 +499,19 @@ def run_outreach_session(
         ),
         parent_signal_age_at_sender_attempt_ms=parent_signal_age_before_sender_ms,
     )
-    code, sender_summary = run_dm_sender_send(
-        d,
-        account_id=aid,
-        account_username=uname,
-        run_id=run_id,
-        max_jobs=(len(prepared_jobs) if using_prepared_jobs else int(quota["max_jobs_effective"])),
-        dm_type="outreach",
-        parent_search_ready=parent_search_ready,
-        prepared_jobs=prepared_jobs if using_prepared_jobs else None,
-        settings_override=settings if using_prepared_jobs else None,
-    )
+    from dm_446_observation_retention import certification_session
+    with certification_session(d, account_id=aid, run_id=run_id):
+        code, sender_summary = run_dm_sender_send(
+            d,
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            max_jobs=(len(prepared_jobs) if using_prepared_jobs else int(quota["max_jobs_effective"])),
+            dm_type="outreach",
+            parent_search_ready=parent_search_ready,
+            prepared_jobs=prepared_jobs if using_prepared_jobs else None,
+            settings_override=settings if using_prepared_jobs else None,
+        )
 
     jobs_claimed = _as_nonnegative_int(sender_summary.get("jobs_claimed_count"), 0)
     jobs_sent = _as_nonnegative_int(sender_summary.get("jobs_sent_count"), 0)

@@ -232,4 +232,241 @@ class ComposerRetentionTests(unittest.TestCase):
         with patch.object(retention.hashlib,'sha256',side_effect=AssertionError('early hash')),patch.object(retention,'_root',side_effect=AssertionError('early IO')):
             b,r=self.compare();self.assertTrue(r[0]);self.assertEqual(len(b['records']),1)
 
+
+# Persistent ordinary certification exercises the installed functions on the
+# existing offline transport fixtures. Never call a real runner or device.
+import subprocess
+ROOT=Path(__file__).resolve().parents[1]
+from tests.test_dm_446_observation_retention import PersistentScopeFixture
+from tests import test_dm_446_readers as _persistent_fixtures
+from tests.test_certification_admission import restore_persistent_certification_recorder_delta
+
+
+class _TextDevice(_persistent_fixtures.Device):
+    def __init__(self,xml,**kw):
+        super().__init__(xml,**kw);self.calls=[];self.text_value='';self.get_error=None
+    def __call__(self,**kw):
+        self.calls.append(('selector',kw))
+        original=_persistent_fixtures.Selector(self,kw);d=self
+        class Field:
+            @property
+            def count(self):
+                d.calls.append('count');return original.count
+            @property
+            def info(self):
+                d.calls.append('info');return original.info
+            def all(self):return original.all()
+            def exists(self,**kwargs):return original.exists(**kwargs)
+            def wait(self,**kwargs):return original.wait(**kwargs)
+            def click(self):d.calls.append('focus')
+            def set_text(self,text):
+                import xml.etree.ElementTree as ET
+                d.calls.append(('set_text',len(text)));d.text_value=text
+                root=ET.fromstring(d.last)
+                _persistent_fixtures.node(root,'row_thread_composer_edittext').set('text',text)
+                d.last=ET.tostring(root,encoding='unicode');d.xmls=[d.last];d.live=None
+            def get_text(self):
+                d.calls.append('get_text')
+                if d.get_error is not None:raise d.get_error
+                return d.text_value
+        return Field()
+
+
+class PersistentPipelineTests(PersistentScopeFixture,unittest.TestCase):
+    def text_device(self,xml=None):
+        import instagram_ui_446_compat as compat
+        d=_TextDevice(xml or _persistent_fixtures.fixture('B_37_new_thread_search'),clock=self.clock)
+        d.serial=self.scope['serial']
+        d._instagram_search_observed_version=(id(d),d.serial,PKG,*compat.VERSION)
+        compat.retain_context(d,serial=d.serial,package=PKG,
+                             version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False)
+        return d
+
+    def test_actual_typing_read_verify_order_and_device_calls_equal_on_off(self):
+        text='Hello diagnostic000 !\n\nTest Message \n\nRegards'
+        runs=[]
+        for on in ('false','true'):
+            d=self.text_device();self.clock.now=0.
+            with patch.dict(os.environ,DM446_CERTIFICATION_RECORDER_ENABLED=on):
+                with self.session(d):
+                    retention.bind_job('job','recipient')
+                    with retention.phase('focus'):
+                        editor=nav._dm_find_focus_composer(d);editor.click()
+                    with retention.phase('typing'):
+                        typed=nav.type_dm_draft_only(d,text,PKG,force_method='set_text',composer=None)
+                    with retention.phase('posttyping'):
+                        readback=nav.read_dm_composer_text(d)
+                    verified=nav.verify_dm_draft_text(d,text)
+                    runs.append((typed,readback,verified,list(d.calls),d.reads,d.currents,d.dimensions))
+        self.assertEqual(runs[0],runs[1]);self.assertTrue(runs[1][2])
+        p,r=self.receipts()[0]
+        self.assertTrue(any('posttyping' in x['phase'] for x in r['records']))
+        self.assertTrue(any('focus' in x['phase'] for x in r['records']))
+        verify=next(x for x in r['events'] if x['stage']=='draft_verify')
+        self.assertEqual(verify['fields']['branch'],'TEXT_EXACT')
+        self.assertEqual(verify['fields']['actual_text']['characters'],45)
+        for record in r['records']:
+            for row in record['observations']:
+                self.assertEqual(hashlib.sha256((p.parent/row['xml_path']).read_bytes()).hexdigest(),row['xml_sha256'])
+
+    def test_verify_native_subbranches_are_distinct_and_business_equivalent(self):
+        import types
+        expected='Private expected 🙂\nSecond line'
+        cases=[('FIELD_ABSENT',None,None,False,0),
+               ('GET_TEXT_EXCEPTION','unused',RuntimeError('PRIVATE_EXCEPTION'),False,1),
+               ('TEXT_EMPTY','',None,False,1),
+               ('TEXT_DIFFERENT','private_other',None,False,1),
+               ('TEXT_EXACT',expected,None,True,1)]
+        # Exact pre-change function for the differential.
+        source=subprocess.check_output(['git','show','0a44138f7e0a3447446e7b0c14561067fdebf041:instagram_navigation.py'],cwd=ROOT,text=True)
+        tree=ast.parse(source);fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='verify_dm_draft_text')
+        for i,(branch,value,error,answer,calls) in enumerate(cases,1):
+            self.context['run_id']=self.run_id='a0000000-0000-4000-8000-%012d'%i
+            invocations=[]
+            def get():
+                invocations.append('get_text')
+                if error:raise error
+                return value
+            field=None if value is None else types.SimpleNamespace(get_text=get)
+            env=dict(nav.__dict__);env['_dm_find_focus_composer']=lambda _:field
+            exec(compile(ast.Module(body=[fn],type_ignores=[]),'<exact0a4verify>','exec'),env)
+            old=env['verify_dm_draft_text'](None,expected);old_calls=list(invocations);invocations.clear()
+            with self.session(self.device()),patch.object(nav,'_dm_find_focus_composer',return_value=field):
+                got=nav.verify_dm_draft_text(None,expected)
+            self.assertEqual((old,old_calls),(got,invocations));self.assertEqual(got,answer)
+            self.assertEqual(len(invocations),calls)
+            _,r=next((p,r) for p,r in self.receipts() if r['context']['run_id']==self.run_id)
+            row=next(x for x in r['events'] if x['stage']=='draft_verify')
+            self.assertEqual(row['fields']['branch'],branch)
+            self.assertEqual(row['fields']['get_text_called'],bool(calls))
+            if error:self.assertEqual(row['fields']['exception_class'],'RuntimeError')
+            self.assertNotIn('PRIVATE_EXCEPTION',str(r))
+
+    def test_read_finder_exception_getter_exception_and_empty_are_not_collapsed(self):
+        import types
+        cases=[('FIELD_ABSENT',None,None),
+               ('FINDER_EXCEPTION',None,ValueError('private_finder')),
+               ('GET_TEXT_EXCEPTION',RuntimeError('private_read'),None),
+               ('TEXT_EMPTY','',None),('TEXT_READ','full text 🙂',None)]
+        for i,(branch,value,finder_error) in enumerate(cases,30):
+            self.context['run_id']=self.run_id='a0000000-0000-4000-8000-%012d'%i
+            def get():
+                if isinstance(value,Exception):raise value
+                return value
+            field=None if value is None else types.SimpleNamespace(get_text=get)
+            with self.session(self.device()),patch.object(nav,'_dm_find_focus_composer',
+                    side_effect=finder_error,return_value=field):
+                got=nav.read_dm_composer_text(None)
+            self.assertEqual(got,'full text 🙂' if branch=='TEXT_READ' else '')
+            _,r=next((p,r) for p,r in self.receipts() if r['context']['run_id']==self.run_id)
+            self.assertEqual(next(x for x in r['events'] if x['stage']=='draft_read')['fields']['branch'],branch)
+
+    def test_exact_text_verification_still_rejects_partial_or_changed_unicode(self):
+        import types
+        expected='Full multiline 🙂\nSecond line 👋🏽'
+        for i,value in enumerate((expected,expected[:-1],expected+'x',expected.replace('🙂','x')),50):
+            self.context['run_id']=self.run_id='a0000000-0000-4000-8000-%012d'%i
+            with self.session(self.device()),patch.object(nav,'_dm_find_focus_composer',
+                    return_value=types.SimpleNamespace(get_text=lambda:value)):
+                self.assertEqual(nav.verify_dm_draft_text(None,expected),value==expected)
+
+    def test_transient_long_clickable_reference_is_recorded_not_admitted(self):
+        import xml.etree.ElementTree as ET
+        f=json.loads((ROOT/'tests/fixtures/dm_446_current_surface.json').read_bytes())['personal_mutual_sticker_filled']
+        before=ET.fromstring(f['xml'])
+        _persistent_fixtures.node(before,'row_thread_composer_send_button_container').set('long-clickable','true')
+        transient=ET.tostring(before,encoding='unicode')
+        # The external qualification binds the native pair; this tracked case
+        # changes only its observed attribute on the existing sanitized fixture.
+        d=self.device([transient,f['xml'],f['xml']])
+        with self.session(d):
+            failed=nav._dm_446_composer(d,PKG)
+            accepted=nav._dm_446_composer(d,PKG)
+        self.assertFalse(failed[0]);self.assertTrue(accepted[0])
+        p,r=self.receipts()[0]
+        records=r['records'];self.assertEqual({x['composer_result'] for x in records},{False,True})
+        first=next(x for x in records if not x['composer_result'])
+        row=first['observations'][0]
+        self.assertEqual((p.parent/row['xml_path']).read_text(),transient)
+
+    def test_sender_order_outcome_and_send_count_equal_exact_parent(self):
+        import dm_sender_engine as engine
+        parent=subprocess.check_output(['git','show','0a44138f7e0a3447446e7b0c14561067fdebf041:dm_sender_engine.py'],cwd=ROOT,text=True)
+        name='_perform_real_welcome_dm_send'
+        oldnode=next(x for x in ast.parse(parent).body if isinstance(x,ast.FunctionDef) and x.name==name)
+        newnode=next(x for x in ast.parse((ROOT/'dm_sender_engine.py').read_text()).body if isinstance(x,ast.FunctionDef) and x.name==name)
+        for verified in (False,True):
+            answers=[]
+            for index,node in enumerate((oldnode,newnode)):
+                calls=[];reads=iter(('', 'Complete draft'))
+                def trace(label,result):
+                    def call(*a,**kw):calls.append(label);return result
+                    return call
+                env=dict(engine.__dict__)
+                env.update(log=lambda *a,**kw:None,
+                    dm_thread_shows_outgoing_message=trace('duplicate',False),
+                    _resolve_dm_text_composer=trace('focus',(object(),None)),
+                    verify_dm_composer_safe=trace('qualify',(True,'ok')),
+                    read_dm_composer_text=lambda *a:(calls.append('read') or next(reads)),
+                    type_dm_draft_only=trace('type',(True,{'method':'set_text'})),
+                    verify_dm_draft_text=trace('verify',verified),
+                    send_dm_safe=trace('send',{'sent':True,'send_tapped':True}))
+                import __future__
+                exec(compile(ast.Module(body=[node],type_ignores=[]),'<parent-or-candidate-sender>',
+                             'exec',flags=__future__.annotations.compiler_flag),env)
+                with self.session(self.device()):
+                    result=env[name](None,username='recipient',message_body='Complete draft',
+                        thread_state='empty_new_thread',pkg=PKG,dm_type='outreach',post_send_nav='sender_owned')
+                answers.append((result,calls))
+            self.assertEqual(answers[0],answers[1])
+            self.assertEqual(answers[1][1].count('send'),1 if verified else 0)
+            self.assertEqual(answers[1][1],['duplicate','focus','qualify','read','type','read','verify']+(['send'] if verified else []))
+
+    def test_existing_send_tap_and_pre_send_boundary_order_no_extra_calls(self):
+        import types
+        calls=[]
+        button=types.SimpleNamespace(click=lambda:calls.append('click'))
+        original_boundary=self.slot.before_send
+        self.slot.before_send=lambda job:calls.append('boundary')
+        signature=dict(message_marker_count=0,expected_text_present=False)
+        with self.session(self.device()),patch.object(nav.config,'ENABLE_REAL_DM_SEND',True),patch.object(
+                nav,'_dm_find_focus_composer',return_value=object()),patch.object(
+                nav,'read_dm_composer_text',return_value='exact'),patch.object(
+                nav,'wait_for_dm_send_button_after_draft',return_value=(button,'ok',{'send_button_candidate_count':1})),patch.object(
+                nav,'_dm_screen_size_for_dm',return_value=(1080,2340)),patch.object(
+                nav,'_dm_composer_bounds_u2',return_value={}),patch.object(
+                nav,'_dm_thread_message_signature',return_value=signature),patch.object(
+                nav,'_dm_capture_send_debug_artifact',return_value={}),patch.object(
+                nav,'guard_instagram_action_rate_limit',side_effect=lambda *a,**kw:calls.append('guard')),patch.object(
+                nav,'_dm_verify_outbound_message_after_send',return_value=(True,'A0_OUTBOUND_PROOF',signature)):
+            result=nav.send_dm_safe(None,'recipient','exact','empty_new_thread',job_id='job')
+        self.slot.before_send=original_boundary
+        self.assertTrue(result['sent'])
+        self.assertEqual(calls,['guard','boundary','click','guard'])
+        _,r=self.receipts()[0];stages={x['stage'] for x in r['events']}
+        self.assertTrue({'send_button_qualification','before_send_boundary','send_tap_started',
+                         'send_tap_returned','outbound_verification'}<=stages)
+
+    def test_existing_child_environment_keeps_switch_without_per_run_activation(self):
+        from device import runner_subprocess_env
+        with patch('device.resolve_adb_path',return_value='/existing/adb'):
+            env=runner_subprocess_env({'PATH':'/existing','DM446_CERTIFICATION_RECORDER_ENABLED':'true'})
+        self.assertEqual(env['DM446_CERTIFICATION_RECORDER_ENABLED'],'true')
+        self.assertEqual(env['ADB_PATH'],'/existing/adb')
+
+    def test_wrong_or_ambiguous_live_selector_keeps_original_refusal_and_receipt(self):
+        for i,mode in enumerate(('zero','duplicate','missing'),80):
+            self.context['run_id']=self.run_id='a0000000-0000-4000-8000-%012d'%i
+            d=CountDevice(CAPS['business']['xml']);d.mode=mode;d.missing_fields=set()
+            # Existing admitted version fixture. Scope is tested separately, not forged into a canary.
+            with patch.object(retention,'_scope_context',return_value=dict(
+                    self.scope,run_id=self.run_id,request_id=self.request_id,
+                    execution_id=self.request_id,worker_sha='a'*40)):
+                with self.session(d):result=nav._dm_446_composer(d,PKG)
+            self.assertFalse(result[0])
+            _,r=next((p,r) for p,r in self.receipts() if r['context']['run_id']==self.run_id)
+            self.assertFalse(r['records'][0]['composer_result'])
+            self.assertTrue(r['records'][0]['first_failed_predicate'])
+
+
 if __name__=='__main__':unittest.main()

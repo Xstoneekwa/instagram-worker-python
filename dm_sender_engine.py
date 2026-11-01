@@ -16,6 +16,7 @@ from typing import Any, Callable
 import uiautomator2 as u2
 
 import config
+import dm_446_observation_retention as _dm_retention
 import account_protection_lists
 import supabase_client
 from device import app_start, force_stop, get_device_serial
@@ -3314,10 +3315,13 @@ def _resolve_dm_text_composer(
         username=username,
         caller=caller,
     )
+    _dm_retention.capture_event('focus_started', bounds=bounds)
     try:
         ed.click()
         time.sleep(0.05)
     except Exception as e:
+        _dm_retention.capture_event('focus_result', failure=True,
+                                    branch='FOCUS_EXCEPTION', exception_class=type(e).__name__)
         log(
             "error",
             "dm_sender_text_composer_focus_failed",
@@ -3327,6 +3331,7 @@ def _resolve_dm_text_composer(
         )
         return None, "composer_focus_failed"
     ed2 = _dm_find_focus_composer(d) or ed
+    _dm_retention.capture_event('focus_result', branch='FOCUS_CALL_RETURNED', bounds=bounds)
     log(
         "info",
         "dm_sender_text_composer_focus_verified",
@@ -3516,21 +3521,22 @@ def _perform_real_welcome_dm_send(
     )
 
     composer_fast_path_state: dict[str, Any] = {}
-    _ed, focus_err = _resolve_dm_text_composer(
-        d,
-        pkg=pkg,
-        username=uname,
-        caller="real_send",
-        dm_type=dm_type,
-        thread_state=thread_state,
-        thread_snapshot=thread_snapshot,
-        welcome_composer_evidence=welcome_composer_evidence,
-        account_id=account_id,
-        run_id=run_id,
-        job_id=job_id,
-        navigation_generation=navigation_generation,
-        fast_path_state=composer_fast_path_state,
-    )
+    with _dm_retention.phase('focus'):
+        _ed, focus_err = _resolve_dm_text_composer(
+            d,
+            pkg=pkg,
+            username=uname,
+            caller="real_send",
+            dm_type=dm_type,
+            thread_state=thread_state,
+            thread_snapshot=thread_snapshot,
+            welcome_composer_evidence=welcome_composer_evidence,
+            account_id=account_id,
+            run_id=run_id,
+            job_id=job_id,
+            navigation_generation=navigation_generation,
+            fast_path_state=composer_fast_path_state,
+        )
     if focus_err:
         log(
             "error",
@@ -3560,7 +3566,8 @@ def _perform_real_welcome_dm_send(
     if not bool(getattr(config, "DM_DRAFT_TYPING_ENABLED", True)):
         return False, {}, "draft_typing_disabled"
 
-    existing_draft = read_dm_composer_text(d)
+    with _dm_retention.phase('pretyping'):
+        existing_draft = read_dm_composer_text(d)
     ok_type = False
     type_info: Any = {}
     reused_draft = False
@@ -3607,13 +3614,14 @@ def _perform_real_welcome_dm_send(
 
     if not reused_draft:
         force_method = "set_text" if strategy == "set_text" else None
-        ok_type, type_info = type_dm_draft_only(
-            d,
-            draft_text,
-            pkg,
-            force_method=force_method,
-            composer=_ed if bool(composer_fast_path_state.get("used")) else None,
-        )
+        with _dm_retention.phase('typing'):
+            ok_type, type_info = type_dm_draft_only(
+                d,
+                draft_text,
+                pkg,
+                force_method=force_method,
+                composer=_ed if bool(composer_fast_path_state.get("used")) else None,
+            )
         log(
             "info",
             "dm_sender_real_send_draft_typed",
@@ -3648,16 +3656,19 @@ def _perform_real_welcome_dm_send(
                     from_strategy="fast_ime",
                     to_strategy="set_text",
                 )
-                ok_type, type_info = type_dm_draft_only(
-                    d,
-                    draft_text,
-                    pkg,
-                    force_method="set_text",
-                    composer=_ed if bool(composer_fast_path_state.get("used")) else None,
-                )
+                with _dm_retention.phase('typing'):
+                    ok_type, type_info = type_dm_draft_only(
+                        d,
+                        draft_text,
+                        pkg,
+                        force_method="set_text",
+                        composer=_ed if bool(composer_fast_path_state.get("used")) else None,
+                    )
             if not ok_type:
                 return False, {"type_info": type_info}, "draft_typing_failed"
 
+    _dm_retention.capture_event('typing_completed', failure=not bool(ok_type),
+        result=ok_type, reused_draft=reused_draft, type_info=type_info)
     log(
         "info",
         "dm_sender_typing_completed",
@@ -3666,7 +3677,9 @@ def _perform_real_welcome_dm_send(
         reused_existing_draft=reused_draft,
         **flags,
     )
-    composer_after_type = read_dm_composer_text(d)
+    with _dm_retention.phase('posttyping'):
+        composer_after_type = read_dm_composer_text(d)
+    _dm_retention.capture_event('posttyping_read_result', actual_text=composer_after_type)
     log(
         "info",
         "dm_sender_draft_text_after_typing",
@@ -3707,14 +3720,15 @@ def _perform_real_welcome_dm_send(
     prev_enable = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
     try:
         config.ENABLE_REAL_DM_SEND = True
-        send_out = send_dm_safe(
-            d,
-            uname,
-            draft_text,
-            thread_state,
-            target_row=None,
-            job_id=job_id,
-        )
+        with _dm_retention.phase('send'):
+            send_out = send_dm_safe(
+                d,
+                uname,
+                draft_text,
+                thread_state,
+                target_row=None,
+                job_id=job_id,
+            )
     finally:
         config.ENABLE_REAL_DM_SEND = prev_enable
 
@@ -3827,7 +3841,10 @@ def execute_dm_job_real_send(
     message_body = str(job.get("message_body") or "")
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
 
+    _dm_retention.bind_job(job_id, recipient)
     running = supabase_client.mark_dm_job_running(job_id)
+    _dm_retention.capture_event('mark_running_result', failure=not bool(running),
+                                returned_row=type(running) is dict)
     if not running:
         log("error", "dm_sender_mark_running_failed", job_id=job_id)
         _complete_job_failed_retry(
@@ -4020,6 +4037,7 @@ def execute_dm_job_real_send(
                     final_status = str((updated_job or {}).get("status") or "pending")
                     job_terminal_handled = True
     finally:
+        _dm_retention.capture_backend_completion(job_id, updated_job, outcome=outcome)
         t_post_job = time.perf_counter()
         post_job_restore = _get_dm_sender_post_job_restore()
         from outreach_slot_contract import active as outreach_slot_active

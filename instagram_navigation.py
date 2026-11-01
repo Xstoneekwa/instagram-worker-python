@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 import uiautomator2 as u2
 
 import config
+import dm_446_observation_retention as _dm_retention
 import account_protection_lists
 import follow_persistence_intent
 import followers_surface_proof as followers_proof
@@ -6807,6 +6808,8 @@ def _dm_try_unique_send_resource_u2(d: u2.Device) -> Any | None:
         try:
             sel = d(resourceIdMatches=pat)
             objs = sel.all() if hasattr(sel, "all") else []
+            _dm_retention.capture_event('send_resource_selector', failure=len(objs) != 1,
+                selector_pattern=pat, selector_count=len(objs))
             if len(objs) == 1:
                 return objs[0]
         except Exception:
@@ -6824,6 +6827,9 @@ def _dm_resolve_send_button_from_hierarchy(
     thread_state: str,
 ) -> tuple[Any | None, str, dict[str, Any]]:
     """Pick best Send tap target from hierarchy XML (exact id path, then visual survivors)."""
+    _dm_retention.capture_xml('send_button_candidates', hier)
+    _dm_retention.capture_event('send_button_geometry', composer_bounds=composer_bounds,
+                                screen_width=screen_w, screen_height=screen_h)
     meta: dict[str, Any] = {
         "send_button_candidate_count": 0,
         "send_button_position_fallback": False,
@@ -7047,13 +7053,26 @@ def wait_for_dm_send_button_after_draft(
 
 
 def read_dm_composer_text(d: u2.Device) -> str:
-    try:
-        cur = _dm_find_focus_composer(d)
-        if cur is None:
+    with _dm_retention.phase('draft_read'):
+        step = 'finder'
+        try:
+            cur = _dm_find_focus_composer(d)
+            if cur is None:
+                _dm_retention.capture_event('draft_read', failure=True,
+                    branch='FIELD_ABSENT', get_text_called=False)
+                return ""
+            step = 'get_text'
+            raw = cur.get_text()
+            text = str(raw or "").strip()
+            _dm_retention.capture_event('draft_read', failure=not bool(text),
+                branch='TEXT_READ' if text else 'TEXT_EMPTY', get_text_called=True,
+                actual_text=raw if type(raw) is str else text, returned_none=raw is None)
+            return text
+        except Exception as exc:
+            _dm_retention.capture_event('draft_read', failure=True,
+                branch='GET_TEXT_EXCEPTION' if step == 'get_text' else 'FINDER_EXCEPTION',
+                get_text_called=step == 'get_text', exception_class=type(exc).__name__)
             return ""
-        return str(cur.get_text() or "").strip()
-    except Exception:
-        return ""
 
 
 def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
@@ -7247,6 +7266,7 @@ def _dm_thread_message_signature(
     blob = hier.lower()
     expected_text_present = _dm_expected_text_present(hier, text)
     outbound_match_mode = _dm_outbound_expected_message_match_mode(hier, text)
+    _dm_retention.capture_xml('thread_signature', hier, failure=not bool(outbound_match_mode))
     return {
         "hierarchy_hash": hashlib.sha256(hier.encode("utf-8", errors="ignore")).hexdigest()
         if hier
@@ -7434,6 +7454,7 @@ def _dm_capture_send_debug_artifact(d: u2.Device, label: str) -> dict[str, str]:
             out["screenshot_error"] = str(exc)[:200]
         try:
             hier = _dm_dump_thread_hierarchy(d)
+            _dm_retention.capture_xml(safe_label, hier)
             with open(xml_path, "w", encoding="utf-8") as fh:
                 fh.write(hier)
             out["xml_path"] = xml_path
@@ -9566,11 +9587,23 @@ def type_dm_draft_only(
     text = str(draft or "")
 
     def _read_composer_text() -> str:
-        try:
-            cur = ed if composer is not None else (_dm_find_focus_composer(d) or ed)
-            return str((cur.get_text() if cur is not None else "") or "")
-        except Exception:
-            return ""
+        with _dm_retention.phase('typing_readback'):
+            step = 'finder'
+            try:
+                cur = ed if composer is not None else (_dm_find_focus_composer(d) or ed)
+                step = 'get_text'
+                raw = cur.get_text() if cur is not None else ""
+                text = str(raw or "")
+                _dm_retention.capture_event('typing_readback', failure=not bool(text),
+                    branch='TEXT_READ' if text else 'TEXT_EMPTY',
+                    get_text_called=cur is not None, original_editor_used=cur is ed,
+                    actual_text=raw if type(raw) is str else text)
+                return text
+            except Exception as exc:
+                _dm_retention.capture_event('typing_readback', failure=True,
+                    branch='GET_TEXT_EXCEPTION' if step == 'get_text' else 'FINDER_EXCEPTION',
+                    exception_class=type(exc).__name__)
+                return ""
 
     def _prefix20(s: str) -> str:
         return str(s or "")[:20]
@@ -9696,16 +9729,30 @@ def type_dm_draft_only(
 
 
 def verify_dm_draft_text(d: u2.Device, expected: str) -> bool:
-    t0 = time.perf_counter()
-    ed = _dm_find_focus_composer(d)
-    if ed is None:
-        return False
-    try:
-        got = ed.get_text() or ""
-    except Exception:
-        return False
-    _perf["dm_draft_verify_ms"] = (time.perf_counter() - t0) * 1000
-    return got.strip() == str(expected).strip()
+    with _dm_retention.phase('draft_verify'):
+        t0 = time.perf_counter()
+        ed = _dm_find_focus_composer(d)
+        if ed is None:
+            _dm_retention.capture_event('draft_verify', failure=True,
+                branch='FIELD_ABSENT', get_text_called=False)
+            return False
+        try:
+            raw = ed.get_text()
+            got = raw or ""
+        except Exception as exc:
+            _dm_retention.capture_event('draft_verify', failure=True,
+                branch='GET_TEXT_EXCEPTION', get_text_called=True,
+                exception_class=type(exc).__name__)
+            return False
+        _perf["dm_draft_verify_ms"] = (time.perf_counter() - t0) * 1000
+        actual = got.strip()
+        expected_text = str(expected)
+        exact = actual == expected_text.strip()
+        _dm_retention.capture_event('draft_verify', failure=not exact,
+            branch='TEXT_EXACT' if exact else ('TEXT_EMPTY' if not got else 'TEXT_DIFFERENT'),
+            get_text_called=True, actual_text=got, expected_text=expected_text,
+            returned_none=raw is None, result=exact)
+        return exact
 
 
 # --- Follow SAFE V1 (profile header; single tap; bounded verify) ---
@@ -66682,6 +66729,9 @@ def send_dm_safe(
         draft_matches_expected=bool(draft_ok),
     )
     out["send_button_candidate_count"] = meta.get("send_button_candidate_count", 0)
+    _dm_retention.capture_event('send_button_qualification', failure=status != 'ok' or btn is None,
+        status=status, selector_returned=btn is not None, candidate_count=meta.get('send_button_candidate_count', 0),
+        metadata=meta)
     out["coordinate_fallback_used"] = bool(meta.get("send_button_coordinate_fallback"))
     out["send_button_selection_score"] = meta.get("send_button_selection_score", 0)
     out["filtered_send_candidates_count"] = len(meta.get("filtered_send_candidates") or [])
@@ -66723,7 +66773,8 @@ def send_dm_safe(
         return out
 
     pre_send_len = int(out.get("composer_text_len_before_send") or 0)
-    pre_send_signature = _dm_thread_message_signature(d, msg)
+    with _dm_retention.phase('pre_send_signature'):
+        pre_send_signature = _dm_thread_message_signature(d, msg)
     out["pre_send_thread_marker_count"] = int(
         pre_send_signature.get("message_marker_count") or 0
     )
@@ -66747,9 +66798,12 @@ def send_dm_safe(
     slot = outreach_slot_active()
     if slot:
         slot.before_send(job_id)
+        _dm_retention.capture_event('before_send_boundary', branch='EXISTING_BOUNDARY_PASSED', job_id=job_id)
     try:
+        _dm_retention.capture_event('send_tap_started', job_id=job_id)
         btn.click()
         out["send_tapped"] = True
+        _dm_retention.capture_event('send_tap_returned', job_id=job_id, result=True)
         log(
             "info",
             "dm_send_button_tap_sent",
@@ -66770,6 +66824,8 @@ def send_dm_safe(
         )
     except Exception as e:
         out["failure_event"] = "dm_sent_failed"
+        _dm_retention.capture_event('send_tap_returned', failure=True, job_id=job_id,
+                                    exception_class=type(e).__name__)
         out["reason"] = "send_button_tap_failed"
         out["tap_error"] = str(e)
         _LAST_DM_SEND_RESULT = dict(out)
@@ -66781,12 +66837,15 @@ def send_dm_safe(
         preceding_action="dm_send",
     )
 
-    verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
-        d,
-        msg,
-        pre_signature=pre_send_signature,
-        expected_username=username,
-    )
+    with _dm_retention.phase('post_send_verification'):
+        verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
+            d,
+            msg,
+            pre_signature=pre_send_signature,
+            expected_username=username,
+        )
+    _dm_retention.capture_event('outbound_verification', failure=not bool(verified),
+        result=verified, reason=verify_reason, signature=post_send_signature)
     if verified:
         out["outbound_verified_artifacts"] = _dm_capture_send_debug_artifact(
             d, "dm_send_outbound_verified"
