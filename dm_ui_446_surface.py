@@ -87,15 +87,33 @@ def qualify(root,package,target,context):
  if header is None or not rect(header) or rect(header)[3]>vb[1]:return None
  if bar is not None and (not rect(bar) or rect(bar)[3]>vb[1]):return None
  if banner is not None and (not rect(banner) or rect(banner)[3]>rb[1]):return None
- # Existing F4 rule: any visible list descendant crossing editor blocks composer.
+ send_button=one(app,'row_thread_composer_send_button_container')
+ # Filled personal/business chrome can coincide. Bind the personal model to
+ # its existing exact intro, rather than selecting a model by message text.
+ matches=[k for k,s in SCHEMAS.items()
+          if any(match(app,t,values,opaque_list=True,allow_no_tray=True) for t in [s['app']]+s.get('app_alternates',[]))
+          and (k!='personal_mutual_sticker_empty' or send_button is None
+               or send_button.get('enabled')!='true'
+               or any(match(n,s['intro'],values,rect(ml)) for n in ml))]
+ if len(matches)!=1:return None
+ variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
+ # The native filled personal intro exposes oversized layout bounds. Its
+ # exact finite subtree proves the layout ancestors with their observed
+ # attributes; it does not exempt text, images or unfamiliar nodes from F4.
+ send_button=one(app,'row_thread_composer_send_button_container')
+ intro_layouts=set()
+ if (variant=='personal_mutual_sticker_empty' and len(intro)==1
+     and send_button is not None and send_button.get('enabled')=='true'):
+  intro_layouts={n for n in intro[0].iter('node') if len(n)
+                 and not n.get('text') and not n.get('content-desc')
+                 and all(n.get(k)=='false' for k in ('clickable','focusable'))}
+ # Existing F4 rule still checks every descendant, including all intro leaves.
  for n in ml.iter('node'):
   if n is ml:continue
   b=rect(n)
   if n.get('package')!=P or not b or 'dialog' in n.get('class','').lower():return None
-  if n.get('visible-to-user')!='false' and b[0]<eb[2] and eb[0]<b[2] and b[1]<eb[3] and eb[1]<b[3]:return None
- matches=[k for k,s in SCHEMAS.items() if any(match(app,t,values,opaque_list=True,allow_no_tray=True) for t in [s['app']]+s.get('app_alternates',[]))]
- if len(matches)!=1:return None
- variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
+  if (n.get('visible-to-user')!='false' and b[0]<eb[2] and eb[0]<b[2]
+      and b[1]<eb[3] and eb[1]<b[3] and n not in intro_layouts):return None
  identity_handle = target if generic_business else handle
  send_button=one(app,'row_thread_composer_send_button_container')
  empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and ((send_button is None and variant in ('business_chat_sticker_empty','personal_mutual_sticker_empty')) or (send_button is not None and send_button.get('enabled')=='false'))

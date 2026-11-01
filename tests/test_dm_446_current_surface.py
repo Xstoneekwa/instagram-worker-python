@@ -2,7 +2,7 @@ from pathlib import Path
 import json,copy,hashlib,itertools,xml.etree.ElementTree as ET,unittest
 from unittest.mock import patch
 import dm_ui_446_surface as s,dm_thread_truth as truth,instagram_navigation as nav
-from test_dm_446_readers import Device,Clock,P
+from test_dm_446_readers import Device,Clock,P,Selector
 F=json.loads((Path(__file__).parent/'fixtures/dm_446_current_surface.json').read_text())
 class CurrentSurfaceTests(unittest.TestCase):
  def test_janecandika_business_chat_sticker_shape_v1_v6(self):
@@ -230,4 +230,147 @@ class CurrentSurfaceTests(unittest.TestCase):
      self.assertGreaterEqual(clock.now,0.8)
      self.assertEqual(proof['positive_empty_observations'],d.reads)
     else:self.assertEqual(d.reads,2 if case=='second_unknown' else 1)
+
+class FilledComposerSelector(Selector):
+ def click(self):
+  self.d.focus_clicks+=1
+ def set_text(self,value):
+  self.d.typed.append(value)
+  root=ET.fromstring(F['personal_mutual_sticker_filled']['xml'])
+  next(n for n in root.iter('node') if s.role(n)=='row_thread_composer_edittext').set('text',value)
+  self.d.xmls=[ET.tostring(root,encoding='unicode')]
+  self.d.last=self.d.xmls[0]
+ def get_text(self):
+  self.d.text_reads+=1
+  if isinstance(self.d.readback,Exception):raise self.d.readback
+  return super().get_text() if self.d.readback is None else self.d.readback
+
+class FilledComposerDevice(Device):
+ """Native-derived geometry, controlled transport only; never Android evidence."""
+ def __init__(self,xml=None):
+  super().__init__(xml or F['personal_mutual_sticker_empty']['xml'])
+  self.typed=[];self.focus_clicks=0;self.text_reads=0;self.readback=None
+ def __call__(self,**kw):return FilledComposerSelector(self,kw)
+
+class FilledComposerTests(unittest.TestCase):
+ def setUp(self):
+  self.clock=Clock()
+  self.t=patch.object(nav,'time',self.clock);self.t.start();self.addCleanup(self.t.stop)
+  self.log=patch.object(nav,'log',lambda *a,**kw:None);self.log.start();self.addCleanup(self.log.stop)
+  self.no_send=patch.object(nav,'send_dm_safe',side_effect=AssertionError('Send forbidden in offline qualification'))
+  self.no_send.start();self.addCleanup(self.no_send.stop)
+ @staticmethod
+ def text(length,multiline,emojis):
+  clusters=('🙂','❤️','👋🏽','👩🏽‍💻','🇿🇦','👨‍👩‍👧‍👦','e\u0301')
+  # Do not split emoji sequences to manufacture the desired code-point length.
+  seed='Test '+(' '.join(clusters) if emojis else 'texte générique')
+  if multiline:seed+='\n\nSuite\n'
+  else:seed+=' '
+  value=seed
+  while len(value)+len(seed)<length:value+=seed
+  return value+'A'*(length-len(value)-1)+'Z'
+ def typed(self,text):
+  d=FilledComposerDevice()
+  ok,meta=nav.type_dm_draft_only(d,text,P,force_method='set_text')
+  self.assertTrue(ok);self.assertEqual(d.typed,[text])
+  self.assertEqual(meta['method'],'set_text')
+  self.assertEqual(meta['actual_text_len_after_set_text'],len(text))
+  self.assertFalse(meta['fastime_used']);self.assertEqual(d.focus_clicks,1)
+  return d
+ def test_native_filled_surface_exact_provenance_and_real_finder(self):
+  f=F['personal_mutual_sticker_filled'];ctx=tuple(f['context'])
+  self.assertEqual(hashlib.sha256(f['xml'].encode()).hexdigest(),f['sha256'])
+  self.assertEqual(f['native_source_sha256'],'f0d0b78785e65f6e11280232fb1b528c9f0053b1acd001477f1bfeb6b4cbd757')
+  result=s.qualify(ET.fromstring(f['xml']),P,f['target'],ctx)
+  self.assertIsNotNone(result);self.assertFalse(result['empty_surface'])
+  d=FilledComposerDevice(f['xml']);ed=nav._dm_find_focus_composer(d)
+  self.assertIsNotNone(ed);self.assertEqual(ed.get_text(),f['controlled_text'])
+  self.assertTrue(nav.verify_dm_draft_text(d,f['controlled_text']))
+  self.assertNotEqual(truth.classify_dm_history(f['xml'],P,f['target'],surface_context=ctx)[0],'empty_new_thread')
+ def test_full_set_text_and_real_verify_length_unicode_matrix(self):
+  # Only text is parameterized. This is not max-height/scrolling native proof.
+  for length,multiline,emojis in itertools.product((45,200,500,800,900),(False,True),(False,True)):
+   with self.subTest(length=length,multiline=multiline,emojis=emojis):
+    value=self.text(length,multiline,emojis)
+    self.assertEqual(len(value),length);self.assertEqual(chr(10) in value,multiline);self.assertNotIn(chr(92)+'n',value)
+    if emojis:self.assertTrue(all(x in value for x in ('🙂','❤️','👋🏽','👩🏽‍💻','🇿🇦','👨‍👩‍👧‍👦')))
+    d=self.typed(value)
+    self.assertEqual(nav.read_dm_composer_text(d),value)
+    self.assertTrue(nav.verify_dm_draft_text(d,value))
+    self.assertEqual(d.typed,[value])
+ def test_real_verify_rejects_partial_or_changed_readback_at_every_length(self):
+  for length,multiline,emojis in itertools.product((45,200,500,800,900),(False,True),(False,True)):
+   expected=self.text(length,multiline,emojis);d=self.typed(expected)
+   bad={'empty':'','prefix_only':expected[:length//2],'suffix_only':expected[length//2:],
+        'last_missing':expected[:-1],'middle_missing':expected[:length//2]+expected[length//2+1:],
+        'wrong_same_length':expected[:-1]+'Y','extra_nonspace':expected+'Q'}
+   if emojis:
+    bad.update(emoji_missing=expected.replace('🙂','',1),VS16_missing=expected.replace('❤️','❤',1),
+               skin_modifier_missing=expected.replace('👋🏽','👋',1),ZWJ_missing=expected.replace('👩🏽‍💻','👩🏽💻',1),
+               half_flag=expected.replace('🇿🇦','🇿',1),replacement=expected.replace('🙂','\ufffd',1),
+               wrong_emoji=expected.replace('🙂','😢',1),renormalized=expected.replace('e\u0301','é',1))
+   for kind,value in bad.items():
+    with self.subTest(length=length,multiline=multiline,emojis=emojis,kind=kind):
+     d.readback=value;self.assertFalse(nav.verify_dm_draft_text(d,expected))
+   d.readback=RuntimeError('controlled_read_failure')
+   self.assertFalse(nav.verify_dm_draft_text(d,expected));self.assertEqual(d.typed,[expected])
+ def test_native_growth_has_no_fixed_height_or_length_rule(self):
+  f=F['personal_mutual_sticker_filled'];empty=F['personal_mutual_sticker_empty']
+  a=s.qualify(ET.fromstring(empty['xml']),P,empty['target'],tuple(empty['context']))
+  b=s.qualify(ET.fromstring(f['xml']),P,f['target'],tuple(f['context']))
+  self.assertIsNotNone(a);self.assertIsNotNone(b)
+  self.assertGreater(b['bounds']['bottom']-b['bounds']['top'],a['bounds']['bottom']-a['bounds']['top'])
+  # No invented positive long or scrolling geometry: actual native states only.
+  root=ET.fromstring(f['xml'])
+  next(n for n in root.iter('node') if s.role(n)=='row_thread_composer_edittext').set('scrollable','true')
+  self.assertIsNone(s.qualify(root,P,f['target'],tuple(f['context'])))
+ def test_exact_intro_layouts_do_not_exempt_real_or_unknown_occlusions(self):
+  f=F['personal_mutual_sticker_filled'];ctx=tuple(f['context'])
+  kinds=('unknown_row_over_editor','unknown_intro_child','intro_text_over_editor',
+         'intro_clickable','intro_focusable','changed_intro_long_click','unknown_intro_label',
+         'foreign_overlay','duplicate_editor','hidden_editor','disabled_editor','wrong_target')
+  for kind in kinds:
+   root=ET.fromstring(f['xml']);app=next(n for n in root if n.get('package')==P)
+   ml=s.one(app,'message_list');ed=s.one(app,'row_thread_composer_edittext')
+   intro=ml[0];target=f['target']
+   if kind=='unknown_row_over_editor':
+    ET.SubElement(ml,'node',{'package':P,'class':'android.view.View','bounds':ed.get('bounds'),'visible-to-user':'true','clickable':'false'})
+   elif kind=='unknown_intro_child':
+    ET.SubElement(intro,'node',{'package':P,'class':'android.view.View','bounds':ed.get('bounds'),'visible-to-user':'true','clickable':'false'})
+   elif kind=='intro_text_over_editor':
+    next(n for n in intro.iter('node') if n.get('text')).set('bounds',ed.get('bounds'))
+   elif kind=='intro_clickable':intro.set('clickable','true')
+   elif kind=='intro_focusable':intro.set('focusable','true')
+   elif kind=='changed_intro_long_click':intro.set('long-clickable','false')
+   elif kind=='unknown_intro_label':
+    next(n for n in intro.iter('node') if n.get('text')=='You follow each other on Instagram').set('text','Unknown relationship')
+   elif kind=='foreign_overlay':
+    root.append(ET.Element('node',{'package':'com.example.overlay','class':'android.view.View','bounds':ed.get('bounds'),'visible-to-user':'true'}))
+   elif kind=='duplicate_editor':
+    s.one(app,'composer_content_container').append(copy.deepcopy(ed))
+   elif kind=='hidden_editor':ed.set('visible-to-user','false')
+   elif kind=='disabled_editor':ed.set('enabled','false')
+   elif kind=='wrong_target':target='another_target'
+   with self.subTest(kind=kind):
+    self.assertIsNone(s.qualify(root,P,target,ctx))
+    if kind!='wrong_target':
+     d=FilledComposerDevice(ET.tostring(root,encoding='unicode'))
+     self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']))
+     self.assertEqual(d.text_reads,0)
+ def test_filled_surface_identity_stays_generic_and_bound(self):
+  f=F['personal_mutual_sticker_filled']
+  for name,handle in [('Generic Person','different_target.9'),('Another Person','other_target_2')]:
+   x=f['xml'].replace('Surface Fixture User',name).replace(f['target'],handle)
+   out=s.qualify(ET.fromstring(x),P,handle,tuple(f['context']))
+   self.assertEqual(out['identity'],(name,handle))
+   self.assertIsNone(s.qualify(ET.fromstring(x),P,'wrong_target',tuple(f['context'])))
+ def test_live_selector_geometry_and_foreground_refusals_preserved(self):
+  f=F['personal_mutual_sticker_filled'];root=ET.fromstring(f['xml'])
+  d=FilledComposerDevice(f['xml'])
+  next(n for n in root.iter('node') if s.role(n)=='row_thread_composer_edittext').set('bounds','[171,1798][891,2127]')
+  d.live=ET.tostring(root,encoding='unicode')
+  self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']));self.assertEqual(d.text_reads,0)
+  d=FilledComposerDevice(f['xml']);d.foregrounds=[dict(package='com.example.other',activity='Other')]
+  self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']));self.assertEqual(d.text_reads,0)
+
 if __name__=='__main__':unittest.main()
