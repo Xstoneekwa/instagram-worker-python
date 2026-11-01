@@ -373,4 +373,104 @@ class FilledComposerTests(unittest.TestCase):
   d=FilledComposerDevice(f['xml']);d.foregrounds=[dict(package='com.example.other',activity='Other')]
   self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']));self.assertEqual(d.text_reads,0)
 
+class FilledMirroredHeaderTests(unittest.TestCase):
+ # Reuse only the existing transport setup; do not inherit/replay its suites.
+ setUp=FilledComposerTests.setUp
+ @staticmethod
+ def filled():return F['personal_mutual_sticker_filled_mirrored_header']
+ def test_native_derived_fixture_and_actual_finder(self):
+  f=self.filled();ctx=tuple(f['context'])
+  self.assertEqual(f['native_source_sha256'],'b171d2e938631bdaf0a244b25b6492828ff77d016e08022630858cda256847d6')
+  self.assertEqual(hashlib.sha256(f['xml'].encode()).hexdigest(),f['sha256'])
+  self.assertEqual(len(f['controlled_text']),45)
+  root=ET.fromstring(f['xml']);title=s.one(root,'header_title')
+  self.assertEqual(title.get('content-desc'),title.get('text'))
+  self.assertEqual(s.one(root,'row_thread_composer_send_button_container').get('long-clickable'),'false')
+  result=s.qualify(root,P,f['target'],ctx)
+  self.assertEqual(result['variant'],'personal_mutual_sticker_empty')
+  self.assertEqual(result['identity'],('Surface Fixture User',f['target']))
+  self.assertFalse(result['empty_surface'])
+  d=FilledComposerDevice(f['xml']);editor=nav._dm_find_focus_composer(d)
+  self.assertIsNotNone(editor);self.assertEqual(editor.count,1)
+  self.assertEqual(editor.get_text(),f['controlled_text'])
+  self.assertTrue(nav.verify_dm_draft_text(d,f['controlled_text']))
+ def test_empty_and_filled_keep_both_header_variants(self):
+  from dm_ui_446_evidence import composer_evidence
+  cases=(('personal_mutual_sticker_empty',True),
+         ('personal_mutual_sticker_mirrored_header',True),
+         ('personal_mutual_sticker_filled',False),
+         ('personal_mutual_sticker_filled_mirrored_header',False))
+  for key,empty in cases:
+   f=F[key];ctx=tuple(f['context'])
+   with self.subTest(surface=key):
+    out=s.qualify(ET.fromstring(f['xml']),P,f['target'],ctx)
+    self.assertIsNotNone(out);self.assertEqual(out['empty_surface'],empty)
+    self.assertTrue(composer_evidence(f['xml'],P,display_size=ctx[2:],surface_context=ctx)['visible'])
+    state=truth.classify_dm_history(f['xml'],P,f['target'],surface_context=ctx)[0]
+    if empty:self.assertEqual(state,'empty_new_thread')
+    else:
+     self.assertNotEqual(state,'empty_new_thread')
+     self.assertTrue(nav.verify_dm_draft_text(FilledComposerDevice(f['xml']),f['controlled_text']))
+ def test_description_and_recipient_remain_exact(self):
+  from dm_ui_446_evidence import composer_evidence
+  for key in ('personal_mutual_sticker_mirrored_header','personal_mutual_sticker_filled_mirrored_header'):
+   f=F[key];ctx=tuple(f['context'])
+   for description in ('Different display name','Surface Fixture User plus'):
+    root=ET.fromstring(f['xml']);s.one(root,'header_title').set('content-desc',description)
+    with self.subTest(surface=key,description=description):
+     self.assertIsNone(s.qualify(root,P,f['target'],ctx))
+     self.assertFalse(composer_evidence(ET.tostring(root,encoding='unicode'),P,display_size=ctx[2:],surface_context=ctx)['visible'])
+   self.assertIsNone(s.qualify(ET.fromstring(f['xml']),P,'wrong_recipient',ctx))
+   self.assertEqual(truth.classify_dm_history(f['xml'],P,'',surface_context=ctx)[0],'unknown')
+ def test_missing_ambiguous_and_occluded_editor_still_refused(self):
+  f=self.filled();ctx=tuple(f['context'])
+  for kind in ('missing','duplicate','foreign_overlay','unknown_row_over_editor','intro_text_over_editor','hidden','disabled','send_long_clickable'):
+   root=ET.fromstring(f['xml']);editor=s.one(root,'row_thread_composer_edittext')
+   if kind=='missing':
+    parent=next(n for n in root.iter('node') if editor in list(n));parent.remove(editor)
+   elif kind=='duplicate':s.one(root,'composer_content_container').append(copy.deepcopy(editor))
+   elif kind=='foreign_overlay':
+    root.append(ET.Element('node',{'package':'com.example.overlay','class':'android.view.View','bounds':editor.get('bounds'),'visible-to-user':'true'}))
+   elif kind=='unknown_row_over_editor':
+    ET.SubElement(s.one(root,'message_list'),'node',{'package':P,'class':'android.view.View','bounds':editor.get('bounds'),'visible-to-user':'true','clickable':'false'})
+   elif kind=='intro_text_over_editor':
+    next(n for n in s.one(root,'message_list').iter('node') if n.get('text')).set('bounds',editor.get('bounds'))
+   elif kind=='hidden':editor.set('visible-to-user','false')
+   elif kind=='disabled':editor.set('enabled','false')
+   else:s.one(root,'row_thread_composer_send_button_container').set('long-clickable','true')
+   with self.subTest(case=kind):
+    self.assertIsNone(s.qualify(root,P,f['target'],ctx))
+    d=FilledComposerDevice(ET.tostring(root,encoding='unicode'))
+    self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']))
+    self.assertEqual(d.text_reads,0)
+ def test_same_45_set_text_read_verify_sequence_without_send(self):
+  f=self.filled();expected=f['controlled_text']
+  # The existing selector transport now returns the observed filled variant.
+  with patch.dict(F,{'personal_mutual_sticker_filled':f}):
+   d=FilledComposerDevice(F['personal_mutual_sticker_mirrored_header']['xml'])
+   ok,meta=nav.type_dm_draft_only(d,expected,P,force_method='set_text')
+   self.assertTrue(ok);self.assertEqual(meta['method'],'set_text')
+   self.assertFalse(meta['fastime_used']);self.assertEqual(meta['actual_text_len_after_set_text'],45)
+   self.assertEqual(d.typed,[expected]);self.assertEqual(d.focus_clicks,1)
+   self.assertEqual(nav.read_dm_composer_text(d),expected)
+   self.assertTrue(nav.verify_dm_draft_text(d,expected))
+   self.assertEqual(d.typed,[expected])
+ def test_full_text_equality_stays_required_after_admission(self):
+  f=self.filled();expected=f['controlled_text'];d=FilledComposerDevice(f['xml'])
+  self.assertTrue(nav.verify_dm_draft_text(d,expected))
+  for actual in ('',expected[:20],expected[:-1],expected[:-1]+'X',expected+'Q'):
+   with self.subTest(readback_length=len(actual)):
+    d.readback=actual;self.assertFalse(nav.verify_dm_draft_text(d,expected))
+  d.readback=RuntimeError('controlled_read_failure')
+  self.assertFalse(nav.verify_dm_draft_text(d,expected))
+ def test_dynamic_names_and_handles_remain_bound(self):
+  for key in ('personal_mutual_sticker_mirrored_header','personal_mutual_sticker_filled_mirrored_header'):
+   f=F[key];ctx=tuple(f['context'])
+   for name,handle in (('Another Person','other_target.3'),('Élodie Fixture','fixture_target_4')):
+    xml=f['xml'].replace('Surface Fixture User',name).replace(f['target'],handle)
+    with self.subTest(surface=key,name=name,handle=handle):
+     result=s.qualify(ET.fromstring(xml),P,handle,ctx)
+     self.assertEqual(result['identity'],(name,handle))
+     self.assertIsNone(s.qualify(ET.fromstring(xml),P,'wrong_recipient',ctx))
+
 if __name__=='__main__':unittest.main()
