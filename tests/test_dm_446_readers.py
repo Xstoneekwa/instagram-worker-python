@@ -267,3 +267,86 @@ class OptionCNavigationProjectionTests(unittest.TestCase):
         self.assertNotIn('sleep',ast.unparse(block))
         self.assertNotIn('.wait(',ast.unparse(block))
 
+
+# The signed a700 parent is the comparison baseline, never a runtime fallback.
+def composer_signal_parent_state():
+    source = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'show',
+         'a7009397680df1bc4d0bb7cbd4c0b28427f7cb35:instagram_navigation.py'],
+        text=True)
+    fn = next(n for n in ast.parse(source).body
+              if isinstance(n, ast.FunctionDef) and n.name == '_dm_446_thread_state')
+    namespace = dict(vars(nav))
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), '<signed-parent-state>', 'exec'),
+         namespace)
+    return namespace[fn.name]
+
+
+class ComposerSignalProjectionTests(unittest.TestCase):
+    def observe(self, xml, target=TARGET, *, parent=False, version=446, package=P):
+        clock = Clock()
+        clock.now = 0.
+        device = Device(xml, clock=clock, version=version, package=package)
+        with patch.object(nav, 'time', clock), patch.object(nav, 'log'):
+            baseline = composer_signal_parent_state() if parent else nav._dm_446_thread_state
+            with patch.object(nav, '_dm_446_thread_state', baseline):
+                state, snap = nav.detect_dm_thread_state(device, target, pkg=package)
+        return state, snap, (device.reads, device.currents, device.dimensions, clock.now)
+
+    def test_positive_signal_changes_only_projection_not_a0_reads_or_deadlines(self):
+        for name in ('B_37_new_thread_search', 'B_62_profile_message'):
+            with self.subTest(fixture=name):
+                old = self.observe(fixture(name), parent=True)
+                new = self.observe(fixture(name))
+                self.assertEqual(new[0], 'empty_new_thread')
+                self.assertEqual(new[1]['composer_signal'],
+                                 'resource_id_exact_composer_pkg+contextual_composer:thread')
+                self.assertEqual(old[1]['composer_signal'], 'contextual_composer')
+                self.assertEqual(old[2], new[2])
+                self.assertEqual({k: v for k, v in old[1].items() if k != 'composer_signal'},
+                                 {k: v for k, v in new[1].items() if k != 'composer_signal'})
+                self.assertGreaterEqual(new[2][3], 0.8)
+
+    def test_missing_ambiguous_and_occluded_editor_keep_exact_refusal(self):
+        xml = fixture('B_37_new_thread_search')
+        cases = {
+            'missing': mutate(xml, lambda r: node(r, ui.COMPOSER).set('resource-id', P+':id/search_edit_text')),
+            'ambiguous': mutate(xml, lambda r: r.append(ET.fromstring(ET.tostring(node(r, ui.COMPOSER))))),
+            'disabled': mutate(xml, lambda r: node(r, ui.COMPOSER).set('enabled', 'false')),
+            'occluded': DATA['dm_ui_phase_b1/anonymous_overlay_inside_history']['xml'],
+        }
+        for label, value in cases.items():
+            with self.subTest(case=label):
+                old = self.observe(value, parent=True)
+                new = self.observe(value)
+                self.assertEqual(old, new)
+                self.assertEqual(new[0], 'unknown')
+                self.assertFalse(new[1]['composer_visible'])
+                self.assertNotIn('resource_id_exact_composer_pkg', new[1]['composer_signal'])
+
+    def test_identity_and_history_refusals_cannot_admit_fast_path(self):
+        from dm_sender_engine import _thread_snapshot_supports_composer_fast_path
+        for name, target, expected in (
+            ('B_37_new_thread_search', 'wrong_recipient', 'unknown'),
+            ('B_37_new_thread_search', '', 'unknown'),
+            ('B_30_existing_thread', TARGET, 'existing_thread')):
+            with self.subTest(fixture=name, target=target):
+                old = self.observe(fixture(name), target, parent=True)
+                new = self.observe(fixture(name), target)
+                self.assertEqual(new[0], expected)
+                self.assertEqual(old[2], new[2])
+                self.assertEqual({k: v for k, v in old[1].items() if k != 'composer_signal'},
+                                 {k: v for k, v in new[1].items() if k != 'composer_signal'})
+                self.assertFalse(_thread_snapshot_supports_composer_fast_path(
+                    new[1], dm_type='outreach', thread_state=new[0])[0])
+
+    def test_372_projection_and_no_new_reads_are_identical_to_parent(self):
+        for name in ('A_30_new_thread_search', 'A_24_existing_thread'):
+            with self.subTest(fixture=name):
+                old = self.observe(fixture(name), parent=True, version=372,
+                                   package='com.instagram.androig')
+                new = self.observe(fixture(name), version=372, package='com.instagram.androig')
+                self.assertEqual(old, new)
+                self.assertEqual(new[2][0], 0)
+
+

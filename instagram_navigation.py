@@ -8469,7 +8469,9 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s, *, _profile_i
             if observation is not None:
                 observation["classifier"] = dict(state=state, reason=proof.get("reason"))
             snap.update(proof, composer_visible=composer["visible"],
-                        composer_signal=composer["reason"])
+                        composer_signal=("resource_id_exact_composer_pkg+contextual_composer:"
+                                         + composer["context"] if composer["visible"]
+                                         else composer["reason"]))
             if state == "existing_thread":
                 snap.update(thread_state=state, has_history=True, has_history_signal=True,
                             draft_only_fast=False)

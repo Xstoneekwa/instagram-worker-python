@@ -949,3 +949,135 @@ class DmSendButtonSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ComposerSignalConsumerIntegrationTests(unittest.TestCase):
+    """Real A0 snapshot and strict finder; only the offline transport is fake."""
+
+    def exercise(self, *, parent=False, dm_type='outreach', damage=None,
+                 blocked=False, focus_error=False, false_snapshot=False):
+        from test_dm_446_readers import (
+            Device, Selector, Clock, P, TARGET, fixture, mutate, node, ui,
+            composer_signal_parent_state)
+        import xml.etree.ElementTree as ET
+
+        clock = Clock()
+        clock.now = 0.
+
+        class OfflineSelector(Selector):
+            def click(self):
+                self.d.actions.append('focus')
+                if focus_error:
+                    raise RuntimeError('controlled_focus_failure')
+
+        class DiagnosticSelector:
+            def __init__(self, device, word):
+                self.device, self.word = device, word
+
+            def exists(self, **kw):
+                self.device.audit.append((self.word, kw))
+                # Synthetic RPC cost: an accounting test, not a device benchmark.
+                clock.now += 0.25
+                return False
+
+        class OfflineDevice(Device):
+            def __init__(self):
+                super().__init__(fixture('B_37_new_thread_search'), clock=clock)
+                self.audit, self.actions, self.selectors = [], [], []
+
+            def __call__(self, **kw):
+                if 'descriptionContains' in kw:
+                    return DiagnosticSelector(self, kw['descriptionContains'])
+                self.selectors.append(kw)
+                return OfflineSelector(self, kw)
+
+        device = OfflineDevice()
+        with patch.object(nav, 'time', clock), patch.object(dm_sender_engine, 'time', clock), \
+                patch.object(nav, 'log'), patch.object(dm_sender_engine, 'log'):
+            implementation = composer_signal_parent_state() if parent else nav._dm_446_thread_state
+            with patch.object(nav, '_dm_446_thread_state', implementation):
+                state, snap = nav.detect_dm_thread_state(device, TARGET, pkg=P)
+            self.assertEqual(state, 'empty_new_thread')
+            if false_snapshot:
+                snap['composer_visible'] = False
+            if damage == 'missing':
+                device.xmls = ['<hierarchy/>']
+            elif damage == 'disabled':
+                device.live = mutate(device.last, lambda r: node(r, ui.COMPOSER).set('enabled', 'false'))
+            elif damage == 'duplicate':
+                device.live = mutate(device.last, lambda r: r.append(
+                    ET.fromstring(ET.tostring(node(r, ui.COMPOSER)))))
+            elif damage == 'geometry':
+                device.live = mutate(device.last, lambda r: node(r, ui.COMPOSER).set('bounds', '[0,0][1,1]'))
+            elif damage == 'foreground':
+                device.package = 'foreign.package'
+            start, reads, currents = clock.now, device.reads, device.currents
+            device.selectors.clear()
+            with patch.object(dm_sender_engine, '_check_dm_sender_permission_blocker',
+                              return_value=blocked) as blocker, \
+                    patch.object(dm_sender_engine, '_dm_find_focus_composer',
+                                 wraps=nav._dm_find_focus_composer) as strict:
+                editor, reason = dm_sender_engine._resolve_dm_text_composer(
+                    device, pkg=P, username=TARGET, caller='offline_projection_contract',
+                    dm_type=dm_type, thread_state=state, thread_snapshot=snap)
+                result = dict(success=editor is not None, reason=reason,
+                              strict_calls=strict.call_count, blocker_calls=blocker.call_args_list,
+                              actions=list(device.actions), audit=list(device.audit),
+                              selectors=list(device.selectors), reads=device.reads-reads,
+                              currents=device.currents-currents, elapsed=clock.now-start)
+            # Never retain the device/mock identity in cross-run comparisons.
+            result['blocker_calls'] = [c.kwargs for c in result['blocker_calls']]
+        return result
+
+    def test_real_snapshot_removes_only_eight_log_probes_with_controlled_cost(self):
+        old, new = self.exercise(parent=True), self.exercise()
+        self.assertTrue(new['success'])
+        self.assertIsNone(new['reason'])
+        self.assertEqual([x[0] for x in old['audit']],
+                         ['Photo', 'Gallery', 'Image', 'Media', 'Attach', 'Camera', 'Microphone', 'Voice'])
+        self.assertEqual([x[1] for x in old['audit']], [dict(timeout=0.04)]*8)
+        self.assertEqual(new['audit'], [])
+        self.assertAlmostEqual(old['elapsed']-new['elapsed'], 8*0.25)
+        self.assertEqual(new['actions'], ['focus'])
+        self.assertEqual(new['strict_calls'], 2)
+        self.assertGreaterEqual(new['reads'], 4)
+        self.assertEqual({k: v for k, v in old.items() if k not in ('audit', 'elapsed')},
+                         {k: v for k, v in new.items() if k not in ('audit', 'elapsed')})
+
+    def test_stale_positive_snapshot_never_replaces_fresh_strict_finder(self):
+        for damage in ('missing', 'disabled', 'duplicate', 'geometry', 'foreground'):
+            with self.subTest(damage=damage):
+                new = self.exercise(damage=damage)
+                self.assertFalse(new['success'])
+                self.assertEqual(new['reason'], 'draft_composer_not_resolved')
+                self.assertEqual(new['strict_calls'], 1)
+                self.assertEqual(new['actions'], [])
+                self.assertEqual(new['audit'], [])
+
+    def test_false_snapshot_preserves_audit_and_cannot_approve_invalid_editor(self):
+        result = self.exercise(false_snapshot=True, damage='disabled')
+        self.assertEqual(len(result['audit']), 8)
+        self.assertEqual(result['strict_calls'], 1)
+        self.assertEqual(result['reason'], 'draft_composer_not_resolved')
+        self.assertEqual(result['actions'], [])
+
+    def test_permission_blocker_still_precedes_any_audit_finder_or_focus(self):
+        old, new = self.exercise(parent=True, blocked=True), self.exercise(blocked=True)
+        self.assertEqual(old, new)
+        self.assertEqual(new['reason'], 'unexpected_permission_dialog')
+        self.assertEqual((new['strict_calls'], new['audit'], new['actions']), (0, [], []))
+
+    def test_focus_exception_keeps_existing_refusal_without_second_finder(self):
+        old, new = self.exercise(parent=True, focus_error=True), self.exercise(focus_error=True)
+        self.assertEqual(new['reason'], 'composer_focus_failed')
+        self.assertEqual((new['strict_calls'], new['actions']), (1, ['focus']))
+        self.assertEqual({k: v for k, v in old.items() if k not in ('audit', 'elapsed')},
+                         {k: v for k, v in new.items() if k not in ('audit', 'elapsed')})
+
+    def test_welcome_does_not_use_outreach_snapshot_optimization(self):
+        old, new = self.exercise(parent=True, dm_type='welcome'), self.exercise(dm_type='welcome')
+        self.assertEqual(old, new)
+        self.assertEqual(len(new['audit']), 8)
+        self.assertEqual(new['strict_calls'], 2)
+        self.assertTrue(new['success'])
+
