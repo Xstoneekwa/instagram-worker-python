@@ -9,6 +9,102 @@ from outreach_measurements import validate_policy
 import test_outreach_slot_contract as v1tests
 
 
+class NativeTimestampTests(unittest.TestCase):
+    @staticmethod
+    def context():
+        fixture = v1tests.SlotTests()
+        fixture.setUp()
+        ctx = {**fixture.ctx, 'slot_start': '2026-11-02T21:12:55.18838+00:00',
+               'slot_end': '2026-11-02T21:52:55.18838+00:00'}
+        ctx['execution_policy'] = {
+            **ctx['execution_policy'], 'mode': 'bootstrap', 'slot_id': ctx['slot_id'],
+            'target_dm': ctx['target_dm'], 'cleanup_grace_ms': 30000,
+            'approved_at': '2026-11-02T21:09:08.77635+00:00',
+            'expires_at': '2026-11-03T21:09:08.77635+00:00'}
+        return ctx
+
+    def test_native_five_digit_policy_and_dispatcher_deadlines(self):
+        from outreach_measurements import stamp, dispatcher_deadlines
+        ctx = self.context()
+        now = datetime(2026, 11, 2, 21, 13, tzinfo=timezone.utc)
+        self.assertEqual(stamp(ctx['execution_policy']['approved_at']),
+                         datetime(2026, 11, 2, 21, 9, 8, 776350, timezone.utc).timestamp())
+        with patch('outreach_measurements.datetime') as date:
+            date.now.return_value = now
+            out = dispatcher_deadlines(ctx)
+        self.assertEqual(out, {
+            'BUSINESS_ACTION_DEADLINE': ctx['slot_end'],
+            'SCHEDULED_SESSION_START': ctx['slot_start'],
+            'SCHEDULED_SESSION_END': '2026-11-02T21:53:25.188380+00:00'})
+
+    def test_zero_through_six_fraction_digits_and_timezone_equivalence(self):
+        from outreach_measurements import stamp
+        for fraction in ('', '.1', '.12', '.123', '.1234', '.12345', '.123456'):
+            micro = int((fraction[1:] + '000000')[:6])
+            expected = datetime(2026, 11, 2, 21, 9, 8, micro, timezone.utc).timestamp()
+            for value in ('2026-11-02T21:09:08'+fraction+'Z',
+                          '2026-11-02 21:09:08'+fraction+'+00:00',
+                          '2026-11-02T23:09:08'+fraction+'+0200',
+                          '2026-11-02T18:09:08'+fraction+'-03:00'):
+                with self.subTest(value=value):
+                    self.assertEqual(stamp(value), expected)
+
+    def test_invalid_inputs_refused_with_safe_reason(self):
+        from outreach_measurements import stamp
+        for value in (None, 123, float('nan'), '', 'infinity', '2026-11-02',
+                      '2026-11-02T21:09:08', '2026-02-30T00:00:00Z',
+                      '2026-11-02T21:09:60Z', '2026-11-02T21:09:08+24:00',
+                      '2026-11-02T21:09:08+02:60', '2026-11-02T21:09:08.1234567Z',
+                      '2026-11-02T21:09:08+00'):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, '^measurement_timestamp_invalid$'):
+                stamp(value)
+
+    def test_microsecond_expiry_and_approval_boundaries(self):
+        from outreach_measurements import stamp
+        ctx = self.context()
+        approved = stamp(ctx['execution_policy']['approved_at'])
+        expires = stamp(ctx['execution_policy']['expires_at'])
+        for instant, allowed in ((approved-.000001, False), (approved, True),
+                                 (expires-.000001, True), (expires, False),
+                                 (expires+.000001, False)):
+            with self.subTest(instant=instant):
+                if allowed:
+                    self.assertIs(validate_policy(ctx, instant), ctx['execution_policy'])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'invalid_or_stale'):
+                        validate_policy(ctx, instant)
+        ctx['execution_policy']['expires_at'] = '2026-11-02T21:52:55.188379Z'
+        with self.assertRaisesRegex(ValueError, 'invalid_or_stale'):
+            validate_policy(ctx, approved)
+        ctx['execution_policy']['expires_at'] = ctx['slot_end']
+        validate_policy(ctx, approved)
+
+    def test_policy_refusals_and_normal_measurement_instants_preserved(self):
+        ctx = self.context()
+        now = datetime(2026, 11, 2, 21, 13, tzinfo=timezone.utc).timestamp()
+        for changes in ({'authority': 'metadata'}, {'approval_id': ''},
+                        {'device_id': 'other'}, {'slot_id': 'other'}, {'mode': 'unknown'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_policy({**ctx, 'execution_policy': {
+                    **ctx['execution_policy'], **changes}}, now)
+        ctx['execution_policy'].update(mode='normal',
+            observed_at='2026-11-02T21:09:08.77635+00:00')
+        validate_policy(ctx, now)
+        ctx['execution_policy']['observed_at'] = '2026-11-02T21:09:08.776351Z'
+        with self.assertRaisesRegex(ValueError, 'provenance'):
+            validate_policy(ctx, now)
+
+    def test_strict_parser_and_reconciliation_io_not_reimplemented(self):
+        from outreach_measurements import stamp
+        from reconciliation_scan import parse_reconciliation_timestamp
+        with patch('reconciliation_scan.parse_reconciliation_timestamp',
+                   wraps=parse_reconciliation_timestamp) as parser:
+            stamp('2026-11-02T21:09:08.77635Z')
+        parser.assert_called_once_with('2026-11-02T21:09:08.77635Z')
+
+
+
 def actual_function(file, name, env):
     node=next(n for n in ast.parse(Path(file).read_text()).body if isinstance(n,ast.FunctionDef) and n.name==name)
     module=ast.Module(body=[ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0),node],type_ignores=[])

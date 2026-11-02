@@ -14,10 +14,11 @@ def sender_identity():
 
 
 def stamp(value):
-    dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        raise ValueError('measurement_timestamp_invalid')
-    return dt.timestamp()
+    from reconciliation_scan import parse_reconciliation_timestamp
+    try:
+        return parse_reconciliation_timestamp(value).timestamp()
+    except ValueError as exc:
+        raise ValueError('measurement_timestamp_invalid') from exc
 
 
 def validate_policy(context, now):
@@ -61,8 +62,9 @@ def validate_policy(context, now):
 
 def dispatcher_deadlines(context):
     from datetime import timedelta
+    from reconciliation_scan import parse_reconciliation_timestamp
     p = validate_policy(context, datetime.now().astimezone().timestamp())
-    end = datetime.fromisoformat(context['slot_end'].replace('Z', '+00:00'))
+    end = parse_reconciliation_timestamp(context['slot_end'])
     return {'BUSINESS_ACTION_DEADLINE': context['slot_end'],
             'SCHEDULED_SESSION_START': context['slot_start'],
             'SCHEDULED_SESSION_END': (end + timedelta(milliseconds=p['cleanup_grace_ms'])).isoformat()}

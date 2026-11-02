@@ -12,11 +12,9 @@ class SlotBlocked(RuntimeError):
 _ACTIVE: SlotBudget | None = None
 
 def _timestamp(value: Any) -> float:
+    from reconciliation_scan import parse_reconciliation_timestamp
     try:
-        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-        if dt.tzinfo is None:
-            raise ValueError('timezone missing')
-        return dt.timestamp()
+        return parse_reconciliation_timestamp(value).timestamp()
     except (ValueError, TypeError):
         raise SlotBlocked('outreach_slot_timestamp_invalid')
 

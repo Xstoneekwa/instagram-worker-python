@@ -1992,3 +1992,209 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutreachPreSpawnTimestampTests(unittest.TestCase):
+    """Actual consumer and completion wrapper; all IO is isolated at its boundary."""
+    class ReachedSpawn(BaseException):
+        pass
+
+    def setUp(self):
+        from contextlib import ExitStack
+        from test_outreach_slot_v2 import NativeTimestampTests
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.directory = self.stack.enter_context(tempfile.TemporaryDirectory(
+            prefix="outreach-prespawn-test-", dir="/private/tmp"))
+        self.cfg = consumer.DispatcherConfig(
+            enabled=True, health_only=False, launch_enabled=True,
+            worker_id="run-dispatcher:test", poll_seconds=5, lease_seconds=120,
+            heartbeat_seconds=20, allowed_run_types=["outreach_session"],
+            test_account_ids=set(), subprocess_timeout_seconds=7200,
+            require_assignment=True, enforce_assignment_window=False)
+        self.binding = _canonical_device_lease(self.cfg.worker_id)
+        self.successor = _canonical_device_lease(self.cfg.worker_id, transferred=True)
+        self.slot = NativeTimestampTests.context()
+        self.ctx = dict(assignment_found=True, assignment_id="assignment-1",
+                        account_id=TEST_ACCOUNT_ID, device_id=self.binding["device_id"],
+                        app_instance_id="app-instance-1", adb_serial="SYNTHETIC",
+                        package_name="com.instagram.android", outreach_slot_v1=self.slot)
+        self.request = dict(id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID,
+                            requested_run_type="outreach_session", status="claimed",
+                            metadata_safe={"device_lock_binding": self.binding})
+        self.row = dict(id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID, run_id=None,
+                        claimed_by=self.cfg.worker_id, status="starting",
+                        lease_expires_at="2026-11-02T21:15:00Z")
+        self.fault = None
+        self.readback_override = None
+        self.patches = {}
+        targets = {
+            "_account_is_launch_allowed": (True, None),
+            "_load_package_runtime_contract": (True, "ready", {}),
+            "mark_account_run_request_starting": True,
+            "_validate_assignment": (True, None, self.ctx),
+            "evaluate_queued_run_commercial_policy": (True, None, {}),
+            "_load_account_protection_snapshot": (True, "ready", '{"ok":true}', {}),
+            "transfer_device_lock": {"ok": True, "transferred": True, **self.successor},
+            "release_device_lock": {"ok": True, "released": True, **self.successor},
+            "_heartbeat": None, "_runner_runtime_identity_env": {},
+            "runner_subprocess_env": {}, "log": None, "_audit": None,
+            "clear_cooperative_stop_context": None,
+            "runtime_home": Path(self.directory), "_integration_noop_runner_enabled": False,
+        }
+        for name, value in targets.items():
+            self.patches[name] = self.stack.enter_context(
+                patch.object(consumer, name, return_value=value))
+        self.spawn = self.stack.enter_context(patch.object(
+            consumer, "_fleet_spawn_or_legacy", side_effect=self.ReachedSpawn))
+        self.rpc = self.stack.enter_context(patch.object(
+            consumer.supabase_client, "call_rpc_once", side_effect=self.complete))
+        self.read = self.stack.enter_context(patch.object(
+            consumer, "get_account_run_request", side_effect=lambda *a, **k:
+            dict(self.row) if self.readback_override is None else self.readback_override))
+        self.stack.enter_context(patch.object(
+            consumer.subprocess, "Popen", side_effect=AssertionError("no process")))
+        date = self.stack.enter_context(patch("outreach_measurements.datetime"))
+        date.now.return_value = datetime(2026, 11, 2, 21, 13, tzinfo=timezone.utc)
+
+    def complete(self, name, params, **kwargs):
+        self.assertEqual(name, "complete_account_run_request")
+        self.assertEqual(params["p_request_id"], TEST_REQUEST_ID)
+        self.assertEqual(params["p_worker_id"], self.cfg.worker_id)
+        self.assertEqual(params["p_status"], "blocked")
+        self.assertEqual(kwargs, {"timeout_seconds": 5.0})
+        if self.fault == "before_commit":
+            raise ConnectionError("synthetic transport unavailable")
+        if self.fault == "owner_cancel":
+            self.row.update(status="canceled", lease_expires_at=None,
+                            cancel_reason="botapp_manual_stop")
+            return None  # Canonical complete RPC does not overwrite canceled.
+        self.row.update(status="blocked", lease_expires_at=None,
+                        error_code=params["p_error_code"])
+        if self.fault == "after_commit":
+            raise ConnectionError("synthetic response lost")
+        if self.fault == "wrong_response":
+            return {**self.row, "id": TEST_RUN_ID}
+        return dict(self.row)
+
+    def invalid(self):
+        self.slot["execution_policy"]["approved_at"] = "not-a-timestamp"
+
+    def handle(self):
+        consumer._handle_claimed_request(self.cfg, self.request)
+
+    def test_native_valid_timestamp_reaches_unchanged_spawn_once(self):
+        with self.assertRaises(self.ReachedSpawn):
+            self.handle()
+        self.spawn.assert_called_once()
+        env = self.spawn.call_args.args[3]
+        self.assertEqual(env["BUSINESS_ACTION_DEADLINE"], self.slot["slot_end"])
+        self.assertEqual(env["SCHEDULED_SESSION_END"], "2026-11-02T21:53:25.188380+00:00")
+        self.rpc.assert_not_called()
+        self.patches["release_device_lock"].assert_not_called()
+
+    def test_invalid_timestamp_terminal_once_exact_owned_lease_no_spawn(self):
+        self.invalid()
+        self.handle()
+        self.rpc.assert_called_once()
+        self.spawn.assert_not_called()
+        self.assertEqual(self.row["status"], "blocked")
+        self.assertEqual(self.row["error_code"], "measurement_timestamp_invalid")
+        self.assertIsNone(self.row["lease_expires_at"])
+        self.patches["release_device_lock"].assert_called_once_with(
+            device_id=self.binding["device_id"], worker_id=self.cfg.worker_id,
+            request_id=TEST_REQUEST_ID, expected_lease_id=self.successor["lease_id"],
+            account_id=TEST_ACCOUNT_ID)
+        # Canonical reclaim only requeues claimed/starting with expired lease
+        # and no RUN/cancellation. This terminal row is never a retry candidate.
+        for later in (120, 900, 2400):
+            with self.subTest(seconds_after=later):
+                self.assertNotIn(self.row["status"], ("claimed", "starting", "queued"))
+        logs = [c for c in self.patches["log"].call_args_list
+                if c.args[1] == "outreach_pre_spawn_policy_rejected"]
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].kwargs["phase"], "dispatcher_deadlines")
+        self.assertEqual(logs[0].kwargs["reason"], "measurement_timestamp_invalid")
+
+    def test_owner_cancel_race_not_overwritten_and_exact_lease_released(self):
+        self.invalid()
+        self.fault = "owner_cancel"
+        self.handle()
+        self.rpc.assert_called_once()
+        self.assertEqual(self.row["status"], "canceled")
+        self.assertEqual(self.row["cancel_reason"], "botapp_manual_stop")
+        self.read.assert_called_once_with(TEST_REQUEST_ID, bounded_pre_device=True)
+        self.spawn.assert_not_called()
+        self.patches["release_device_lock"].assert_called_once()
+
+    def test_lost_completion_response_uses_existing_readback_without_retry(self):
+        self.invalid()
+        self.fault = "after_commit"
+        self.handle()
+        self.rpc.assert_called_once()
+        self.read.assert_called_once_with(TEST_REQUEST_ID, bounded_pre_device=True)
+        self.patches["release_device_lock"].assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_completion_transport_failure_remains_unconfirmed_no_spawn(self):
+        self.invalid()
+        self.fault = "before_commit"
+        with self.assertRaises(ConnectionError):
+            self.handle()
+        self.rpc.assert_called_once()
+        self.spawn.assert_not_called()
+        self.patches["release_device_lock"].assert_not_called()
+        self.assertEqual(self.row["status"], "starting")
+        self.assertTrue(any(c.kwargs.get("reason") == "measurement_timestamp_invalid"
+                            for c in self.patches["log"].call_args_list))
+
+    def test_foreign_completion_response_is_not_a_terminal_proof(self):
+        self.invalid()
+        self.fault = "wrong_response"
+        with self.assertRaisesRegex(RuntimeError, "terminal_unconfirmed"):
+            self.handle()
+        self.rpc.assert_called_once()
+        self.spawn.assert_not_called()
+        self.patches["release_device_lock"].assert_not_called()
+
+    def test_unconfirmed_exact_release_cannot_report_success(self):
+        self.invalid()
+        self.patches["release_device_lock"].return_value = {
+            "ok": False, "released": False, "reason": "device_lock_generation_mismatch"}
+        with self.assertRaisesRegex(RuntimeError, "device_lease_release_unconfirmed"):
+            self.handle()
+        self.assertEqual(self.row["status"], "blocked")
+        self.patches["release_device_lock"].assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_other_deterministic_policy_refusal_is_precise(self):
+        self.slot["execution_policy"]["device_id"] = "wrong"
+        self.handle()
+        self.assertEqual(self.row["error_code"], "outreach_policy_binding_mismatch")
+        self.rpc.assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_unexpected_valueerror_text_is_not_exposed(self):
+        self.slot["attempt_id"] = "PRIVATE_UNTRUSTED_VALUE"
+        self.handle()
+        self.assertEqual(self.row["error_code"], "outreach_policy_invalid")
+        self.assertNotIn("PRIVATE_UNTRUSTED_VALUE", str(self.rpc.call_args))
+        self.spawn.assert_not_called()
+
+    def test_unrelated_transient_deadline_exception_not_terminalized(self):
+        with patch("outreach_measurements.dispatcher_deadlines",
+                   side_effect=ConnectionError("synthetic unrelated IO")):
+            with self.assertRaises(ConnectionError):
+                self.handle()
+        self.rpc.assert_not_called()
+        self.patches["release_device_lock"].assert_not_called()
+        self.spawn.assert_not_called()
+
+    def test_non_outreach_path_does_not_call_outreach_deadlines(self):
+        self.ctx.pop("outreach_slot_v1")
+        with patch("outreach_measurements.dispatcher_deadlines") as deadline:
+            with self.assertRaises(self.ReachedSpawn):
+                self.handle()
+        deadline.assert_not_called()
+        self.rpc.assert_not_called()
+        self.spawn.assert_called_once()

@@ -4446,7 +4446,49 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     if dispatch_ctx.get("outreach_slot_v1"):
         slot = dispatch_ctx["outreach_slot_v1"]
         from outreach_measurements import dispatcher_deadlines
-        deadline_env = dispatcher_deadlines(slot)
+        try:
+            deadline_env = dispatcher_deadlines(slot)
+        except ValueError as exc:
+            # A deterministic policy refusal is terminal before spawn, not a
+            # stale starting request for the natural lease reclaimer to retry.
+            reason = str(exc)
+            if reason not in {
+                "measurement_timestamp_invalid", "outreach_measurements_required",
+                "outreach_policy_binding_mismatch", "outreach_policy_invalid_or_stale",
+                "outreach_bootstrap_scope_invalid", "outreach_measurement_provenance_invalid",
+                "outreach_mode_invalid", "outreach_policy_invalid",
+            }:
+                reason = "outreach_policy_invalid"
+            log("warning", "outreach_pre_spawn_policy_rejected",
+                account_id=account_id, request_id=request_id, reason=reason,
+                phase="dispatcher_deadlines", worker_spawned=False, device_actions_started=False)
+            terminal = _safe_complete_account_run_request(
+                request_id, cfg.worker_id, "blocked", error_code=reason,
+                error_message_safe=f"Outreach policy rejected before Worker spawn: {reason}.",
+                bounded_control_plane=True)
+            if not terminal:
+                # The owner may have canceled between validation and completion.
+                terminal = get_account_run_request(request_id, bounded_pre_device=True) or {}
+            if (terminal.get("id") != request_id or terminal.get("account_id") != account_id
+                    or terminal.get("run_id") is not None or terminal.get("lease_expires_at") is not None
+                    or not (terminal.get("status") == "canceled"
+                            or (terminal.get("status") == "blocked"
+                                and terminal.get("claimed_by") == cfg.worker_id
+                                and terminal.get("error_code") == reason))):
+                raise RuntimeError("outreach_pre_spawn_terminal_unconfirmed") from exc
+            if device_id and device_lock_active:
+                released = release_device_lock(
+                    device_id=device_id, worker_id=lock_owner_worker_id,
+                    request_id=request_id, expected_lease_id=device_lock_binding["lease_id"],
+                    account_id=account_id)
+                if not released or released.get("ok") is not True or released.get("released") is not True:
+                    raise RuntimeError("outreach_pre_spawn_device_lease_release_unconfirmed") from exc
+            _audit(account_id=account_id, action_type="manual_run_blocked",
+                   status=terminal["status"],
+                   message=f"Outreach policy rejected before Worker spawn: {reason}.",
+                   payload={"request_id": request_id, "run_type": run_type,
+                            "reason": reason, "phase": "dispatcher_deadlines"})
+            return
 
     cooperative_stop_context: StopContext | None = None
     cooperative_stop_diagnostics: dict[str, Any] = {}

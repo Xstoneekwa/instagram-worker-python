@@ -4,6 +4,50 @@ from pathlib import Path
 from datetime import datetime, timezone
 from outreach_slot_contract import SlotBudget, SlotBlocked
 
+
+class NativeSlotTimestampTests(unittest.TestCase):
+    def budget(self, **changes):
+        fixture = SlotTests()
+        fixture.setUp()
+        ctx = {**fixture.ctx, 'slot_start': '2026-11-02T21:12:55.18838+00:00',
+               'slot_end': '2026-11-02T21:52:55.18838+00:00', **changes}
+        wall = datetime(2026, 11, 2, 21, 12, 55, 188380, timezone.utc).timestamp()
+        self.clock = {'wall': wall, 'mono': 0}
+        return SlotBudget(ctx, wall=lambda: self.clock['wall'],
+                          monotonic=lambda: self.clock['mono'])
+
+    def test_native_context_keeps_exact_40_minutes(self):
+        b = self.budget()
+        self.assertEqual(b.end-b.start, 2400)
+        self.assertEqual(b.remaining_ms(), 2400000)
+        self.clock['wall'] += 2399.999
+        self.clock['mono'] += 2399.999
+        self.assertGreater(b.remaining_ms(), 0)
+        self.clock['wall'] += .001
+        self.clock['mono'] += .001
+        self.assertEqual(b.remaining_ms(), 0)
+
+    def test_native_context_clock_rollback_cannot_extend(self):
+        b = self.budget()
+        self.clock['wall'] -= 300
+        self.clock['mono'] = 2400
+        self.assertEqual(b.remaining_ms(), 0)
+
+    def test_invalid_native_context_keeps_exact_slot_reason(self):
+        for value in ('not-a-date', '2026-11-02T21:52:55.1883801Z',
+                      '2026-11-02T21:52:55', None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    SlotBlocked, '^outreach_slot_timestamp_invalid$'):
+                # Exercise the actual parser directly when a missing field
+                # would correctly fail the earlier missing-context predicate.
+                from outreach_slot_contract import _timestamp
+                _timestamp(value)
+
+    def test_native_context_wrong_duration_still_refused(self):
+        with self.assertRaisesRegex(SlotBlocked, '^outreach_slot_contract_invalid$'):
+            self.budget(slot_end='2026-11-02T21:52:55.188381+00:00')
+
+
 class Clock:
     def __init__(self): self.now=datetime(2026,9,15,8,tzinfo=timezone.utc).timestamp(); self.mono=0
     def advance(self,s): self.now+=s;self.mono+=s
