@@ -9,7 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 
 
-def classify_dm_history(hierarchy: str, package: str, expected_username: str | None = None, *, surface_context=None) -> tuple[str, dict]:
+def classify_dm_history(hierarchy: str, package: str, expected_username: str | None = None, *, surface_context=None, profile_identity=None) -> tuple[str, dict]:
     evidence = {"history_signal_type": "", "empty_signal_type": ""}
 
     def unknown(reason):
@@ -50,8 +50,8 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
                 if n.get("text", "").strip()]
 
     def intro(row):
-        if extension and row is extension['intro']:
-            return "compose_recipient_intro"
+        if extension:
+            return "compose_recipient_intro" if row is extension['intro'] else ""
         ids = {rid(n) for n in row.iter()}
         if {"user_avatar", "other_user_full_name_or_username", "network_attribution"} <= ids:
             if ids <= {"", "user_avatar", "other_user_full_name_or_username", "network_attribution"} and all(not n.get("text", "").strip() or rid(n) in {
@@ -120,6 +120,22 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
     # list. An unrecognized row, timestamp, spinner, banner or media remains UNKNOWN.
     if len(rows) != 1 or len(intro_rows) != 1:
         return unknown("no_positive_empty_structure")
+    if extension is not None:
+        if rows[0] is not extension['intro'] or not extension['empty_surface']:
+            return unknown("structural_intro_or_empty_composer_unproved")
+        # Username-role subtitle is independent of descriptive card text.
+        # Generic Business titles need the exact, current profile transition
+        # projected by the existing navigation boundary, never expected intent.
+        identity = extension['identity']
+        if identity is None:
+            if not expected_username or _normalized_identity(profile_identity or "") != _normalized_identity(expected_username):
+                return unknown("exact_profile_transition_unproved")
+        elif not expected_username or _normalized_identity(identity[1]) != _normalized_identity(expected_username):
+            return unknown("recipient_target_mismatch")
+        return "empty_new_thread", dict(evidence, empty_signal_type="recipient_intro_only_with_new_thread_context", reason="positive_empty_structure")
+    if (type(surface_context) is tuple and surface_context[:2] == ('446.0.0.49.77', 385211304)
+            and len(root) > 1):
+        return unknown("conversation_path_unqualified")
     # Empty proof is stricter than positive history recognition. Preserve R01/R02.
     identity = extension['identity'] if extension and rows[0] is extension['intro'] else _empty_intro_identity(rows[0], package)
     if identity is None:

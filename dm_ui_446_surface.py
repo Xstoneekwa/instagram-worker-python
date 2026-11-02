@@ -20,7 +20,7 @@ def match(n,s,values,outer=None,opaque_list=False,allow_no_tray=False):
   a=actual[k]
   if v=='$bool':
    if a not in ('true','false'):return False
-  elif v=='$draft':pass # widget identity only; never empty-draft or Send authority
+  elif v in ('$draft','$cosmetic'):pass # widget identity only; never empty-draft or Send authority
   elif v=='$clock':
    if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',a):return False
   elif v=='$stats':
@@ -35,6 +35,24 @@ def match(n,s,values,outer=None,opaque_list=False,allow_no_tray=False):
      and role(n[0])=='row_thread_composer_container'):
   return match(n[0],children[1],values,b,opaque_list,allow_no_tray)
  return len(n)==len(children) and all(match(c,t,values,b,opaque_list,allow_no_tray) for c,t in zip(n,children))
+def intro_card(n,model,values,outer):
+ # Only this positively delimited observed card has cosmetic leaves. No
+ # message-list wildcard: avatar, ancestry, attributes and controls stay exact.
+ if len(n)!=1 or len(n[0])<2:return False
+ body=n[0]
+ root_shape=[model['intro_root'][0],model['intro_root'][1],[]]
+ body_shape=[model['intro_body'][0],model['intro_body'][1],[]]
+ def shell(node,shape,parent):
+  shallow=ET.Element(node.tag,node.attrib)
+  return match(shallow,shape,values,parent)
+ if not shell(n,root_shape,outer) or not shell(body,body_shape,rect(n)):return False
+ if not match(body[0],model['intro_avatar'],values,rect(body)):return False
+ leaves=list(body)[1:]; controls=model['intro_community_controls']
+ if controls and len(leaves)>len(controls) and all(
+     match(node,shape,values,rect(body)) for node,shape in zip(leaves[-len(controls):],controls)):
+  leaves=leaves[:-len(controls)]
+ return bool(leaves) and all(match(node,model['intro_text'],values,rect(body)) for node in leaves)
+
 def qualify(root,package,target,context):
  if type(context) is not tuple or len(context)!=4 or context[:2]!=VERSION or any(type(v)is not int for v in context[1:]) or context[2:]!=(1080,2340) or package!=P:return None
  if root.tag!='hierarchy' or root.attrib!={'rotation':'0'} or len(root) not in (3,4) or (root.text or '').strip():return None
@@ -44,9 +62,7 @@ def qualify(root,package,target,context):
  if any(n is None for n in (title,sub,ml,ed,view,row)):return None
  handle=sub.get('content-desc','');name=title.get('text','')
  generic_business = handle == 'Business chat'
- if generic_business:
-  if target is not None and name.strip().casefold() != target.strip().casefold():return None
- elif not re.fullmatch(r'[A-Za-z0-9_.]+',handle):
+ if not generic_business and not re.fullmatch(r'[A-Za-z0-9_.]+',handle):
   return None
  if not name.strip() or name.strip().lower() in ('search','meta ai','search or ask meta ai') or (target is not None and not generic_business and target!=handle):return None
  values={'name':name,'handle':handle}
@@ -88,22 +104,18 @@ def qualify(root,package,target,context):
  if bar is not None and (not rect(bar) or rect(bar)[3]>vb[1]):return None
  if banner is not None and (not rect(banner) or rect(banner)[3]>rb[1]):return None
  send_button=one(app,'row_thread_composer_send_button_container')
- # Filled personal/business chrome can coincide. Bind the personal model to
- # its existing exact intro, rather than selecting a model by message text.
+ # Personal and Business can share identical physical chrome. Their observed
+ # alternatives are one canonical family, never a first-match semantic choice.
  matches=[k for k,s in SCHEMAS.items()
-          if any(match(app,t,values,opaque_list=True,allow_no_tray=True) for t in [s['app']]+s.get('app_alternates',[]))
-          and (k!='personal_mutual_sticker_empty' or send_button is None
-               or send_button.get('enabled')!='true'
-               or any(match(n,s['intro'],values,rect(ml)) for n in ml))]
+          if any(match(app,t,values,opaque_list=True,allow_no_tray=True)
+                 for t in [s['app']]+s.get('app_alternates',[]))]
  if len(matches)!=1:return None
- variant=matches[0];intro=[n for n in ml if match(n,SCHEMAS[variant]['intro'],values,rect(ml))]
- # The native filled personal intro exposes oversized layout bounds. Its
- # exact finite subtree proves the layout ancestors with their observed
- # attributes; it does not exempt text, images or unfamiliar nodes from F4.
- send_button=one(app,'row_thread_composer_send_button_container')
+ variant=matches[0]
+ intro=[n for n in ml if intro_card(n,SCHEMAS[variant],values,rect(ml))]
+ # Only positively qualified, noninteractive layout ancestors may overlap
+ # the expanded editor. Every leaf and unknown descendant still meets F4.
  intro_layouts=set()
- if (variant=='personal_mutual_sticker_empty' and len(intro)==1
-     and send_button is not None and send_button.get('enabled')=='true'):
+ if (len(intro)==1 and send_button is not None and send_button.get('enabled')=='true'):
   intro_layouts={n for n in intro[0].iter('node') if len(n)
                  and not n.get('text') and not n.get('content-desc')
                  and all(n.get(k)=='false' for k in ('clickable','focusable'))}
@@ -114,7 +126,7 @@ def qualify(root,package,target,context):
   if n.get('package')!=P or not b or 'dialog' in n.get('class','').lower():return None
   if (n.get('visible-to-user')!='false' and b[0]<eb[2] and eb[0]<b[2]
       and b[1]<eb[3] and eb[1]<b[3] and n not in intro_layouts):return None
- identity_handle = target if generic_business else handle
+ identity_handle = None if generic_business else handle
  send_button=one(app,'row_thread_composer_send_button_container')
- empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and ((send_button is None and variant in ('business_chat_sticker_empty','personal_mutual_sticker_empty')) or (send_button is not None and send_button.get('enabled')=='false'))
- return dict(variant=variant,identity=(name,identity_handle),intro=intro[0] if len(intro)==1 else None,empty_surface=empty_surface,bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')
+ empty_surface = ed.get('text')==ed.get('hint') and ed.get('hint') in SCHEMAS[variant].get('empty_hints',[SCHEMAS[variant]['hint']]) and (send_button is None or (send_button is not None and send_button.get('enabled')=='false'))
+ return dict(variant=variant,identity=(name,identity_handle) if identity_handle else None,generic_business=generic_business,intro=intro[0] if len(intro)==1 else None,empty_surface=empty_surface,bounds=dict(zip(('left','top','right','bottom'),eb)),app_viewport=vb,window_bounds=rect(app),focused=ed.get('focused')=='true')

@@ -7,8 +7,8 @@ F=json.loads((Path(__file__).parent/'fixtures/dm_446_current_surface.json').read
 class CurrentSurfaceTests(unittest.TestCase):
  def test_janecandika_business_chat_sticker_shape_v1_v6(self):
   j=F['janecandika']; x=j['xml']; ctx=tuple(j['context']); target=j['target']
-  self.assertEqual(s.qualify(ET.fromstring(x),s.P,target,ctx)['variant'],'business_chat_sticker_empty')
-  self.assertEqual(truth.classify_dm_history(x,s.P,target,surface_context=ctx)[0],'empty_new_thread')
+  self.assertEqual(s.qualify(ET.fromstring(x),s.P,target,ctx)['variant'],'thread')
+  self.assertEqual(truth.classify_dm_history(x,s.P,target,surface_context=ctx,profile_identity=target)[0],'empty_new_thread')
   cases=[('wrong_recipient',x,'wrong','unknown'),('no_target',x,'','unknown')]
   r=ET.fromstring(x); ml=next(n for n in r.iter('node') if s.role(n)=='message_list'); msg=ET.SubElement(ml,'node',{'resource-id':s.P+':id/message_content','class':'android.view.View','package':s.P,'bounds':'[100,1200][800,1300]'}); ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'existing message','bounds':'[110,1210][790,1290]'})
   cases.append(('real_history',ET.tostring(r,encoding='unicode'),target,'existing_thread'))
@@ -18,7 +18,7 @@ class CurrentSurfaceTests(unittest.TestCase):
    with self.subTest(case=name): self.assertEqual(truth.classify_dm_history(xml,s.P,target_i,surface_context=ctx)[0],expected)
  def test_janecandika_reader_excludes_only_qualified_sticker_tray(self):
   j=F['janecandika']; clock=Clock(); d=Device(j['xml'],clock=clock)
-  with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None): state,proof=nav.detect_dm_thread_state(d,j['target'],pkg=s.P)
+  with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None): state,proof=nav.detect_dm_thread_state(d,j['target'],pkg=s.P,_profile_identity=dict(device=d,context=nav._dm_446_context(d),username=j['target'],transition=True))
   self.assertEqual(state,'empty_new_thread'); self.assertEqual(proof['reason'],'a0_history_probe_completed')
  def test_exact_retained_xml(self):
   self.assertEqual(hashlib.sha256(F['xml'].encode()).hexdigest(),F['sha256'])
@@ -104,7 +104,7 @@ class CurrentSurfaceTests(unittest.TestCase):
   self.assertEqual(hashlib.sha256(x.encode('utf-8')).hexdigest(),f['sha256'])
   self.assertEqual(f['native_source_sha256'],'5de3ef242720909e8e6dee92fa2ccf5788fa099e787554fcdb530642952fff46')
   out=s.qualify(ET.fromstring(x),s.P,f['target'],ctx)
-  self.assertEqual(out['variant'],'personal_mutual_sticker_empty')
+  self.assertEqual(out['variant'],'thread')
   self.assertTrue(out['empty_surface'])
   self.assertEqual(out['identity'],('Surface Fixture User',f['target']))
   self.assertTrue(composer_evidence(x,s.P,display_size=ctx[2:],surface_context=ctx)['visible'])
@@ -144,7 +144,7 @@ class CurrentSurfaceTests(unittest.TestCase):
    xml=ET.tostring(root,encoding='unicode')
    with self.subTest(case=kind):
     self.assertEqual(truth.classify_dm_history(xml,s.P,target,surface_context=context)[0],
-                     'existing_thread' if kind=='known_history' else 'unknown')
+                     'existing_thread' if kind=='known_history' else ('empty_new_thread' if kind=='unknown_intro' else 'unknown'))
     if kind in ('composer_hidden','composer_disabled','duplicate_composer','foreign_window','list_over_editor','rotated','wrong_version'):
      self.assertFalse(composer_evidence(xml,s.P,display_size=ctx[2:],surface_context=context)['visible'])
  def test_personal_mutual_sticker_keeps_a0_probe_and_recipient_gate(self):
@@ -167,7 +167,7 @@ class CurrentSurfaceTests(unittest.TestCase):
   self.assertEqual(hashlib.sha256(x.encode('utf-8')).hexdigest(),f['sha256'])
   self.assertEqual(f['native_source_sha256'],'5d70b6ea423f760fc103e0e34f5fece2d4efd8e274c5031fc74d6a62d14d20c7')
   out=s.qualify(ET.fromstring(x),s.P,f['target'],ctx)
-  self.assertEqual(out['variant'],'personal_mutual_sticker_empty')
+  self.assertEqual(out['variant'],'thread')
   self.assertEqual(out['identity'],('Surface Fixture User',f['target']))
   self.assertTrue(out['empty_surface'])
   self.assertTrue(composer_evidence(x,s.P,display_size=ctx[2:],surface_context=ctx)['visible'])
@@ -214,7 +214,7 @@ class CurrentSurfaceTests(unittest.TestCase):
     ET.SubElement(msg,'node',{'resource-id':s.P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':s.P,'text':'Existing message','bounds':'[110,1210][790,1290]'})
    xml=ET.tostring(root,encoding='unicode')
    with self.subTest(case=kind):
-    self.assertEqual(truth.classify_dm_history(xml,s.P,target,surface_context=context)[0],'existing_thread' if kind=='known_history' else 'unknown')
+    self.assertEqual(truth.classify_dm_history(xml,s.P,target,surface_context=context)[0],'existing_thread' if kind=='known_history' else ('empty_new_thread' if kind=='unknown_intro' else 'unknown'))
     if kind in ('missing_composer','duplicate_composer','composer_hidden','composer_disabled','list_over_editor','foreign_overlay','wrong_version'):
      self.assertFalse(composer_evidence(xml,s.P,display_size=ctx[2:],surface_context=context)['visible'])
  def test_personal_mirrored_header_keeps_a0_probe_and_recipient_gate(self):
@@ -352,6 +352,10 @@ class FilledComposerTests(unittest.TestCase):
    elif kind=='disabled_editor':ed.set('enabled','false')
    elif kind=='wrong_target':target='another_target'
    with self.subTest(kind=kind):
+    if kind=='unknown_intro_label':
+     self.assertIsNotNone(s.qualify(root,P,target,ctx))
+     self.assertTrue(nav.verify_dm_draft_text(FilledComposerDevice(ET.tostring(root,encoding='unicode')),f['controlled_text']))
+     continue
     self.assertIsNone(s.qualify(root,P,target,ctx))
     if kind!='wrong_target':
      d=FilledComposerDevice(ET.tostring(root,encoding='unicode'))
@@ -387,7 +391,7 @@ class FilledMirroredHeaderTests(unittest.TestCase):
   self.assertEqual(title.get('content-desc'),title.get('text'))
   self.assertEqual(s.one(root,'row_thread_composer_send_button_container').get('long-clickable'),'false')
   result=s.qualify(root,P,f['target'],ctx)
-  self.assertEqual(result['variant'],'personal_mutual_sticker_empty')
+  self.assertEqual(result['variant'],'thread')
   self.assertEqual(result['identity'],('Surface Fixture User',f['target']))
   self.assertFalse(result['empty_surface'])
   d=FilledComposerDevice(f['xml']);editor=nav._dm_find_focus_composer(d)
@@ -474,3 +478,104 @@ class FilledMirroredHeaderTests(unittest.TestCase):
      self.assertIsNone(s.qualify(ET.fromstring(xml),P,'wrong_recipient',ctx))
 
 if __name__=='__main__':unittest.main()
+
+class StructuralOptionCTests(unittest.TestCase):
+ def corpus(self):return F['option_c_native_corpus']
+ def test_canonical_family_and_native_baseline_eight(self):
+  from dm_ui_446_evidence import composer_evidence
+  self.assertEqual(set(s.SCHEMAS),{'thread'})
+  for f in self.corpus():
+   with self.subTest(case=f['label']):
+    self.assertEqual(hashlib.sha256(f['xml'].encode()).hexdigest(),f['sha256'])
+    ctx=tuple(f['context']);root=ET.fromstring(f['xml'])
+    q=s.qualify(root,P,f['target'],ctx)
+    state=truth.classify_dm_history(f['xml'],P,f['target'],surface_context=ctx)[0]
+    if f['label']=='bradley_empty':
+     self.assertIsNotNone(q);self.assertIsNotNone(q['intro'])
+     self.assertIsNone(q['identity']);self.assertEqual(state,'unknown')
+     self.assertTrue(composer_evidence(f['xml'],P,display_size=ctx[2:],surface_context=ctx)['visible'])
+     # Explicit synthetic projection, never a claim of native profile evidence.
+     self.assertEqual(truth.classify_dm_history(f['xml'],P,f['target'],surface_context=ctx,profile_identity=f['target'])[0],'empty_new_thread')
+    elif f['label'] in ('personal_empty','oct08_empty'):
+     self.assertIsNotNone(q);self.assertEqual(state,'empty_new_thread')
+    else:
+     self.assertNotEqual(state,'empty_new_thread')
+     if f['label']=='personal_filled':self.assertIsNotNone(q)
+ def test_cosmetic_leaves_language_count_order_never_choose_identity(self):
+  for f in [self.corpus()[0],self.corpus()[1],F['personal_mutual_sticker_filled']]:
+   ctx=tuple(f['context']);base=ET.fromstring(f['xml'])
+   for words in (['Une présentation variable','199 abonnés','Compte récent'],
+                 ['紹介','説明','別の順序','0','❤️'],['Un seul descriptif']):
+    root=copy.deepcopy(base);body=s.one(root,'message_list')[0][0]
+    leaf=copy.deepcopy(body[1]);body[:]=[body[0]]
+    for text in words:
+     n=copy.deepcopy(leaf);n.set('text',text);body.append(n)
+    # Synthetic text/count changes within retained geometry, not new UI evidence.
+    out=s.qualify(root,P,f['target'],ctx)
+    with self.subTest(case=f.get('label','filled'),words=len(words)):
+     self.assertIsNotNone(out);self.assertIsNotNone(out['intro'])
+     xml=ET.tostring(root,encoding='unicode')
+     state=truth.classify_dm_history(xml,P,f['target'],surface_context=ctx,profile_identity=f['target'])[0]
+     self.assertEqual(state,'empty_new_thread' if out['empty_surface'] else 'unknown')
+ def test_card_delimitation_rejects_accessible_or_unexpected_descendants(self):
+  f=self.corpus()[0];ctx=tuple(f['context'])
+  for kind in ('clickable_text','long_clickable_text','focusable_text','content_description',
+               'nested_reply','media','unknown_view','hidden_leaf','foreign_leaf','second_card'):
+   root=ET.fromstring(f['xml']);ml=s.one(root,'message_list');body=ml[0][0];leaf=body[1]
+   if kind in ('clickable_text','long_clickable_text','focusable_text'):
+    leaf.set({'clickable_text':'clickable','long_clickable_text':'long-clickable','focusable_text':'focusable'}[kind],'true')
+   elif kind=='content_description':leaf.set('content-desc','Reply from another account')
+   elif kind=='nested_reply':leaf.append(copy.deepcopy(leaf))
+   elif kind=='media':leaf.set('class','android.widget.ImageView')
+   elif kind=='unknown_view':leaf.set('class','android.view.View')
+   elif kind=='hidden_leaf':leaf.set('visible-to-user','false')
+   elif kind=='foreign_leaf':leaf.set('package','other.package')
+   else:ml.append(copy.deepcopy(ml[0]))
+   xml=ET.tostring(root,encoding='unicode')
+   with self.subTest(case=kind):
+    self.assertNotEqual(truth.classify_dm_history(xml,P,f['target'],surface_context=ctx,profile_identity=f['target'])[0],'empty_new_thread')
+ def test_business_public_name_and_header_conflicts(self):
+  f=self.corpus()[0];ctx=tuple(f['context'])
+  root=ET.fromstring(f['xml']);s.one(root,'header_title').set('text','Shared Public Name');s.one(root,'header_title').set('content-desc','Shared Public Name')
+  x=ET.tostring(root,encoding='unicode')
+  self.assertIsNotNone(s.qualify(root,P,None,ctx))
+  for proof in (None,'','other_recipient'):
+   self.assertEqual(truth.classify_dm_history(x,P,f['target'],surface_context=ctx,profile_identity=proof)[0],'unknown')
+  self.assertEqual(truth.classify_dm_history(x,P,f['target'],surface_context=ctx,profile_identity=f['target'])[0],'empty_new_thread')
+  sub=s.one(root,'header_subtitle');sub.set('content-desc','contradictory_username')
+  self.assertEqual(truth.classify_dm_history(ET.tostring(root,encoding='unicode'),P,f['target'],surface_context=ctx,profile_identity=f['target'])[0],'unknown')
+ def test_23_case_corpus_expectations_are_candidate_results(self):
+  from test_dm_446_readers import DATA
+  from dm_ui_446_evidence import composer_evidence
+  cases=[(f['label'],f['xml'],f['target'],f['baseline_history']) for f in self.corpus()]
+  names=('dm_truth/B_30_existing_thread','dm_truth_a1/accessible_reply_in_intro',
+         'dm_truth_a3/message_list_unknown_semantics','dm_ui_phase_b1/display_name_collision',
+         'dm_ui_phase_b1/contradictory_header_channels','dm_truth_a1/untitled_dialog',
+         'dm_truth_a1/hidden_ancestor','dm_truth_a2/H2_nested_overlay_message_composer_bar',
+         'dm_ui_phase_b1/anonymous_overlay_inside_history','dm_truth_a1/unexpected_node')
+  for name in names:
+   cases.append((name,DATA[name]['xml'],'reginanubway' if name.endswith('B_30_existing_thread') else 'vincentfavrephotographe',
+                 'existing_thread' if name.endswith('B_30_existing_thread') else 'unknown'))
+  for kind in ('wrong_recipient','missing_editor','duplicate_editor','editor_occluded','false_thread_search_header'):
+   root=ET.fromstring(self.corpus()[1]['xml']);ed=s.one(root,'row_thread_composer_edittext');target='fixture_target'
+   parent=next(n for n in root.iter() if ed in list(n))
+   if kind=='wrong_recipient':target='wrong_recipient'
+   elif kind=='missing_editor':parent.remove(ed)
+   elif kind=='duplicate_editor':parent.append(copy.deepcopy(ed))
+   elif kind=='editor_occluded':s.one(root,'message_list').append(copy.deepcopy(ed))
+   else:
+    s.one(root,'header_title').set('text','Search');s.one(root,'header_title').set('content-desc','Search')
+   cases.append((kind,ET.tostring(root,encoding='unicode'),target,'unknown'))
+  self.assertEqual(len(cases),23)
+  for name,x,target,expected in cases:
+   with self.subTest(case=name):
+    self.assertEqual(truth.classify_dm_history(x,P,target,surface_context=tuple(F['context']))[0],expected)
+ def test_empty_and_filled_offline_exact_45_use_unchanged_methods(self):
+  d=FilledComposerDevice()
+  text='Hello diagnostic000 !\n\nTest Message \n\nRegards'
+  self.assertEqual(len(text),45)
+  with patch.object(nav,'log',lambda *a,**kw:None),patch.object(nav,'send_dm_safe',side_effect=AssertionError('no Send')):
+   ok,meta=nav.type_dm_draft_only(d,text,P,force_method='set_text')
+   self.assertTrue(ok);self.assertEqual(nav.read_dm_composer_text(d),text)
+   self.assertTrue(nav.verify_dm_draft_text(d,text));self.assertEqual(d.typed,[text])
+

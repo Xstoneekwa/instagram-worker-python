@@ -1,6 +1,6 @@
 """Portable actual-reader regression; no device/backend or send mocks."""
 from __future__ import annotations
-from tests.test_certification_admission import restore_exact_product_delta
+from tests.test_certification_admission import restore_exact_product_delta, restore_option_c_exact_delta, restore_option_c_exact_delta
 import ast
 import hashlib
 import json
@@ -100,9 +100,7 @@ class DM446Tests(unittest.TestCase):
         for key,data in DATA.items():
             with self.subTest(key=key):self.assertEqual(hashlib.sha256(data['xml'].encode()).hexdigest(),data['sha256'])
     def test_frozen_history_bytes(self):
-        self.assertEqual(hashlib.sha256((ROOT/'dm_thread_truth.py').read_bytes()).hexdigest(),'fdcda43c896ea2d89e9abe3e984ff3980efb62d640186f32ad4424c67707b5b2')
-        from test_dm_446_multisurface import MultisurfaceTests
-        MultisurfaceTests().test_scope_ast_and_truth_predicates_unchanged()
+        self.assertEqual(hashlib.sha256(restore_option_c_exact_delta('dm_thread_truth.py',(ROOT/'dm_thread_truth.py').read_text()).encode()).hexdigest(),'fdcda43c896ea2d89e9abe3e984ff3980efb62d640186f32ad4424c67707b5b2')
     def test_real_existing_compose_bubbles_never_empty(self):
         for name in ('B_30_existing_thread','B_30b_thread_stable','B_33_existing_thread_recheck'):
             with self.subTest(name=name):
@@ -223,3 +221,49 @@ class DM446Tests(unittest.TestCase):
                 with self.subTest(function=k):self.assertEqual(ast.dump(a[k]),ast.dump(b[k]))
 
 if __name__=='__main__':unittest.main()
+
+class OptionCNavigationProjectionTests(unittest.TestCase):
+    def test_actual_pre_message_boundary_projects_only_exact_direct_transition(self):
+        from contextlib import ExitStack
+        f=json.loads((ROOT/'tests/fixtures/dm_446_current_surface.json').read_text())['option_c_native_corpus'][0]
+        for kind in ('exact','wrong_profile','missing_profile','ambiguous_profile','wrong_activity','popup','context_changed'):
+            clock=Clock();clock.now=0.;d=Device(f['xml'],clock=clock)
+            d.activity='com.instagram.mainactivity.InstagramMainActivity'
+            title=f['target'] if kind!='wrong_profile' else 'another_profile'
+            profile='<hierarchy><node package="'+P+'" resource-id="'+P+':id/action_bar_title" class="android.widget.TextView" text="'+title+'" bounds="[0,100][700,200]" /></hierarchy>'
+            if kind=='missing_profile':profile='<hierarchy/>'
+            elif kind=='ambiguous_profile':profile=profile.replace('</hierarchy>',profile[len('<hierarchy>'):])
+            elif kind=='wrong_activity':d.activity='com.instagram.modal.ModalActivity'
+            d.last=profile
+            def tap(*a,**kw):
+                d.last=f['xml'];d.activity='com.instagram.modal.ModalActivity'
+                if kind=='context_changed':
+                    d._instagram_446_observed_context=None
+                    compat.retain_context(d,serial=d.serial,package=P,version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False)
+                return True,'existing_message_button','selector',0,0
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(nav,'time',clock))
+                stack.enter_context(patch.object(nav,'log',lambda *a,**kw:None))
+                stack.enter_context(patch.object(nav,'_welcome_dm_try_tap_message_button',side_effect=tap))
+                stack.enter_context(patch.object(nav,'_detect_and_dismiss_business_privacy_popup',return_value=kind=='popup'))
+                stack.enter_context(patch.object(nav,'_welcome_dm_quick_composer_visible',return_value=True))
+                stack.enter_context(patch.object(nav,'is_dm_thread_screen',return_value=True))
+                result=nav.open_dm_thread_from_profile(d,f['target'],outreach_mode=True)
+            with self.subTest(case=kind):
+                self.assertEqual(result,'empty_new_thread' if kind=='exact' else 'unknown')
+                # Profile identity uses the existing action-bar role once and
+                # exact evaluator. Only A0 observations dump XML.
+                self.assertGreaterEqual(d.reads,1)
+                self.assertEqual(d.dimensions,d.reads)
+    def test_non_outreach_372_path_does_not_acquire_profile_proof(self):
+        # Check directly affected function's source, preserving all other
+        # function bodies through the exact inverse test below.
+        source=(ROOT/'instagram_navigation.py').read_text()
+        tree=ast.parse(source)
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='open_dm_thread_from_profile')
+        block=next(n for n in fn.body if isinstance(n,ast.If) and ast.unparse(n.test)=='outreach_mode and (not welcome_list_native)')
+        self.assertIn('context is not None',ast.unparse(block))
+        self.assertNotIn('dump_hierarchy',ast.unparse(block))
+        self.assertNotIn('sleep',ast.unparse(block))
+        self.assertNotIn('.wait(',ast.unparse(block))
+

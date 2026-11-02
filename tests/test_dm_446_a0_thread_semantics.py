@@ -41,3 +41,44 @@ class A0ThreadSemanticsTests(unittest.TestCase):
         self.assertEqual(result[1]['reason'],'dm_composer_budget_exhausted')
         self.assertEqual(d.reads,1)
 if __name__=='__main__':unittest.main()
+
+class OptionCIdentityProjectionTests(unittest.TestCase):
+    def fixture(self):
+        import json
+        from pathlib import Path
+        return json.loads((Path(__file__).parent/'fixtures/dm_446_current_surface.json').read_text())['option_c_native_corpus'][0]
+    def proof(self,d,target):
+        return dict(device=d,context=nav._dm_446_context(d),username=target,transition=True)
+    def detect(self,d,target,proof):
+        with patch.object(nav,'time',d.clock),patch.object(nav,'log',lambda *a,**kw:None):
+            return nav.detect_dm_thread_state(d,target,pkg=P,_profile_identity=proof)
+    def test_exact_transition_is_consumed_and_probe_has_no_new_device_reads(self):
+        f=self.fixture();clock=Clock();clock.now=0.;d=Device(f['xml'],clock=clock);proof=self.proof(d,f['target'])
+        result=self.detect(d,f['target'],proof)
+        self.assertEqual(result[0],'empty_new_thread');self.assertEqual(proof,{})
+        self.assertGreaterEqual(clock.now,.8)
+        self.assertEqual((d.currents,d.dimensions),(2*d.reads,d.reads))
+        self.assertEqual(self.detect(d,f['target'],proof)[0],'unknown')
+    def test_missing_cross_target_device_context_or_discontinuous_proof_is_unknown(self):
+        f=self.fixture()
+        for kind in ('missing','wrong_target','wrong_device','stale_context','no_transition','wrong_package'):
+            clock=Clock();clock.now=0.;d=Device(f['xml'],clock=clock);proof=self.proof(d,f['target'])
+            if kind=='missing':proof=None
+            elif kind=='wrong_target':proof['username']='someone_else'
+            elif kind=='wrong_device':proof['device']=Device(f['xml'])
+            elif kind=='stale_context':proof['context']=Device(f['xml'])._instagram_446_observed_context
+            elif kind=='no_transition':proof['transition']=False
+            else:d.package='other.package'
+            with self.subTest(case=kind):
+                self.assertEqual(self.detect(d,f['target'],proof)[0],'unknown')
+    def test_header_change_during_probe_cannot_reuse_profile_identity(self):
+        f=self.fixture();x=f['xml'].replace('fixture_target','Other Public Name')
+        clock=Clock();clock.now=0.;d=Device([f['xml'],x],clock=clock)
+        result=self.detect(d,f['target'],self.proof(d,f['target']))
+        self.assertEqual(result[0],'unknown');self.assertEqual(d.reads,2)
+    def test_existing_history_and_unknown_are_not_overridden_by_profile_identity(self):
+        f=self.fixture()
+        for xml,expected in [(fixture('B_30_existing_thread'),'existing_thread'),('<hierarchy/>','unknown')]:
+            clock=Clock();clock.now=0.;d=Device([f['xml'],xml],clock=clock)
+            self.assertEqual(self.detect(d,f['target'],self.proof(d,f['target']))[0],expected)
+

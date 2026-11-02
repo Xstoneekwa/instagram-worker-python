@@ -8426,7 +8426,7 @@ def _dm_446_composer(d, package):
         if record is not None: record.complete(result)
 
 
-def _dm_446_thread_state(d, username, package, composer_timeout_s):
+def _dm_446_thread_state(d, username, package, composer_timeout_s, *, _profile_identity=None):
     """A0 composer phase then history probe, using the qualified 446 UI reader."""
     from dm_thread_truth import classify_dm_history
     snap = dict(thread_state="unknown", composer_visible=False, composer_signal="",
@@ -8438,8 +8438,10 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
     retention = begin(package, username)
     started = time.monotonic()
     refusal_observation = {}
+    profile_header = None
 
     def observe():
+        nonlocal profile_header
         observation = {}
         try:
             observation = retention.observation() if retention is not None else observation
@@ -8447,8 +8449,23 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
             snap["number_of_reads"] += 1
             snap.update(observation_reason=observation.get("observation_reason", ""),
                         observation_exception_class="")
+            profile_username = None
+            if _profile_identity:
+                context = _dm_446_context(d)
+                if (_profile_identity.get("device") is d
+                        and _profile_identity.get("context") is context
+                        and context.package == package
+                        and _normalize_handle(_profile_identity.get("username") or "") == _normalize_handle(username)
+                        and _profile_identity.get("transition") is True):
+                    header = (_welcome_dm_thread_header_from_hierarchy(xml),
+                              _welcome_dm_thread_subtitle_from_hierarchy(xml))
+                    if profile_header is None:
+                        profile_header = header
+                    if header == profile_header:
+                        profile_username = _profile_identity["username"]
             state, proof = classify_dm_history(xml, package, username,
-                                               surface_context=composer.get("surface_context"))
+                                               surface_context=composer.get("surface_context"),
+                                               profile_identity=profile_username)
             if observation is not None:
                 observation["classifier"] = dict(state=state, reason=proof.get("reason"))
             snap.update(proof, composer_visible=composer["visible"],
@@ -8506,6 +8523,8 @@ def _dm_446_thread_state(d, username, package, composer_timeout_s):
         snap.update(thread_state="empty_new_thread", reason="a0_history_probe_completed")
         return snap["thread_state"], snap
     finally:
+        if _profile_identity is not None:
+            _profile_identity.clear()
         snap["elapsed_s"] = time.monotonic() - started
         if retention is not None:
             retention.finish(snap)
@@ -8812,6 +8831,7 @@ def detect_dm_thread_state(
     pkg: str | None = None,
     *,
     composer_timeout_s: float | None = None,
+    _profile_identity: dict | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     Detect DM thread state after opening Message:
@@ -8824,7 +8844,7 @@ def detect_dm_thread_state(
     except Exception:
         return "unknown", {"thread_state": "unknown", "reason": "dm_version_context_unproved"}
     if context is not None:
-        return _dm_446_thread_state(d, username, pkg or context.package, composer_timeout_s)
+        return _dm_446_thread_state(d, username, pkg or context.package, composer_timeout_s, _profile_identity=_profile_identity)
     start = time.perf_counter()
     current_pkg = pkg or (d.app_current() or {}).get("package") or config.INSTAGRAM_PACKAGE
     # Snapshot fields requested by runner debugging.
@@ -9374,6 +9394,25 @@ def open_dm_thread_from_profile(
         pkg = config.INSTAGRAM_PACKAGE
     _LAST_DM_THREAD_STATE = "unknown"
 
+    # Only the 446 Outreach boundary projects identity. Observe the existing
+    # canonical profile username role once, without XML, polling or a gesture;
+    # the existing exact evaluator decides identity/package/activity.
+    profile_identity = None
+    if outreach_mode and not welcome_list_native:
+        try:
+            context = _dm_446_context(d)
+            if context is not None and context.package == pkg:
+                header = d(resourceId=pkg + ":id/action_bar_title")
+                observed = str(header.get_text() or "") if header.count == 1 else ""
+                if observed:
+                    exact, identity = _expected_profile_identity_boundary(
+                        d, username, pkg, observed_username=observed)
+                    if exact and identity.get("identity_method") == "exact_observed_username":
+                        profile_identity = dict(device=d, context=context, username=observed,
+                                                transition=False)
+        except Exception:
+            profile_identity = None
+
     t_open = time.perf_counter()
     tapped, button_signal, click_method, tap_x, tap_y = _welcome_dm_try_tap_message_button(
         d, wait_s=0.4
@@ -9530,11 +9569,18 @@ def open_dm_thread_from_profile(
             composer_timeout_s=detect_timeout_s,
             welcome_list_native=True,
         )
+    # A call-local proof survives only the direct, single Message transition.
+    # Existing recovery paths still run, but cannot borrow this identity proof.
+    if profile_identity is not None:
+        profile_identity["transition"] = bool(
+            message_click_attempts == 1 and composer_quick and dm_thread_quick
+            and not still_profile_with_message and not business_popup_dismissed)
     thread_state, snap = detect_dm_thread_state(
         d,
         username,
         pkg=pkg,
         composer_timeout_s=detect_timeout_s,
+        **({"_profile_identity": profile_identity} if profile_identity is not None else {}),
     )
     if thread_state == "unknown" and _detect_and_dismiss_business_privacy_popup(d):
         business_popup_dismissed = True
@@ -9596,7 +9642,7 @@ def open_dm_thread_from_profile(
         dm_thread_detect_ms=round(float(dm_thread_detect_ms), 2),
         message_click_attempts=int(message_click_attempts),
         **({
-            "classification_reason": snap.get("reason") if snap.get("reason") in ('ancestor_surface_unqualified', 'a0_history_probe_completed', 'background_surface_unqualified', 'conversation_bounds_unqualified', 'conversation_path_unqualified', 'dm_composer_budget_exhausted', 'dm_observation_unproved', 'dm_recipient_unproved', 'effective_visibility_incomplete', 'header_or_picker_overlaps_conversation', 'hierarchy_unavailable', 'message_list_not_unique_or_missing', 'message_list_visibility_incomplete', 'modal_obscures_thread', 'new_thread_context_not_proven', 'no_positive_empty_structure', 'overlay_container_not_empty', 'positive_empty_structure', 'positive_history', 'recipient_not_positively_proven', 'recipient_target_mismatch', 'sibling_surface_unqualified', 'topmost_surface_unqualified', 'unknown_intro_semantics', 'unqualified_surface_descendant') else "unreported",
+            "classification_reason": snap.get("reason") if snap.get("reason") in ('ancestor_surface_unqualified', 'a0_history_probe_completed', 'background_surface_unqualified', 'conversation_bounds_unqualified', 'conversation_path_unqualified', 'dm_composer_budget_exhausted', 'dm_observation_unproved', 'dm_recipient_unproved', 'effective_visibility_incomplete', 'header_or_picker_overlaps_conversation', 'hierarchy_unavailable', 'message_list_not_unique_or_missing', 'message_list_visibility_incomplete', 'modal_obscures_thread', 'new_thread_context_not_proven', 'no_positive_empty_structure', 'overlay_container_not_empty', 'positive_empty_structure', 'positive_history', 'recipient_not_positively_proven', 'recipient_target_mismatch', 'sibling_surface_unqualified', 'topmost_surface_unqualified', 'unknown_intro_semantics', 'unqualified_surface_descendant', 'exact_profile_transition_unproved', 'structural_intro_or_empty_composer_unproved') else "unreported",
             "observation_reason": snap.get("observation_reason") if snap.get("observation_reason") in ('observed', 'version_context_invalid', 'foreground_before_invalid', 'viewport_read_failed', 'dump_failed', 'foreground_after_changed', 'composer_unproved') else "unreported",
             "observation_exception_class": snap.get("observation_exception_class") if snap.get("observation_exception_class") in ('ValueError', 'RuntimeError', 'TimeoutError', 'ConnectionError', 'OSError', 'AssertionError', 'TypeError', 'KeyError', 'AttributeError', 'ParseError') else ("OtherError" if snap.get("observation_exception_class") else None),
             "composer_visible": snap.get("composer_visible") is True,
