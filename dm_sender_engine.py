@@ -4006,18 +4006,19 @@ def execute_dm_job_real_send(
                     or fail_reason == "send_unverified"
                     or send_out.get("reason") == "send_unverified"
                 ):
+                    from terminal_summary_projection import native_reason_code
                     updated_job, outcome = _complete_job_send_unverified_quarantine(
                         job,
                         last_error=str(fail_reason or send_out.get("reason") or "send_unverified"),
                         thread_state=thread_state,
-                        metadata_patch={"send_out": {k: send_out.get(k) for k in (
+                        metadata_patch={"send_out": {**{k: send_out.get(k) for k in (
                             "sent",
                             "send_tapped",
                             "reason",
                             "blocked_event",
                             "failure_event",
                             "precheck_ok",
-                        )}},
+                        )}, "post_send_signal_reason": native_reason_code(send_out.get("post_send_signal_reason"))}},
                     )
                     final_status = str((updated_job or {}).get("status") or "failed")
                     job_terminal_handled = True
@@ -4558,7 +4559,7 @@ def run_dm_sender_send(
             native_job = last_result.get("job") or {}
             native_reason = str(native_job.get("last_error") or "")
             if native_reason and last_result.get("outcome") in (
-                "failed_retry", "failed_terminal", "send_unverified",
+                "failed_retry", "failed_terminal", "send_unverified", "send_unverified_quarantined",
             ):
                 from terminal_summary_projection import native_reason_code
                 native_reason = native_reason_code(native_reason)

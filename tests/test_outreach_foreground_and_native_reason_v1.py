@@ -25,6 +25,17 @@ def request():
 
 
 class NativeReasonTests(unittest.TestCase):
+    def test_postsend_inverse_is_exact_and_preserves_parent_bytes(self):
+        import subprocess
+        from tests.test_certification_admission import restore_postsend_exact_delta
+        for name in ("instagram_navigation.py", "dm_sender_engine.py"):
+            source = (ROOT / name).read_text()
+            parent = subprocess.check_output(["git", "show", "63be955177a36fd41c084325873c06130e1fe7e3:" + name], cwd=ROOT, text=True)
+            self.assertEqual(restore_postsend_exact_delta(name, source), parent)
+            for changed in (source + "\n# unknown\n", "# moved\n" + source):
+                with self.assertRaises(AssertionError):
+                    restore_postsend_exact_delta(name, changed)
+
     def test_exact_observation_inverse_preserves_old_pins_and_rejects_unapproved_bytes(self):
         import subprocess
         from tests.test_certification_admission import restore_consolidated_projection_delta
@@ -83,8 +94,38 @@ class NativeReasonTests(unittest.TestCase):
         self.assertEqual(summary["jobs_failed_count"],2)
         self.assertEqual(execute.call_count,2)
 
+    def test_quarantine_first_cause_reaches_existing_incident_notification_path(self):
+        from tests.test_outreach_send_unverified_quarantine import OutreachSendUnverifiedQuarantineTest
+        quarantined, complete, _, _, _ = OutreachSendUnverifiedQuarantineTest()._execute((False, {
+            "send_tapped": True, "sent": False, "reason": "send_unverified",
+            "post_send_signal_reason": "outbound_bubble_not_new",
+        }, "send_unverified"))
+        jobs = [dict(id="one", recipient_username="first"), dict(id="two", recipient_username="second")]
+        results = [quarantined, dict(outcome="failed_retry", job={"last_error":"cleanup_failure"})]
+        with ExitStack() as stack:
+            for name, value in {"resolve_dm_sender_real_send_enabled_for_type":(True,"fixture"),
+                    "_resolve_reserved_by":"fixture", "_resolve_dm_sender_only_job_id":("","fixture"),
+                    "_dm_sender_session_should_abort":False}.items():
+                stack.enter_context(patch.object(sender, name, return_value=value))
+            stack.enter_context(patch("outreach_slot_contract.active", return_value=None))
+            stack.enter_context(patch.object(sender.account_protection_lists, "is_interaction_blocked", return_value=False))
+            stack.enter_context(patch.object(sender, "execute_dm_job_real_send", side_effect=results))
+            stack.enter_context(patch.object(sender, "log"))
+            _, summary = sender.run_dm_sender_send(Mock(), account_id=AID, dm_type="outreach",
+                prepared_jobs=jobs, settings_override={}, max_jobs=2)
+        self.assertEqual(summary["first_causal_reason"], "send_unverified")
+        projected = project_terminal_summary({"reason":"worker_exit_nonzero", "outreach_session_summary":{"sender_summary":summary}})
+        self.assertEqual(projected["first_causal_reason"], "send_unverified")
+        decision = classify_terminal_run_failure(exit_code=1, performance_summary=projected)
+        payload = build_run_failure_incident_payload(decision, account_id=AID,
+            account_username="fixture", run_id=RID, run_request_id=QID, run_type="outreach_session")
+        self.assertEqual(payload["reason"], "send_unverified")
+        notification = build_incident_notification_payload(payload)
+        self.assertEqual(notification["reason_code"], "send_unverified")
+        self.assertEqual(complete.call_args.kwargs["metadata_patch"]["send_out"]["post_send_signal_reason"], "outbound_bubble_not_new")
+
     def test_consumer_persists_native_terminal_code_with_existing_fallback(self):
-        for reason in ("navigation_failed",None):
+        for reason in ("navigation_failed", "send_unverified", None):
             row=request()
             summary={"outreach_session_summary":{"sender_summary":{"first_causal_reason":reason}}} if reason else {}
             cfg=SimpleNamespace(worker_id="worker")

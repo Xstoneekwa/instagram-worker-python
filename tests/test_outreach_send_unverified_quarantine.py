@@ -41,6 +41,7 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
             return {
                 **job,
                 "status": status,
+                "last_error": kwargs.get("last_error"),
                 "metadata": {**job["metadata"], **kwargs.get("metadata_patch", {})},
             }
 
@@ -114,6 +115,26 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
 
     def test_attempted_send_without_reason_is_quarantined(self) -> None:
         self._assert_quarantined((False, {"send_tapped": True, "sent": False}, None))
+
+    def test_safe_post_send_subreason_is_retained_without_changing_quarantine(self):
+        for native, expected in [("outbound_bubble_not_new", "outbound_bubble_not_new"),
+                                 ("Traceback: password=SECRET", ""), (None, "")]:
+            with self.subTest(native=native):
+                result, complete, send, quarantine, _ = self._execute((False, {
+                    "send_tapped": True, "sent": False, "reason": "send_unverified",
+                    "post_send_signal_reason": native,
+                }, "send_unverified"))
+                self.assertEqual(result["outcome"], "send_unverified_quarantined")
+                self.assertEqual(complete.call_args.kwargs["last_error"], "send_unverified")
+                metadata = complete.call_args.kwargs["metadata_patch"]
+                self.assertEqual(metadata["send_out"]["post_send_signal_reason"], expected)
+                self.assertTrue(metadata["automatic_retry_blocked"])
+                self.assertTrue(metadata["manual_reconciliation_required"])
+                self.assertIsNone(complete.call_args.kwargs["retry_delay_seconds"])
+                self.assertTrue(complete.call_args.kwargs["increment_attempt"])
+                self.assertNotIn("SECRET", str(metadata))
+                send.assert_called_once()
+                quarantine.assert_called_once()
 
     def test_failure_before_send_preserves_existing_retry_contract(self) -> None:
         result, complete, send, quarantine, _job = self._execute((False, {
