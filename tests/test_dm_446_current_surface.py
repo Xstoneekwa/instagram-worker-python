@@ -579,3 +579,139 @@ class StructuralOptionCTests(unittest.TestCase):
    self.assertTrue(ok);self.assertEqual(nav.read_dm_composer_text(d),text)
    self.assertTrue(nav.verify_dm_draft_text(d,text));self.assertEqual(d.typed,[text])
 
+
+class CompactOptionCGenericTests(unittest.TestCase):
+ def cases(self):return F['compact_option_c_native_structures']
+ def xml(self,root):return ET.tostring(root,encoding='unicode')
+ def state(self,root,target,ctx):
+  return truth.classify_dm_history(self.xml(root),P,target,surface_context=ctx)[0]
+ def test_both_exact_native_and_controlled_equivalents(self):
+  from dm_ui_446_evidence import composer_evidence
+  import subprocess
+  parent=json.loads(subprocess.check_output(['git','-C',str(Path(s.__file__).parent),'show',
+      '347ebd11fd2503fea2aa2769ef1265a780c770a9:dm_ui_446_surface_shapes.json'],text=True))
+  for f in self.cases():
+   raw=Path(f['native_path']).read_bytes()
+   self.assertEqual(hashlib.sha256(raw).hexdigest(),f['native_sha256'])
+   self.assertEqual(hashlib.sha256(f['xml'].encode()).hexdigest(),f['sha256'])
+   for label,x in (('exact_native',raw.decode()),('controlled',f['xml'])):
+    root=ET.fromstring(x);ctx=tuple(f['context']);target=s.one(root,'header_subtitle').get('content-desc')
+    with self.subTest(case=f['label'],input=label):
+     with patch.object(s,'SCHEMAS',parent):self.assertIsNone(s.qualify(root,P,target,ctx))
+     q=s.qualify(root,P,target,ctx)
+     self.assertIsNotNone(q);self.assertEqual(q['identity'][1],target)
+     self.assertIsNotNone(q['intro']);self.assertTrue(q['empty_surface'])
+     self.assertTrue(composer_evidence(x,P,display_size=ctx[2:],surface_context=ctx)['visible'])
+     self.assertEqual(self.state(root,target,ctx),'empty_new_thread')
+ def test_disabled_compact_title_and_long_click_combinations(self):
+  for f in self.cases():
+   for mirrored,long_click in itertools.product((False,True),('false','true')):
+    root=ET.fromstring(f['xml']);ctx=tuple(f['context']);title=s.one(root,'header_title')
+    title.set('content-desc',title.get('text') if mirrored else '')
+    send=s.one(root,'row_thread_composer_send_button_container');send.set('long-clickable',long_click)
+    with self.subTest(case=f['label'],mirrored=mirrored,long_click=long_click):
+     self.assertIsNotNone(s.qualify(root,P,f['target'],ctx))
+     self.assertEqual(self.state(root,f['target'],ctx),'empty_new_thread')
+     send.set('enabled','true')
+     # Only the previously accepted empty-description/long=true shape may admit enabled Send.
+     if mirrored or long_click=='false':self.assertIsNone(s.qualify(root,P,f['target'],ctx))
+     self.assertNotEqual(self.state(root,f['target'],ctx),'empty_new_thread')
+ def test_variable_intro_language_count_order_remain_cosmetic(self):
+  for f in self.cases():
+   ctx=tuple(f['context'])
+   for words in (['Une ligne'],['紹介','Compte récent','50 abonnés','共通'],['Private promotion','0 posts','Suivi mutuel']):
+    for order in (words,list(reversed(words))):
+     root=ET.fromstring(f['xml']);body=s.one(root,'message_list')[0][0]
+     sample=copy.deepcopy(body[1]);body[:]=[body[0]]
+     for text in order:
+      n=copy.deepcopy(sample);n.set('text',text);body.append(n)
+     with self.subTest(case=f['label'],words=order):
+      q=s.qualify(root,P,f['target'],ctx)
+      self.assertIsNotNone(q);self.assertIsNotNone(q['intro'])
+      self.assertEqual(q['identity'][1],f['target'])
+      self.assertEqual(self.state(root,f['target'],ctx),'empty_new_thread')
+ def test_exact_handle_not_public_name_and_profile_continuity_stays_required(self):
+  for f in self.cases():
+   ctx=tuple(f['context']);root=ET.fromstring(f['xml']);title=s.one(root,'header_title')
+   title.set('text','Shared Public Name');title.set('content-desc','Shared Public Name')
+   for wrong in ('different_target','Shared Public Name',''):
+    with self.subTest(case=f['label'],wrong=wrong):
+     self.assertEqual(self.state(root,wrong,ctx),'unknown')
+   self.assertEqual(self.state(root,f['target'],ctx),'empty_new_thread')
+   # A generic subtitle is never an exact username; the existing continuity gate remains mandatory.
+   s.one(root,'header_subtitle').set('content-desc','Business chat')
+   q=s.qualify(root,P,None,ctx);self.assertIsNotNone(q);self.assertIsNone(q['identity'])
+   self.assertEqual(self.state(root,f['target'],ctx),'unknown')
+   clock=Clock();d=Device(self.xml(root),clock=clock)
+   with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None):
+    state,_=nav.detect_dm_thread_state(d,f['target'],pkg=P,
+      _profile_identity=dict(device=d,context=nav._dm_446_context(d),username=f['target'],transition=False))
+   self.assertEqual(state,'unknown')
+ def test_real_bubble_in_or_outside_card_never_empty(self):
+  for f in self.cases():
+   ctx=tuple(f['context'])
+   for location in ('outside','inside'):
+    root=ET.fromstring(f['xml']);ml=s.one(root,'message_list')
+    parent=ml if location=='outside' else ml[0][0]
+    msg=ET.SubElement(parent,'node',{'resource-id':P+':id/message_content','class':'android.view.View','package':P,'bounds':'[100,1200][800,1300]'})
+    ET.SubElement(msg,'node',{'resource-id':P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':P,'text':'Actual existing message','bounds':'[110,1210][790,1290]'})
+    with self.subTest(case=f['label'],location=location):
+     self.assertIsNotNone(s.qualify(root,P,f['target'],ctx))
+     self.assertEqual(self.state(root,f['target'],ctx),'existing_thread')
+ def test_intro_boundary_accessibility_and_unknown_rows_never_empty(self):
+  for f in self.cases():
+   ctx=tuple(f['context'])
+   for kind in ('clickable','long-clickable','focusable','description','child','unknown_class','hidden','foreign','second_card','outside_text'):
+    root=ET.fromstring(f['xml']);ml=s.one(root,'message_list');leaf=ml[0][0][1]
+    if kind in ('clickable','long-clickable','focusable'):leaf.set(kind,'true')
+    elif kind=='description':leaf.set('content-desc','Unexpected accessible descendant')
+    elif kind=='child':leaf.append(copy.deepcopy(leaf))
+    elif kind=='unknown_class':leaf.set('class','android.view.View')
+    elif kind=='hidden':leaf.set('visible-to-user','false')
+    elif kind=='foreign':leaf.set('package','foreign')
+    elif kind=='second_card':ml.append(copy.deepcopy(ml[0]))
+    else:ml.append(copy.deepcopy(leaf))
+    with self.subTest(case=f['label'],kind=kind):
+     self.assertNotEqual(self.state(root,f['target'],ctx),'empty_new_thread')
+ def test_composer_identity_geometry_and_shape_fail_closed(self):
+  from dm_ui_446_evidence import composer_evidence
+  for f in self.cases():
+   ctx=tuple(f['context'])
+   for kind in ('description_conflict','missing','duplicate','hidden','disabled','occlusion','foreign_window','wrong_version','false_thread','unknown_structure','send_focusable'):
+    root=ET.fromstring(f['xml']);ed=s.one(root,'row_thread_composer_edittext');context=ctx
+    parent=next(n for n in root.iter() if ed in list(n))
+    if kind=='description_conflict':s.one(root,'header_title').set('content-desc','Wrong public title')
+    elif kind=='missing':parent.remove(ed)
+    elif kind=='duplicate':parent.append(copy.deepcopy(ed))
+    elif kind=='hidden':ed.set('visible-to-user','false')
+    elif kind=='disabled':ed.set('enabled','false')
+    elif kind=='occlusion':
+     ET.SubElement(s.one(root,'message_list'),'node',{'package':P,'class':'android.view.View','bounds':ed.get('bounds'),'visible-to-user':'true','clickable':'false'})
+    elif kind=='foreign_window':root.append(ET.Element('node',{'package':'overlay','class':'android.view.View','bounds':'[0,100][1080,2205]'}))
+    elif kind=='wrong_version':context=('372.0.0.48.60',377611059,1080,2340)
+    elif kind=='false_thread':
+     s.one(root,'header_title').set('text','Search');s.one(root,'header_title').set('content-desc','Search')
+    elif kind=='unknown_structure':parent.append(copy.deepcopy(s.one(root,'header_title')))
+    else:s.one(root,'row_thread_composer_send_button_container').set('focusable','false')
+    with self.subTest(case=f['label'],kind=kind):
+     self.assertIsNone(s.qualify(root,P,f['target'],context))
+     self.assertFalse(composer_evidence(self.xml(root),P,display_size=ctx[2:],surface_context=context)['visible'])
+     self.assertEqual(self.state(root,f['target'],context),'unknown')
+ def test_nonempty_draft_is_not_empty_history_and_a0_probe_not_bypassed(self):
+  for f in self.cases():
+   root=ET.fromstring(f['xml']);ctx=tuple(f['context'])
+   s.one(root,'row_thread_composer_edittext').set('text','Existing unsent draft')
+   q=s.qualify(root,P,f['target'],ctx);self.assertIsNotNone(q);self.assertFalse(q['empty_surface'])
+   self.assertEqual(self.state(root,f['target'],ctx),'unknown')
+   for label,xmls in (('stable',f['xml']),('second_unknown',[f['xml'],'<hierarchy/>'])):
+    clock=Clock();d=Device(xmls,clock=clock)
+    with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None):
+     state,proof=nav.detect_dm_thread_state(d,f['target'],pkg=P)
+    with self.subTest(case=f['label'],probe=label):
+     self.assertEqual(state,'empty_new_thread' if label=='stable' else 'unknown')
+     self.assertGreaterEqual(d.reads,2)
+     if label=='stable':
+      self.assertEqual(proof['reason'],'a0_history_probe_completed')
+      self.assertGreaterEqual(clock.now,0.8)
+
+
