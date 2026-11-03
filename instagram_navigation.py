@@ -9860,8 +9860,13 @@ def type_dm_draft_only(
     return True, type_meta
 
 
-def verify_dm_draft_text(d: u2.Device, expected: str) -> bool:
+def verify_dm_draft_text(
+    d: u2.Device, expected: str, *, observation: dict[str, Any] | None = None,
+) -> bool:
     with _dm_retention.phase('draft_verify'):
+        if observation is not None:
+            observation.clear()
+            observation.update(read_succeeded=False, branch='FIELD_ABSENT')
         t0 = time.perf_counter()
         ed = _dm_find_focus_composer(d)
         if ed is None:
@@ -9872,6 +9877,8 @@ def verify_dm_draft_text(d: u2.Device, expected: str) -> bool:
             raw = ed.get_text()
             got = raw or ""
         except Exception as exc:
+            if observation is not None:
+                observation.update(branch='GET_TEXT_EXCEPTION', exception_class=type(exc).__name__)
             _dm_retention.capture_event('draft_verify', failure=True,
                 branch='GET_TEXT_EXCEPTION', get_text_called=True,
                 exception_class=type(exc).__name__)
@@ -9880,6 +9887,11 @@ def verify_dm_draft_text(d: u2.Device, expected: str) -> bool:
         actual = got.strip()
         expected_text = str(expected)
         exact = actual == expected_text.strip()
+        if observation is not None:
+            observation.update(
+                read_succeeded=True, actual_text=got, returned_none=raw is None,
+                branch='TEXT_EXACT' if exact else ('TEXT_EMPTY' if not got else 'TEXT_DIFFERENT'),
+            )
         _dm_retention.capture_event('draft_verify', failure=not exact,
             branch='TEXT_EXACT' if exact else ('TEXT_EMPTY' if not got else 'TEXT_DIFFERENT'),
             get_text_called=True, actual_text=got, expected_text=expected_text,

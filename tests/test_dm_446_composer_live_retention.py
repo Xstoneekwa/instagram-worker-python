@@ -309,6 +309,24 @@ class PersistentPipelineTests(PersistentScopeFixture,unittest.TestCase):
             for row in record['observations']:
                 self.assertEqual(hashlib.sha256((p.parent/row['xml_path']).read_bytes()).hexdigest(),row['xml_sha256'])
 
+    def test_optional_verify_metadata_keeps_native_xml_without_diagnostic_replay(self):
+        text='Hello diagnostic000 !\n\nTest Message \n\nRegards'
+        d=self.text_device();observation={}
+        with self.session(d):
+            retention.bind_job('job','recipient')
+            self.assertTrue(nav.type_dm_draft_only(d,text,PKG,force_method='set_text',composer=None)[0])
+            before=d.reads
+            self.assertTrue(nav.verify_dm_draft_text(d,text,observation=observation))
+            self.assertEqual(d.reads-before,2)
+        self.assertEqual(observation['actual_text'],text)
+        path,receipt=self.receipts()[0]
+        self.assertEqual(len([e for e in receipt['events'] if e['stage']=='draft_verify']),1)
+        self.assertFalse(any(e['stage']=='draft_read' for e in receipt['events']))
+        self.assertTrue(receipt['records'])
+        for record in receipt['records']:
+            for row in record['observations']:
+                self.assertEqual(hashlib.sha256((path.parent/row['xml_path']).read_bytes()).hexdigest(),row['xml_sha256'])
+
     def test_verify_native_subbranches_are_distinct_and_business_equivalent(self):
         import types
         expected='Private expected 🙂\nSecond line'
@@ -404,6 +422,7 @@ class PersistentPipelineTests(PersistentScopeFixture,unittest.TestCase):
                     return call
                 env=dict(engine.__dict__)
                 env.update(log=lambda *a,**kw:None,
+                    _dm_446_context=lambda d:None,
                     dm_thread_shows_outgoing_message=trace('duplicate',False),
                     _resolve_dm_text_composer=trace('focus',(object(),None)),
                     verify_dm_composer_safe=trace('qualify',(True,'ok')),

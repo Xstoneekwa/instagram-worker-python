@@ -17,10 +17,69 @@ import certification_admission as ca
 
 
 
+
+# Exact inverse of the scoped DM446 read-reuse delta; test-only.
+_LATENCY_REUSE_EXACT_INVERSE = 'eNrNWGlv2zgQ/SuE+sF2oTV0Hwa8QLZxFgF6oWssWtSFQJGULUSmVB1Jg9T/fYeiHdOynGu7wCqt60qcNzNv3gwZ3Wl0HVWMU1ZGjC9TzsbFrTa502JcsYjk63VaaxPN9h0am05iWzahtkexYcWGaZmeGYa+RY3E9JzAcg1Nl4bVCluuB4ae4QZm7McuMQIPszAwsBN4rpNgxyB+wKgRJNQmtmsElJjYT+zADnwrtpzQDpLEB0CCOU0prhVU4htx7ISuF4dxQIhBMbNtQAqNkLmm43om3HVZGLo2CakfGj7xccJCFvs4sDEF1FXDrypt8vVOy5OkYpCk6RuuruUZBQewgLMb+ILgioAix/GADV6zH7W+4NpG39s5PjDRayiua1ZWac53xmjahRvSEUoTVJQsgRrEmFxFVS0+6xwKg0uyQiyrGHqfc3bk2XT8k57FBdQhntdouOCocz3g8HixwOlmklYttIzrCQbjApzgJUPTKSquloc2o05qruM4xi61LjiEW9ZCnEVeQQrXaZXGGeCiOM+zYbRXdHdJ9L1JyRUwLtz18fXUih0nfDKmHurF1U+buEAMEgy81quSYXqP9uwyvKQUu6tV3XMY7QJ0a2patu9ZalEZtbb0JimnUZKTprp3IRojL2FNp1bH9VEofqhUQCzBWcZKkfZCA2azNq2F1nJU1eASKL8tmPC70BbaaAw302I4Gmf5DUQ0kpZ5U4Mx9Im2B1d6dJu7+OcVmq+gQFu36XrNaAqTLLtFJfve4CxNUlahesXQLmsdiYrLe9CiEE3KlzswWuKkboMtWZVn12Cbwv+XOOUogZjl6jG6rBFnwBNqqhYeQgCopuSCTAkFgdRgAYbC04dtRqjA9WqMzvNWU7QpspRAvLAG1ygBpyu0DRtuQxHGEk7WUSkDo4LtB6T6LFW23D6ukl7N2W5g+armbtJ61YIBI4y3SRQr2LOGA8CrJYOD0WTv/V7ywD18tvqYtlUSKPdPD+R2iE9wAeSzCErCa9VP1KIArU1WD3SESQ3ktkjTHq9b7CxfKkwvtJQn+ULT1Vv7fm0V0yLugYSg1PUgkpLjNZs24lN5II0zxqfwd9gX0dHiNa7JilUR+1EwUjPal8euqUSd9/Ht7ur3hZRfQEftEFqyGtfQoiCWJF3qkOX5u+jv2afLiy/R/MvH2Xk0n32eQ2JoXjZspFYQIITuQG5pcitKs/c6pLoSgzDqzhphwjiGWUd3O8xzQ5GR/Ju59ZLZdGIkyb5Us3pkV3lCqypcv0KfGAgK5RyGnBgtUt0oT+QcWgMahslzux0nbSzbaaJvpxZW4Yoybfu7HVfw5/O7t6jiuKhWeT1GZyjBqUhCdBJ8rGEUVgiEfA23RXrjPVYegw6vW08TRFNSfwUGdXTGb79BMe42+5UyqLbgj4tGV4GnyvfRYzNEWTsGTQ0XmjIBoMKH8jg1Tw433tPTpcqbkrDpQEYu8xroh9atRdUQwhiF5j0O8HCBkPgFBpmNOjhxiTlZ9djLB5Bbx+D16+FdJ/1JH2sboV84enA4InHC+oaSLrplJNV/t1EdKYQeDtGDQfrE+Xl6bD5tdD4vEdGIvS6OBm47oXYCHvXWVwoB0lSUcLAjjPpnJwBOunjiVCE1oAPbLXkKaiS7c3dQEqkoCM/eil+6Hf/XW/L/Q1FP08dLN+RjXfRsI8/YZjffNrrWyn9Z4nUEEztdyknxS19AJKERYIfYfhwTRvzACXxKbcNzbYM6ceg4pk08HwcOIbZjxm5IDCPwwInjMdty3f4XECEhTmgQ3wpt16WEhh5jlkkSgk3LIHFITQI/rme6Lo59JzDcENs+S0zIgzAr6X0BYXumaTm7syplyQkqJ6ixxufsOiXQc7u6TuSw+O339oiinmNOAsliPgCno9f6g7vmT3lAmO7G04F/9RgOqVmBd/JVBYhJcaMePjrNr24oJGMYjj2nFzSFKNqws6dtZ9V2hxpcXM7enkdnf/w1ez8fjI7D9oPwwTcsTw79RHS7OP6czdtTYzT7/Gb2cX754f1AVIOwom7PXRmuqqlo1iHcHI2jSIyIKDqO2LJt49cSvY30OJ0Os+Kwezgxl3mt3//mGXFwMy3xjXDbs58p54bBlomzN/OBiJn9AFS5EQ63z959nH8Z7HYn8COfyofnlxcXs09tQfWe10zfNpt/AM14qfw='
+
+def restore_latency_reuse_exact_delta(name, source):
+    import base64, zlib
+    record = json.loads(zlib.decompress(base64.b64decode(_LATENCY_REUSE_EXACT_INVERSE))).get(name)
+    if record is None or hashlib.sha256(source.encode()).hexdigest() == record['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:
+        raise AssertionError('latency_reuse_source_changed:' + name)
+    for hunk in reversed(record['hunks']):
+        at, new = hunk['offset'], hunk['new']
+        if source[at:at+len(new)] != new:
+            raise AssertionError('latency_reuse_hunk_changed:' + name)
+        source = source[:at] + hunk['old'] + source[at+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest() != record['base_sha256']:
+        raise AssertionError('latency_reuse_inverse_mismatch:' + name)
+    return source
+
+def _restore_latency_reuse_if_exact_candidate(name, source):
+    import base64, zlib
+    record = json.loads(zlib.decompress(base64.b64decode(_LATENCY_REUSE_EXACT_INVERSE))).get(name)
+    if record is not None and hashlib.sha256(source.encode()).hexdigest() == record['candidate_sha256']:
+        return restore_latency_reuse_exact_delta(name, source)
+    return source
+
+class LatencyReuseExactInverseTests(unittest.TestCase):
+    def test_exact_parent_and_unrelated_missing_moved_duplicate_refused(self):
+        import base64,zlib
+        for name,record in json.loads(zlib.decompress(base64.b64decode(_LATENCY_REUSE_EXACT_INVERSE))).items():
+            current=(ROOT/name).read_text()
+            parent=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
+            self.assertEqual(restore_latency_reuse_exact_delta(name,current),parent)
+            self.assertEqual(restore_latency_reuse_exact_delta(name,parent),parent)
+            h=next(h for h in record['hunks'] if h['new']);at,new=h['offset'],h['new']
+            for bad in (current+'\n',current[:at]+current[at+1:],
+                        current[:at]+new+current[at:],current[:at]+current[at+len(new):]+new):
+                if bad!=current:
+                    with self.assertRaises(AssertionError):restore_latency_reuse_exact_delta(name,bad)
+
+    def test_only_approved_functions_and_prior_records_preserved(self):
+        expected={'dm_sender_engine.py':['prepare_dm_sender_global_search_surface','_resolve_dm_text_composer','_perform_real_welcome_dm_send'],
+                  'instagram_navigation.py':['verify_dm_draft_text']}
+        functions=lambda src:{n.name:ast.dump(n) for n in ast.parse(src).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+        for name,allowed in expected.items():
+            current=(ROOT/name).read_text();parent=restore_latency_reuse_exact_delta(name,current)
+            a,b=functions(parent),functions(current)
+            self.assertEqual(a.keys(),b.keys());self.assertEqual([k for k in a if a[k]!=b[k]],allowed)
+        parent=subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:tests/test_certification_admission.py'],text=True)
+        constants=lambda src:{n.targets[0].id:ast.literal_eval(n.value) for n in ast.parse(src).body
+            if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name)
+            and n.targets[0].id.endswith('_EXACT_INVERSE')}
+        current_constants=constants(Path(__file__).read_text())
+        for k,v in constants(parent).items():self.assertEqual(current_constants[k],v,k)
+        for name in ('outreach_terminal_receipt.py','runner.py','dm_ui_446_evidence.py','dm_thread_truth.py','outreach_slot_contract.py'):
+            self.assertEqual((ROOT/name).read_bytes(),subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:'+name]))
+
 # Exact inverse of the terminal receipt precision and error projection delta; test-only.
 _TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE = 'eNq1VU2P2zgM/SuGL066QeAvWVKA/oBeeljsaacDQ5aojra2ZUhOZ7pB/vtS8STNOM700tXFsE0+PpKP1CG2+9GBkE/1CK4zvWhrBxLMMG6HH/HuEDfCQy1t15kx3sWirICxIq8aqXjTUCILyYFmnOYy05JzXpWUNzTeTI7+SeSkQsdMQc6LpihApPhgvGEgi4KyAghJRUmF4kQXZSNLwVTTcJlLlgLJc11oWmkElKJXRonxCpUIzhuhC9UoTSqlBAeuRcGYFARJQQq6oVRokWlSCllplucl0IbmKWFAAs2nff/Nx7uHQ2y19oBJsmwT21YhvHa2i0LE0XQQmW6wbry8f+nRu4fnsx2WzfbStEaMxva1R7pnl0E4rMXMIGD4UXQDAh03P8PnFeVnAtHrOdlFHy+xtyGi8VZb14lxNYDzxo+gtg6GVkhYJX8nmyj5I013aZqs11/6KyQkdBcJGY7wMj4kvrVjfTJOHu+jXiowJ/p+xj8JLzD7hesiw0Dl+HjcxG7f9+B+r3QpSJQj0VIRVpSFUmnKszzPGOS0qHhKK0pE1aRZI4kSqagYUBS2IBlXgJJelm6uidKCYmjNldSUkxQySbO8IIUoVCZ5WeZZ1hChdVqxtCwrViqoBCo6S5lalG6eVpwVZ/XcdCecy5iDc9Zhvb/CKMbRrS6LIBQW2zzfB5MDCuCz7eGqb+EYPcPdvf0fzmlILlZ+33XC/agHZ/8BGXp8GZbpSz033UQ9auF7kIbwKAlpFdxGeTUOOrqDs1JGhpHBjvRft5j9KkE5nvTfSzhbJesIq3M4rte3MSYCGCK5uzxr038XrVHJrffgzKnut9msXmNPpK5+JEsssOYTlOmjVRIG89m6b+BqeDFj3dv+X3A2fL6Q1MK0oJL1QnOuSrfdD0GpK22cH2sp9v6UViDzcXpsoitus2/n1+UQc0nYtrXPOMR2eBthIV1oPfyCOI4ADpzYt1g9H/aHCgoLWe8dTIU801zfVc7DO02dJuARm/dW7QtNnuSFlocPH15fsBVLQtudIx9nF0FWMFJV7PouOM3QXX7nCTopLyybuUHIfspEhMJ75CAleD9b5P9TlE30aRqKv14d/pzMbtOm7J0lhro33vS4+bGKK3iR93DnOg97bbvcU+yTxxWIYOuHXValj9N9cvwPeJ3ynw=='
 
 def restore_terminal_receipt_precision_exact_delta(name, source):
+    source = _restore_latency_reuse_if_exact_candidate(name, source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE))).get(name)
     if record is None or hashlib.sha256(source.encode()).hexdigest() == record['base_sha256']:
@@ -37,6 +96,7 @@ def restore_terminal_receipt_precision_exact_delta(name, source):
     return source
 
 def _restore_terminal_receipt_precision_if_exact_candidate(name, source):
+    source = _restore_latency_reuse_if_exact_candidate(name, source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE))).get(name)
     if record is not None and hashlib.sha256(source.encode()).hexdigest() == record['candidate_sha256']:

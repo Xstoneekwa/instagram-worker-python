@@ -131,10 +131,10 @@ class DmRealSendFlagsTest(unittest.TestCase):
             ),
             patch.object(dm_sender_engine, "_resolve_dm_text_composer", return_value=(object(), None)),
             patch.object(dm_sender_engine, "verify_dm_composer_safe", return_value=(True, "ok")),
-            patch.object(dm_sender_engine, "read_dm_composer_text", side_effect=[existing_draft, "Salut", "Salut"]),
+            patch.object(dm_sender_engine, "read_dm_composer_text", side_effect=[existing_draft, "Salut", "Salut"]) as draft_reader,
             patch.object(dm_sender_engine, "clear_dm_draft", clear_mock),
             patch.object(dm_sender_engine, "type_dm_draft_only", return_value=(True, {"method": "set_text"})),
-            patch.object(dm_sender_engine, "verify_dm_draft_text", return_value=True),
+            patch.object(dm_sender_engine, "verify_dm_draft_text", return_value=True) as draft_verify,
             patch.object(dm_sender_engine, "send_dm_safe", return_value={"sent": True, "composer_text_len_before_send": 5}),
             patch.object(dm_sender_engine, "finalize_after_real_send", return_value={"back_to_profile_ok": True}),
         ):
@@ -147,6 +147,9 @@ class DmRealSendFlagsTest(unittest.TestCase):
             )
         self.assertTrue(sent_ok)
         self.assertIsNone(failure_reason)
+        self.assertEqual(draft_reader.call_count, 2)  # Welcome keeps its original reads.
+        draft_verify.assert_called_once()
+        self.assertNotIn("observation", draft_verify.call_args.kwargs)
         return clear_mock
 
     def test_placeholder_existing_draft_is_not_cleared_before_typing(self) -> None:

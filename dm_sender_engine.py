@@ -57,6 +57,7 @@ from instagram_navigation import (
     verify_app_foreground,
     verify_dm_composer_safe,
     verify_dm_draft_text,
+    _dm_446_context,
     verify_profile,
     verify_welcome_dm_thread_recipient_exact,
     _welcome_dm_thread_recipient_identity_from_hierarchy,
@@ -1280,8 +1281,14 @@ def prepare_dm_sender_global_search_surface(
     invalidate_search_surface_cache(f"dm_sender_prepare:{context}")
 
     try:
+        version_context = _dm_446_context(d) if prefer_back_stack_to_search else None
         if (
             last_recipient_username
+            and not (
+                prefer_back_stack_to_search
+                and version_context is not None
+                and version_context.package == pkg
+            )
             and is_dm_thread_screen(d, pkg)
             and not prefer_back_stack_to_search
         ):
@@ -1463,7 +1470,13 @@ def prepare_dm_sender_global_search_surface(
                         )
                         return True
                 start_dm_thread_visible = bool(is_dm_thread_screen(d, pkg))
-                start_composer_visible = bool(_dm_sender_composer_visible_quick(d))
+                version_context = _dm_446_context(d)
+                start_composer_visible = (
+                    None
+                    if start_dm_thread_visible and version_context is not None
+                    and version_context.package == pkg
+                    else bool(_dm_sender_composer_visible_quick(d))
+                )
                 start_screen = (
                     "thread"
                     if start_dm_thread_visible or start_composer_visible
@@ -3330,7 +3343,18 @@ def _resolve_dm_text_composer(
             error=str(e)[:200],
         )
         return None, "composer_focus_failed"
-    ed2 = _dm_find_focus_composer(d) or ed
+    version_context = (
+        _dm_446_context(d)
+        if caller == "real_send" and str(dm_type or "").strip().lower() == "outreach"
+        else None
+    )
+    # This caller immediately requalifies the composer, reads the pretyping
+    # draft and resolves it again for typing. It never uses this returned
+    # editor in the Outreach path. Do not duplicate that fresh qualification.
+    ed2 = (
+        ed if version_context is not None and version_context.package == pkg
+        else _dm_find_focus_composer(d) or ed
+    )
     _dm_retention.capture_event('focus_result', branch='FOCUS_CALL_RETURNED', bounds=bounds)
     log(
         "info",
@@ -3677,19 +3701,41 @@ def _perform_real_welcome_dm_send(
         reused_existing_draft=reused_draft,
         **flags,
     )
-    with _dm_retention.phase('posttyping'):
-        composer_after_type = read_dm_composer_text(d)
-    _dm_retention.capture_event('posttyping_read_result', actual_text=composer_after_type)
-    log(
-        "info",
-        "dm_sender_draft_text_after_typing",
-        username=uname,
-        draft_len=len(composer_after_type),
-        draft_matches_expected=composer_after_type.strip() == draft_text.strip(),
+    verify_enabled = bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True))
+    version_context = (
+        _dm_446_context(d)
+        if str(dm_type or "").strip().lower() == "outreach" else None
     )
-
-    if bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True)):
-        if not verify_dm_draft_text(d, draft_text):
+    if verify_enabled and version_context is not None and version_context.package == pkg:
+        # Reuse only the result of this mandatory fresh verification, never a
+        # prior editor or XML snapshot. A failed read remains unavailable.
+        observation: dict[str, Any] = {}
+        verified = verify_dm_draft_text(d, draft_text, observation=observation)
+        composer_after_type = observation.get("actual_text")
+        _dm_retention.capture_event(
+            'posttyping_read_result', source='draft_verify',
+            read_succeeded=observation.get("read_succeeded", False),
+            branch=observation.get("branch"),
+            **({"actual_text": composer_after_type} if isinstance(composer_after_type, str) else {}),
+        )
+        log(
+            "info", "dm_sender_draft_text_after_typing", username=uname,
+            draft_len=len(composer_after_type) if isinstance(composer_after_type, str) else None,
+            draft_matches_expected=bool(verified),
+            read_source="draft_verify",
+        )
+        if not verified:
+            return False, {}, "draft_verify_failed"
+    else:
+        with _dm_retention.phase('posttyping'):
+            composer_after_type = read_dm_composer_text(d)
+        _dm_retention.capture_event('posttyping_read_result', actual_text=composer_after_type)
+        log(
+            "info", "dm_sender_draft_text_after_typing", username=uname,
+            draft_len=len(composer_after_type),
+            draft_matches_expected=composer_after_type.strip() == draft_text.strip(),
+        )
+        if verify_enabled and not verify_dm_draft_text(d, draft_text):
             return False, {}, "draft_verify_failed"
     if state_transition is not None:
         state_transition("draft_exact", "draft_readback_exact")

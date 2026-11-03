@@ -1,0 +1,64 @@
+{
+  "schema": "DM446_NATIVE_LATENCY_SEGMENTS_V1",
+  "physical_after_available": false,
+  "run_seconds": 326.389203,
+  "recipients": [
+    {
+      "label": "compact_46",
+      "admission_to_typing_s": 35.79483,
+      "typing_to_send_s": 26.420361,
+      "proof_to_search_s": 35.852766,
+      "proof_to_next_composer_s": 67.96968,
+      "typing_to_diagnostic_s": 4.074596
+    },
+    {
+      "label": "compact_43",
+      "admission_to_typing_s": 34.848038,
+      "typing_to_send_s": 25.228656,
+      "proof_to_search_s": 35.712041,
+      "typing_to_diagnostic_s": 4.186901
+    }
+  ],
+  "posttyping_roles": [
+    {
+      "role": "diagnostic_read",
+      "xml_observations": 2,
+      "retained": false
+    },
+    {
+      "role": "mandatory_draft_verify",
+      "xml_observations": 2,
+      "retained": true
+    },
+    {
+      "role": "send_qualification",
+      "xml_observations": 2,
+      "retained": true
+    },
+    {
+      "role": "send_draft_read",
+      "xml_observations": 2,
+      "retained": true
+    },
+    {
+      "role": "pre_send_signature_draft_read",
+      "xml_observations": 2,
+      "retained": true
+    },
+    {
+      "role": "send_button_candidates",
+      "xml_observations": 1,
+      "retained": true
+    },
+    {
+      "role": "thread_signature",
+      "xml_observations": 1,
+      "retained": true
+    },
+    {
+      "role": "pre_tap_artifact",
+      "xml_observations": 1,
+      "retained": true
+    }
+  ]
+}
