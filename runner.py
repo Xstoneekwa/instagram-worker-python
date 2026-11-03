@@ -5520,6 +5520,19 @@ def _return_with_cleanup(d, code: int) -> int:
             if outreach_slot.finished:
                 pending = {**pending, 'performance_summary': {**(pending.get('performance_summary') or {}),
                     'outreach_slot_terminal': outreach_slot.terminal}}
+            terminal_error = getattr(outreach_slot, 'terminal_receipt_error', None)
+            if terminal_error:
+                from terminal_summary_projection import project_terminal_summary, native_reason_code
+                summary = project_terminal_summary(dict(pending.get('performance_summary') or {}))
+                reason = 'outreach_terminal_receipt_invalid'
+                prior = native_reason_code(summary.get('reason_code'))
+                if prior in ('', 'worker_exit_nonzero', 'outreach_failed'):
+                    summary.update(first_causal_reason=reason, reason_code=reason, reason=reason,
+                                   follow_stop_reason=reason)
+                else:
+                    summary.setdefault('secondary_failure_code', reason)
+                summary['outreach_terminal_receipt_error'] = terminal_error
+                pending = {**pending, 'performance_summary': summary}
         summary = pending.get("performance_summary") or {}
         if "restriction_preflight_terminal_contract" in summary:
             summary["preflight_cleanup_completed"] = cleanup_ok is True
@@ -30047,7 +30060,7 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
 
 def _outreach_cleanup_and_finish(d, code, *, allow_device_cleanup=True):
     from outreach_slot_contract import active
-    from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_success
+    from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_success, InvalidTerminalReceipt
     slot = active()
     if slot is None:
         return code
@@ -30090,6 +30103,8 @@ def _outreach_cleanup_and_finish(d, code, *, allow_device_cleanup=True):
         return code if receipt_allows_success(terminal) else 1
     except Exception as exc:
         log('error','outreach_terminal_persistence_failed',error=str(exc)[:160])
+        if isinstance(exc, InvalidTerminalReceipt):
+            slot.terminal_receipt_error = str(exc)[:160]
         return 1
 
 

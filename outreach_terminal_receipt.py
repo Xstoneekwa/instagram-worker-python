@@ -1,5 +1,5 @@
 """Strict dedicated-outreach receipt validation; no IO and no full_cycle use."""
-from datetime import datetime
+from reconciliation_scan import parse_reconciliation_timestamp
 
 SCHEMA = 'OUTREACH_TERMINAL_V22'
 IDENTITY = ('request_id', 'slot_id', 'root_request_id', 'account_id',
@@ -45,8 +45,8 @@ def validate_terminal_receipt(receipt, context, *, run_id):
     persisted = receipt.get('persisted_at')
     require(type(persisted) is str and bool(persisted.strip()), 'persisted_at')
     try:
-        stamp = datetime.fromisoformat(persisted.replace('Z', '+00:00'))
-        start = datetime.fromisoformat(context['slot_start'].replace('Z', '+00:00'))
+        stamp = parse_reconciliation_timestamp(persisted)
+        start = parse_reconciliation_timestamp(context['slot_start'])
         require(stamp.tzinfo is not None and start.tzinfo is not None and stamp >= start, 'persisted_at')
     except (ValueError, TypeError, KeyError):
         raise InvalidTerminalReceipt('outreach_terminal_receipt_invalid:persisted_at')

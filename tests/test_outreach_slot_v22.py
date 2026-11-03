@@ -1,4 +1,7 @@
 import unittest
+import json
+from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import outreach_slot_contract as contract
@@ -6,6 +9,92 @@ from outreach_terminal_receipt import validate_terminal_receipt, receipt_allows_
 import test_outreach_slot_contract as fixtures
 from test_outreach_slot_v2 import actual_function
 import account_run_request_consumer as consumer
+
+
+def native_precision_fixture():
+    return json.loads((Path(__file__).parent / 'fixtures' /
+                       'outreach_terminal_native_precision_v1.json').read_text())
+
+
+class NativeReceiptTimestampTests(unittest.TestCase):
+    def setUp(self):
+        native = native_precision_fixture()
+        self.ctx, self.receipt = native['context'], native['receipt']
+
+    def validate(self, persisted=None, start=None):
+        receipt = dict(self.receipt)
+        context = dict(self.ctx)
+        if persisted is not None:
+            receipt['persisted_at'] = persisted
+        if start is not None:
+            context['slot_start'] = start
+        return validate_terminal_receipt(receipt, context, run_id=receipt['run_id'])
+
+    def test_native_five_digit_receipt_is_unchanged_and_successful(self):
+        self.assertEqual(self.receipt['persisted_at'], '2026-11-03T12:15:39.03672+00:00')
+        self.assertEqual(self.ctx['slot_start'], '2026-11-03T12:10:00.30652+00:00')
+        self.assertEqual(self.validate(), self.receipt)
+        self.assertTrue(receipt_allows_success(self.validate()))
+        self.assertEqual(self.receipt['sent_confirmed_in_slot'], 2)
+
+    def test_zero_through_six_fraction_digits_and_timezone_instants(self):
+        from reconciliation_scan import parse_reconciliation_timestamp
+        for digits in ('', '1', '12', '123', '1234', '12345', '123456'):
+            fraction = '.' + digits if digits else ''
+            expected = datetime(2026, 11, 3, 12, 15, 39,
+                                int((digits + '000000')[:6]), timezone.utc)
+            variants = ('2026-11-03T12:15:39' + fraction + 'Z',
+                        '2026-11-03 12:15:39' + fraction + '+00:00',
+                        '2026-11-03T14:15:39' + fraction + '+0200',
+                        '2026-11-03T09:15:39' + fraction + '-03:00')
+            for stamp in variants:
+                with self.subTest(stamp=stamp):
+                    self.assertEqual(parse_reconciliation_timestamp(stamp), expected)
+                    result = self.validate(stamp, variants[0])
+                    self.assertEqual(result['persisted_at'], stamp)
+                    self.assertTrue(receipt_allows_success(result))
+
+    def test_microsecond_order_and_equal_boundary_preserved(self):
+        start = '2026-11-03T12:10:00.30652+00:00'
+        for stamp in ('2026-11-03T14:10:00.306520+02:00',
+                      '2026-11-03T12:10:00.306521Z'):
+            self.validate(stamp, start)
+        with self.assertRaisesRegex(InvalidTerminalReceipt,
+                                   '^outreach_terminal_receipt_invalid:persisted_at$'):
+            self.validate('2026-11-03T14:10:00.306519+02:00', start)
+
+    def test_invalid_instants_fail_closed_in_both_fields(self):
+        invalid = (None, '', 123, True, [], {}, 'infinity', '2026-11-03',
+                   '2026-11-03T12:15:39', '2026-02-30T00:00:00Z',
+                   '2026-11-03T12:15:60Z', '2026-11-03T12:15:39+24:00',
+                   '2026-11-03T12:15:39+02:60', '2026-11-03T12:15:39+00',
+                   '2026-11-03T12:15:39.1234567Z')
+        for field in ('persisted_at', 'slot_start'):
+            for stamp in invalid:
+                receipt, context = dict(self.receipt), dict(self.ctx)
+                (receipt if field == 'persisted_at' else context)[field] = stamp
+                with self.subTest(field=field, stamp=stamp), self.assertRaisesRegex(
+                        InvalidTerminalReceipt, '^outreach_terminal_receipt_invalid:persisted_at$'):
+                    validate_terminal_receipt(receipt, context, run_id=receipt['run_id'])
+            receipt, context = dict(self.receipt), dict(self.ctx)
+            (receipt if field == 'persisted_at' else context).pop(field)
+            with self.assertRaises(InvalidTerminalReceipt):
+                validate_terminal_receipt(receipt, context, run_id=receipt['run_id'])
+
+    def test_native_precision_does_not_weaken_other_receipt_proofs(self):
+        for field in ('request_id', 'run_id', 'root_request_id', 'slot_id', 'account_id',
+                      'assignment_id', 'device_id', 'app_instance_id', 'package_name',
+                      'client_id', 'campaign_id'):
+            with self.subTest(field=field), self.assertRaises(InvalidTerminalReceipt):
+                validate_terminal_receipt({**self.receipt, field: 'foreign'}, self.ctx,
+                                          run_id=self.receipt['run_id'])
+        for change in ({'campaign_revision': 2}, {'attempt_id': 2},
+                       {'remaining_target': 27}, {'cleanup_ok': False},
+                       {'business_failure': True}, {'ambiguous_send_count': 1},
+                       {'terminal_class': 'TARGET_REACHED'}):
+            with self.subTest(change=change), self.assertRaises(InvalidTerminalReceipt):
+                validate_terminal_receipt({**self.receipt, **change}, self.ctx,
+                                          run_id=self.receipt['run_id'])
 
 
 class ReceiptTests(unittest.TestCase):
@@ -28,7 +117,7 @@ class ReceiptTests(unittest.TestCase):
             code = fn(SimpleNamespace(press=Mock()), 0)
         request = {'id':'r','account_id':'a','run_id':'run','requested_run_type':'outreach_session',
                    'status':'running','metadata_safe':{'outreach_slot_v1':self.ctx}}
-        with patch.object(consumer,'get_account_run_request',return_value=request), patch.object(consumer.supabase_client,'call_rpc_once',return_value=receipt), patch.object(consumer,'_safe_complete_account_run_request') as complete, patch.object(consumer,'_reconcile_linked_run'), patch.object(consumer,'_audit'), patch.object(consumer,'_publish_run_failure_incident'), patch.object(consumer,'_safe_login_provisioner_summary_for_audit',return_value={}):
+        with patch.object(consumer,'get_account_run_request',return_value=request), patch.object(consumer.supabase_client,'call_rpc_once',return_value=receipt), patch.object(consumer,'_safe_complete_account_run_request') as complete, patch.object(consumer,'_reconcile_linked_run'), patch.object(consumer,'_audit'), patch.object(consumer,'_publish_run_failure_incident'), patch.object(consumer,'_safe_login_provisioner_summary_for_audit',return_value={}), patch.object(consumer.supabase_client,'load_run_row',return_value={}), patch.object(consumer,'log'):
             # Independent dispatcher check: even a falsely successful child must fail.
             consumer._finalize_manual_run_after_subprocess(SimpleNamespace(worker_id='w'),request_id='r',account_id='a',exit_code=0)
         return code, complete.call_args.args[2], budget

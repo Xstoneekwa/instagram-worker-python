@@ -8,6 +8,141 @@ import outreach_terminal_receipt as authority
 import test_outreach_slot_contract as fixtures
 from test_outreach_slot_v2 import actual_function
 import outreach_slot_contract
+from test_outreach_slot_v22 import native_precision_fixture
+
+
+class NativeTerminalFinalizationTests(unittest.TestCase):
+    def setUp(self):
+        native = native_precision_fixture()
+        self.ctx, self.receipt = native['context'], native['receipt']
+        self.request = {'id': self.ctx['request_id'], 'run_id': self.receipt['run_id'],
+                        'account_id': self.ctx['account_id'], 'status': 'running',
+                        'requested_run_type': 'outreach_session',
+                        'metadata_safe': {'outreach_slot_v1': self.ctx}}
+
+    def finish(self, receipt, summary=None):
+        from reconciliation_scan import parse_reconciliation_timestamp
+        budget = outreach_slot_contract.SlotBudget(
+            self.ctx, wall=lambda: parse_reconciliation_timestamp(self.ctx['slot_start']).timestamp()+1,
+            monotonic=lambda: 0, rpc=Mock(return_value=receipt))
+        if isinstance(receipt, Exception):
+            budget.rpc.side_effect = receipt
+        published = []
+        def publish(**kwargs):
+            published.append(kwargs)
+            return kwargs['status']
+        env = {'set_wait_event_callback': Mock(), 'time': SimpleNamespace(monotonic=lambda: 0),
+               'log': Mock(), '_CURRENT_RUN_ID': self.receipt['run_id'],
+               '_CURRENT_RUN_REQUEST_ID': self.request['id'],
+               '_run_control_dispatcher_worker_id': lambda: 'test-only',
+               '_PENDING_TERMINAL_RUN_STATUS': {'run_id': self.receipt['run_id'],
+                   'status': 'completed', 'totals': {'dm': 2}, 'performance_summary': summary or {}},
+               '_update_run_status_safe': publish}
+        for name in ('_outreach_cleanup_and_finish', '_terminalize_run_request_after_cleanup',
+                     '_return_with_cleanup'):
+            env[name] = actual_function('runner.py', name, env)
+        device = SimpleNamespace(press=Mock())
+        with patch.object(outreach_slot_contract, 'active', return_value=budget), \
+                patch('device.shell', return_value=(0, '', '')) as shell, \
+                patch('cooperative_business_stop.StopContext.from_env', return_value=None), \
+                patch('account_run_control.complete_account_run_request', return_value={}) as complete:
+            code = env['_return_with_cleanup'](device, 0)
+            # Repeated cleanup never repeats the finish RPC or device actions.
+            again = env['_outreach_cleanup_and_finish'](device, code)
+        self.assertEqual(again, code)
+        budget.rpc.assert_called_once()
+        self.assertEqual(budget.rpc.call_args.args[0], 'finish_outreach_slot_v2')
+        shell.assert_called_once()
+        device.press.assert_called_once_with('home')
+        self.assertEqual(len(published), 1)
+        self.assertEqual(complete.call_args.args[2], published[0]['status'])
+        self.assertEqual(published[0]['totals'], {'dm': 2})
+        return code, published[0], budget
+
+    def dispatch(self, receipt, persisted, code, canceled=False):
+        request = {**self.request, 'status': 'canceled' if canceled else 'running'}
+        row = {'id': self.receipt['run_id'], 'account_id': self.ctx['account_id'],
+               'status': persisted['status'], 'performance_summary': persisted['performance_summary']}
+        with patch.object(consumer, 'get_account_run_request', return_value=request), \
+                patch.object(consumer.supabase_client, 'call_rpc_once', return_value=receipt) as rpc, \
+                patch.object(consumer.supabase_client, 'load_run_row', return_value=row), \
+                patch.object(consumer, '_safe_complete_account_run_request', return_value={}) as complete, \
+                patch.object(consumer, '_reconcile_linked_run'), patch.object(consumer, '_audit'), \
+                patch.object(consumer, '_publish_run_failure_incident') as incident, \
+                patch.object(consumer, '_safe_login_provisioner_summary_for_audit', return_value={}), \
+                patch.object(consumer, 'log'):
+            consumer._finalize_manual_run_after_subprocess(
+                SimpleNamespace(worker_id='test-only'), request_id=request['id'],
+                account_id=request['account_id'], exit_code=code)
+        self.assertEqual(rpc.call_args_list[0].args[0], 'read_outreach_terminal_v2')
+        return complete, incident
+
+    def test_native_receipt_completes_runner_and_dispatcher_without_incident(self):
+        code, row, budget = self.finish(self.receipt)
+        self.assertEqual((code, row['status'], budget.finished), (0, 'completed', True))
+        self.assertEqual(row['performance_summary']['outreach_slot_terminal'], self.receipt)
+        self.assertNotIn('outreach_terminal_receipt_error', row['performance_summary'])
+        complete, incident = self.dispatch(self.receipt, row, code)
+        self.assertEqual(complete.call_args.args[2], 'completed')
+        incident.assert_not_called()
+
+    def test_invalid_receipt_reason_reaches_unchanged_dispatcher(self):
+        for changes, field in (({'persisted_at': 'invalid'}, 'persisted_at'),
+                               ({'account_id': 'foreign'}, 'account_id'),
+                               ({'remaining_target': 27}, 'counters')):
+            receipt = {**self.receipt, **changes}
+            with self.subTest(field=field):
+                code, row, budget = self.finish(receipt)
+                self.assertEqual((code, row['status'], budget.finished), (1, 'failed', False))
+                summary = row['performance_summary']
+                self.assertEqual(summary['reason_code'], 'outreach_terminal_receipt_invalid')
+                self.assertEqual(summary['outreach_terminal_receipt_error'],
+                                 'outreach_terminal_receipt_invalid:' + field)
+                complete, incident = self.dispatch(receipt, row, code)
+                self.assertEqual(complete.call_args.args[2], 'failed')
+                self.assertEqual(complete.call_args.kwargs['error_code'], summary['reason_code'])
+                incident.assert_called_once()
+                self.assertEqual(incident.call_args.kwargs['worker_summary']
+                                 ['outreach_terminal_receipt_error'],
+                                 'outreach_terminal_receipt_invalid:' + field)
+
+    def test_prior_native_cause_wins_and_terminal_error_remains(self):
+        prior = {'outreach_session_summary': {'first_causal_reason': 'send_unverified_quarantined'}}
+        code, row, _ = self.finish({**self.receipt, 'persisted_at': 'invalid'}, prior)
+        summary = row['performance_summary']
+        self.assertEqual(summary['reason_code'], 'send_unverified_quarantined')
+        self.assertEqual(summary['secondary_failure_code'], 'outreach_terminal_receipt_invalid')
+        self.assertEqual(summary['outreach_terminal_receipt_error'],
+                         'outreach_terminal_receipt_invalid:persisted_at')
+        complete, _ = self.dispatch({}, row, code)
+        self.assertEqual(complete.call_args.kwargs['error_code'], 'send_unverified_quarantined')
+        self.assertEqual(prior, {'outreach_session_summary':
+                                {'first_causal_reason': 'send_unverified_quarantined'}})
+
+    def test_generic_fallback_does_not_hide_typed_terminal_failure(self):
+        for reason in ('unknown', 'worker_exit_nonzero', 'outreach_failed'):
+            with self.subTest(reason=reason):
+                code, row, _ = self.finish({}, {'reason': reason})
+                self.assertEqual(code, 1)
+                self.assertEqual(row['performance_summary']['reason_code'],
+                                 'outreach_terminal_receipt_invalid')
+
+    def test_existing_cleanup_failure_is_preserved_as_first_cause(self):
+        _, row, _ = self.finish({}, {'reason_code': 'cleanup_failure'})
+        self.assertEqual(row['performance_summary']['reason_code'], 'cleanup_failure')
+        self.assertEqual(row['performance_summary']['secondary_failure_code'],
+                         'outreach_terminal_receipt_invalid')
+
+    def test_unavailable_rpc_is_not_invented_as_receipt_validation(self):
+        code, row, budget = self.finish(TimeoutError('response unavailable'))
+        self.assertEqual((code, row['status'], budget.finished), (1, 'failed', False))
+        self.assertNotIn('outreach_terminal_receipt_error', row['performance_summary'])
+
+    def test_owner_cancellation_cannot_become_success(self):
+        code, row, _ = self.finish(self.receipt)
+        complete, incident = self.dispatch(self.receipt, row, code, canceled=True)
+        self.assertEqual(complete.call_args.args[2], 'canceled')
+        incident.assert_not_called()
 
 
 class ReconciliationTests(unittest.TestCase):
