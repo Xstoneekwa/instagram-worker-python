@@ -20,6 +20,8 @@ def match(n,s,values,outer=None,opaque_list=False,allow_no_tray=False):
   a=actual[k]
   if v=='$bool':
    if a not in ('true','false'):return False
+  elif v=='$empty_or_name':
+   if a!='' and a!=values.get('name'):return False
   elif v in ('$draft','$cosmetic'):pass # widget identity only; never empty-draft or Send authority
   elif v=='$clock':
    if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',a):return False

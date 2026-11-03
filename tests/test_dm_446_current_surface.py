@@ -580,6 +580,192 @@ class StructuralOptionCTests(unittest.TestCase):
    self.assertTrue(nav.verify_dm_draft_text(d,text));self.assertEqual(d.typed,[text])
 
 
+class CompactFamilySelector(FilledComposerSelector):
+ def set_text(self,value):
+  self.d.typed.append(value)
+  self.d.pending=[]
+  for stage in ('first_filled','filled','verify'):
+   root=ET.fromstring(self.d.case['stages'][stage]['xml'])
+   s.one(root,'row_thread_composer_edittext').set('text',value)
+   self.d.pending.append(ET.tostring(root,encoding='unicode'))
+  self.d.last=self.d.pending[0]
+
+class CompactFamilyDevice(FilledComposerDevice):
+ """Transport double over native-derived states; no physical qualification."""
+ def __init__(self,case):
+  super().__init__(case['stages']['empty']['xml'])
+  self.case=case;self.pending=[];self.emitted=[]
+ def __call__(self,**kw):return CompactFamilySelector(self,kw)
+ def dump_hierarchy(self):
+  if self.pending:self.xmls=[self.pending.pop(0)]
+  xml=super().dump_hierarchy();self.emitted.append(xml);return xml
+
+class CompactFilledFamilyTests(unittest.TestCase):
+ def cases(self):return F['compact_filled_family']
+ def setUp(self):
+  for obj,name,value in ((nav,'time',Clock()),(nav,'log',lambda *a,**kw:None),
+                         (nav,'send_dm_safe',None)):
+   p=patch.object(obj,name,side_effect=AssertionError('No Send in offline test')) if name=='send_dm_safe' else patch.object(obj,name,value)
+   p.start();self.addCleanup(p.stop)
+ def xml(self,r):return ET.tostring(r,encoding='unicode')
+ def history(self,r,f,target=None,context=None):
+  return truth.classify_dm_history(self.xml(r),P,f['target'] if target is None else target,
+             surface_context=tuple(f['context']) if context is None else context)[0]
+ def test_exact_native_empty_and_filled_reader_provenance(self):
+  import subprocess
+  from dm_ui_446_evidence import composer_evidence
+  parent=json.loads(subprocess.check_output(['git','-C',str(Path(s.__file__).parent),'show',
+      '9a8e3cab21de81b235e107ea75106eaf1a22d6b7:dm_ui_446_surface_shapes.json'],text=True))
+  for f in self.cases():
+   for stage,e in f['stages'].items():
+    raw=Path(e['native_path']).read_bytes()
+    self.assertEqual(hashlib.sha256(raw).hexdigest(),e['native_sha256'])
+    self.assertEqual(hashlib.sha256(e['xml'].encode()).hexdigest(),e['sha256'])
+    for label,xml in (('native',raw.decode()),('controlled',e['xml'])):
+     root=ET.fromstring(xml);ctx=tuple(f['context']);target=s.one(root,'header_subtitle').get('content-desc')
+     with self.subTest(case=f['label'],stage=stage,input=label):
+      with patch.object(s,'SCHEMAS',parent):
+       q=s.qualify(root,P,target,ctx)
+       if stage=='empty':self.assertIsNotNone(q)
+       else:self.assertIsNone(q)
+      q=s.qualify(root,P,target,ctx);self.assertIsNotNone(q)
+      self.assertEqual(q['identity'][1],target);self.assertIsNotNone(q['intro'])
+      self.assertEqual(q['empty_surface'],stage=='empty')
+      self.assertTrue(composer_evidence(xml,P,display_size=ctx[2:],surface_context=ctx)['visible'])
+      d=FilledComposerDevice(xml);ed=nav._dm_find_focus_composer(d)
+      self.assertIsNotNone(ed);self.assertEqual(ed.count,1)
+      if stage!='empty':
+       expected=s.one(root,'row_thread_composer_edittext').get('text')
+       self.assertEqual(len(expected),f['length'])
+       self.assertEqual(len(expected.encode('utf-16-le'))//2,f['length'])
+       self.assertEqual(nav.read_dm_composer_text(d),expected)
+       self.assertTrue(nav.verify_dm_draft_text(d,expected))
+       self.assertNotEqual(truth.classify_dm_history(xml,P,target,surface_context=ctx)[0],'empty_new_thread')
+ def test_full_43_46_typing_read_verify_native_state_sequence(self):
+  for f in self.cases():
+   with self.subTest(case=f['label']):
+    d=CompactFamilyDevice(f);expected=f['controlled_text']
+    ok,meta=nav.type_dm_draft_only(d,expected,P,force_method='set_text')
+    self.assertTrue(ok);self.assertEqual(d.typed,[expected]);self.assertEqual(d.focus_clicks,1)
+    self.assertEqual(meta['method'],'set_text');self.assertFalse(meta['fastime_used'])
+    self.assertEqual(meta['actual_text_len_after_set_text'],f['length'])
+    self.assertEqual(nav.read_dm_composer_text(d),expected)
+    self.assertTrue(nav.verify_dm_draft_text(d,expected));self.assertGreaterEqual(d.text_reads,3)
+    sends=[s.one(ET.fromstring(x),'row_thread_composer_send_button_container') for x in d.emitted]
+    transitions=[]
+    for n in sends:
+     state=(n.get('enabled'),n.get('long-clickable'))
+     if not transitions or transitions[-1]!=state:transitions.append(state)
+    self.assertEqual(transitions,[('false','false'),('true','true'),('true','false')])
+ def test_functional_states_and_exact_header_variants(self):
+  for f in self.cases():
+   for stage,mirrored,long_click in itertools.product(('empty','filled'),(False,True),('false','true')):
+    root=ET.fromstring(f['stages'][stage]['xml']);title=s.one(root,'header_title')
+    title.set('content-desc',title.get('text') if mirrored else '')
+    s.one(root,'row_thread_composer_send_button_container').set('long-clickable',long_click)
+    with self.subTest(case=f['label'],stage=stage,mirrored=mirrored,long_click=long_click):
+     q=s.qualify(root,P,f['target'],tuple(f['context']));self.assertIsNotNone(q)
+     self.assertEqual(q['empty_surface'],stage=='empty')
+     if stage=='filled':self.assertTrue(nav.verify_dm_draft_text(FilledComposerDevice(self.xml(root)),f['controlled_text']))
+     else:self.assertEqual(self.history(root,f),'empty_new_thread')
+     title.set('content-desc','Other public title')
+     self.assertIsNone(s.qualify(root,P,f['target'],tuple(f['context'])))
+ def test_filled_or_enabled_empty_never_becomes_empty_authority(self):
+  for f in self.cases():
+   for stage,enabled in itertools.product(('empty','filled'),('false','true')):
+    root=ET.fromstring(f['stages'][stage]['xml'])
+    s.one(root,'row_thread_composer_send_button_container').set('enabled',enabled)
+    with self.subTest(case=f['label'],stage=stage,enabled=enabled):
+     q=s.qualify(root,P,f['target'],tuple(f['context']))
+     if stage=='filled' and enabled=='false':
+      # The existing F4 exception for the expanded editor requires enabled Send.
+      self.assertIsNone(q)
+     else:
+      self.assertIsNotNone(q);self.assertEqual(q['empty_surface'],stage=='empty' and enabled=='false')
+     self.assertEqual(self.history(root,f),'empty_new_thread' if stage=='empty' and enabled=='false' else 'unknown')
+ def test_full_text_mismatch_empty_and_native_exception_fail_closed(self):
+  for f in self.cases():
+   for bad in ('',f['controlled_text'][:-1],f['controlled_text'].replace('Test','Tast'),RuntimeError('native get_text')):
+    d=FilledComposerDevice(f['stages']['verify']['xml']);d.readback=bad
+    with self.subTest(case=f['label'],bad=type(bad).__name__):
+     self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']))
+     self.assertEqual(d.text_reads,1)
+ def test_wrong_recipient_and_unproved_business_continuity_remain_unknown(self):
+  for f in self.cases():
+   for stage in ('empty','filled'):
+    r=ET.fromstring(f['stages'][stage]['xml']);ctx=tuple(f['context'])
+    for wrong in ('wrong_recipient','Surface Fixture',''):
+     with self.subTest(case=f['label'],stage=stage,target=wrong):
+      self.assertEqual(self.history(r,f,wrong),'unknown')
+    s.one(r,'header_subtitle').set('content-desc','Business chat')
+    q=s.qualify(r,P,None,ctx);self.assertIsNotNone(q);self.assertIsNone(q['identity'])
+    self.assertEqual(self.history(r,f),'unknown')
+    d=Device(self.xml(r),clock=nav.time)
+    out,_=nav.detect_dm_thread_state(d,f['target'],pkg=P,
+       _profile_identity=dict(device=d,context=nav._dm_446_context(d),username=f['target'],transition=False))
+    self.assertEqual(out,'unknown')
+ def test_cosmetic_intro_variations_are_not_composer_or_identity_gates(self):
+  for f in self.cases():
+   for stage,words in itertools.product(('empty','filled'),(['紹介','50 abonnés','Compte récent'],['Une ligne.'])):
+    for order in (words,list(reversed(words))):
+     r=ET.fromstring(f['stages'][stage]['xml']);body=s.one(r,'message_list')[0][0]
+     leaf=copy.deepcopy(body[1]);body[:]=[body[0]]
+     for text in order:
+      n=copy.deepcopy(leaf);n.set('text',text);body.append(n)
+     q=s.qualify(r,P,f['target'],tuple(f['context']))
+     with self.subTest(case=f['label'],stage=stage,order=order):
+      self.assertIsNotNone(q);self.assertIsNotNone(q['intro']);self.assertEqual(q['identity'][1],f['target'])
+      self.assertEqual(self.history(r,f),'empty_new_thread' if stage=='empty' else 'unknown')
+ def test_real_and_ambiguous_history_stay_independent(self):
+  for f in self.cases():
+   for stage,kind in itertools.product(('empty','filled'),('bubble_inside','bubble_outside','accessible_leaf','unknown_row','second_card')):
+    r=ET.fromstring(f['stages'][stage]['xml']);ml=s.one(r,'message_list')
+    if kind.startswith('bubble'):
+     parent=ml[0][0] if kind=='bubble_inside' else ml
+     row=ET.SubElement(parent,'node',{'resource-id':P+':id/message_content','class':'android.view.View','package':P,'bounds':'[100,1200][800,1300]'})
+     ET.SubElement(row,'node',{'resource-id':P+':id/direct_text_message_text_view','class':'android.widget.TextView','package':P,'text':'Real message','bounds':'[110,1210][790,1290]'})
+    elif kind=='accessible_leaf':ml[0][0][1].set('content-desc','Unexpected accessible content')
+    elif kind=='second_card':ml.append(copy.deepcopy(ml[0]))
+    else:ml.append(copy.deepcopy(ml[0][0][1]))
+    with self.subTest(case=f['label'],stage=stage,kind=kind):
+     state=self.history(r,f);self.assertNotEqual(state,'empty_new_thread')
+     if kind.startswith('bubble'):self.assertEqual(state,'existing_thread')
+ def test_field_foreground_occlusion_and_send_structure_refusals(self):
+  from dm_ui_446_evidence import composer_evidence
+  kinds=('missing','duplicate','disabled','hidden','occlusion','foreign_window','false_thread',
+         'send_enabled_invalid','send_long_invalid','send_role','send_class','send_click','send_focus','send_child')
+  for f in self.cases():
+   for stage,kind in itertools.product(('empty','filled'),kinds):
+    r=ET.fromstring(f['stages'][stage]['xml']);ed=s.one(r,'row_thread_composer_edittext')
+    parent=next(n for n in r.iter() if ed in list(n));send=s.one(r,'row_thread_composer_send_button_container')
+    if kind=='missing':parent.remove(ed)
+    elif kind=='duplicate':parent.append(copy.deepcopy(ed))
+    elif kind in ('disabled','hidden'):ed.set('enabled' if kind=='disabled' else 'visible-to-user','false')
+    elif kind=='occlusion':ET.SubElement(s.one(r,'message_list'),'node',{'package':P,'class':'android.view.View','bounds':ed.get('bounds'),'visible-to-user':'true','clickable':'false'})
+    elif kind=='foreign_window':r.append(ET.Element('node',{'package':'overlay','class':'android.view.View','bounds':'[0,100][1080,2205]'}))
+    elif kind=='false_thread':
+     s.one(r,'header_title').set('text','Search');s.one(r,'header_title').set('content-desc','Search')
+    elif kind=='send_child':send.append(copy.deepcopy(ed))
+    else:
+     key,value={'send_enabled_invalid':('enabled','unknown'),'send_long_invalid':('long-clickable','unknown'),
+                'send_role':('resource-id',P+':id/fake_send'),'send_class':('class','android.widget.TextView'),
+                'send_click':('clickable','false'),'send_focus':('focusable','false')}[kind];send.set(key,value)
+    with self.subTest(case=f['label'],stage=stage,kind=kind):
+     self.assertIsNone(s.qualify(r,P,f['target'],tuple(f['context'])))
+     self.assertFalse(composer_evidence(self.xml(r),P,display_size=(1080,2340),surface_context=tuple(f['context']))['visible'])
+     self.assertFalse(nav.verify_dm_draft_text(FilledComposerDevice(self.xml(r)),f['controlled_text']))
+   d=FilledComposerDevice(f['stages']['filled']['xml']);d.package='foreign'
+   self.assertFalse(nav.verify_dm_draft_text(d,f['controlled_text']))
+ def test_a0_probe_not_replaced_by_compact_match(self):
+  for f in self.cases():
+   for label,x in (('stable',f['stages']['empty']['xml']),('unknown_next',[f['stages']['empty']['xml'],'<hierarchy/>'])):
+    d=Device(x,clock=nav.time)
+    state,proof=nav.detect_dm_thread_state(d,f['target'],pkg=P)
+    with self.subTest(case=f['label'],probe=label):
+     self.assertEqual(state,'empty_new_thread' if label=='stable' else 'unknown')
+     self.assertGreaterEqual(d.reads,2)
+     if label=='stable':self.assertEqual(proof['reason'],'a0_history_probe_completed')
+
 class CompactOptionCGenericTests(unittest.TestCase):
  def cases(self):return F['compact_option_c_native_structures']
  def xml(self,root):return ET.tostring(root,encoding='unicode')
@@ -613,8 +799,8 @@ class CompactOptionCGenericTests(unittest.TestCase):
      self.assertIsNotNone(s.qualify(root,P,f['target'],ctx))
      self.assertEqual(self.state(root,f['target'],ctx),'empty_new_thread')
      send.set('enabled','true')
-     # Only the previously accepted empty-description/long=true shape may admit enabled Send.
-     if mirrored or long_click=='false':self.assertIsNone(s.qualify(root,P,f['target'],ctx))
+     # Composer evidence is independent from EMPTY and from permission to Send.
+     self.assertIsNotNone(s.qualify(root,P,f['target'],ctx))
      self.assertNotEqual(self.state(root,f['target'],ctx),'empty_new_thread')
  def test_variable_intro_language_count_order_remain_cosmetic(self):
   for f in self.cases():
