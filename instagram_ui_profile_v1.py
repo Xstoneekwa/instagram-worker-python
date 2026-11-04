@@ -30,6 +30,68 @@ class UIProfileStopped(BaseException):
                         'safe_to_continue_ui': False, 'completed_actions_preserved': True}
 
 
+# Only preparation diagnostics: these labels confer no UI or lease authority.
+_PREPARATION_STAGES = {
+    'assignment': ('instagram_ui_assignment_read_failed', 'assignment'),
+    'request_read': ('instagram_ui_request_read_failed', 'request'),
+    'request_identity': ('instagram_ui_request_conversion_failed', 'request.identity'),
+    'request_lineage': ('instagram_ui_request_lineage_invalid', 'request.lineage'),
+    'lease_binding': ('instagram_ui_lease_binding_invalid', 'device_lock_binding'),
+    'lease_projection': ('instagram_ui_lease_projection_invalid', 'device_lock_binding'),
+    'live_lease_read': ('instagram_ui_lease_read_failed', 'device_lock'),
+    'live_lease_identity': ('instagram_ui_lease_conversion_failed', 'device_lock.identity'),
+    'live_lease_expiry': ('instagram_ui_lease_timestamp_invalid', 'lease_expires_at'),
+    'run_read': ('instagram_ui_run_read_failed', 'run'),
+    'run_identity': ('instagram_ui_run_conversion_failed', 'run.identity'),
+    'package_metadata': ('instagram_ui_package_metadata_read_failed', 'installed_package'),
+    'binding_construct': ('instagram_ui_binding_conversion_failed', 'instagram_ui_binding'),
+    'parent_binding': ('instagram_ui_parent_binding_read_failed', 'parent.instagram_ui_binding'),
+    'run_snapshot': ('instagram_ui_run_snapshot_invalid', 'run.updated_at'),
+    'binding_persist': ('instagram_ui_binding_persistence_unproved', 'performance_summary'),
+    'binding_readback': ('instagram_ui_binding_readback_failed', 'performance_summary'),
+    'resume_binding_persist': ('instagram_ui_resume_binding_persistence_unproved', 'resume_plan'),
+    'binding_arm': ('instagram_ui_binding_arm_failed', 'instagram_ui_binding'),
+}
+
+
+def preparation_failure(error, stage):
+    """Keep a strict stop and its native chain without retaining sensitive values.
+
+    The existing terminal logger receives stack locations/types separately from
+    the public summary. Never format exception messages, source lines or locals:
+    transport exceptions can contain credentials or entire response payloads.
+    """
+    stage = stage if stage in _PREPARATION_STAGES else 'binding_construct'
+    reason, field = _PREPARATION_STAGES[stage]
+    stopped = error if isinstance(error, UIProfileStopped) else UIProfileStopped(reason)
+    chain, seen, current = [], set(), error
+    while current is not None and id(current) not in seen and len(chain) < 8:
+        seen.add(id(current))
+        name = type(current).__name__
+        name = name if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,99}', name) else 'Exception'
+        frames, tb = [], current.__traceback__
+        while tb is not None and len(frames) < 32:
+            frames.append({'file': tb.tb_frame.f_code.co_filename.rsplit('/', 1)[-1][:120],
+                           'line': tb.tb_lineno,
+                           'function': tb.tb_frame.f_code.co_name[:100]})
+            tb = tb.tb_next
+        cause = current.__cause__
+        context = current.__context__ if not current.__suppress_context__ else None
+        chain.append({'exception_type': name, 'traceback': frames,
+                      'traceback_truncated': tb is not None,
+                      'chained_via': 'cause' if cause is not None else
+                                     'context' if context is not None else None})
+        current = cause if cause is not None else context
+    native_type = next((item['exception_type'] for item in chain
+                        if item['exception_type'] != 'UIProfileStopped'), 'UIProfileStopped')
+    stopped.summary.update(preparation_stage=stage, preparation_field=field,
+                           error_class=native_type)
+    stopped.preparation_diagnostic = {'stage': stage, 'field': field,
+                                      'exception_type': native_type, 'cause_chain': chain,
+                                      'cause_chain_truncated': current is not None}
+    return stopped
+
+
 @dataclass(frozen=True)
 class AppMetadata:
     package: str

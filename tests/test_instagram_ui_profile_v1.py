@@ -637,6 +637,153 @@ class RunnerTests(Isolated):
         with self.assertRaises(ui.UIProfileStopped):self.prepare()
         self.assertEqual(self.operations, [])
 
+
+    def test_valid_fractional_and_offset_contract_reaches_real_binding(self):
+        from datetime import datetime, timezone, timedelta
+        from reconciliation_scan import parse_reconciliation_timestamp
+        parser = parse_reconciliation_timestamp
+        for fraction in ('', '.1', '.12', '.123', '.1234', '.12345', '.123456'):
+            for offset in ('Z', '+00:00', '+02:00', '-05:30', '+0200'):
+                stamp = '2099-01-01T09:48:57' + fraction + offset
+                self.live_lease['lease_expires_at'] = stamp
+                with self.subTest(stamp=stamp), patch.object(ui, '_SESSION', None), \
+                     patch('reconciliation_scan.parse_reconciliation_timestamp', wraps=parser) as parsed:
+                    self.assertEqual(self.prepare(), binding())
+                    parsed.assert_called_once_with(stamp)
+                    expected_microseconds = int(fraction[1:].ljust(6, '0') or '0')
+                    self.assertEqual(parser(stamp).microsecond, expected_microseconds)
+                    offset_minutes = {'Z': 0, '+00:00': 0, '+02:00': 120,
+                                      '-05:30': -330, '+0200': 120}[offset]
+                    expected = (datetime(2099, 1, 1, 9, 48, 57, expected_microseconds,
+                                         tzinfo=timezone.utc) - timedelta(minutes=offset_minutes))
+                    self.assertEqual(parser(stamp), expected)
+
+    def test_invalid_missing_or_naive_expiry_is_precise_safe_stop(self):
+        for stamp in (None, '', 'bad', '2099-01-01T09:48:57',
+                      '2099-01-01T09:48:57.1234567+00:00',
+                      '2099-02-30T09:48:57+00:00', '2099-01-01T09:48:57+24:00'):
+            self.live_lease['lease_expires_at'] = stamp
+            with self.subTest(stamp=stamp), patch.object(ui, 'read_metadata') as adb, \
+                 patch.object(supabase_client, 'load_run_row') as run_read:
+                with self.assertRaises(ui.UIProfileStopped) as raised:
+                    self.prepare()
+                error = raised.exception
+                self.assertEqual(error.summary['root_failure_code'], 'instagram_ui_lease_timestamp_invalid')
+                self.assertEqual(error.summary['preparation_field'], 'lease_expires_at')
+                self.assertEqual(error.summary['error_class'], 'InvalidReconciliationTimestamp')
+                self.assertIsNotNone(error.__cause__)
+                adb.assert_not_called(); run_read.assert_not_called()
+            self.assertFalse(ui.armed()); self.assertEqual(self.operations, [])
+
+    def test_expiry_boundary_uses_current_instant_without_tolerance(self):
+        from datetime import datetime, timezone
+        instant = datetime(2099, 1, 1, 7, 48, 57, 123450, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return instant
+        for stamp in ('2099-01-01T09:48:57.12345+02:00',
+                      '2099-01-01T07:48:57.123449Z'):
+            self.live_lease['lease_expires_at'] = stamp
+            with self.subTest(stamp=stamp), patch.object(runner, 'datetime', Clock), \
+                 patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaisesRegex(ui.UIProfileStopped, 'lease_identity_mismatch'):
+                    self.prepare()
+                adb.assert_not_called()
+        self.live_lease['lease_expires_at'] = '2099-01-01T09:48:57.123451+0200'
+        with patch.object(runner, 'datetime', Clock):
+            self.assertEqual(self.prepare(), binding())
+
+    def test_backend_read_exception_keeps_native_chain_and_hides_payload(self):
+        def failed_read(*args, **kwargs):
+            try:
+                raise OSError('TOKEN=private-value response={"password":"secret"}')
+            except OSError as cause:
+                raise RuntimeError('sensitive backend body') from cause
+        with patch.object(device_leases, '_load_device_lock', side_effect=failed_read), \
+             patch.object(ui, 'read_metadata') as adb:
+            with self.assertRaises(ui.UIProfileStopped) as raised:self.prepare()
+        error = raised.exception
+        self.assertEqual(error.summary['root_failure_code'], 'instagram_ui_lease_read_failed')
+        self.assertEqual(error.summary['preparation_stage'], 'live_lease_read')
+        self.assertEqual(error.summary['preparation_field'], 'device_lock')
+        self.assertEqual(error.summary['error_class'], 'RuntimeError')
+        chain = error.preparation_diagnostic['cause_chain']
+        self.assertEqual([x['exception_type'] for x in chain], ['RuntimeError', 'OSError'])
+        self.assertTrue(all(x['traceback'] for x in chain))
+        self.assertEqual(chain[0]['chained_via'], 'cause')
+        serialized = json.dumps([error.summary, error.preparation_diagnostic])
+        for secret in ('private-value', 'password', 'sensitive backend body'):
+            self.assertNotIn(secret, serialized)
+        adb.assert_not_called();self.assertFalse(ui.armed())
+        self.assertEqual(self.operations, [])
+
+    def test_request_and_run_read_failures_are_stage_specific(self):
+        for target, name, reason, stage in (
+            (account_run_control, 'get_account_run_request', 'instagram_ui_request_read_failed', 'request_read'),
+            (supabase_client, 'load_run_row', 'instagram_ui_run_read_failed', 'run_read')):
+            with self.subTest(stage=stage), patch.object(target, name, side_effect=TimeoutError('private')), \
+                 patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaises(ui.UIProfileStopped) as raised:self.prepare()
+                self.assertEqual(raised.exception.summary['root_failure_code'], reason)
+                self.assertEqual(raised.exception.summary['preparation_stage'], stage)
+                self.assertEqual(raised.exception.summary['error_class'], 'TimeoutError')
+                adb.assert_not_called()
+        self.assertFalse(ui.armed());self.assertEqual(self.operations, [])
+
+    def test_bad_lock_or_run_conversion_never_reaches_metadata(self):
+        with patch.object(device_leases, '_load_device_lock', return_value=['not-a-row']), \
+             patch.object(ui, 'read_metadata') as adb:
+            with self.assertRaises(ui.UIProfileStopped) as raised:self.prepare()
+            self.assertEqual(raised.exception.summary['root_failure_code'], 'instagram_ui_lease_conversion_failed')
+            self.assertEqual(raised.exception.summary['error_class'], 'AttributeError')
+            adb.assert_not_called()
+        for change in ({'id': PRIOR}, {'account_id': Q}, {'status': 'failed'}):
+            row = {**self.row, **change}
+            with self.subTest(change=change), patch.object(supabase_client, 'load_run_row', return_value=row), \
+                 patch.object(ui, 'read_metadata') as adb:
+                with self.assertRaisesRegex(ui.UIProfileStopped, 'run_identity_mismatch'):self.prepare()
+                adb.assert_not_called()
+        self.assertEqual(self.operations, [])
+
+    def test_failed_write_and_readback_preserve_both_causes_without_retry(self):
+        calls = 0
+        def read_run(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:return copy.deepcopy(self.row)
+            raise OSError('private-readback-payload')
+        with patch.object(supabase_client, '_request_json', side_effect=TimeoutError('private-write-token')) as write, \
+             patch.object(supabase_client, 'load_run_row', side_effect=read_run):
+            with self.assertRaises(ui.UIProfileStopped) as raised:self.prepare()
+        error = raised.exception
+        self.assertEqual(error.summary['root_failure_code'], 'instagram_ui_binding_readback_failed')
+        self.assertEqual([x['exception_type'] for x in error.preparation_diagnostic['cause_chain']],
+                         ['OSError', 'TimeoutError'])
+        self.assertNotIn('private-', json.dumps(error.preparation_diagnostic))
+        self.assertEqual(write.call_count, 1);self.assertEqual(calls, 2)
+        self.assertFalse(ui.armed())
+
+    def test_terminal_handler_preserves_precise_summary_and_safe_trace(self):
+        try:raise ValueError('private-token')
+        except ValueError as cause:
+            error = ui.preparation_failure(cause, 'live_lease_expiry')
+        with patch.object(runner, '_main_impl', side_effect=error), \
+             patch.object(runner, '_CURRENT_RUN_ID', RUN), \
+             patch.object(runner, '_update_run_status_safe', return_value='failed') as terminal, \
+             patch.object(runner, 'log') as logger, \
+             patch.object(runner, '_cleanup_session_apps', side_effect=AssertionError('NO_UI_CLEANUP')):
+            self.assertEqual(runner.main(), 1)
+        summary = terminal.call_args.kwargs['performance_summary']
+        self.assertEqual(summary['root_failure_code'], 'instagram_ui_lease_timestamp_invalid')
+        self.assertEqual(summary['error_class'], 'ValueError')
+        self.assertNotIn('cause_chain', summary)
+        native = next(c for c in logger.call_args_list if c.args[1] == 'instagram_ui_preparation_native_failure')
+        self.assertEqual(native.kwargs['field'], 'lease_expires_at')
+        self.assertTrue(native.kwargs['cause_chain'][0]['traceback'])
+        self.assertNotIn('private-token', json.dumps(native.kwargs))
+
+
     def test_real_runner_order_and_no_optional_selection_flag(self):
         tree = ast.parse(Path(runner.__file__).read_text())
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_main_impl')

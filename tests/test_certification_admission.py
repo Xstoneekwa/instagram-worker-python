@@ -18,6 +18,69 @@ import certification_admission as ca
 
 
 
+
+# Exact inverse of the bounded Preparing conversion/cause delta; test-only.
+_PREPARING_BINDING_CAUSE_EXACT_INVERSE = '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'
+
+def restore_preparing_binding_cause_exact_delta(name, source):
+    import base64, zlib
+    record=json.loads(zlib.decompress(base64.b64decode(_PREPARING_BINDING_CAUSE_EXACT_INVERSE))).get(name)
+    if record is None or hashlib.sha256(source.encode()).hexdigest()==record['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest()!=record['candidate_sha256']:
+        raise AssertionError('preparing_source_changed:'+name)
+    for h in reversed(record['hunks']):
+        at,new=h['offset'],h['new']
+        if source[at:at+len(new)]!=new:raise AssertionError('preparing_hunk_changed:'+name)
+        source=source[:at]+h['old']+source[at+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest()!=record['base_sha256']:
+        raise AssertionError('preparing_inverse_mismatch:'+name)
+    return source
+
+def _restore_preparing_if_exact_candidate(name, source):
+    import base64,zlib
+    record=json.loads(zlib.decompress(base64.b64decode(_PREPARING_BINDING_CAUSE_EXACT_INVERSE))).get(name)
+    if record and hashlib.sha256(source.encode()).hexdigest()==record['candidate_sha256']:
+        return restore_preparing_binding_cause_exact_delta(name,source)
+    return source
+
+class PreparingBindingCauseExactInverseTests(unittest.TestCase):
+    def test_exact_parent_and_unrelated_missing_moved_duplicate_refused(self):
+        import base64,zlib
+        records=json.loads(zlib.decompress(base64.b64decode(_PREPARING_BINDING_CAUSE_EXACT_INVERSE)))
+        for name,r in records.items():
+            current=(ROOT/name).read_text()
+            parent=subprocess.check_output(['git','-C',str(ROOT),'show',r['base_commit']+':'+name],text=True)
+            self.assertEqual(restore_preparing_binding_cause_exact_delta(name,current),parent)
+            self.assertEqual(restore_preparing_binding_cause_exact_delta(name,parent),parent)
+            h=next(h for h in r['hunks'] if h['new']);at,new=h['offset'],h['new']
+            for bad in (current+'\n',current[:at]+current[at+1:],
+                        current[:at]+new+current[at:],current[:at]+current[at+len(new):]+new):
+                if bad!=current:
+                    with self.assertRaises(AssertionError):restore_preparing_binding_cause_exact_delta(name,bad)
+
+    def test_only_signed_preparing_functions_and_prior_inverse_records_change(self):
+        functions=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body
+                            if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+        for name in ('runner.py','instagram_ui_profile_v1.py'):
+            new=(ROOT/name).read_text();old=restore_preparing_binding_cause_exact_delta(name,new)
+            a,b=functions(old),functions(new)
+            if name=='runner.py':
+                self.assertEqual(a.keys(),b.keys())
+                self.assertEqual([k for k in a if a[k]!=b[k]],
+                                 ['_main_with_existing_handlers','_prepare_instagram_ui_profile'])
+            else:
+                self.assertEqual(set(b)-set(a),{'preparation_failure'})
+                self.assertTrue(all(a[k]==b[k] for k in a))
+        oldtests=subprocess.check_output(['git','-C',str(ROOT),'show',
+            'a4463b4ff528d7ec9d2e769124cb4575d4841618:tests/test_certification_admission.py'],text=True)
+        def constants(s):
+            return {n.targets[0].id:ast.literal_eval(n.value) for n in ast.parse(s).body
+                    if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name)
+                    and n.targets[0].id.endswith('_EXACT_INVERSE')}
+        current=constants(Path(__file__).read_text())
+        for k,v in constants(oldtests).items():self.assertEqual(current[k],v,k)
+
 # Exact inverse of the scoped DM446 read-reuse delta; test-only.
 _LATENCY_REUSE_EXACT_INVERSE = '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'
 
@@ -38,6 +101,7 @@ def restore_latency_reuse_exact_delta(name, source):
     return source
 
 def _restore_latency_reuse_if_exact_candidate(name, source):
+    source = _restore_preparing_if_exact_candidate(name, source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_LATENCY_REUSE_EXACT_INVERSE))).get(name)
     if record is not None and hashlib.sha256(source.encode()).hexdigest() == record['candidate_sha256']:
@@ -73,7 +137,7 @@ class LatencyReuseExactInverseTests(unittest.TestCase):
         current_constants=constants(Path(__file__).read_text())
         for k,v in constants(parent).items():self.assertEqual(current_constants[k],v,k)
         for name in ('outreach_terminal_receipt.py','runner.py','dm_ui_446_evidence.py','dm_thread_truth.py','outreach_slot_contract.py'):
-            self.assertEqual((ROOT/name).read_bytes(),subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:'+name]))
+            self.assertEqual(_restore_preparing_if_exact_candidate(name,(ROOT/name).read_text()).encode(),subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:'+name]))
 
 # Exact inverse of the terminal receipt precision and error projection delta; test-only.
 _TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE = 'eNq1VU2P2zgM/SuGL066QeAvWVKA/oBeeljsaacDQ5aojra2ZUhOZ7pB/vtS8STNOM700tXFsE0+PpKP1CG2+9GBkE/1CK4zvWhrBxLMMG6HH/HuEDfCQy1t15kx3sWirICxIq8aqXjTUCILyYFmnOYy05JzXpWUNzTeTI7+SeSkQsdMQc6LpihApPhgvGEgi4KyAghJRUmF4kQXZSNLwVTTcJlLlgLJc11oWmkElKJXRonxCpUIzhuhC9UoTSqlBAeuRcGYFARJQQq6oVRokWlSCllplucl0IbmKWFAAs2nff/Nx7uHQ2y19oBJsmwT21YhvHa2i0LE0XQQmW6wbry8f+nRu4fnsx2WzfbStEaMxva1R7pnl0E4rMXMIGD4UXQDAh03P8PnFeVnAtHrOdlFHy+xtyGi8VZb14lxNYDzxo+gtg6GVkhYJX8nmyj5I013aZqs11/6KyQkdBcJGY7wMj4kvrVjfTJOHu+jXiowJ/p+xj8JLzD7hesiw0Dl+HjcxG7f9+B+r3QpSJQj0VIRVpSFUmnKszzPGOS0qHhKK0pE1aRZI4kSqagYUBS2IBlXgJJelm6uidKCYmjNldSUkxQySbO8IIUoVCZ5WeZZ1hChdVqxtCwrViqoBCo6S5lalG6eVpwVZ/XcdCecy5iDc9Zhvb/CKMbRrS6LIBQW2zzfB5MDCuCz7eGqb+EYPcPdvf0fzmlILlZ+33XC/agHZ/8BGXp8GZbpSz033UQ9auF7kIbwKAlpFdxGeTUOOrqDs1JGhpHBjvRft5j9KkE5nvTfSzhbJesIq3M4rte3MSYCGCK5uzxr038XrVHJrffgzKnut9msXmNPpK5+JEsssOYTlOmjVRIG89m6b+BqeDFj3dv+X3A2fL6Q1MK0oJL1QnOuSrfdD0GpK22cH2sp9v6UViDzcXpsoitus2/n1+UQc0nYtrXPOMR2eBthIV1oPfyCOI4ADpzYt1g9H/aHCgoLWe8dTIU801zfVc7DO02dJuARm/dW7QtNnuSFlocPH15fsBVLQtudIx9nF0FWMFJV7PouOM3QXX7nCTopLyybuUHIfspEhMJ75CAleD9b5P9TlE30aRqKv14d/pzMbtOm7J0lhro33vS4+bGKK3iR93DnOg97bbvcU+yTxxWIYOuHXValj9N9cvwPeJ3ynw=='
@@ -125,7 +189,7 @@ class TerminalReceiptPrecisionExactInverseTests(unittest.TestCase):
         functions=lambda src:{n.name:ast.dump(n) for n in ast.parse(src).body
             if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         for name,allowed in expected.items():
-            current=(ROOT/name).read_text()
+            current=_restore_preparing_if_exact_candidate(name,(ROOT/name).read_text())
             parent=restore_terminal_receipt_precision_exact_delta(name,current)
             a,b=functions(parent),functions(current)
             self.assertEqual(a.keys(),b.keys())
@@ -292,6 +356,7 @@ class CompactOptionCExactInverseTests(unittest.TestCase):
 _TIMESTAMP_PRESPAWN_EXACT_INVERSE = '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'
 
 def restore_timestamp_prespawn_exact_delta(name, source):
+    source = _restore_preparing_if_exact_candidate(name, source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_TIMESTAMP_PRESPAWN_EXACT_INVERSE))).get(name)
     if record is None or hashlib.sha256(source.encode()).hexdigest() == record['base_sha256']:
@@ -558,6 +623,7 @@ def restore_consolidated_projection_delta(name, source):
 
 
 def restore_exact_product_delta(name, source):
+    source = _restore_preparing_if_exact_candidate(name, source)
     source = restore_persistent_certification_recorder_delta(name, source)
     source = restore_ordinary_recorder_delta(name, source)
     source = restore_consolidated_projection_delta(name, source)
@@ -600,6 +666,7 @@ class ProductExactInverseTests(unittest.TestCase):
 
 
 def restore_exact_ui_profile_delta(name, source):
+    source = _restore_preparing_if_exact_candidate(name, source)
     import base64, zlib
     record = json.loads(zlib.decompress(base64.b64decode(_PROFILE_EXACT_INVERSE)))[name]
     if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:

@@ -29677,6 +29677,10 @@ def _main_with_existing_handlers() -> int:
         if outreach_slot_active():
             outreach_slot_active().unsafe_ui_continuity = True
         summary = {**exc.summary, "session_counters": dict(_SESSION_COUNTERS)}
+        diagnostic = getattr(exc, 'preparation_diagnostic', None)
+        if diagnostic is not None:
+            log("error", "instagram_ui_preparation_native_failure", run_id=_CURRENT_RUN_ID,
+                request_id=_CURRENT_RUN_REQUEST_ID, **diagnostic)
         log("error", "instagram_ui_profile_safe_stop", run_id=_CURRENT_RUN_ID,
             request_id=_CURRENT_RUN_REQUEST_ID, **summary)
         if _CURRENT_RUN_ID:
@@ -29938,6 +29942,7 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
     ui = instagram_ui_profile_v1
     if ui.armed():
         raise ui.UIProfileStopped("instagram_ui_binding_already_bound")
+    stage = 'assignment'
     try:
         package = str(config.INSTAGRAM_PACKAGE or "")
         instance = str(context.get("app_instance_id") or "")
@@ -29953,7 +29958,9 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
                                  (getattr(args, "device_serial", ""), serial)):
             if expected and expected != actual:
                 raise ui.UIProfileStopped("instagram_ui_dispatch_identity_mismatch")
+        stage = 'request_read'
         request = get_account_run_request(request_id, bounded_pre_device=True) or {}
+        stage = 'request_identity'
         if (request.get("id") != request_id or request.get("account_id") != account_id
                 or request.get("run_id") != run_id):
             raise ui.UIProfileStopped("instagram_ui_request_identity_mismatch")
@@ -29986,10 +29993,13 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
                     ("app_instance_id", instance), ("assignment_id", context.get("assignment_id")),
                     ("package_name", package), ("adb_serial", serial))):
                 raise ui.UIProfileStopped("instagram_ui_request_instance_mismatch")
+        stage = 'request_lineage'
         lineage = _claimed_request_lineage(account_id, request, meta)
+        stage = 'lease_binding'
         lease = device_lock_binding_from_request(
             request, account_id=account_id, request_id=request_id, device_id=device_id,
         )
+        stage = 'lease_projection'
         transported_lease = device_lock_binding_from_request(
             {"metadata_safe": {"device_lock_binding": json.loads(os.environ.get("FLEET_DEVICE_LOCK_BINDING_JSON", "null"))}},
             account_id=account_id, request_id=request_id, device_id=device_id,
@@ -29998,22 +30008,32 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
                 "device_id", "account_id", "request_id", "worker_id", "lease_id",
                 "generation", "app_instance_id", "lease_seconds", "lease_expires_at")):
             raise ui.UIProfileStopped("instagram_ui_lease_identity_mismatch")
+        stage = 'live_lease_read'
         live_lease = _load_device_lock(device_id) or {}
+        stage = 'live_lease_identity'
         if (lease.get("app_instance_id") != instance
                 or any(live_lease.get(key) != lease.get(key) for key in (
-                    "device_id", "account_id", "request_id", "worker_id", "lease_id"))
-                or not isinstance(live_lease.get("lease_expires_at"), str)
-                or datetime.fromisoformat(live_lease["lease_expires_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc)):
+                    "device_id", "account_id", "request_id", "worker_id", "lease_id"))):
             raise ui.UIProfileStopped("instagram_ui_lease_identity_mismatch")
+        stage = 'live_lease_expiry'
+        from reconciliation_scan import parse_reconciliation_timestamp
+        expires = parse_reconciliation_timestamp(live_lease.get("lease_expires_at"))
+        if expires <= datetime.now(timezone.utc):
+            raise ui.UIProfileStopped("instagram_ui_lease_identity_mismatch")
+        stage = 'run_read'
         row = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
+        stage = 'run_identity'
         if row.get("id") != run_id or row.get("account_id") != account_id or row.get("status") not in ("running", "pending"):
             raise ui.UIProfileStopped("instagram_ui_run_identity_mismatch")
+        stage = 'package_metadata'
         installed = ui.read_metadata(serial, package)
+        stage = 'binding_construct'
         binding = ui.RunUIBinding(
             account_id, request_id, run_id, lineage["root_business_session_id"],
             lineage["execution_attempt_no"], device_id, serial, instance, package,
             installed.version_name, installed.version_code, ui.resolve(installed, package), lease["lease_id"],
         )
+        stage = 'parent_binding'
         parent = None
         prior = str(meta.get("prior_run_id") or meta.get("original_run_id") or "")
         if binding.attempt_id > 1 or load_resume_policy_from_env():
@@ -30027,6 +30047,7 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
             projected = (load_resume_policy_from_env() or {}).get(ui.PLAN_KEY)
             if projected is not None and projected != parent:
                 raise ui.UIProfileStopped("instagram_ui_parent_projection_mismatch")
+        stage = 'run_snapshot'
         updated = row.get("updated_at")
         if type(updated) is not str or not updated:
             raise ui.UIProfileStopped("instagram_ui_run_snapshot_unproved")
@@ -30034,28 +30055,39 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
         performance = ui.carry_plan(performance, binding.to_dict())
         # Existing JSON column and authenticated transport. Preserve every other
         # summary field and all status/counters; one write, canonical readback.
+        stage = 'binding_persist'
+        write_error = None
         try:
             supabase_client._request_json(
                 "PATCH", "ig_runs", query={"id": "eq." + run_id, "account_id": "eq." + account_id,
                                              "updated_at": "eq." + updated, "status": "eq." + row["status"]},
                 body={"performance_summary": performance}, request_timeout=5.0, max_retries=0,
             )
-        except Exception:
-            pass  # Never retry a write; only its exact durable readback can win.
-        confirmed = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
+        except Exception as exc:
+            write_error = exc  # Never retry; exact durable readback can still win.
+        stage = 'binding_readback'
+        try:
+            confirmed = supabase_client.load_run_row(run_id, request_timeout=5.0, max_retries=0) or {}
+        except Exception as exc:
+            if write_error is not None:
+                raise exc from write_error
+            raise
         if (confirmed.get("id") != run_id or confirmed.get("account_id") != account_id
                 or confirmed.get("performance_summary") != performance):
-            raise ui.UIProfileStopped("instagram_ui_binding_persistence_unproved")
+            raise ui.UIProfileStopped("instagram_ui_binding_persistence_unproved") from write_error
         if account_session_run:
+            stage = 'resume_binding_persist'
             result = bind_run_ui_profile(run_id=run_id, binding=binding.to_dict())
             if not result.get("persisted"):
                 raise ui.UIProfileStopped("instagram_ui_resume_binding_persistence_unproved")
+        stage = 'binding_arm'
         ui.arm(binding, lambda: ui.read_metadata(serial, package), parent=parent)
         return binding
-    except ui.UIProfileStopped:
+    except ui.UIProfileStopped as exc:
+        ui.preparation_failure(exc, stage)
         raise
     except Exception as exc:
-        raise ui.UIProfileStopped("instagram_ui_binding_unproved") from exc
+        raise ui.preparation_failure(exc, stage) from exc
 
 
 def _outreach_cleanup_and_finish(d, code, *, allow_device_cleanup=True):

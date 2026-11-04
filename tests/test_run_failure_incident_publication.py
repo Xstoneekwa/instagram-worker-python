@@ -24,6 +24,41 @@ def _identity_run_row() -> dict:
 
 
 class PublishRunFailureIncidentTest(unittest.TestCase):
+
+    def test_preparing_native_reason_uses_existing_incident_without_sensitive_trace(self) -> None:
+        import json
+        import instagram_ui_profile_v1 as ui
+        try:
+            raise ValueError('private-token response={"password":"hidden"}')
+        except ValueError as cause:
+            failure = ui.preparation_failure(cause, 'live_lease_expiry')
+        row = {'id': RUN_ID, 'account_id': ACCOUNT_ID, 'status': 'failed',
+               'performance_summary': dict(failure.summary)}
+        with (
+            patch.object(consumer.supabase_client, 'load_run_row', return_value=row),
+            patch.object(consumer.supabase_client, 'get_account_username', return_value='offline_sender'),
+            patch.object(consumer.runtime_incidents, 'publish_account_incident',
+                         return_value={'published': True, 'incident_id': 'offline-incident',
+                                       'occurrence_count': 1}) as publish,
+            patch.object(consumer.supabase_client, 'call_rpc', return_value={'id': 'offline-action'}) as rpc,
+            patch.object(consumer.incident_notifications, 'dispatch_operator_review_action_notification') as notify,
+            patch.object(consumer, '_audit'),
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID, account_id=ACCOUNT_ID, run_id=RUN_ID,
+                run_type='outreach_session', exit_code=1, timed_out=False, canceled=False)
+        self.assertEqual(publish.call_args.kwargs['reason'], 'instagram_ui_lease_timestamp_invalid')
+        self.assertEqual(publish.call_args.kwargs['incident_type'], 'run_worker_failure')
+        metadata = publish.call_args.kwargs['metadata']
+        self.assertEqual(metadata['error_class'], 'ValueError')
+        self.assertEqual(rpc.call_args.args[1]['p_metadata']['reason_code'],
+                         'instagram_ui_lease_timestamp_invalid')
+        public = json.dumps([publish.call_args.kwargs, rpc.call_args.args[1], notify.call_args.kwargs])
+        for secret in ('private-token', 'password', 'hidden', 'cause_chain', 'traceback'):
+            self.assertNotIn(secret, public)
+        notify.assert_called_once()
+
+
     def test_reviewable_failure_upserts_canonical_operator_review_action(self) -> None:
         run_row = {
             "id": RUN_ID,
