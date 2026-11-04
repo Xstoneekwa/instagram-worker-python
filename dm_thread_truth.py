@@ -87,6 +87,15 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
     timestamp = any(re.fullmatch(r"\d{1,2} [A-Za-zÀ-ÿ.]+, \d{1,2}:\d{2}", t)
                     for row in rows if row.get("class") == "android.widget.TextView"
                     for t in texts(row))
+    # Positive message evidence is independent of the presence/state of an
+    # editor, descriptive introduction and localized date/reaction labels.
+    compose_messages = _qualified_compose_message_rows(root, message_list, package)
+    subtitles = by_id.get("header_subtitle", [])
+    handle = subtitles[0].get("content-desc", "") if len(subtitles) == 1 else ""
+    exact_identity = bool(expected_username and (
+        _normalized_identity(handle) == _normalized_identity(expected_username)
+        or (handle == "Business chat" and profile_identity
+            and _normalized_identity(profile_identity) == _normalized_identity(expected_username))))
     for row in rows:
         if intro(row):
             continue
@@ -94,6 +103,8 @@ def classify_dm_history(hierarchy: str, package: str, expected_username: str | N
         if any(any(marker in value for marker in ("sticker", "banner", "education", "privacy", "recommend"))
                for value in ids):
             continue
+        if exact_identity and any(item["compose"] is row for item in compose_messages):
+            return "existing_thread", dict(evidence, history_signal_type="compose_message_bubble", reason="positive_history")
         if "message_content" in ids and any(
                 rid(n) in {"direct_text_message_text_view", "message_bubble"}
                 and (n.get("text", "").strip() or n.get("content-desc", "").strip())
@@ -183,6 +194,137 @@ def _dm_bubble_bounds(value: str, list_value: str) -> bool:
     return (len(coords) == len(outer) == 4 and outer[0] <= coords[0] < coords[2] <= outer[2]
             and outer[1] <= coords[1] < coords[3] <= outer[3]
             and coords[2] - coords[0] < outer[2] - outer[0])
+
+
+def _qualified_compose_message_rows(root, message_list, package):
+    """Observed message-row proof shared by history and outgoing readers.
+
+    A logical row can extend above/below the viewport, but its Compose host
+    must be exactly its visible intersection. Full text, identity and novelty
+    remain separate caller responsibilities; this never proves EMPTY or Send.
+    """
+    if package != "com.instagram.android" or root.tag != "hierarchy":
+        return []
+    parents = {child: parent for parent in root.iter() for child in parent}
+
+    def one(role):
+        nodes = [n for n in root.iter() if n.get("resource-id") == package + ":id/" + role]
+        return nodes[0] if len(nodes) == 1 else None
+
+    def fits(a, b):
+        return bool(a and b and b[0] <= a[0] < a[2] <= b[2]
+                    and b[1] <= a[1] < a[3] <= b[3])
+
+    def intersection(a, b):
+        if not a or not b:
+            return None
+        v = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+        return v if v[0] < v[2] and v[1] < v[3] else None
+
+    title, subtitle, view = (one(k) for k in (
+        "header_title", "header_subtitle", "direct_thread_content_below_action_bar"))
+    header = one("direct_thread_header")
+    if (one("message_list") is not message_list or any(n is None for n in (title, subtitle, view, header))
+            or parents.get(title) is not parents.get(subtitle)
+            or parents.get(title).get("resource-id") != package + ":id/header_title_subtitle_container"):
+        return []
+    nodes = (message_list, title, subtitle, view, header)
+    if any(n.get("package") != package or n.get("visible-to-user") != "true"
+           or n.get("enabled") != "true" or not _rect(n.get("bounds")) for n in nodes):
+        return []
+    lb, hb, vb = (_rect(n.get("bounds")) for n in (message_list, header, view))
+    if hb[3] > lb[1] or not fits(lb, vb):
+        return []
+    editors = [n for n in root.iter() if n.get("resource-id") == package + ":id/row_thread_composer_edittext"]
+    bar = one("message_composer_bar")
+    disabled = (one("thread_disabled_title"), one("thread_disabled_bottom_description"))
+    if len(editors) == 1 and bar is not None and not any(n is not None for n in disabled):
+        editor = editors[0]
+        if (editor.get("class") != "android.widget.EditText" or editor.get("package") != package
+                or editor.get("visible-to-user") != "true" or editor.get("enabled") != "true"
+                or not fits(_rect(editor.get("bounds")), _rect(bar.get("bounds")))):
+            return []
+        bottom = _rect(bar.get("bounds"))[1]
+    elif not editors and all(n is not None for n in disabled):
+        if any(n.get("package") != package or n.get("visible-to-user") != "true"
+               or n.get("enabled") != "true" or n.get("clickable") != "false"
+               or not n.get("text", "").strip() or not fits(_rect(n.get("bounds")), vb)
+               for n in disabled):
+            return []
+        bottom = min(_rect(n.get("bounds"))[1] for n in disabled)
+    else:
+        return []
+    viewport = (lb[0], lb[1], lb[2], min(lb[3], bottom))
+    if viewport[1] >= viewport[3]:
+        return []
+    apps = [n for n in root if n.get("package") == package]
+    if len(apps) != 1 or len(root) not in (1, 3, 4):
+        return []
+    active = (vb[0], hb[1], vb[2], vb[3])
+    for n in root:
+        if n is apps[0]:
+            continue
+        if (n.get("package") not in {"com.android.systemui", "com.android.adbkeyboard"}
+                or n.get("class") != "android.widget.FrameLayout"
+                or n.get("visible-to-user") != "true" or n.get("enabled") != "true"
+                or n.get("clickable") != "false" or not _rect(n.get("bounds"))
+                or intersection(_rect(n.get("bounds")), active)):
+            return []
+    app_root = ET.Element(root.tag, root.attrib)
+    app_root.append(apps[0])
+    if not _qualified_conversation_path(app_root, message_list, package, message_surface=True):
+        return []
+    neutral = {package + ":id/" + k for k in (
+        "meta_ai_voice_container", "direct_command_picker_container",
+        "thread_background_view_container", "message_actions_fragment")}
+    current = message_list
+    while current in parents and parents[current] is not root:
+        for sibling in parents[current]:
+            if sibling is current or not intersection(_rect(sibling.get("bounds")), viewport):
+                continue
+            if (sibling.get("resource-id") not in neutral
+                    or any(n.get("text") or n.get("content-desc") or n.get("clickable") != "false"
+                           or n.get("focusable") != "false" for n in sibling.iter())
+                    or (len(sibling) and not sibling.get("resource-id", "").endswith(":id/thread_background_view_container"))):
+                return []
+        current = parents[current]
+    result = []
+    for compose in message_list:
+        if (compose.get("class") != "com.facebook.compose.view.MetaComposeView" or len(compose) != 1):
+            continue
+        row = compose[0]
+        if row.get("class") != "android.view.View" or len(row) not in (2, 3):
+            continue
+        bubble, decoration = row[:2]
+        if (bubble.get("class") != "android.widget.TextView" or not bubble.get("text", "").strip()
+                or decoration.get("class") != "android.view.View"
+                or (len(row) == 3 and (row[2].get("class") != "android.widget.ImageView"
+                                      or row[2].get("content-desc") != "Sending…"))):
+            continue
+        all_nodes = (compose, row, *row)
+        if (any(n.get("package") != package or n.get("visible-to-user") != "true"
+                or n.get("enabled") != "true" or n.get("clickable") != "false"
+                or n.get("long-clickable") not in ("true", "false") or n.get("resource-id")
+                or (n.get("content-desc") and n is not (row[2] if len(row) == 3 else None))
+                for n in all_nodes)
+                or any(len(n) for n in row)
+                or any(n.get("text") for n in (compose, row, *row[1:]))):
+            continue
+        cb, rb, bb, db = (_rect(n.get("bounds")) for n in (compose, row, bubble, decoration))
+        if (not all((cb, rb, bb, db)) or cb != intersection(rb, viewport)
+                or rb[0] != lb[0] or rb[2] != lb[2]
+                or not all(fits(_rect(n.get("bounds")), rb) for n in row)
+                or not intersection(bb, viewport)
+                or not bb[1] <= (db[1] + db[3]) / 2 <= bb[3]
+                or bb[2] - bb[0] >= lb[2] - lb[0]):
+            continue
+        outgoing = bb[0] - lb[0] > lb[2] - bb[2] and db[0] < bb[0] and db[2] < bb[2]
+        incoming = bb[0] - lb[0] < lb[2] - bb[2] and db[2] > bb[2] and db[0] > bb[0]
+        if not (outgoing or incoming) or (len(row) == 3 and (
+                not outgoing or _rect(row[2].get("bounds"))[0] < bb[2])):
+            continue
+        result.append(dict(compose=compose, row=row, bubble=bubble, outgoing=outgoing))
+    return result
 
 
 def _normalized_identity(value: str) -> str:
@@ -490,7 +632,7 @@ _CONVERSATION_PATH = {
 }
 
 
-def _qualified_conversation_path(root, message_list, package):
+def _qualified_conversation_path(root, message_list, package, *, message_surface=False):
     """Iteratively certify root -> list and sibling membership at every level.
 
     A.2 still qualifies sibling subtrees. This function closes the gap on the
@@ -528,13 +670,25 @@ def _qualified_conversation_path(root, message_list, package):
         if role == "window" and bounds[:2] != (0, 0):
             return False
         if role == "message_list":
-            return (current is message_list and current.get("scrollable") == "true"
+            return (current is message_list and current.get("scrollable") in (("true", "false") if message_surface else ("true",))
                     and all(fits(_rect(c.get("bounds")), bounds) for c in current))
         if current.get("scrollable") != "false":
             return False
         children = list(current)
+        if message_surface and role == "thread_fragment_container":
+            sequences += tuple(sequence[:-1] + ("direct_thread_business_chat_action_bar", sequence[-1])
+                               for sequence in sequences if "direct_thread_header" in sequence)
+        if message_surface and role == "direct_thread_content_below_action_bar":
+            sequences += tuple(tuple("thread_disabled_text_stub" if r == "message_composer_bar" else r
+                                     for r in sequence) for sequence in sequences)
         matched = None
         for sequence in sequences:
+            if message_surface and role == "direct_thread_content_below_action_bar":
+                # The empty command host and thread/footer can change sibling
+                # order. Roles, uniqueness, geometry and occlusion still bind.
+                roles = {rid_for(r): r for r in sequence}
+                if len(roles) == len(children) and set(roles) == {c.get("resource-id") for c in children}:
+                    sequence = tuple(roles[c.get("resource-id")] for c in children)
             if len(sequence) != len(children):
                 continue
             if all(child.get("resource-id", "") == rid_for(child_role)

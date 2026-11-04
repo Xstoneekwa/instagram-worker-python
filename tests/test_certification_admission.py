@@ -19,6 +19,83 @@ import certification_admission as ca
 
 
 
+
+# Exact inverse of the owner-scoped Stage3B reader/diagnostic delta; test-only.
+_E2E_READER_EXACT_INVERSE = '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'
+
+def restore_e2e_reader_exact_delta(name, source):
+    import base64,zlib
+    record=json.loads(zlib.decompress(base64.b64decode(_E2E_READER_EXACT_INVERSE))).get(name)
+    if record is None or hashlib.sha256(source.encode()).hexdigest()==record['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest()!=record['candidate_sha256']:
+        raise AssertionError('e2e_reader_source_changed:'+name)
+    for h in reversed(record['hunks']):
+        at,new=h['offset'],h['new']
+        if source[at:at+len(new)]!=new:raise AssertionError('e2e_reader_hunk_changed:'+name)
+        source=source[:at]+h['old']+source[at+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest()!=record['base_sha256']:
+        raise AssertionError('e2e_reader_inverse_mismatch:'+name)
+    return source
+
+def _restore_e2e_if_exact_candidate(name, source):
+    import base64,zlib
+    record=json.loads(zlib.decompress(base64.b64decode(_E2E_READER_EXACT_INVERSE))).get(name)
+    if record and hashlib.sha256(source.encode()).hexdigest()==record['candidate_sha256']:
+        return restore_e2e_reader_exact_delta(name,source)
+    return source
+
+def _e2e_parent_source(name):
+    return _restore_e2e_if_exact_candidate(name,(ROOT/name).read_text())
+
+def _e2e_parent_bytes(name):
+    raw=(ROOT/name).read_bytes()
+    if name in ('dm_thread_truth.py','instagram_navigation.py'):
+        return _restore_e2e_if_exact_candidate(name,raw.decode('utf-8')).encode('utf-8')
+    return raw
+
+class E2EReaderExactInverseTests(unittest.TestCase):
+    def test_exact_parent_and_unrelated_missing_moved_duplicate_refused(self):
+        import base64,zlib
+        records=json.loads(zlib.decompress(base64.b64decode(_E2E_READER_EXACT_INVERSE)))
+        for name,r in records.items():
+            source=(ROOT/name).read_text()
+            old=subprocess.check_output(['git','-C',str(ROOT),'show',r['base_commit']+':'+name],text=True)
+            self.assertEqual(restore_e2e_reader_exact_delta(name,source),old)
+            self.assertEqual(restore_e2e_reader_exact_delta(name,old),old)
+            h=next(x for x in r['hunks'] if x['new']);at,new=h['offset'],h['new']
+            for bad in (source+'\n',source[:at]+source[at+1:],source[:at]+new+source[at:],
+                        source[:at]+source[at+len(new):]+new):
+                if bad!=source:
+                    with self.assertRaises(AssertionError):restore_e2e_reader_exact_delta(name,bad)
+
+    def test_only_scoped_functions_and_full_parent_bytes_preserved(self):
+        functions=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body
+                            if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+        expected={'dm_thread_truth.py':({'classify_dm_history','_qualified_conversation_path'},{'_qualified_compose_message_rows'}),
+                  'instagram_navigation.py':({'_dm_outbound_expected_message_match_mode','_dm_thread_message_signature',
+                       '_dm_outbound_signature_advanced','_dm_verify_outbound_message_after_send'},
+                       {'_dm_full_exported_text_match_mode'})}
+        for name,(changed,added) in expected.items():
+            source=(ROOT/name).read_text();old=restore_e2e_reader_exact_delta(name,source)
+            a,b=functions(old),functions(source)
+            self.assertEqual(set(b)-set(a),added);self.assertEqual(set(a)-set(b),set())
+            self.assertEqual({k for k in a if a[k]!=b[k]},changed)
+        oldtests=subprocess.check_output(['git','-C',str(ROOT),'show',
+            '6a89ac200155acf0bc11fe0aa8b30c2b569076f8:tests/test_certification_admission.py'],text=True)
+        def constants(s):
+            return {n.targets[0].id:ast.literal_eval(n.value) for n in ast.parse(s).body
+                    if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name)
+                    and n.targets[0].id.endswith('_EXACT_INVERSE')}
+        current=constants(Path(__file__).read_text())
+        for k,v in constants(oldtests).items():self.assertEqual(current[k],v,k)
+
+    def test_parent_projection_is_only_for_the_two_exact_candidate_hashes(self):
+        for name in ('dm_thread_truth.py','instagram_navigation.py'):
+            raw=(ROOT/name).read_text();self.assertEqual(_e2e_parent_source(name),restore_e2e_reader_exact_delta(name,raw))
+            self.assertEqual(_restore_e2e_if_exact_candidate(name,raw+'\n'),raw+'\n')
+        self.assertEqual(_e2e_parent_source('dm_sender_engine.py'),(ROOT/'dm_sender_engine.py').read_text())
+
 # Exact inverse of the bounded Preparing conversion/cause delta; test-only.
 _PREPARING_BINDING_CAUSE_EXACT_INVERSE = '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'
 
@@ -49,7 +126,7 @@ class PreparingBindingCauseExactInverseTests(unittest.TestCase):
         import base64,zlib
         records=json.loads(zlib.decompress(base64.b64decode(_PREPARING_BINDING_CAUSE_EXACT_INVERSE)))
         for name,r in records.items():
-            current=(ROOT/name).read_text()
+            current=_e2e_parent_source(name)
             parent=subprocess.check_output(['git','-C',str(ROOT),'show',r['base_commit']+':'+name],text=True)
             self.assertEqual(restore_preparing_binding_cause_exact_delta(name,current),parent)
             self.assertEqual(restore_preparing_binding_cause_exact_delta(name,parent),parent)
@@ -63,7 +140,7 @@ class PreparingBindingCauseExactInverseTests(unittest.TestCase):
         functions=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body
                             if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         for name in ('runner.py','instagram_ui_profile_v1.py'):
-            new=(ROOT/name).read_text();old=restore_preparing_binding_cause_exact_delta(name,new)
+            new=_e2e_parent_source(name);old=restore_preparing_binding_cause_exact_delta(name,new)
             a,b=functions(old),functions(new)
             if name=='runner.py':
                 self.assertEqual(a.keys(),b.keys())
@@ -112,7 +189,7 @@ class LatencyReuseExactInverseTests(unittest.TestCase):
     def test_exact_parent_and_unrelated_missing_moved_duplicate_refused(self):
         import base64,zlib
         for name,record in json.loads(zlib.decompress(base64.b64decode(_LATENCY_REUSE_EXACT_INVERSE))).items():
-            current=(ROOT/name).read_text()
+            current=_e2e_parent_source(name)
             parent=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
             self.assertEqual(restore_latency_reuse_exact_delta(name,current),parent)
             self.assertEqual(restore_latency_reuse_exact_delta(name,parent),parent)
@@ -127,7 +204,7 @@ class LatencyReuseExactInverseTests(unittest.TestCase):
                   'instagram_navigation.py':['verify_dm_draft_text']}
         functions=lambda src:{n.name:ast.dump(n) for n in ast.parse(src).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         for name,allowed in expected.items():
-            current=(ROOT/name).read_text();parent=restore_latency_reuse_exact_delta(name,current)
+            current=_e2e_parent_source(name);parent=restore_latency_reuse_exact_delta(name,current)
             a,b=functions(parent),functions(current)
             self.assertEqual(a.keys(),b.keys());self.assertEqual([k for k in a if a[k]!=b[k]],allowed)
         parent=subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:tests/test_certification_admission.py'],text=True)
@@ -137,7 +214,7 @@ class LatencyReuseExactInverseTests(unittest.TestCase):
         current_constants=constants(Path(__file__).read_text())
         for k,v in constants(parent).items():self.assertEqual(current_constants[k],v,k)
         for name in ('outreach_terminal_receipt.py','runner.py','dm_ui_446_evidence.py','dm_thread_truth.py','outreach_slot_contract.py'):
-            self.assertEqual(_restore_preparing_if_exact_candidate(name,(ROOT/name).read_text()).encode(),subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:'+name]))
+            self.assertEqual(_restore_preparing_if_exact_candidate(name,_e2e_parent_source(name)).encode(),subprocess.check_output(['git','-C',str(ROOT),'show','374db14f323cd36da02b0121619972d0f1648250:'+name]))
 
 # Exact inverse of the terminal receipt precision and error projection delta; test-only.
 _TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE = 'eNq1VU2P2zgM/SuGL066QeAvWVKA/oBeeljsaacDQ5aojra2ZUhOZ7pB/vtS8STNOM700tXFsE0+PpKP1CG2+9GBkE/1CK4zvWhrBxLMMG6HH/HuEDfCQy1t15kx3sWirICxIq8aqXjTUCILyYFmnOYy05JzXpWUNzTeTI7+SeSkQsdMQc6LpihApPhgvGEgi4KyAghJRUmF4kQXZSNLwVTTcJlLlgLJc11oWmkElKJXRonxCpUIzhuhC9UoTSqlBAeuRcGYFARJQQq6oVRokWlSCllplucl0IbmKWFAAs2nff/Nx7uHQ2y19oBJsmwT21YhvHa2i0LE0XQQmW6wbry8f+nRu4fnsx2WzfbStEaMxva1R7pnl0E4rMXMIGD4UXQDAh03P8PnFeVnAtHrOdlFHy+xtyGi8VZb14lxNYDzxo+gtg6GVkhYJX8nmyj5I013aZqs11/6KyQkdBcJGY7wMj4kvrVjfTJOHu+jXiowJ/p+xj8JLzD7hesiw0Dl+HjcxG7f9+B+r3QpSJQj0VIRVpSFUmnKszzPGOS0qHhKK0pE1aRZI4kSqagYUBS2IBlXgJJelm6uidKCYmjNldSUkxQySbO8IIUoVCZ5WeZZ1hChdVqxtCwrViqoBCo6S5lalG6eVpwVZ/XcdCecy5iDc9Zhvb/CKMbRrS6LIBQW2zzfB5MDCuCz7eGqb+EYPcPdvf0fzmlILlZ+33XC/agHZ/8BGXp8GZbpSz033UQ9auF7kIbwKAlpFdxGeTUOOrqDs1JGhpHBjvRft5j9KkE5nvTfSzhbJesIq3M4rte3MSYCGCK5uzxr038XrVHJrffgzKnut9msXmNPpK5+JEsssOYTlOmjVRIG89m6b+BqeDFj3dv+X3A2fL6Q1MK0oJL1QnOuSrfdD0GpK22cH2sp9v6UViDzcXpsoitus2/n1+UQc0nYtrXPOMR2eBthIV1oPfyCOI4ADpzYt1g9H/aHCgoLWe8dTIU801zfVc7DO02dJuARm/dW7QtNnuSFlocPH15fsBVLQtudIx9nF0FWMFJV7PouOM3QXX7nCTopLyybuUHIfspEhMJ75CAleD9b5P9TlE30aRqKv14d/pzMbtOm7J0lhro33vS4+bGKK3iR93DnOg97bbvcU+yTxxWIYOuHXValj9N9cvwPeJ3ynw=='
@@ -172,7 +249,7 @@ class TerminalReceiptPrecisionExactInverseTests(unittest.TestCase):
         import base64, zlib
         records=json.loads(zlib.decompress(base64.b64decode(_TERMINAL_RECEIPT_PRECISION_EXACT_INVERSE)))
         for name,record in records.items():
-            current=(ROOT/name).read_text()
+            current=_e2e_parent_source(name)
             parent=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
             self.assertEqual(restore_terminal_receipt_precision_exact_delta(name,current),parent)
             self.assertEqual(restore_terminal_receipt_precision_exact_delta(name,parent),parent)
@@ -189,7 +266,7 @@ class TerminalReceiptPrecisionExactInverseTests(unittest.TestCase):
         functions=lambda src:{n.name:ast.dump(n) for n in ast.parse(src).body
             if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         for name,allowed in expected.items():
-            current=_restore_preparing_if_exact_candidate(name,(ROOT/name).read_text())
+            current=_restore_preparing_if_exact_candidate(name,_e2e_parent_source(name))
             parent=restore_terminal_receipt_precision_exact_delta(name,current)
             a,b=functions(parent),functions(current)
             self.assertEqual(a.keys(),b.keys())
@@ -203,7 +280,7 @@ class TerminalReceiptPrecisionExactInverseTests(unittest.TestCase):
         for k,v in constants(parent).items():self.assertEqual(current_constants[k],v,k)
         for name in ('reconciliation_scan.py','terminal_summary_projection.py',
                      'account_run_request_consumer.py','outreach_slot_contract.py'):
-            self.assertEqual((ROOT/name).read_bytes(),subprocess.check_output(
+            self.assertEqual(_e2e_parent_bytes(name),subprocess.check_output(
                 ['git','-C',str(ROOT),'show','a46e88326bcd9bb75c3c9e71972c1fc9996479b7:'+name]))
 
 # Exact inverse of the factored compact filled-family delta; test-only.
@@ -239,7 +316,7 @@ class CompactFilledFamilyExactInverseTests(unittest.TestCase):
         import base64, zlib
         records=json.loads(zlib.decompress(base64.b64decode(_COMPACT_FILLED_FAMILY_EXACT_INVERSE)))
         for name,record in records.items():
-            current=(ROOT/name).read_text()
+            current=_e2e_parent_source(name)
             parent=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
             self.assertEqual(restore_compact_filled_family_exact_delta(name,current),parent)
             self.assertEqual(restore_compact_filled_family_exact_delta(name,parent),parent)
@@ -252,7 +329,7 @@ class CompactFilledFamilyExactInverseTests(unittest.TestCase):
 
     def test_one_compact_template_other_seven_and_prior_records_unchanged(self):
         import copy
-        name='dm_ui_446_surface_shapes.json';source=(ROOT/name).read_text()
+        name='dm_ui_446_surface_shapes.json';source=_e2e_parent_source(name)
         old=json.loads(restore_compact_filled_family_exact_delta(name,source));new=json.loads(source)
         self.assertEqual(len(old['thread']['app_alternates']),10)
         self.assertEqual(len(new['thread']['app_alternates']),7)
@@ -272,7 +349,7 @@ class CompactFilledFamilyExactInverseTests(unittest.TestCase):
             attrs(compact,'header_title')['content-desc']='$empty_or_name'
             attrs(compact,'row_thread_composer_send_button_container').update(enabled='$bool',**{'long-clickable':'$bool'})
             self.assertEqual(compact,shape)
-        name='dm_ui_446_surface.py';current=(ROOT/name).read_text()
+        name='dm_ui_446_surface.py';current=_e2e_parent_source(name)
         parent=restore_compact_filled_family_exact_delta(name,current)
         functions=lambda src:{n.name:ast.dump(n) for n in ast.parse(src).body if isinstance(n,ast.FunctionDef)}
         a,b=functions(parent),functions(current)
@@ -316,7 +393,7 @@ class CompactOptionCExactInverseTests(unittest.TestCase):
     def test_exact_parent_and_unknown_missing_moved_duplicate_bytes_refused(self):
         import base64, zlib
         name = 'dm_ui_446_surface_shapes.json'
-        source = (ROOT/name).read_text()
+        source = _e2e_parent_source(name)
         record = json.loads(zlib.decompress(base64.b64decode(_COMPACT_OPTION_C_EXACT_INVERSE)))[name]
         parent = subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
         self.assertEqual(restore_compact_option_c_exact_delta(name, source),parent)
@@ -328,7 +405,7 @@ class CompactOptionCExactInverseTests(unittest.TestCase):
                 restore_compact_option_c_exact_delta(name,bad)
 
     def test_existing_alternatives_records_and_other_source_bytes_preserved(self):
-        name = 'dm_ui_446_surface_shapes.json';current=_restore_compact_filled_family_if_exact_candidate(name,(ROOT/name).read_text())
+        name = 'dm_ui_446_surface_shapes.json';current=_restore_compact_filled_family_if_exact_candidate(name,_e2e_parent_source(name))
         before=json.loads(restore_compact_option_c_exact_delta(name,current))
         after=json.loads(current)
         self.assertEqual(after['thread']['app_alternates'][:-3],before['thread']['app_alternates'])
@@ -412,7 +489,7 @@ def _restore_composer_signal_if_exact_candidate(name, source):
 class ComposerSignalExactInverseTests(unittest.TestCase):
     def test_exact_parent_only_and_unknown_bytes_refused(self):
         name = 'instagram_navigation.py'
-        source = (ROOT/name).read_text()
+        source = _e2e_parent_source(name)
         parent = subprocess.check_output(['git', '-C', str(ROOT), 'show',
             'a7009397680df1bc4d0bb7cbd4c0b28427f7cb35:'+name], text=True)
         self.assertEqual(restore_composer_signal_exact_delta(name, source), parent)
@@ -429,7 +506,7 @@ class ComposerSignalExactInverseTests(unittest.TestCase):
     def test_only_one_existing_function_changed_and_historical_records_intact(self):
         import ast
         name = 'instagram_navigation.py'
-        current = (ROOT/name).read_text()
+        current = _e2e_parent_source(name)
         parent = restore_composer_signal_exact_delta(name, current)
         functions = lambda source: {n.name: ast.dump(n) for n in ast.parse(source).body
                                    if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
@@ -448,6 +525,7 @@ class ComposerSignalExactInverseTests(unittest.TestCase):
             self.assertEqual(value, now[key], key)
 
 def restore_option_c_exact_delta(name, source):
+    source = _restore_e2e_if_exact_candidate(name, source)
     source = _restore_compact_option_c_if_exact_candidate(name, source)
     source = _restore_composer_signal_if_exact_candidate(name, source)
     import base64, zlib
@@ -479,7 +557,7 @@ class OptionCExactInverseTests(unittest.TestCase):
         import base64, zlib
         records=json.loads(zlib.decompress(base64.b64decode(_OPTION_C_EXACT_INVERSE)))
         for name,record in records.items():
-            source=(ROOT/name).read_text()
+            source=_e2e_parent_source(name)
             expected=subprocess.check_output(['git','-C',str(ROOT),'show','c5e355f41fb1b7da591257f2fccdf7804ea00362:'+name],text=True)
             with self.subTest(path=name):
                 self.assertEqual(restore_option_c_exact_delta(name,source),expected)
@@ -623,6 +701,7 @@ def restore_consolidated_projection_delta(name, source):
 
 
 def restore_exact_product_delta(name, source):
+    source = _restore_e2e_if_exact_candidate(name, source)
     source = _restore_preparing_if_exact_candidate(name, source)
     source = restore_persistent_certification_recorder_delta(name, source)
     source = restore_ordinary_recorder_delta(name, source)
@@ -649,7 +728,7 @@ class ProductExactInverseTests(unittest.TestCase):
         import base64,zlib
         records=json.loads(zlib.decompress(base64.b64decode(_PRODUCT_EXACT_INVERSE)))
         for name,record in records.items():
-            source=(ROOT/name).read_text()
+            source=_e2e_parent_source(name)
             expected=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
             with self.subTest(name=name):
                 self.assertEqual(restore_exact_product_delta(name,source),expected)
@@ -1125,17 +1204,17 @@ class RunnerIntegrationTests(unittest.TestCase):
 
     def test_navigation_exact_a0_bytes(self):
         for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
-            self._assert_navigation_a0_with_exact_446_delta(name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode())
+            self._assert_navigation_a0_with_exact_446_delta(name, restore_exact_product_delta(name, _e2e_parent_source(name)).encode())
 
     def test_navigation_freeze_rejects_unrelated_byte_changes(self):
         for name in ('device.py','own_profile_navigation.py','account_identity_guard.py','instagram_navigation.py','follow60_mainline_v2.py'):
             with self.subTest(name=name), self.assertRaises(AssertionError):
                 self._assert_navigation_a0_with_exact_446_delta(
-                    name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode() + b'\n# unrelated change\n')
+                    name, restore_exact_product_delta(name, _e2e_parent_source(name)).encode() + b'\n# unrelated change\n')
 
     def test_navigation_freeze_rejects_changed_or_missing_approved_hunk(self):
         for name, hunks in self._APPROVED_446_HUNKS.items():
-            source = restore_exact_product_delta(name, (ROOT/name).read_text()).encode()
+            source = restore_exact_product_delta(name, _e2e_parent_source(name)).encode()
             if name == "device.py":
                 source = restore_exact_ui_profile_delta(name, source.decode()).encode()
             for current, original in hunks:
@@ -1151,7 +1230,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         import base64, zlib
         records = json.loads(zlib.decompress(base64.b64decode(_PROFILE_EXACT_INVERSE)))
         for name, record in records.items():
-            source = restore_exact_product_delta(name, (ROOT/name).read_text())
+            source = restore_exact_product_delta(name, _e2e_parent_source(name))
             baseline = subprocess.check_output(['git', 'show', 'baf0bf85701e0c28e65ca8ebe71b9537e7293b73:' + name], cwd=ROOT, text=True)
             self.assertEqual(restore_exact_ui_profile_delta(name, source), baseline)
             for hunk in record['hunks']:
@@ -1170,7 +1249,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             for current, _ in hunks:
                 with self.subTest(name=name), self.assertRaises(AssertionError):
                     self._assert_navigation_a0_with_exact_446_delta(
-                        name, restore_exact_product_delta(name, (ROOT/name).read_text()).encode() + current)
+                        name, restore_exact_product_delta(name, _e2e_parent_source(name)).encode() + current)
 
     def test_no_ui_dependency_or_bare_except(self):
         tree=ast.parse((ROOT/'certification_admission.py').read_text())
@@ -1186,7 +1265,7 @@ if __name__=='__main__':unittest.main()
 
 class LikeBudgetExactFreezeTests(unittest.TestCase):
     def test_exact_hunks_reconstruct_signed_baseline(self):
-        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
+        source = restore_exact_product_delta('instagram_navigation.py', _e2e_parent_source('instagram_navigation.py'))
         expected = subprocess.check_output(['git','show',
             '8519f1c16284a7f4f4185e898b0b281d8ea27e72:instagram_navigation.py'],cwd=ROOT,text=True)
         self.assertEqual(restore_exact_like_budget_delta(source),expected)
@@ -1194,7 +1273,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
             self.assertEqual(source.count(approved),1)
 
     def test_missing_changed_duplicate_and_moved_hunks_fail(self):
-        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
+        source = restore_exact_product_delta('instagram_navigation.py', _e2e_parent_source('instagram_navigation.py'))
         for approved, original in LIKE_BUDGET_EXACT_HUNKS:
             for mutated in (source.replace(approved,original,1),
                             source.replace(approved,approved+'# unauthorized byte\n',1),
@@ -1204,7 +1283,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
                     restore_exact_like_budget_delta(mutated)
 
     def test_unrelated_semantic_and_business_mutations_fail(self):
-        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
+        source = restore_exact_product_delta('instagram_navigation.py', _e2e_parent_source('instagram_navigation.py'))
         names = ('_ui_post_viewer_action_button_liked_strict',
                  '_ui_post_viewer_liked_state_for_verify','visual_verify_post_liked',
                  '_visual_filled_heart_red_ratio','_hierarchy_liked_state_for_post_verify',
@@ -1231,7 +1310,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
             if hashlib.sha256(content).hexdigest() != hashes[name]:
                 raise AssertionError('business_companion_changed:' + name)
         for name in hashes:
-            content = restore_exact_product_delta(name, (ROOT/name).read_text()).encode()
+            content = restore_exact_product_delta(name, _e2e_parent_source(name)).encode()
             if name == "runner.py":
                 content = restore_exact_self_xml_delta(name, content.decode()).encode()
             assert_exact(name,content)
@@ -1243,7 +1322,7 @@ class LikeBudgetExactFreezeTests(unittest.TestCase):
 class SelfXmlExactFreezeTests(unittest.TestCase):
     def test_exact_inverse_and_missing_altered_duplicate_or_moved_hunks(self):
         for name, hunks in SELF_XML_EXACT_HUNKS.items():
-            source = restore_exact_product_delta(name, (ROOT/name).read_text())
+            source = restore_exact_product_delta(name, _e2e_parent_source(name))
             restored = restore_exact_self_xml_delta(name, source)
             self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), SELF_XML_BASE_HASHES[name])
             for approved, original in hunks:
@@ -1257,7 +1336,7 @@ class SelfXmlExactFreezeTests(unittest.TestCase):
     def test_business_and_orchestrator_mutations_remain_rejected(self):
         for name, surfaces in [('runner.py', ('reentry', 'Follow', 'Mute', 'Return CT', 'checkpoint/resume', 'extra byte')),
                                ('account_session_orchestrator.py', ('Target Availability', 'rotation', 'unapproved propagation'))]:
-            source = restore_exact_product_delta(name, (ROOT/name).read_text())
+            source = restore_exact_product_delta(name, _e2e_parent_source(name))
             tree = ast.parse(source)
             # Inject a byte inside real functions as well as at file end. Nothing
             # outside the authorized hunks may be swallowed by normalization.
@@ -1739,12 +1818,12 @@ class CanonicalCycleAdmissionTests(unittest.TestCase):
 
 class DM446ExactFreezeTests(unittest.TestCase):
     def test_exact_delta_restores_signed_baseline(self):
-        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
+        source = restore_exact_product_delta('instagram_navigation.py', _e2e_parent_source('instagram_navigation.py'))
         expected = subprocess.check_output(['git','show','ea69818bfb3445dba3459ea56156d3c6206031c5:instagram_navigation.py'],cwd=ROOT,text=True)
         self.assertEqual(restore_exact_dm446_delta(source),expected)
 
     def test_outer_hash_and_inner_position_checks_reject_mutations(self):
-        source = restore_exact_product_delta('instagram_navigation.py', (ROOT/'instagram_navigation.py').read_text())
+        source = restore_exact_product_delta('instagram_navigation.py', _e2e_parent_source('instagram_navigation.py'))
         for offset, approved, original in DM446_EXACT_HUNKS:
             without = source[:offset]+source[offset+len(approved):]
             mutations = (without,source[:offset]+'# altered\n'+source[offset+1:],approved+without,source+approved)
@@ -1771,7 +1850,7 @@ class PersistentCertificationExactInverseTests(unittest.TestCase):
         import base64,zlib
         records=json.loads(zlib.decompress(base64.b64decode(_PERSISTENT_CERTIFICATION_EXACT_INVERSE)))
         for name,record in records.items():
-            source=(ROOT/name).read_text()
+            source=_e2e_parent_source(name)
             expected=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
             self.assertEqual(restore_persistent_certification_recorder_delta(name,source),expected)
             for bad in (source+'\n',source.replace(record['hunks'][0]['new'],'',1)):
@@ -1781,7 +1860,7 @@ class PersistentCertificationExactInverseTests(unittest.TestCase):
     def test_classifier_shapes_and_protected_identity_unchanged(self):
         for name in ('dm_ui_446_surface.py','dm_ui_446_surface_shapes.json','dm_ui_446_evidence.py',
                      'dm_thread_truth.py','outreach_slot_contract.py','outreach_measurements.py'):
-            source = restore_timestamp_prespawn_exact_delta(name, (ROOT/name).read_text()).encode()
+            source = restore_timestamp_prespawn_exact_delta(name, _e2e_parent_source(name)).encode()
             self.assertEqual(source,subprocess.check_output(['git','-C',str(ROOT),'show',
                 '0a44138f7e0a3447446e7b0c14561067fdebf041:'+name]))
 
@@ -1791,7 +1870,7 @@ class TimestampPreSpawnExactInverseTests(unittest.TestCase):
         import base64, zlib
         records = json.loads(zlib.decompress(base64.b64decode(_TIMESTAMP_PRESPAWN_EXACT_INVERSE)))
         for name, record in records.items():
-            source = (ROOT/name).read_text()
+            source = _e2e_parent_source(name)
             parent = subprocess.check_output(['git', '-C', str(ROOT), 'show',
                                                record['base_commit']+':'+name], text=True)
             self.assertEqual(restore_timestamp_prespawn_exact_delta(name, source), parent)
@@ -1811,7 +1890,7 @@ class TimestampPreSpawnExactInverseTests(unittest.TestCase):
         funcs = lambda s: {n.name: ast.dump(n) for n in ast.parse(s).body
                             if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
         for name, allowed in expected.items():
-            source = (ROOT/name).read_text()
+            source = _e2e_parent_source(name)
             before = funcs(restore_timestamp_prespawn_exact_delta(name, source))
             after = funcs(source)
             self.assertEqual(before.keys(), after.keys())
@@ -1830,4 +1909,4 @@ class TimestampPreSpawnExactInverseTests(unittest.TestCase):
             historical = subprocess.check_output(['git', '-C', str(ROOT), 'show',
                 '0a44138f7e0a3447446e7b0c14561067fdebf041:'+name], text=True)
             self.assertEqual(restore_timestamp_prespawn_exact_delta(
-                name, (ROOT/name).read_text()), historical)
+                name, _e2e_parent_source(name)), historical)

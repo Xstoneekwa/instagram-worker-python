@@ -91,6 +91,17 @@ class Device:
     def click(self,*a,**kw):raise AssertionError('UI action forbidden')
     def press(self,*a,**kw):raise AssertionError('UI action forbidden')
 
+class ThreadSignatureExistingBudgetTests(unittest.TestCase):
+    def test_post_send_keeps_its_budget_and_can_reach_the_second_real_observation(self):
+        f=json.loads((ROOT/'tests/fixtures/dm_446_history_outbound_longtext.json').read_text())
+        before,after=f['cases']['57']['xml'],f['cases']['61']['xml'];clock=Clock();clock.now=0.
+        d=Device([before,after],clock=clock);d.cost=1.2
+        with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**kw:None),patch.object(nav,'_dm_read_composer_text_len',side_effect=AssertionError('redundant diagnostic read')) as getter:
+            pre=nav._dm_thread_message_signature(d,f['expected_text'],hierarchy_xml=before)
+            ok,reason,_=nav._dm_verify_outbound_message_after_send(d,f['expected_text'],pre_signature=pre,expected_username=f['target'])
+        self.assertTrue(ok);self.assertEqual(reason,'outbound_bubble_after_tap')
+        self.assertEqual(d.reads,2);self.assertLessEqual(clock.now,4.);getter.assert_not_called()
+
 class DM446Tests(unittest.TestCase):
     def setUp(self):
         self.clock=Clock();self.p=patch.object(nav,'time',self.clock);self.p.start();self.addCleanup(self.p.stop)

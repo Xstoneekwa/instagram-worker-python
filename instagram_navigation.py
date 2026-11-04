@@ -7133,6 +7133,24 @@ def _dm_message_semantic_text_without_symbols(value: str | None) -> str:
     return " ".join("".join(chars).split()).strip().casefold()
 
 
+def _dm_full_exported_text_match_mode(observed: str, expected: str) -> str:
+    """Full text only; the observed exporter writes two dots per non-BMP unit pair.
+
+    The existing redaction anchor minimum is necessary, but never sufficient:
+    every other character, line break and punctuation must remain exact.
+    """
+    if not expected or not expected.strip():
+        return ""
+    if observed == expected:
+        return "exact"
+    if (any(ord(c) > 0xFFFF for c in expected)
+            and len(_dm_message_semantic_text_without_symbols(
+                "".join(c for c in expected if ord(c) <= 0xFFFF))) >= 12
+            and observed == "".join(".." if ord(c) > 0xFFFF else c for c in expected)):
+        return "export_equivalent"
+    return ""
+
+
 def _dm_outbound_expected_message_match_mode(
     hierarchy_xml: str,
     expected_text: str,
@@ -7160,6 +7178,19 @@ def _dm_outbound_expected_message_match_mode(
         getattr(config, "INSTAGRAM_PACKAGE", "com.instagram.android")
         or "com.instagram.android"
     )
+    parents = {child: parent for parent in root.iter() for child in parent}
+    lists = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/message_list"]
+    if len(lists) == 1:
+        from dm_thread_truth import _qualified_compose_message_rows
+        matches = [n for n in lists[0].iter() if n.get("class") == "android.widget.TextView"
+                   and _dm_full_exported_text_match_mode(n.get("text", ""), str(expected_text or ""))]
+        if len(matches) == 1:
+            for message in _qualified_compose_message_rows(root, lists[0], package):
+                if message["bubble"] is matches[0] and message["outgoing"]:
+                    mode = _dm_full_exported_text_match_mode(matches[0].get("text", ""), str(expected_text or ""))
+                    if mode == "exact" and not any(n.get("resource-id") == f"{package}:id/row_thread_composer_edittext" for n in root.iter()):
+                        return "invite_postsend_exact"
+                    return "compose_outgoing_" + mode
     invite_title = False
     invite_explanation = False
     composer_present = False
@@ -7188,67 +7219,20 @@ def _dm_outbound_expected_message_match_mode(
                 node.attrib.get("package") == package
                 and node.attrib.get("class") == "android.widget.TextView"
                 and not rid
-                and expected in _normalize_dm_message_text(node.attrib.get("text", ""))
+                and node.attrib.get("text", "") == str(expected_text or "")
+                and message_list is not None
             ):
                 if message_list is not None and node not in message_nodes:
                     continue
+                parent = parents.get(node)
+                while (parent is not None and parent is not message_list
+                       and parent.get("class") != "com.facebook.compose.view.MetaComposeView"):
+                    parent = parents.get(parent)
+                # Compose rows use the structural proof above; an invalid one
+                # cannot fall through to the historical invite-label branch.
+                if parent is not message_list:
+                    continue
                 return "invite_postsend_exact"
-    # Normal 446 threads use an anonymous TextView in a Compose message row.
-    # Qualify the observed row topology AND its outgoing geometry; a matching
-    # label elsewhere (including the composer/profile intro) is not a bubble.
-    lists = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/message_list"]
-    titles = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/header_title"]
-    subtitles = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/header_subtitle"]
-    editors = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/row_thread_composer_edittext"]
-    if len(lists) == len(titles) == len(subtitles) == len(editors) == 1:
-        parents = {child: parent for parent in root.iter() for child in parent}
-        ml, title, subtitle, editor = lists[0], titles[0], subtitles[0], editors[0]
-        exact = [n for n in ml.iter() if n.get("class") == "android.widget.TextView"
-                 and n.get("text", "") == str(expected_text or "")]
-        if len(exact) == 1:
-            bubble = exact[0]
-            row = parents.get(bubble)
-            compose = parents.get(row)
-            header = parents.get(title)
-            nodes = (ml, title, subtitle, editor, bubble, row, compose)
-            if (all(n is not None and n.get("package") == package
-                    and n.get("visible-to-user") == "true"
-                    and n.get("enabled") == "true" for n in nodes)
-                    and ml.get("class") == "androidx.recyclerview.widget.RecyclerView"
-                    and editor.get("class") == "android.widget.EditText"
-                    and header is not None and parents.get(subtitle) is header
-                    and header.get("resource-id") == f"{package}:id/header_title_subtitle_container"
-                    and compose.get("class") == "com.facebook.compose.view.MetaComposeView"
-                    and parents.get(compose) is ml and list(compose) == [row]
-                    and row.get("class") == "android.view.View"
-                    and len(row) in (2, 3) and row[0] is bubble
-                    and row[1].get("class") == "android.view.View"
-                    and (len(row) == 2 or row[2].get("class") == "android.widget.ImageView")
-                    and all(not n.get("resource-id")
-                            and n.get("clickable") == "false" for n in (compose, row, *row))
-                    and all(not n.get("content-desc") for n in (compose, row, bubble, row[1]))
-                    and (len(row) == 2 or row[2].get("content-desc") == "Sending…")
-                    and all(len(n) == 0 and n.get("package") == package
-                            and n.get("visible-to-user") == "true" and n.get("enabled") == "true"
-                            for n in row)
-                    and all(not n.get("text") for n in (compose, row, *list(row)[1:]))):
-                boxes = [_dm_parse_bounds_attr_xml(n.get("bounds")) for n in nodes]
-                extra = [_dm_parse_bounds_attr_xml(n.get("bounds")) for n in list(row)[1:]]
-                if all(b and b["left"] < b["right"] and b["top"] < b["bottom"] for b in boxes + extra):
-                    lb, tb, sb, eb, bb, rb, cb = boxes
-                    decoration = extra[0]
-                    if (lb["left"] == rb["left"] == cb["left"]
-                            and lb["right"] == rb["right"] == cb["right"]
-                            and _bounds_contain(lb, cb) and _bounds_contain(cb, rb)
-                            and all(_bounds_contain(rb, b) for b in [bb, *extra])
-                            and max(tb["bottom"], sb["bottom"]) <= lb["top"]
-                            and rb["bottom"] <= eb["top"]
-                            and bb["left"] - lb["left"] > lb["right"] - bb["right"]
-                            and decoration["left"] < bb["left"]
-                            and decoration["right"] < bb["right"]
-                            and bb["top"] <= decoration["top"] < decoration["bottom"] <= bb["bottom"]
-                            and (len(extra) == 1 or extra[1]["left"] >= bb["right"])):
-                        return "compose_outgoing_exact"
     for node in root.iter():
         rid = str(node.attrib.get("resource-id") or "").lower()
         if "composer" in rid:
@@ -7326,6 +7310,7 @@ def _dm_thread_message_signature(
     # a preexisting bubble becoming readable must never become a new Send.
     compose_expected_count = None
     compose_thread = None
+    composer_text_len = None
     try:
         package = str(getattr(config, "INSTAGRAM_PACKAGE", "com.instagram.android") or "com.instagram.android")
         root = ET.fromstring(hier)
@@ -7333,11 +7318,32 @@ def _dm_thread_message_signature(
         titles = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/header_title"]
         subtitles = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/header_subtitle"]
         if len(lists) == len(titles) == len(subtitles) == 1:
-            compose_expected_count = sum(n.get("class") == "android.widget.TextView" and n.get("text", "") == str(expected_text or "") for n in lists[0].iter())
+            compose_expected_count = sum(n.get("class") == "android.widget.TextView"
+                                         and bool(_dm_full_exported_text_match_mode(n.get("text", ""), str(expected_text or "")))
+                                         for n in lists[0].iter())
             compose_thread = hashlib.sha256(json.dumps([
                 _welcome_dm_thread_header_from_hierarchy(hier),
                 _welcome_dm_thread_subtitle_from_hierarchy(hier),
             ], ensure_ascii=False).encode("utf-8")).hexdigest()
+        # Diagnostic only: reuse this very observation, without another strict
+        # finder/get_text round trip. Never turn a missing observation into 0.
+        editors = [n for n in root.iter() if n.get("resource-id") == f"{package}:id/row_thread_composer_edittext"]
+        if len(editors) == 1 and all((
+                editors[0].get("class") == "android.widget.EditText",
+                editors[0].get("package") == package,
+                editors[0].get("visible-to-user") == "true",
+                editors[0].get("enabled") == "true",
+                editors[0].get("clickable") == "true")):
+            value = editors[0].get("text", "")
+            composer_text_len = 0 if value == editors[0].get("hint") else len(value)
+        elif not editors:
+            disabled = [[n for n in root.iter() if n.get("resource-id") == f"{package}:id/{role}"]
+                        for role in ("thread_disabled_title", "thread_disabled_bottom_description")]
+            if all(len(ns) == 1 and ns[0].get("class") == "android.widget.TextView"
+                   and ns[0].get("package") == package and ns[0].get("visible-to-user") == "true"
+                   and ns[0].get("enabled") == "true" and ns[0].get("text", "").strip()
+                   for ns in disabled):
+                composer_text_len = 0
     except (ET.ParseError, TypeError, ValueError):
         pass
     _dm_retention.capture_xml('thread_signature', hier, failure=not bool(outbound_match_mode))
@@ -7352,7 +7358,7 @@ def _dm_thread_message_signature(
         "compose_expected_message_count": compose_expected_count,
         "compose_thread_identity": compose_thread,
         "message_marker_count": sum(blob.count(marker) for marker in _DM_MESSAGE_MARKERS),
-        "composer_text_len": _dm_read_composer_text_len(d),
+        "composer_text_len": composer_text_len,
         "pending_outbound_signal_present": _dm_pending_outbound_signal_present(hier),
     }
 
@@ -7363,7 +7369,8 @@ def _dm_outbound_signature_advanced(
 ) -> bool:
     pre_hash = str(pre_sig.get("hierarchy_hash") or "")
     post_hash = str(post_sig.get("hierarchy_hash") or "")
-    if post_sig.get("outbound_expected_text_match_mode") == "compose_outgoing_exact":
+    if post_sig.get("outbound_expected_text_match_mode") in (
+            "compose_outgoing_exact", "compose_outgoing_export_equivalent", "invite_postsend_exact"):
         return bool(pre_hash and post_hash and post_hash != pre_hash
                     and pre_sig.get("compose_expected_message_count") == 0
                     and post_sig.get("compose_expected_message_count") == 1
@@ -7443,7 +7450,8 @@ def _dm_verify_outbound_message_after_send(
         )
         pending_outbound = bool(last_sig.get("pending_outbound_signal_present")) and marker_delta > 0
         identity_ok = not expected_username or header_match
-        if last_sig.get("outbound_expected_text_match_mode") == "compose_outgoing_exact":
+        if last_sig.get("outbound_expected_text_match_mode") in (
+                "compose_outgoing_exact", "compose_outgoing_export_equivalent", "invite_postsend_exact"):
             identity_ok = bool(expected_username and header_match)
         elapsed_ms = round((time.monotonic() - started_at) * 1000.0, 2)
         log(
@@ -7454,7 +7462,7 @@ def _dm_verify_outbound_message_after_send(
             bubble_found=exact_or_normalized_text,
             header_match=header_match,
             evidence_mode=last_sig.get("outbound_expected_text_match_mode") or None,
-            composer_empty=int(last_sig.get("composer_text_len") or 0) == 0,
+            composer_empty=(last_sig["composer_text_len"] == 0 if last_sig.get("composer_text_len") is not None else None),
             pending_outbound=pending_outbound,
             identity_source=identity_evaluation.get("identity_source"),
             subtitle_kind=identity_evaluation.get("subtitle_kind"),

@@ -136,6 +136,22 @@ class AnticipatoryComposerPostsendTests(unittest.TestCase):
         self.assertIn("direct_text_message_text_view", xml)
         self.assertEqual(nav._dm_outbound_expected_message_match_mode(xml, EXPECTED), "exact_or_normalized")
 
+    def test_invite_requires_complete_literal_text_instead_of_a_prefix(self):
+        xml=(ROOT/'tests/fixtures/dm_446_invite_postsend_446.xml').read_text()
+        self.assertFalse(nav._dm_outbound_expected_message_match_mode(xml, EXPECTED[:5]))
+        root=ET.fromstring(xml)
+        next(n for n in root.iter() if n.get('text')==EXPECTED).set('text',EXPECTED+' extra')
+        self.assertFalse(nav._dm_outbound_expected_message_match_mode(ET.tostring(root,encoding='unicode'),EXPECTED))
+
+    def test_preexisting_invite_bubble_cannot_become_new_when_qualification_changes(self):
+        xml=(ROOT/'tests/fixtures/dm_446_invite_postsend_446.xml').read_text()
+        root=ET.fromstring(xml)
+        next(n for n in root.iter() if n.get('text')==EXPECTED).set('clickable','true')
+        pre=nav._dm_thread_message_signature(Device(xml),EXPECTED,hierarchy_xml=ET.tostring(root,encoding='unicode'))
+        post=nav._dm_thread_message_signature(Device(xml),EXPECTED,hierarchy_xml=xml)
+        self.assertEqual((pre['compose_expected_message_count'],post['compose_expected_message_count']),(1,1))
+        self.assertFalse(nav._dm_outbound_signature_advanced(pre,post))
+
 
 class NativeComposePostsendTests(unittest.TestCase):
     @classmethod

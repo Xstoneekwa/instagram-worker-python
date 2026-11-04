@@ -82,3 +82,68 @@ class OptionCIdentityProjectionTests(unittest.TestCase):
             clock=Clock();clock.now=0.;d=Device([f['xml'],xml],clock=clock)
             self.assertEqual(self.detect(d,f['target'],self.proof(d,f['target']))[0],expected)
 
+class ExistingMessageWithoutComposerTests(unittest.TestCase):
+    def test_previous_23_case_corpus_preserves_every_negative_and_proves_actual_bubbles(self):
+        import copy
+        import xml.etree.ElementTree as ET
+        import dm_thread_truth as truth
+        from test_dm_446_current_surface import StructuralOptionCTests, F, s
+        from test_dm_446_readers import DATA
+        corpus=StructuralOptionCTests().corpus()
+        changed={f'postsend_observation_{n:03}' for n in (28,29,30,31)}
+        cases=[(f['label'],f['xml'],f['target'],
+                'existing_thread' if f['label'] in changed else f['baseline_history']) for f in corpus]
+        names=('dm_truth/B_30_existing_thread','dm_truth_a1/accessible_reply_in_intro',
+               'dm_truth_a3/message_list_unknown_semantics','dm_ui_phase_b1/display_name_collision',
+               'dm_ui_phase_b1/contradictory_header_channels','dm_truth_a1/untitled_dialog',
+               'dm_truth_a1/hidden_ancestor','dm_truth_a2/H2_nested_overlay_message_composer_bar',
+               'dm_ui_phase_b1/anonymous_overlay_inside_history','dm_truth_a1/unexpected_node')
+        cases.extend((name,DATA[name]['xml'],
+                      'reginanubway' if name.endswith('B_30_existing_thread') else 'vincentfavrephotographe',
+                      'existing_thread' if name.endswith('B_30_existing_thread') else 'unknown') for name in names)
+        for kind in ('wrong_recipient','missing_editor','duplicate_editor','editor_occluded','false_thread_search_header'):
+            root=ET.fromstring(corpus[1]['xml']);ed=s.one(root,'row_thread_composer_edittext');target='fixture_target'
+            parent=next(n for n in root.iter() if ed in list(n))
+            if kind=='wrong_recipient':target='wrong_recipient'
+            elif kind=='missing_editor':parent.remove(ed)
+            elif kind=='duplicate_editor':parent.append(copy.deepcopy(ed))
+            elif kind=='editor_occluded':s.one(root,'message_list').append(copy.deepcopy(ed))
+            else:
+                s.one(root,'header_title').set('text','Search');s.one(root,'header_title').set('content-desc','Search')
+            cases.append((kind,ET.tostring(root,encoding='unicode'),target,'unknown'))
+        self.assertEqual(len(cases),23)
+        self.assertEqual({f['label'] for f in corpus if f['label'] in changed},changed)
+        for name,value,target,expected in cases:
+            with self.subTest(case=name):
+                state,proof=truth.classify_dm_history(value,P,target,surface_context=tuple(F['context']))
+                self.assertEqual(state,expected)
+                if name in changed:
+                    self.assertEqual(proof['history_signal_type'],'compose_message_bubble')
+                    self.assertNotEqual(state,'empty_new_thread')
+
+    def fixture(self):
+        import json
+        from pathlib import Path
+        return json.loads((Path(__file__).parent/'fixtures/dm_446_history_outbound_longtext.json').read_text())
+
+    def test_actual_a0_boundary_accepts_positive_history_without_an_editor(self):
+        f=self.fixture();clock=Clock();clock.now=0.;d=Device(f['cases']['41']['xml'],clock=clock)
+        with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**k:None):
+            state,snap=nav.detect_dm_thread_state(d,f['target'],pkg=P)
+        self.assertEqual(state,'existing_thread');self.assertTrue(snap['has_history'])
+        self.assertFalse(snap['composer_visible']);self.assertEqual(snap['positive_empty_observations'],0)
+        self.assertEqual(d.reads,1)
+
+    def test_foreground_failure_never_borrows_underlying_positive_history(self):
+        f=self.fixture();clock=Clock();clock.now=0.;d=Device(f['cases']['41']['xml'],clock=clock)
+        d.foregrounds=[dict(package='another.package',activity=d.activity)]
+        with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**k:None):
+            state,snap=nav.detect_dm_thread_state(d,f['target'],pkg=P)
+        self.assertEqual(state,'unknown');self.assertFalse(snap['has_history']);self.assertEqual(d.reads,0)
+
+    def test_wrong_identity_stays_unknown_at_the_actual_a0_boundary(self):
+        f=self.fixture();clock=Clock();clock.now=0.;d=Device(f['cases']['41']['xml'],clock=clock);d.cost=1.
+        with patch.object(nav,'time',clock),patch.object(nav,'log',lambda *a,**k:None):
+            state,snap=nav.detect_dm_thread_state(d,'another_target',pkg=P)
+        self.assertEqual(state,'unknown');self.assertFalse(snap['has_history'])
+
