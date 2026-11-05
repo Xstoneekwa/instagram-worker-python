@@ -1,0 +1,33 @@
+{
+  "schema": "DM446_CHRONOMETRIC_NATIVE_SEGMENTS_V1",
+  "source_run": "de60dcda-1ea9-44fc-bc1c-ca648a3cb906",
+  "worker_before": "ea7e6016c4ceb84c8f119996e1e42777a2142b03",
+  "native_timeline_sha256": "5b8283f72125de489a249fe61c370c83a2d1166dd3890ca913cdcde54c389857",
+  "transformation": "Opaque ordinal candidates only. Timings copied exactly from native evidence. No recipient/message content or invented UI behavior. Synthetic fake transport cost is not a physical measurement.",
+  "expected_unicode": 803,
+  "expected_utf16": 810,
+  "physical_gain_certified": false,
+  "sent_candidates": [
+    {
+      "index": 0,
+      "A": 39.511476,
+      "B": 17.004484,
+      "C_proof_to_search": 41.800665,
+      "obsolete_finalize_ms": 17578.61
+    },
+    {
+      "index": 1,
+      "A": 38.646347,
+      "B": 16.11597,
+      "C_proof_to_search": 40.58959,
+      "obsolete_finalize_ms": 17365.56
+    },
+    {
+      "index": 2,
+      "A": 44.114416,
+      "B": 20.915241,
+      "C_proof_to_search": 48.468904,
+      "obsolete_finalize_ms": 20768.34
+    }
+  ]
+}

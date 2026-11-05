@@ -25,6 +25,7 @@ import uiautomator2 as u2
 
 import config
 import dm_446_observation_retention as _dm_retention
+import run_latency_observability_v1 as _dm_latency
 import account_protection_lists
 import follow_persistence_intent
 import followers_surface_proof as followers_proof
@@ -7075,6 +7076,38 @@ def read_dm_composer_text(d: u2.Device) -> str:
             return ""
 
 
+def _dm_read_current_446_composer_text(d, composer, context, *, observation=None):
+    """Read this operation's strict editor, never a reusable admission token."""
+    with _dm_retention.phase('draft_read'):
+        if observation is not None:
+            observation.clear()
+            observation.update(read_succeeded=False)
+        step = 'context'
+        get_text_called = False
+        try:
+            if context is None or _dm_446_context(d) is not context:
+                raise ValueError('dm_version_context_changed')
+            step = 'get_text'
+            get_text_called = True
+            raw = composer.get_text()
+            step = 'context'
+            if _dm_446_context(d) is not context:
+                raise ValueError('dm_version_context_changed')
+            text = str(raw or '').strip()
+            if observation is not None:
+                observation.update(read_succeeded=True, actual_text=text)
+            _dm_retention.capture_event('draft_read', failure=not bool(text),
+                branch='TEXT_READ' if text else 'TEXT_EMPTY', get_text_called=True,
+                actual_text=raw if type(raw) is str else text, returned_none=raw is None,
+                read_source='current_operation_strict_composer')
+            return text
+        except Exception as exc:
+            _dm_retention.capture_event('draft_read', failure=True,
+                branch='GET_TEXT_EXCEPTION' if step == 'get_text' else 'CONTEXT_UNPROVED',
+                get_text_called=get_text_called, exception_class=type(exc).__name__)
+            return ''
+
+
 def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
     """Best-effort: outgoing bubble text appears in thread hierarchy (not composer-only)."""
     needle = str(expected_text or "").strip()
@@ -9688,8 +9721,12 @@ def open_dm_thread_from_profile(
     return thread_state
 
 
-def verify_dm_composer_safe(d: u2.Device, pkg: str | None = None) -> tuple[bool, str]:
+def verify_dm_composer_safe(
+    d: u2.Device, pkg: str | None = None, *, _pretyping_readback=None,
+) -> tuple[bool, str]:
     p = pkg or config.INSTAGRAM_PACKAGE
+    if _pretyping_readback is not None:
+        _pretyping_readback.clear()
     if not verify_app_foreground(d, p):
         return False, "not_foreground"
     if is_lightweight_search_screen(d, p):
@@ -9700,8 +9737,18 @@ def verify_dm_composer_safe(d: u2.Device, pkg: str | None = None) -> tuple[bool,
     while (time.perf_counter() - w0) < acc:
         composer = _dm_find_focus_composer(d)
         if composer is not None:
+            if _pretyping_readback is not None:
+                context = _dm_446_context(d)
+                if context is None or context.package != p:
+                    return False, 'no_dm_composer'
+                # No UI mutation or caller callback between qualification/read.
+                _dm_read_current_446_composer_text(
+                    d, composer, context, observation=_pretyping_readback,
+                )
+                if not _pretyping_readback.get('read_succeeded'):
+                    return False, 'no_dm_composer'
             return True, "ok"
-        time.sleep(0.08)
+        _dm_latency.dm446_wait(0.08, reason='composer_poll', sleep=time.sleep, emit=log)
     _emit_wait_event("dm_composer_wait", (time.perf_counter() - w0) * 1000)
     return False, "no_dm_composer"
 
@@ -9713,26 +9760,42 @@ def type_dm_draft_only(
     *,
     force_method: str | None = None,
     composer: Any | None = None,
+    _outreach_446_readback: bool = False,
 ) -> tuple[bool, Any]:
     _ = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
     ed = composer or _dm_find_focus_composer(d)
     if ed is None:
         return False, "no_composer"
+    readback_context = _dm_446_context(d) if _outreach_446_readback else None
+    focus_returned = False
     try:
         ed.click()
-        time.sleep(0.05)
+        focus_returned = True
+        _dm_latency.dm446_wait(0.05, reason='typing_focus_settle', sleep=time.sleep, emit=log)
     except Exception:
         pass
     text = str(draft or "")
 
-    def _read_composer_text() -> str:
+    def _read_composer_text(*, original_set_text_editor=False) -> str:
         with _dm_retention.phase('typing_readback'):
             step = 'finder'
+            read_attempted = False
             try:
-                cur = ed if composer is not None else (_dm_find_focus_composer(d) or ed)
+                if original_set_text_editor:
+                    step = 'context'
+                    if readback_context is None or _dm_446_context(d) is not readback_context:
+                        raise ValueError('dm_version_context_changed')
+                    cur = ed
+                else:
+                    cur = ed if composer is not None else (_dm_find_focus_composer(d) or ed)
                 step = 'get_text'
+                read_attempted = cur is not None
                 raw = cur.get_text() if cur is not None else ""
+                if original_set_text_editor:
+                    step = 'context'
+                    if _dm_446_context(d) is not readback_context:
+                        raise ValueError('dm_version_context_changed')
                 text = str(raw or "")
                 _dm_retention.capture_event('typing_readback', failure=not bool(text),
                     branch='TEXT_READ' if text else 'TEXT_EMPTY',
@@ -9741,7 +9804,8 @@ def type_dm_draft_only(
                 return text
             except Exception as exc:
                 _dm_retention.capture_event('typing_readback', failure=True,
-                    branch='GET_TEXT_EXCEPTION' if step == 'get_text' else 'FINDER_EXCEPTION',
+                    branch='GET_TEXT_EXCEPTION' if step == 'get_text' else 'CONTEXT_UNPROVED' if step == 'context' else 'FINDER_EXCEPTION',
+                    get_text_called=read_attempted,
                     exception_class=type(exc).__name__)
                 return ""
 
@@ -9849,11 +9913,16 @@ def type_dm_draft_only(
     else:
         ok = False
         try:
-            ed.set_text(text)
+            with _dm_latency.dm446_span('set_text', emit=log):
+                ed.set_text(text)
             ok = True
         except Exception as e:
             return False, str(e)
-        actual_set = _read_composer_text()
+        # This readback authorizes nothing; the caller still performs the
+        # independent fresh full draft verification and fresh Send admission.
+        actual_set = _read_composer_text(original_set_text_editor=bool(
+            _outreach_446_readback and focus_returned and readback_context is not None
+        ))
         type_meta["method"] = "set_text"
         type_meta["set_text_used"] = True
         type_meta["actual_text_len_after_set_text"] = len(actual_set)
@@ -66815,6 +66884,7 @@ def send_dm_safe(
     *,
     target_row: Any = None,
     job_id: str = "",
+    _outreach_446_read: bool = False,
 ) -> dict[str, Any]:
     global _LAST_DM_SEND_RESULT
     _ = target_row
@@ -66851,7 +66921,12 @@ def send_dm_safe(
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
-    cur = read_dm_composer_text(d)
+    read_context = _dm_446_context(d) if _outreach_446_read else None
+    cur = (
+        _dm_read_current_446_composer_text(d, composer, read_context)
+        if read_context is not None and read_context.package == config.INSTAGRAM_PACKAGE
+        else read_dm_composer_text(d)
+    )
     out["composer_text_len_before_send"] = len(cur)
     draft_ok = cur.strip() == msg.strip()
     out["draft_matches_before_send"] = draft_ok
@@ -66949,7 +67024,8 @@ def send_dm_safe(
     from outreach_slot_contract import active as outreach_slot_active
     slot = outreach_slot_active()
     if slot:
-        slot.before_send(job_id)
+        with _dm_latency.dm446_span('pre_send_gate', emit=log):
+            slot.before_send(job_id)
         _dm_retention.capture_event('before_send_boundary', branch='EXISTING_BOUNDARY_PASSED', job_id=job_id)
     try:
         _dm_retention.capture_event('send_tap_started', job_id=job_id)
@@ -66989,7 +67065,7 @@ def send_dm_safe(
         preceding_action="dm_send",
     )
 
-    with _dm_retention.phase('post_send_verification'):
+    with _dm_retention.phase('post_send_verification'), _dm_latency.dm446_span('outbound_proof', emit=log):
         verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
             d,
             msg,
@@ -67017,6 +67093,13 @@ def send_dm_safe(
     )
     if verified:
         out["sent"] = True
+        if _outreach_446_read:
+            out['post_send_strong_empty_composer_proved'] = bool(
+                verify_reason == 'outbound_bubble_after_tap'
+                and post_send_signature.get('outbound_expected_text_present') is True
+                and type(post_send_signature.get('composer_text_len')) is int
+                and post_send_signature['composer_text_len'] == 0
+            )
         out["post_send_signal_reason"] = verify_reason
         out["post_send_signal_method"] = "outbound_bubble"
         log(

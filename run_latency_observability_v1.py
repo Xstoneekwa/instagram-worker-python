@@ -7,6 +7,7 @@ import os
 import resource
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -80,6 +81,8 @@ class _ObserverState:
     cycle_index: int = 0
     cycle_metrics: dict[str, float] = field(default_factory=dict)
     log_events_in_cycle: int = 0
+    dm446_context: dict[str, Any] = field(default_factory=dict)
+    dm446_generation: int = 0
 
 
 _LOCAL = threading.local()
@@ -100,7 +103,91 @@ def reset_for_tests() -> None:
 def current_context() -> dict[str, Any]:
     """Return only the bounded identity currently correlated to the run."""
 
-    return dict(_state().context)
+    state = _state()
+    if state.dm446_context:
+        # Outreach spans carry their own opaque binding, never a prior
+        # candidate username left by an unrelated logger/previous job.
+        return {**state.dm446_context, 'ui_generation': state.dm446_generation,
+                'generation_scope': 'observed_proxy_mutations_not_admission_authority'}
+    return dict(state.context)
+
+
+@contextmanager
+def dm446_span(callsite: str, *, identity=None, emit=None):
+    """Bounded opt-in spans on the existing observer; no I/O or payload reads."""
+    enabled = os.environ.get('PHONEFARM_RUN_LATENCY_OBSERVABILITY_V1', '1').strip().lower() not in {'0', 'false', 'no'}
+    state = _state()
+    prior = state.dm446_context
+    if not enabled or (not prior and identity is None):
+        yield
+        return
+    try:
+        allowed = ('run_id', 'job_id', 'account_id', 'request_id', 'visit_index')
+        incoming = {k: v for k, v in (identity or {}).items() if k in allowed and v is not None}
+        started = time.monotonic()
+        if not prior:
+            # Use the existing new-run reset before any nested RPC log can
+            # invalidate the active scoped observer state.
+            observe_runtime_event('dm446_timing_context', incoming)
+            state = _state()
+            state.dm446_generation = 0
+        state.dm446_context = {**prior, **incoming, 'callsite': callsite[:96], 'phase': callsite[:96]}
+    except Exception:
+        yield
+        return
+    success = False
+    try:
+        yield
+        success = True
+    finally:
+        try:
+            if emit is not None:
+                emit('info', PUBLIC_EVENT, schema_version=SCHEMA_VERSION,
+                     metric='dm446_callsite', duration_ms=round(max(0., (time.monotonic()-started)*1000.), 3),
+                     success=success, payload_captured=False, extra_phone_call=False,
+                     monotonic_ms=round(time.monotonic()*1000., 3), **current_context())
+        except Exception:
+            pass
+        finally:
+            state.dm446_context = prior
+
+
+def dm446_wait(seconds, *, reason, sleep, emit=None):
+    """Measure the same existing wait only inside a scoped Outreach span."""
+    if not _state().dm446_context:
+        sleep(seconds)
+        return
+    observed_wait(seconds, reason=reason, sleep=sleep, emit=emit)
+
+
+def _dm446_io(operation, name, emit):
+    # A timing/sink failure must never suppress, repeat or replace the call.
+    try:
+        started = time.monotonic()
+    except Exception:
+        return operation()
+    state = _state()
+    if name in {'click', 'click_exists', 'press', 'swipe', 'scroll', 'set_text', 'clear_text', 'long_click', 'app_start', 'shell'}:
+        state.dm446_generation += 1
+    success = False
+    result = None
+    try:
+        result = operation()
+        success = True
+        return result
+    finally:
+        if emit is not None:
+            try:
+                emit('info', 'run_latency_io_timing_v1', schema_version=SCHEMA_VERSION,
+                     io_kind='xml_capture' if name=='dump_hierarchy' else 'adb' if name=='shell' else 'uiautomator',
+                     operation=name, duration_ms=round(max(0., (time.monotonic()-started)*1000.), 3),
+                     success=success, result_kind=type(result).__name__ if success else 'error',
+                     xml_size_bytes=len(result.encode('utf-8')) if name=='dump_hierarchy' and isinstance(result,str) else 0,
+                     payload_captured=False, extra_phone_call=False,
+                     transport_scope='outer_adapter_call_not_internal_ADB_count',
+                     monotonic_ms=round(time.monotonic()*1000.,3), **current_context())
+            except Exception:
+                pass
 
 
 _FIRST_SCROLL_BOUNDARIES = (
@@ -362,22 +449,27 @@ _UI_METHODS = frozenset(
 
 
 class _TimedProxy:
-    def __init__(self, raw: Any, *, kind: str, emit: Callable[..., None] | None, methods: frozenset[str]):
+    def __init__(self, raw: Any, *, kind: str, emit: Callable[..., None] | None, methods: frozenset[str], properties: bool = False):
         object.__setattr__(self, "_raw", raw)
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_emit", emit)
         object.__setattr__(self, "_methods", methods)
+        object.__setattr__(self, "_properties", properties)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         result = self._raw(*args, **kwargs)
-        return _TimedProxy(result, kind="uiautomator", emit=self._emit, methods=_UI_METHODS)
+        return _TimedProxy(result, kind="uiautomator", emit=self._emit, methods=_UI_METHODS, properties=self._properties)
 
     def __getattr__(self, name: str) -> Any:
+        if self._properties and name in {'info', 'count'}:
+            return _dm446_io(lambda: getattr(self._raw, name), name, self._emit)
         attr = getattr(self._raw, name)
         if name == "exists" and callable(attr):
             return _TimedExistsProxy(attr, emit=self._emit)
         if name not in self._methods or not callable(attr):
             return attr
+        if self._properties:
+            return lambda *args, **kwargs: _dm446_io(lambda: attr(*args, **kwargs), name, self._emit)
 
         def timed(*args: Any, **kwargs: Any) -> Any:
             started = time.monotonic()
@@ -477,7 +569,7 @@ class _TimedExistsProxy:
         return repr(bool(self))
 
 
-def instrument_device(device: Any, *, emit: Callable[..., None] | None = None) -> Any:
+def instrument_device(device: Any, *, emit: Callable[..., None] | None = None, observe_properties: bool = False) -> Any:
     """Wrap existing calls only. If wrapping cannot be established, return the raw device."""
 
     if device is None or isinstance(device, _TimedProxy):
@@ -485,6 +577,7 @@ def instrument_device(device: Any, *, emit: Callable[..., None] | None = None) -
     if os.environ.get("PHONEFARM_RUN_LATENCY_OBSERVABILITY_V1", "1").strip().lower() in {"0", "false", "no"}:
         return device
     try:
-        return _TimedProxy(device, kind="device", emit=emit, methods=_DEVICE_METHODS)
+        methods = _DEVICE_METHODS | {'window_size'} if observe_properties else _DEVICE_METHODS
+        return _TimedProxy(device, kind="device", emit=emit, methods=methods, properties=observe_properties)
     except Exception:
         return device

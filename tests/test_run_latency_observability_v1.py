@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import os
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
@@ -327,6 +329,120 @@ class RunLatencyObservabilityTests(unittest.TestCase):
             resume.index("scroll_followers_list_forward("),
             resume.index("first_scroll_segment_fields(_ff_diag)"),
         )
+
+
+
+
+class OutreachTimingTests(unittest.TestCase):
+    def setUp(self):
+        obs.reset_for_tests()
+        self.events=[]
+        self.emit=lambda _level,event,**fields:self.events.append((event,fields))
+
+    def device(self):
+        class Ui:
+            def __init__(self):self.calls=[]
+            @property
+            def count(self):self.calls.append('count');return 1
+            @property
+            def info(self):self.calls.append('info');return {'text':'never log this message'}
+            def get_text(self):self.calls.append('get_text');return 'private draft'
+            def click(self):self.calls.append('click');return 'clicked'
+        class Raw:
+            def __init__(self):self.ui=Ui();self.calls=[]
+            def __call__(self,**kw):return self.ui
+            def window_size(self):self.calls.append('window_size');return (1080,2340)
+        return Raw()
+
+    def test_opt_in_properties_methods_are_timed_without_extra_reads(self):
+        raw=self.device();d=obs.instrument_device(raw,emit=self.emit,observe_properties=True)
+        with obs.dm446_span('candidate',identity=dict(run_id='r',job_id='j',account_id='a',visit_index=0),emit=self.emit):
+            self.assertEqual(d.window_size(),(1080,2340))
+            ui=d(resourceId='private-selector-not-logged')
+            self.assertEqual(ui.count,1);self.assertEqual(ui.info,{'text':'never log this message'})
+            self.assertEqual(ui.get_text(),'private draft');self.assertEqual(ui.click(),'clicked')
+        self.assertEqual(raw.calls,['window_size'])
+        self.assertEqual(raw.ui.calls,['count','info','get_text','click'])
+        io=[f for e,f in self.events if e=='run_latency_io_timing_v1']
+        self.assertEqual([f['operation'] for f in io],['window_size','count','info','get_text','click'])
+        self.assertTrue(all(f['job_id']=='j' and f['account_id']=='a' for f in io))
+        self.assertEqual(io[-1]['ui_generation'],1)
+        self.assertTrue(all(not f['payload_captured'] and not f['extra_phone_call'] for f in io))
+        self.assertNotIn('private',str(self.events));self.assertNotIn('never log',str(self.events))
+
+    def test_default_observer_does_not_change_property_or_window_behavior(self):
+        raw=self.device();d=obs.instrument_device(raw,emit=self.emit)
+        self.assertEqual(d.window_size(),(1080,2340));self.assertEqual(d().count,1)
+        self.assertEqual(d().info,{'text':'never log this message'})
+        self.assertEqual(self.events,[])
+
+    def test_disabled_observer_does_not_emit_or_wrap(self):
+        raw=self.device()
+        with patch.dict(os.environ,{'PHONEFARM_RUN_LATENCY_OBSERVABILITY_V1':'0'}):
+            self.assertIs(obs.instrument_device(raw,emit=self.emit,observe_properties=True),raw)
+            with obs.dm446_span('candidate',identity=dict(run_id='r',job_id='j'),emit=self.emit):
+                raw.ui.get_text()
+        self.assertEqual(self.events,[]);self.assertEqual(raw.ui.calls,['get_text'])
+
+    def test_nested_context_cannot_leak_job_or_account(self):
+        for job,account in (('j1','a1'),('j2','a2')):
+            with obs.dm446_span('candidate',identity=dict(run_id='r',job_id=job,account_id=account,visit_index=1,message='never'),emit=self.emit):
+                with obs.dm446_span('typing',emit=self.emit):
+                    obs.observe_runtime_event('unrelated',{'run_id':'r'})
+                    self.assertEqual(obs.current_context()['job_id'],job)
+                self.assertEqual(obs.current_context()['callsite'],'candidate')
+            self.assertNotIn('job_id',obs.current_context())
+        self.assertEqual([f['job_id'] for e,f in self.events],['j1','j1','j2','j2'])
+        self.assertNotIn('message',str(self.events))
+
+    def test_sink_failure_does_not_change_results_or_read_counts(self):
+        raw=self.device()
+        def broken(*a,**k):raise RuntimeError('sink')
+        d=obs.instrument_device(raw,emit=broken,observe_properties=True)
+        with obs.dm446_span('candidate',identity=dict(run_id='r',job_id='j'),emit=broken):
+            self.assertEqual(d().count,1);self.assertEqual(d().get_text(),'private draft')
+        self.assertEqual(raw.ui.calls,['count','get_text'])
+        self.assertNotIn('job_id',obs.current_context())
+
+    def test_getter_exception_is_not_masked_or_retried(self):
+        class Broken:
+            count_calls=0
+            @property
+            def count(self):self.count_calls+=1;raise ValueError('original')
+        raw=Broken();d=obs._TimedProxy(raw,kind='uiautomator',methods=frozenset(),emit=self.emit,properties=True)
+        with self.assertRaisesRegex(ValueError,'original'):
+            with obs.dm446_span('candidate',identity=dict(run_id='r',job_id='j'),emit=self.emit):
+                d.count
+        self.assertEqual(raw.count_calls,1)
+        self.assertFalse(self.events[0][1]['success'])
+        self.assertNotIn('job_id',obs.current_context())
+
+    def test_idempotent_wrapping_preserves_context_owner(self):
+        raw=self.device();d=obs.instrument_device(raw,observe_properties=True)
+        self.assertIs(obs.instrument_device(d,observe_properties=True),d)
+        self.assertIs(vars(d)['_raw'],raw)
+
+    def test_existing_wait_is_executed_once_at_the_same_duration(self):
+        calls=[]
+        with obs.dm446_span('candidate',identity=dict(run_id='r',job_id='j'),emit=self.emit):
+            obs.dm446_wait(.08,reason='composer_poll',sleep=calls.append,emit=self.emit)
+        self.assertEqual(calls,[.08])
+        waits=[f for e,f in self.events if e=='run_latency_wait_v1']
+        self.assertEqual(len(waits),1);self.assertEqual(waits[0]['requested_ms'],80)
+        self.assertEqual(waits[0]['job_id'],'j')
+
+    def test_unscoped_spans_and_waits_keep_legacy_silence(self):
+        calls=[]
+        with obs.dm446_span('typing',emit=self.emit):
+            obs.dm446_wait(.05,reason='focus',sleep=calls.append,emit=self.emit)
+        self.assertEqual(calls,[.05]);self.assertEqual(self.events,[])
+
+    def test_clock_unavailable_does_not_suppress_the_operation(self):
+        calls=[]
+        with patch.object(obs.time,'monotonic',side_effect=RuntimeError('clock')):
+            with obs.dm446_span('candidate',identity=dict(run_id='r'),emit=self.emit):
+                result=obs._dm446_io(lambda:(calls.append('once') or 7),'get_text',self.emit)
+        self.assertEqual(calls,['once']);self.assertEqual(result,7);self.assertEqual(self.events,[])
 
 
 if __name__ == "__main__":

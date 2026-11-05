@@ -17,6 +17,7 @@ import uiautomator2 as u2
 
 import config
 import dm_446_observation_retention as _dm_retention
+import run_latency_observability_v1 as _dm_latency
 import account_protection_lists
 import supabase_client
 from device import app_start, force_stop, get_device_serial
@@ -3435,6 +3436,7 @@ def _perform_real_welcome_dm_send(
     thread_state: str,
     pkg: str,
     post_send_nav: str = "search",
+    sender_restoration_owned: bool = False,
     source_profile_username: str = "",
     dm_type: str = "welcome",
     thread_snapshot: dict[str, Any] | None = None,
@@ -3545,7 +3547,7 @@ def _perform_real_welcome_dm_send(
     )
 
     composer_fast_path_state: dict[str, Any] = {}
-    with _dm_retention.phase('focus'):
+    with _dm_retention.phase('focus'), _dm_latency.dm446_span('focus', emit=log):
         _ed, focus_err = _resolve_dm_text_composer(
             d,
             pkg=pkg,
@@ -3572,10 +3574,24 @@ def _perform_real_welcome_dm_send(
         )
         return False, {}, focus_err
 
+    read_context = (
+        _dm_446_context(d)
+        if str(dm_type or '').strip().lower() == 'outreach'
+        and bool(getattr(config, 'DM_VERIFY_TYPED_TEXT', True))
+        else None
+    )
+    qualified_446 = bool(read_context is not None and read_context.package == pkg)
+    pretyping_readback = (
+        {} if qualified_446 and bool(getattr(config, 'DM_DRAFT_TYPING_ENABLED', True)) else None
+    )
     if bool(composer_fast_path_state.get("used")):
         ok_comp, comp_signal = True, "fresh_welcome_composer_evidence"
     else:
-        ok_comp, comp_signal = verify_dm_composer_safe(d, pkg)
+        with _dm_retention.phase('pretyping'), _dm_latency.dm446_span('pretyping_qualification', emit=log):
+            ok_comp, comp_signal = verify_dm_composer_safe(
+                d, pkg, **({'_pretyping_readback': pretyping_readback}
+                           if pretyping_readback is not None else {}),
+            )
     if not ok_comp:
         log(
             "error",
@@ -3591,7 +3607,12 @@ def _perform_real_welcome_dm_send(
         return False, {}, "draft_typing_disabled"
 
     with _dm_retention.phase('pretyping'):
-        existing_draft = read_dm_composer_text(d)
+        if pretyping_readback is not None:
+            if not pretyping_readback.get('read_succeeded'):
+                return False, {}, 'draft_verify_failed'
+            existing_draft = pretyping_readback['actual_text']
+        else:
+            existing_draft = read_dm_composer_text(d)
     ok_type = False
     type_info: Any = {}
     reused_draft = False
@@ -3638,13 +3659,14 @@ def _perform_real_welcome_dm_send(
 
     if not reused_draft:
         force_method = "set_text" if strategy == "set_text" else None
-        with _dm_retention.phase('typing'):
+        with _dm_retention.phase('typing'), _dm_latency.dm446_span('typing', emit=log):
             ok_type, type_info = type_dm_draft_only(
                 d,
                 draft_text,
                 pkg,
                 force_method=force_method,
                 composer=_ed if bool(composer_fast_path_state.get("used")) else None,
+                **({'_outreach_446_readback': True} if qualified_446 else {}),
             )
         log(
             "info",
@@ -3710,7 +3732,8 @@ def _perform_real_welcome_dm_send(
         # Reuse only the result of this mandatory fresh verification, never a
         # prior editor or XML snapshot. A failed read remains unavailable.
         observation: dict[str, Any] = {}
-        verified = verify_dm_draft_text(d, draft_text, observation=observation)
+        with _dm_latency.dm446_span('draft_verify', emit=log):
+            verified = verify_dm_draft_text(d, draft_text, observation=observation)
         composer_after_type = observation.get("actual_text")
         _dm_retention.capture_event(
             'posttyping_read_result', source='draft_verify',
@@ -3766,7 +3789,7 @@ def _perform_real_welcome_dm_send(
     prev_enable = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
     try:
         config.ENABLE_REAL_DM_SEND = True
-        with _dm_retention.phase('send'):
+        with _dm_retention.phase('send'), _dm_latency.dm446_span('send', emit=log):
             send_out = send_dm_safe(
                 d,
                 uname,
@@ -3774,6 +3797,7 @@ def _perform_real_welcome_dm_send(
                 thread_state,
                 target_row=None,
                 job_id=job_id,
+                **({'_outreach_446_read': True} if qualified_446 else {}),
             )
     finally:
         config.ENABLE_REAL_DM_SEND = prev_enable
@@ -3801,6 +3825,22 @@ def _perform_real_welcome_dm_send(
             message_len=len(draft_text),
         )
         if post_send_nav == "sender_owned":
+            return True, send_out, None
+        if (sender_restoration_owned and qualified_446 and verify_enabled
+                and thread_state == 'empty_new_thread'
+                and send_out.get('send_tapped') is True
+                and send_out.get('post_send_strong_empty_composer_proved') is True
+                and send_out.get('post_send_signal_method') == 'outbound_bubble'
+                and send_out.get('post_send_signal_reason') == 'outbound_bubble_after_tap'
+                and send_out.get('post_send_secondary_signal_reason') == 'skipped_strong_outbound_verified'):
+            # The sender persists sent, then owns the one existing restoration.
+            # This intentionally makes no claim that profile/search is visible.
+            send_out['post_finalize'] = dict(
+                navigation_deferred_to_sender=True, back_to_profile_ok=False,
+                back_to_search_ok=False, post_send_cleanup_reason='sender_owned_restore_deferred',
+            )
+            log('info', 'dm_send_post_finalize_deferred_to_sender',
+                job_id=job_id, reason='strong_outbound_and_empty_composer_proved')
             return True, send_out, None
         if post_send_nav == "welcome_list":
             from instagram_navigation import return_welcome_list_from_dm_to_followers
@@ -3927,17 +3967,18 @@ def execute_dm_job_real_send(
     post_send_fast_finalize_used = False
 
     try:
-        thread_state, nav_ok = _navigate_to_recipient_dm_thread(
-            d,
-            recipient,
-            pkg=pkg,
-            account_id=account_id,
-            run_id=run_id,
-            account_username=account_username,
-            dm_type=dm_type,
-            previous_username=previous_username,
-            parent_search_ready=parent_search_ready,
-        )
+        with _dm_latency.dm446_span('navigation', emit=log):
+            thread_state, nav_ok = _navigate_to_recipient_dm_thread(
+                d,
+                recipient,
+                pkg=pkg,
+                account_id=account_id,
+                run_id=run_id,
+                account_username=account_username,
+                dm_type=dm_type,
+                previous_username=previous_username,
+                parent_search_ready=parent_search_ready,
+            )
         navigation_finished = True
         nav_timings = _get_dm_sender_nav_timings()
         snap = get_last_dm_thread_classify_snapshot()
@@ -4013,6 +4054,9 @@ def execute_dm_job_real_send(
                     run_id=str(run_id or ""),
                     job_id=job_id,
                     navigation_generation=navigation_generation,
+                    sender_restoration_owned=bool(
+                        dm_type == 'outreach' and restore_search_after_job and not skip_post_job_restore
+                    ),
                 )
                 post_send_fast_finalize_used = bool(
                     (send_out.get("post_finalize") or {}).get("post_send_fast_finalize_used")
@@ -4021,16 +4065,17 @@ def execute_dm_job_real_send(
                     send_method = "instagram_send_ui"
                     if send_out.get("coordinate_fallback_used"):
                         send_method = "coordinate_fallback"
-                    updated_job = supabase_client.complete_dm_job(
-                        job_id,
-                        "sent",
-                        metadata_patch={
-                            "thread_state": thread_state,
-                            "send_method": send_method,
-                            "message_len": len(message_body),
-                            "post_finalize_partial": fail_reason == "post_finalize_partial",
-                        },
-                    )
+                    with _dm_latency.dm446_span('sent_persistence', emit=log):
+                        updated_job = supabase_client.complete_dm_job(
+                            job_id,
+                            "sent",
+                            metadata_patch={
+                                "thread_state": thread_state,
+                                "send_method": send_method,
+                                "message_len": len(message_body),
+                                "post_finalize_partial": fail_reason == "post_finalize_partial",
+                            },
+                        )
                     from outreach_slot_contract import active as outreach_slot_active, SlotBlocked
                     if dm_type == 'outreach' and outreach_slot_active() and (updated_job or {}).get('status') != 'sent':
                         raise SlotBlocked('outreach_send_completion_unconfirmed')
@@ -4149,13 +4194,14 @@ def execute_dm_job_real_send(
                 job_status_before_post_job_restore=final_status,
                 outcome=outcome,
             )
-            _safe_teardown_navigation(
-                d,
-                recipient,
-                pkg=pkg,
-                account_username=account_username,
-                prefer_back_stack_to_search=(dm_type == "outreach"),
-            )
+            with _dm_latency.dm446_span('restore', emit=log):
+                _safe_teardown_navigation(
+                    d,
+                    recipient,
+                    pkg=pkg,
+                    account_username=account_username,
+                    prefer_back_stack_to_search=(dm_type == "outreach"),
+                )
             post_job_restore = _get_dm_sender_post_job_restore()
         post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)
         if navigation_finished:
@@ -4573,27 +4619,39 @@ def run_dm_sender_send(
             except SlotBlocked as exc:
                 slot_stop_reason = str(exc)
                 break
+        timing_identity = None
+        job_device = d
+        if dm_type_resolved == 'outreach':
+            try:
+                timing_context = _dm_446_context(d)
+            except Exception:
+                timing_context = None
+            if timing_context is not None and timing_context.package == config.INSTAGRAM_PACKAGE:
+                timing_identity = dict(run_id=run_id, job_id=job.get('id'),
+                                       account_id=aid, visit_index=job_index)
+                job_device = _dm_latency.instrument_device(d, emit=log, observe_properties=True)
         try:
-            last_result = execute_dm_job_real_send(
-                d,
-                job,
-                settings=settings,
-                account_id=aid,
-                account_username=acct_user,
-                run_id=run_id,
-                previous_username=(
-                    last_recipient_username
-                    if dm_type_resolved == "outreach"
-                    else None
-                ),
-                restore_search_after_job=not (
-                    dm_type_resolved == "outreach" and job_index >= max_jobs - 1
-                ),
-                skip_post_job_restore=skip_post_job_restore,
-                parent_search_ready=parent_search_ready,
-                job_index=job_index,
-                jobs_total=max_jobs,
-            )
+            with _dm_latency.dm446_span('candidate', identity=timing_identity, emit=log):
+                last_result = execute_dm_job_real_send(
+                    job_device,
+                    job,
+                    settings=settings,
+                    account_id=aid,
+                    account_username=acct_user,
+                    run_id=run_id,
+                    previous_username=(
+                        last_recipient_username
+                        if dm_type_resolved == "outreach"
+                        else None
+                    ),
+                    restore_search_after_job=not (
+                        dm_type_resolved == "outreach" and job_index >= max_jobs - 1
+                    ),
+                    skip_post_job_restore=skip_post_job_restore,
+                    parent_search_ready=parent_search_ready,
+                    job_index=job_index,
+                    jobs_total=max_jobs,
+                )
         except SlotBlocked as exc:
             slot_stop_reason = str(exc)
             if slot:

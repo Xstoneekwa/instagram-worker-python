@@ -10,6 +10,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+from tests.test_certification_admission import _restore_chronometric_if_exact_candidate, restore_e2e_reader_exact_delta
 import dm_sender_engine as engine
 import instagram_navigation as nav
 from test_dm_446_readers import Device, Clock, P, mutate, node
@@ -54,6 +55,11 @@ class TargetedLatencyTests(unittest.TestCase):
             if read_error: raise RuntimeError("read_error")
             return got
         editor = types.SimpleNamespace(get_text=get_text)
+        def qualify(*a, **kw):
+            calls.append('composer')
+            if safe and kw.get('_pretyping_readback') is not None:
+                kw['_pretyping_readback'].update(read_succeeded=True, actual_text='')
+            return safe, 'qualified'
         def reader(*a):
             count = calls.count("diagnostic_or_pretyping")
             calls.append("diagnostic_or_pretyping")
@@ -64,7 +70,7 @@ class TargetedLatencyTests(unittest.TestCase):
             log=lambda *a, **k: None,
             dm_thread_shows_outgoing_message=call("duplicate", duplicate),
             _resolve_dm_text_composer=call("focus", (object(), None)),
-            verify_dm_composer_safe=call("composer", (safe, "qualified")),
+            verify_dm_composer_safe=qualify,
             read_dm_composer_text=reader,
             type_dm_draft_only=call("type", (True, {"method":"set_text"})),
             verify_dm_draft_text=nav.verify_dm_draft_text,
@@ -83,11 +89,11 @@ class TargetedLatencyTests(unittest.TestCase):
         old, new = self.sender(True), self.sender()
         self.assertEqual(old[0], new[0]); self.assertEqual(old[2], new[2])
         self.assertEqual(old[1].count("diagnostic_or_pretyping"), 2)
-        self.assertEqual(new[1].count("diagnostic_or_pretyping"), 1)
+        self.assertEqual(new[1].count("diagnostic_or_pretyping"), 0)
         self.assertEqual(old[1].count("strict_finder"), 1)
         self.assertEqual(new[1].count("strict_finder"), 1)
         self.assertEqual(new[1].count("send"), 1)
-        self.assertEqual(old[3]-new[3], 4.)  # deterministic cost, NOT a physical gain
+        self.assertEqual(old[3]-new[3], 8.)  # two removed full reads in this synthetic cost model, NOT physical seconds
         event = next(f for s,f in new[4] if s=="posttyping_read_result")
         self.assertEqual(event["source"], "draft_verify")
         self.assertTrue(event["read_succeeded"])
@@ -250,7 +256,9 @@ class TargetedLatencyTests(unittest.TestCase):
         }
         for file,names in allowed.items():
             before=subprocess.check_output(["git","show",PARENT+":"+file],cwd=ROOT,text=True)
-            after=(ROOT/file).read_text()
+            # This assertion certifies the earlier latency delta; the new
+            # production delta has its own full-byte/function-scope inverse.
+            after=restore_e2e_reader_exact_delta(file,_restore_chronometric_if_exact_candidate(file,(ROOT/file).read_text()))
             functions=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}
             a,b=functions(before),functions(after)
             self.assertEqual(set(a),set(b))
