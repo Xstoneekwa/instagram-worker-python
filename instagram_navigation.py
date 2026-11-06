@@ -85,6 +85,128 @@ def get_tap_account_result_failure_reason() -> str | None:
     return _TAP_ACCOUNT_RESULT_FAILURE_REASON
 
 
+@dataclass(frozen=True)
+class OutreachSearchAbsenceProof:
+    """One navigation's positive Search absence; never DM-history authority."""
+
+    generation: object
+    device_identity: int
+    query: str
+    package: str
+    observed_at_monotonic: float
+    observed_at_epoch: float
+    continuity_epoch: int
+    rounds: tuple[tuple[str, ...], ...]
+
+
+def _observe_outreach_missing_search(
+    d: u2.Device, username: str, *, outcome: dict[str, Any],
+) -> bool:
+    """Reuse the bounded canonical observer, with stricter positive-empty proof.
+
+    Only the no-row branch calls this. Two stable positive-empty rounds,
+    separated by one existing clear/retype, are required. Suggestion-only,
+    neighbour-only, loading and unhealthy results never become terminal.
+    True means an exact row appeared: the caller must still rescan/verify it.
+    """
+    from unfollow_hybrid_strategy import (
+        _wait_for_exact_search_result, classify_search_surface_xml, _is_no_results_label, _node_value,
+        normalize_username, SEARCH_NO_RESULTS_CONFIRMED,
+        SEARCH_RESULT_MAX_WAIT_S, SEARCH_RESULT_STABLE_NO_RESULTS_POLLS,
+    )
+
+    query = normalize_username(username)
+    pkg = str(config.INSTAGRAM_PACKAGE or "")
+    proof_epoch = ui_continuity_v1.observe("outreach_search_absence:begin")
+    rounds: list[tuple[str, ...]] = []
+    last: dict[str, Any] = {}
+    reason = "search_surface_unhealthy"
+    outcome["state"] = "unknown"
+
+    class Observation:
+        def dump_hierarchy(self, **kwargs: Any) -> str:
+            nonlocal reason, last
+            ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:read")
+            captured = time.monotonic()
+            captured_wall = time.time()
+            xml = str(d.dump_hierarchy(**kwargs) or "")
+            classification = classify_search_surface_xml(xml, query)
+            current = d.app_current() or {}
+            root = ET.fromstring(xml)
+            nodes = list(root.iter())
+            queries = [n for n in nodes if str(n.get("resource-id") or "") in {
+                pkg + ":id/action_bar_search_edit_text", pkg + ":id/search_edit_text",
+                pkg + ":id/search_src_text",
+            }]
+            safe = bool(
+                current.get("package") == pkg
+                and _activity_family(current.get("activity")) in {"MainActivity", "InstagramMainActivity"}
+                and len(queries) == 1
+                and normalize_username(queries[0].get("text")) == query
+                and queries[0].get("package") == pkg
+            )
+            overlay = any(
+                "permissioncontroller" in str(n.get("package") or "")
+                or "dialog" in str(n.get("class") or "").casefold()
+                or str(n.get("resource-id") or "").endswith(("/alertTitle", "/button1", "/dialog_root"))
+                or str(n.get("class") or "").endswith("ProgressBar")
+                for n in nodes
+            )
+            if not safe or overlay:
+                reason = "search_surface_unhealthy"
+                raise ValueError(reason)
+            if not 0 <= time.monotonic() - captured <= SEARCH_RESULT_MAX_WAIT_S:
+                reason = "search_observation_stale"
+                raise ValueError(reason)
+            last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
+            if classification.get("state") == SEARCH_NO_RESULTS_CONFIRMED:
+                # The shared reader intentionally supports broader Unfollow
+                # semantics. Outreach rejects contradictory committed rows.
+                if (not any(n.get("package") == pkg and _is_no_results_label(_node_value(n)) for n in nodes)
+                        or any(str(n.get("resource-id") or "").endswith("/row_search_user_username") for n in nodes)):
+                    reason = "search_empty_state_contradictory"
+                    raise ValueError(reason)
+                # Keep only fresh reads; identical hashes alone prove nothing.
+                snapshots.append(hashlib.sha256(xml.encode("utf-8")).hexdigest())
+            return xml
+
+    try:
+        for attempt in range(2):
+            snapshots: list[str] = []
+            last = {}
+            result = _wait_for_exact_search_result(Observation(), query)
+            outcome["reason"] = str(result.get("reason") or reason)
+            if result.get("reason") == "search_results_loading_timeout":
+                outcome["state"] = "transient"
+            if result.get("ok") is True:
+                return True
+            if (result.get("reason") != "username_not_found_confirmed"
+                    or len(snapshots) < SEARCH_RESULT_STABLE_NO_RESULTS_POLLS):
+                # Loading may use the same single local recovery, but UNKNOWN
+                # or a mismatched/unhealthy surface never authorizes typing.
+                if attempt or not last.get("safe") or result.get("reason") != "search_results_loading_timeout":
+                    return False
+            else:
+                rounds.append(tuple(snapshots[-SEARCH_RESULT_STABLE_NO_RESULTS_POLLS:]))
+            if attempt == 0:
+                ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:retype")
+                if not type_search(d, query, trusted_search_surface=True):
+                    outcome["reason"] = "search_retype_failed"
+                    return False
+        if len(rounds) != 2:
+            return False
+        ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:proved")
+        outcome["proof"] = OutreachSearchAbsenceProof(
+            outcome, id(d), query, pkg, last["monotonic"], last["epoch"], proof_epoch, tuple(rounds),
+        )
+        outcome["reason"] = "search_no_results_confirmed"
+        outcome["state"] = "confirmed_absent"
+    except Exception as exc:
+        outcome["reason"] = reason
+        log("warning", "outreach_search_absence_unproved", reason=reason, exception_class=type(exc).__name__)
+    return False
+
+
 def _startup_timing_log(
     event: str,
     started_at: float,
@@ -5191,6 +5313,7 @@ def tap_account_result(
     nav_timing_origin: float | None = None,
     follow_ct_search_context: bool = False,
     outreach_search_context: bool = False,
+    outreach_search_outcome: dict[str, Any] | None = None,
     preverified_exact_row_bounds: dict[str, int] | None = None,
     preverified_exact_screen_bounds: dict[str, int] | None = None,
     preverified_exact_result_at_monotonic: float | None = None,
@@ -5735,6 +5858,12 @@ def tap_account_result(
 
     _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
     if el is None:
+        if outreach_active and not follow_ct_active and outreach_search_outcome is not None:
+            if _observe_outreach_missing_search(d, username, outcome=outreach_search_outcome):
+                el = scan_once()
+            if el is None and outreach_search_outcome.get("proof") is not None:
+                _TAP_ACCOUNT_RESULT_FAILURE_REASON = "search_no_results_confirmed"
+                return False
         if follow_ct_active:
             el = _recover_follow_ct_blank_search_results_once(
                 d,

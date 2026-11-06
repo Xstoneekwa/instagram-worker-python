@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import ExitStack
 from copy import deepcopy
 import unittest
+import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import dm_sender_engine as engine
@@ -23,6 +25,8 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
         dm_type: str = "outreach",
         navigation: tuple[str, bool] = ("empty_new_thread", True),
         origin: str | None = None,
+        search_absence: bool = False,
+        completion_ack: bool = True,
     ) -> tuple[dict, object, object, object, object]:
         job = {
             "id": "offline-job",
@@ -34,14 +38,22 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
         }
         if origin is not None:
             job["metadata"]["origin"] = origin
+        if search_absence:
+            job["campaign_id"] = "offline-campaign"
+            job["attempts"] = 2
+            job["metadata"].update(origin="CLIENT_LIST", managed_campaign=True, client_id="offline-client",
+                                   campaign_revision=1, outreach_request_id="offline-request", outreach_slot_id="offline-slot")
         original_job = deepcopy(job)
 
         def complete(job_id: str, status: str, **kwargs: object) -> dict:
             self.assertEqual(job_id, job["id"])
+            if not completion_ack:
+                return None
             return {
                 **job,
                 "status": status,
                 "last_error": kwargs.get("last_error"),
+                "skip_reason": kwargs.get("skip_reason"), "sent_at": None, "next_retry_at": None,
                 "metadata": {**job["metadata"], **kwargs.get("metadata_patch", {})},
             }
 
@@ -49,7 +61,22 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
             stack.enter_context(patch.object(engine, "log"))
             stack.enter_context(patch.object(engine, "_get_dm_sender_nav_timings", return_value={}))
             stack.enter_context(patch.object(engine, "get_last_dm_thread_classify_snapshot", return_value={}))
-            stack.enter_context(patch.object(engine, "_navigate_to_recipient_dm_thread", return_value=navigation))
+            def navigate(device, *args, **kwargs):
+                if search_absence:
+                    result = kwargs["outreach_search_outcome"]
+                    result["reason"] = "search_no_results_confirmed"
+                    result["proof"] = engine.OutreachSearchAbsenceProof(
+                        result, id(device), job["recipient_username"], engine.config.INSTAGRAM_PACKAGE,
+                        time.monotonic(), time.time(), 0, (("a"*64,"a"*64),("a"*64,"a"*64)),
+                    )
+                return navigation
+            stack.enter_context(patch.object(engine, "_navigate_to_recipient_dm_thread", side_effect=navigate))
+            if search_absence:
+                context = {"managed_campaign":True,"account_id":job["account_id"],
+                           "campaign_id":job["campaign_id"],"client_id":"offline-client","campaign_revision":1,
+                           "request_id":"offline-request","slot_id":"offline-slot"}
+                slot = SimpleNamespace(context=context,check=lambda:None,remaining_ms=lambda:1000,stop_reason=None)
+                stack.enter_context(patch("outreach_slot_contract.active",return_value=slot))
             stack.enter_context(patch.object(engine, "_evaluate_welcome_sendability", return_value=(True, None)))
             stack.enter_context(patch.object(engine, "_evaluate_outreach_sendability", return_value=(True, None)))
             stack.enter_context(patch.object(engine.config, "DM_SENDER_FAILED_RETRY_DELAY_SECONDS", 300))
@@ -154,6 +181,24 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
         self.assertEqual(complete.call_args.kwargs["last_error"], "navigation_failed")
         send.assert_not_called()
         quarantine.assert_not_called()
+
+    def test_confirmed_search_absence_persists_once_without_draft_or_send(self) -> None:
+        result, complete, send, quarantine, _ = self._execute(
+            (False, {}, None), navigation=("unknown", False), search_absence=True,
+        )
+        self.assertEqual(result["outcome"], "skipped")
+        self.assertEqual(result["final_job_status"], "skipped")
+        self.assertEqual(result["thread_state"], "unknown")
+        self.assertEqual(complete.call_args.kwargs["skip_reason"], "search_no_results_confirmed")
+        self.assertIs(complete.call_args.kwargs["increment_attempt"], False)
+        complete.assert_called_once();send.assert_not_called();quarantine.assert_not_called()
+
+    def test_uncertain_search_skip_completion_stops_without_failed_retry(self) -> None:
+        from outreach_slot_contract import SlotBlocked
+        with patch.object(engine, "_complete_job_failed_retry", wraps=engine._complete_job_failed_retry) as retry:
+            with self.assertRaisesRegex(SlotBlocked,"outreach_search_absence_completion_unconfirmed"):
+                self._execute((False,{},None),navigation=("unknown",False),search_absence=True,completion_ack=False)
+            retry.assert_not_called()
 
     def test_confirmed_send_preserves_canonical_completion(self) -> None:
         for failure_reason in (None, "post_finalize_partial"):

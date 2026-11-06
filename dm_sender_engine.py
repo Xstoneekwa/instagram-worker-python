@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import math
 import xml.etree.ElementTree as ET
 from typing import Any, Callable
 
@@ -53,6 +54,7 @@ from instagram_navigation import (
     send_dm_safe,
     set_search_ui_mode,
     tap_account_result,
+    OutreachSearchAbsenceProof,
     type_dm_draft_only,
     type_search,
     verify_app_foreground,
@@ -2319,6 +2321,7 @@ def _navigate_to_recipient_dm_thread(
     dm_type: str = "",
     previous_username: str | None = None,
     parent_search_ready: dict[str, Any] | None = None,
+    outreach_search_outcome: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """
     Search → profile → DM thread. Returns (thread_state, navigation_ok).
@@ -2327,6 +2330,8 @@ def _navigate_to_recipient_dm_thread(
     src = str(account_username or "").strip()
     prev_uname = str(previous_username or "").strip()
     dm_type_norm = str(dm_type or "").strip().lower()
+    if outreach_search_outcome is not None:
+        outreach_search_outcome.clear()
     t_nav = time.perf_counter()
     _reset_dm_sender_nav_timings()
     log("info", "dm_sender_navigation_started", username=uname)
@@ -2465,6 +2470,7 @@ def _navigate_to_recipient_dm_thread(
         uname,
         nav_timing_origin=t_type,
         outreach_search_context=(dm_type_norm == "outreach"),
+        outreach_search_outcome=outreach_search_outcome if dm_type_norm == "outreach" else None,
     ):
         log("error", "dm_sender_tap_account_failed", username=uname)
         return "unknown", False
@@ -3060,6 +3066,87 @@ def _complete_job_skipped(
         recipient_username=job.get("recipient_username"),
     )
     return row, "skipped"
+
+
+def _complete_confirmed_search_absence(
+    d: u2.Device, job: dict[str, Any], search: dict[str, Any], *,
+    account_id: str, run_id: str | None, pkg: str,
+) -> dict[str, Any] | None:
+    """Consume this navigation's proof and require the canonical skip receipt.
+
+    The Backend resolves the cycle through its immutable member/job binding;
+    no extra cycle lookup, global account-state write or new queue is needed.
+    None means unproved: the existing bounded UNKNOWN policy still applies.
+    An uncertain completion stops the slot without a second mutation.
+    """
+    import ui_continuity_v1
+    from unfollow_hybrid_strategy import normalize_username, SEARCH_RESULT_MAX_WAIT_S
+    from outreach_slot_contract import active, SlotBlocked
+
+    proof = search.pop("proof", None)
+    if not isinstance(proof, OutreachSearchAbsenceProof):
+        return None
+    metadata = job.get("metadata") or {}
+    slot = active()
+    context = slot.context if slot else {}
+    age = time.monotonic() - proof.observed_at_monotonic
+    ui_continuity_v1.require_epoch(proof.continuity_epoch, "outreach_search_absence:consume")
+    valid = bool(
+        proof.generation is search and proof.device_identity == id(d)
+        and proof.query == normalize_username(job.get("recipient_username"))
+        and proof.package == pkg and math.isfinite(age) and 0 <= age <= SEARCH_RESULT_MAX_WAIT_S
+        and len(proof.rounds) == 2 and all(len(r) == 2 for r in proof.rounds)
+        and all(re.fullmatch(r"[0-9a-f]{64}", h) for r in proof.rounds for h in r)
+        and job.get("dm_type") == "outreach" and job.get("account_id") == account_id
+        and metadata.get("origin") == "CLIENT_LIST" and metadata.get("managed_campaign") is True
+        and metadata.get("outreach_send_state", "before_send") == "before_send"
+        and metadata.get("automatic_retry_blocked", False) is False and job.get("sent_at") is None
+        and type(job.get("attempts")) is int
+        and job.get("id") and job.get("campaign_id") and metadata.get("client_id") and run_id
+        and type(metadata.get("campaign_revision")) is int and metadata["campaign_revision"] > 0
+        and context.get("managed_campaign") is True
+        and context.get("account_id") == account_id
+        and context.get("campaign_id") == job.get("campaign_id")
+        and context.get("client_id") == metadata.get("client_id")
+        and context.get("campaign_revision") == metadata.get("campaign_revision")
+        and context.get("request_id") == metadata.get("outreach_request_id")
+        and context.get("slot_id") == metadata.get("outreach_slot_id")
+        and context.get("request_id") and context.get("slot_id")
+        and math.isfinite(proof.observed_at_epoch)
+    )
+    if not valid:
+        search["reason"] = "search_absence_binding_unproved"
+        return None
+    slot.check()
+    ui_continuity_v1.require_epoch(proof.continuity_epoch, "outreach_search_absence:before_completion")
+    if not 0 <= time.monotonic() - proof.observed_at_monotonic <= SEARCH_RESULT_MAX_WAIT_S:
+        search["reason"] = "search_observation_stale"
+        return None
+    evidence = {
+        "schema": "OUTREACH_CONFIRMED_SEARCH_ABSENCE_V1", "job_id": str(job["id"]),
+        "account_id": account_id, "client_id": metadata["client_id"],
+        "campaign_id": job["campaign_id"], "campaign_revision": metadata["campaign_revision"],
+        "request_id": context["request_id"], "run_id": str(run_id), "slot_id": context["slot_id"],
+        "recipient": proof.query, "query": proof.query, "package": pkg,
+        "observed_at_epoch": proof.observed_at_epoch,
+        "positive_empty_rounds": [list(r) for r in proof.rounds], "local_retypes": 1,
+        "before_send": True,
+    }
+    row = supabase_client.complete_dm_job(
+        str(job["id"]), "skipped", skip_reason="search_no_results_confirmed",
+        increment_attempt=False, retry_delay_seconds=None,
+        metadata_patch={"thread_state": "unknown", "outreach_send_state": "before_send",
+                        "search_absence_v1": evidence},
+    )
+    if not (type(row) is dict and row.get("id") == job["id"]
+            and row.get("account_id") == account_id and row.get("campaign_id") == job["campaign_id"]
+            and row.get("status") == "skipped" and row.get("skip_reason") == "search_no_results_confirmed"
+            and row.get("attempts") == job["attempts"] and "sent_at" in row and "next_retry_at" in row
+            and row.get("sent_at") is None and row.get("next_retry_at") is None
+            and (row.get("metadata") or {}).get("search_absence_v1") == evidence):
+        raise SlotBlocked("outreach_search_absence_completion_unconfirmed")
+    log("info", "dm_sender_search_absence_persisted", job_id=job["id"], reason="search_no_results_confirmed")
+    return row
 
 
 def _complete_job_failed_retry(
@@ -3965,6 +4052,7 @@ def execute_dm_job_real_send(
     send_confirmed = False
     job_terminal_handled = False
     post_send_fast_finalize_used = False
+    search_outcome: dict[str, Any] = {}
 
     try:
         with _dm_latency.dm446_span('navigation', emit=log):
@@ -3978,6 +4066,7 @@ def execute_dm_job_real_send(
                 dm_type=dm_type,
                 previous_username=previous_username,
                 parent_search_ready=parent_search_ready,
+                outreach_search_outcome=search_outcome if dm_type == "outreach" else None,
             )
         navigation_finished = True
         nav_timings = _get_dm_sender_nav_timings()
@@ -3993,11 +4082,24 @@ def execute_dm_job_real_send(
         )
 
         if not nav_ok:
-            updated_job, outcome = _complete_job_failed_retry(
-                job,
-                last_error="navigation_failed",
-                thread_state=thread_state,
-            )
+            if dm_type == "outreach" and search_outcome.get("proof") is not None:
+                # A failed/uncertain write must not trigger another mutation
+                # or UI restoration through the generic retry branch.
+                navigation_finished = False
+                updated_job = _complete_confirmed_search_absence(
+                    d, job, search_outcome, account_id=account_id, run_id=run_id, pkg=pkg,
+                )
+                navigation_finished = True
+            if updated_job is not None:
+                outcome = "skipped"
+                skip_candidate = "search_no_results_confirmed"
+            else:
+                updated_job, outcome = _complete_job_failed_retry(
+                    job, last_error="navigation_failed", thread_state=thread_state,
+                    metadata_patch={"search_failure_reason": search_outcome.get("reason"),
+                                    "search_failure_state": search_outcome.get("state", "unknown")}
+                    if dm_type == "outreach" and search_outcome else None,
+                )
             final_status = str((updated_job or {}).get("status") or "pending")
             job_terminal_handled = True
         else:
