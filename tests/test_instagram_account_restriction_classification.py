@@ -55,7 +55,7 @@ class NabIdentityGuardReplayTest(unittest.TestCase):
     def _verify(self, hierarchies: list[str]):
         with (
             patch.object(identity_guard, "_dump_hierarchy", side_effect=hierarchies),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(identity_guard, "_capture_identity_failure_artifacts") as capture,
             patch.object(runtime_incidents, "publish_account_incident", return_value={"published": True}) as publish,
             patch.object(identity_guard, "_extract_own_profile_username_from_hierarchy", wraps=identity_guard._extract_own_profile_username_from_hierarchy) as extract,
@@ -104,7 +104,7 @@ class NabIdentityGuardReplayTest(unittest.TestCase):
     def test_restriction_already_occluding_pre_profile_surface_stops_without_navigation(self) -> None:
         with (
             patch.object(identity_guard, "_dump_hierarchy", return_value=FIXTURE.read_text()),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav") as open_profile,
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav") as open_profile,
             patch.object(identity_guard, "_capture_identity_failure_artifacts") as capture,
             patch.object(runtime_incidents, "publish_account_incident", return_value={"published": True}),
         ):

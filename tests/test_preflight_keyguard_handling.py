@@ -245,7 +245,7 @@ class PreflightKeyguardHandlingTests(unittest.TestCase):
         device.app_current.return_value = {"package": "com.android.systemui"}
         with (
             patch.object(guard, "_dump_hierarchy", side_effect=[HOME_XML, KEYGUARD_SWIPE_XML]),
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_device_foreground_package", return_value="com.android.systemui"),
             patch.object(
                 guard,
@@ -276,7 +276,7 @@ class PreflightKeyguardHandlingTests(unittest.TestCase):
         device = Mock()
         with (
             patch.object(guard, "_dump_hierarchy", return_value=LOGIN_XML),
-            patch.object(guard, "open_own_profile_from_bottom_nav") as open_profile,
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav") as open_profile,
             patch.object(
                 guard,
                 "_capture_identity_failure_artifacts",
@@ -296,7 +296,7 @@ class PreflightKeyguardHandlingTests(unittest.TestCase):
         device = Mock()
         with (
             patch.object(guard, "_dump_hierarchy", return_value=CHECKPOINT_XML),
-            patch.object(guard, "open_own_profile_from_bottom_nav") as open_profile,
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav") as open_profile,
             patch.object(
                 guard,
                 "_capture_identity_failure_artifacts",

@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import uiautomator2 as u2
 
 import config
+import ui_continuity_v1
+from instagram_human_confirmation_challenge import classify_instagram_human_confirmation
+from instagram_ads_data_consent_popup import (
+    BUSINESS_PAUSED_REASON as ADS_CONSENT_STOP_REASON,
+    classify_instagram_ads_data_consent_popup,
+)
+from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 from instagram_navigation import (
     PROFILE_HEADER_FOLLOWERS_STACKED_FAMILIAR_RID,
     _collect_profile_stats_band_texts,
@@ -64,13 +73,21 @@ class OwnProfileNavigationResult:
     outcome: OwnProfileNavigationOutcome
     clicked: bool
     selector: str = ""
-    hierarchy_xml: str = ""
+    hierarchy_xml: str = field(default="", repr=False)
     loading_retry_used: bool = False
     evidence: dict[str, Any] = field(default_factory=dict)
+    observed_at_monotonic: float = 0.0
+    ui_epoch: int = 0
+    observation_generation: int = 1
+    first_observation: OwnProfileNavigationResult | None = field(default=None, repr=False)
+    reobservation_used: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.outcome is OwnProfileNavigationOutcome.PROFILE_OPENED
+        return (
+            self.outcome is OwnProfileNavigationOutcome.PROFILE_OPENED
+            and not self.evidence.get("failure_reason")
+        )
 
 
 _WHAT_HAPPENED_TITLES = frozenset({"what happened", "ce qui s'est passe", "ce qui s’est passe"})
@@ -337,11 +354,43 @@ def _instagram_package_candidates(
     return pkgs
 
 
+def _own_profile_operator_reason(hierarchy: str, package: str) -> str:
+    """Classify already-read interruptions; never perform a recovery gesture."""
+    if classify_instagram_human_confirmation(hierarchy, package_name=package).detected:
+        return "instagram_human_confirmation_required"
+    if classify_instagram_ads_data_consent_popup(hierarchy, package_name=package).detected:
+        return ADS_CONSENT_STOP_REASON
+    screen = str(extract_login_screen_signals_from_hierarchy(hierarchy).get("screen_type") or "")
+    if screen in {
+        "save_login_info_prompt", "instagram_turn_on_notifications_prompt",
+        "connected_post_login_location_services_prompt", "android_instagram_notification_settings",
+        "google_password_manager_save_prompt", "samsung_pass_save_password_prompt",
+        "password_required_dialog", "logout_confirmation_prompt",
+        "login_form_empty", "login_form_prefilled_username", "continue_password_only",
+        "join_instagram_landing", "account_picker", "continue_as_candidate",
+        "add_account_sheet", "account_switcher_sheet",
+    }:
+        return "own_profile_interruption_requires_operator"
+    return ""
+
+
+def _own_profile_xml_package_proved(hierarchy: str, package: str) -> bool:
+    """Package evidence for a read-only reobservation, never proof of readiness."""
+    if not hierarchy or not package:
+        return False
+    try:
+        packages = {n.get("package") for n in ET.fromstring(hierarchy).iter() if n.get("package")}
+    except ET.ParseError:
+        return False
+    return package in packages and packages <= {package, "com.android.systemui"}
+
+
 def navigate_to_own_profile_from_bottom_nav(
     d: u2.Device,
     *,
     expected_package_name: str | None = None,
     expected_username: str = "",
+    on_first_refusal: Callable[[OwnProfileNavigationResult], bool | None] | None = None,
 ) -> OwnProfileNavigationResult:
     """Click own profile and return a bounded, fresh destination verdict."""
     log("info", "welcome_baseline_own_profile_open_started")
@@ -449,43 +498,103 @@ def navigate_to_own_profile_from_bottom_nav(
     if settle > 0:
         time.sleep(settle)
 
-    hierarchy = _dump_fresh_hierarchy(d)
-    outcome, evidence = classify_own_profile_destination(
-        hierarchy,
-        expected_username=expected_username,
-    )
-    loading_retry_used = False
-    if outcome in {
-        OwnProfileNavigationOutcome.LOADING_INTERMEDIATE,
-        OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
-    }:
-        loading_retry_used = True
-        retry_s = float(getattr(config, "OWN_PROFILE_DESTINATION_LOADING_RETRY_S", 1.0) or 1.0)
-        if retry_s > 0:
-            time.sleep(retry_s)
+    def observe(generation: int) -> OwnProfileNavigationResult:
+        epoch = ui_continuity_v1.observe("own_profile:observation_begin")
         hierarchy = _dump_fresh_hierarchy(d)
+        observed_at = time.monotonic()
         outcome, evidence = classify_own_profile_destination(
-            hierarchy,
-            expected_username=expected_username,
+            hierarchy, expected_username=expected_username,
+        )
+        operator_reason = _own_profile_operator_reason(hierarchy, pkg)
+        if operator_reason:
+            outcome = OwnProfileNavigationOutcome.UNKNOWN_SCREEN
+            evidence = {**evidence, "failure_reason": operator_reason, "operator_action_required": True}
+        evidence = {
+            **evidence,
+            "first_refused_predicate": (
+                "operator_interruption_absent" if operator_reason
+                else "destination_not_proved" if outcome is not OwnProfileNavigationOutcome.PROFILE_OPENED
+                else ""
+            ),
+        }
+        ui_continuity_v1.finish_observation(epoch, "own_profile:observation_complete")
+        return OwnProfileNavigationResult(
+            outcome=outcome, clicked=True, selector=click_name, hierarchy_xml=hierarchy,
+            evidence=evidence, observed_at_monotonic=observed_at, ui_epoch=epoch,
+            observation_generation=generation,
         )
 
-    result = OwnProfileNavigationResult(
-        outcome=outcome,
-        clicked=True,
-        selector=click_name,
-        hierarchy_xml=hierarchy,
-        loading_retry_used=loading_retry_used,
-        evidence=evidence,
-    )
+    first = observe(1)
+    result = first
+    extra_started_at = time.monotonic()
+    if not first.ok:
+        # Retain the causal bytes before any wait/read or possible continuity loss.
+        retained = on_first_refusal(first) if on_first_refusal is not None else None
+        eligible = first.outcome in {
+            OwnProfileNavigationOutcome.UNKNOWN_SCREEN,
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE,
+            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
+        } and not first.evidence.get("operator_action_required")
+        package_proved = _own_profile_xml_package_proved(first.hierarchy_xml, pkg)
+        if retained is False:
+            result = replace(first, evidence={**first.evidence, "failure_reason": "first_observation_retention_failed"})
+        elif eligible and package_proved:
+            try:
+                retry_s = float(getattr(config, "OWN_PROFILE_DESTINATION_LOADING_RETRY_S", 1.0))
+                retry_s = min(1.0, max(0.0, retry_s)) if math.isfinite(retry_s) else 1.0
+            except (TypeError, ValueError):
+                retry_s = 1.0
+            if time.monotonic() - extra_started_at + retry_s <= 5.0:
+                ui_continuity_v1.require_epoch(first.ui_epoch, "own_profile:before_reobservation")
+                if retry_s:
+                    time.sleep(retry_s)
+                if time.monotonic() - extra_started_at <= 5.0:
+                    result = observe(2)
+                    # The new XML replaces all prior surface/identity authority.
+                    failure = ""
+                    if not _own_profile_xml_package_proved(result.hierarchy_xml, pkg):
+                        failure = "reobservation_package_unproved"
+                    elif result.ok and not verify_app_foreground(d, pkg):
+                        failure = "reobservation_foreground_unproved"
+                    elif not result.ok:
+                        failure = result.evidence.get("failure_reason") or "destination_unproved_after_reobservation"
+                    if time.monotonic() - extra_started_at > 5.0:
+                        failure = "reobservation_budget_exceeded"
+                    ui_continuity_v1.require_epoch(first.ui_epoch, "own_profile:reobservation_admission")
+                    result = replace(
+                        result, first_observation=first, reobservation_used=True,
+                        loading_retry_used=first.outcome in {
+                            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE,
+                            OwnProfileNavigationOutcome.LOADING_INTERMEDIATE_ON_PROFILE,
+                        },
+                        evidence={**result.evidence, **({"failure_reason": failure} if failure else {})},
+                    )
+                else:
+                    result = replace(first, evidence={**first.evidence, "failure_reason": "reobservation_budget_exceeded"})
+            else:
+                result = replace(first, evidence={**first.evidence, "failure_reason": "reobservation_budget_exceeded"})
+        elif eligible:
+            result = replace(first, evidence={**first.evidence, "failure_reason": "initial_observation_package_unproved"})
+
+    evidence = {
+        **result.evidence,
+        "first_destination_outcome": first.outcome.value,
+        "first_refused_predicate": first.evidence.get("first_refused_predicate", ""),
+        "first_hierarchy_sha256": hashlib.sha256(first.hierarchy_xml.encode("utf-8")).hexdigest(),
+        "hierarchy_sha256": hashlib.sha256(result.hierarchy_xml.encode("utf-8")).hexdigest(),
+        "reobservation_used": result.reobservation_used,
+        "observation_generation": result.observation_generation,
+    }
+    result = replace(result, evidence=evidence)
 
     if not result.ok:
         log(
             "info",
             "welcome_baseline_own_profile_open_failed",
-            reason="destination_not_proved",
+            reason=first.evidence.get("failure_reason") or "destination_not_proved",
             selector=click_name,
             destination_outcome=result.outcome.value,
-            loading_retry_used=loading_retry_used,
+            loading_retry_used=result.loading_retry_used,
             destination_evidence=evidence,
         )
         return result

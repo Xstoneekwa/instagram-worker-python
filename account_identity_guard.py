@@ -13,11 +13,13 @@ from __future__ import annotations
 import ui_continuity_v1
 
 import html
+import hashlib
+import os
 import re
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,6 +33,7 @@ from instagram_login_ui_probe import (
     extract_login_screen_signals_from_hierarchy,
 )
 from instagram_ads_data_consent_popup import (
+    BUSINESS_PAUSED_REASON as ADS_DATA_CONSENT_BUSINESS_PAUSED_REASON,
     IDENTITY_PENDING_REASON as ADS_DATA_CONSENT_IDENTITY_PENDING_REASON,
     POPUP_TYPE as ADS_DATA_CONSENT_POPUP_TYPE,
     classify_instagram_ads_data_consent_popup,
@@ -45,10 +48,12 @@ from instagram_human_confirmation_challenge import (
 from logs import log
 from runtime_artifacts import runtime_logs_root
 from own_profile_navigation import (
+    _own_profile_xml_package_proved,
     OwnProfileNavigationOutcome,
+    OwnProfileNavigationResult,
     classify_own_profile_destination,
     extract_canonical_profile_username_from_hierarchy,
-    open_own_profile_from_bottom_nav,
+    navigate_to_own_profile_from_bottom_nav,
 )
 
 ACCOUNT_IDENTITY_MISMATCH_REASON = "active_instagram_account_mismatch"
@@ -382,6 +387,9 @@ def _capture_identity_failure_artifacts(
     account_id: str | None,
     run_id: str | None,
     stage: str,
+    capture_screenshot: bool = True,
+    observation_role: str = "",
+    observed_at_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Persist local-only screenshot/XML for operator forensics; never expose raw content remotely."""
     meta: dict[str, Any] = {
@@ -396,12 +404,21 @@ def _capture_identity_failure_artifacts(
         stamp = int(time.time() * 1000)
         acct = str(account_id or "unknown")[:8]
         stem = f"identity_guard_{acct}_{stamp}"
+        if observation_role:
+            # Internal role only; never interpolate phone text into a path.
+            if observation_role not in {"navigation_first", "navigation_final", "identity_requalification"}:
+                raise ValueError("identity_observation_role_invalid")
+            stem += f"_{observation_role}_{time.monotonic_ns()}"
+            meta["observation_role"] = observation_role
+            meta["observed_at_monotonic"] = observed_at_monotonic
+            meta["screenshot_contemporaneous_with_xml"] = False
         screenshot_path = _IDENTITY_GUARD_ARTIFACTS_DIR / f"{stem}.png"
         xml_path = _IDENTITY_GUARD_ARTIFACTS_DIR / f"{stem}.xml"
         try:
-            d.screenshot(str(screenshot_path))
-            meta["screenshot_captured"] = True
-            meta["screenshot_basename"] = screenshot_path.name
+            if capture_screenshot:
+                d.screenshot(str(screenshot_path))
+                meta["screenshot_captured"] = True
+                meta["screenshot_basename"] = screenshot_path.name
         except Exception as exc:
             log(
                 "warning",
@@ -413,9 +430,14 @@ def _capture_identity_failure_artifacts(
             )
         try:
             xml_body = str(hierarchy_xml or "")
-            if not xml_body:
+            if not xml_body and not observation_role:
                 xml_body = _dump_hierarchy(d)
-            xml_path.write_text(xml_body, encoding="utf-8")
+            if observation_role:
+                with os.fdopen(os.open(str(xml_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as output:
+                    output.write(xml_body)
+                meta["hierarchy_sha256"] = hashlib.sha256(xml_body.encode("utf-8")).hexdigest()
+            else:
+                xml_path.write_text(xml_body, encoding="utf-8")
             meta["xml_dump_captured"] = bool(xml_body)
             meta["xml_basename"] = xml_path.name
             meta["hierarchy_xml_len"] = len(xml_body)
@@ -439,6 +461,9 @@ def _capture_identity_failure_artifacts(
                 xml_dump_captured=meta["xml_dump_captured"],
                 screenshot_basename=meta["screenshot_basename"],
                 xml_basename=meta["xml_basename"],
+                observation_role=observation_role or None,
+                observed_at_monotonic=observed_at_monotonic,
+                hierarchy_sha256=meta.get("hierarchy_sha256"),
             )
     except Exception as exc:
         log(
@@ -724,6 +749,9 @@ def _log_identity_failure(
         screen_type=result.meta.get("screen_type"),
         detection_reason=result.meta.get("detection_reason"),
         identity_guard_stage=result.meta.get("identity_guard_stage"),
+        own_profile_first_refused_predicate=result.meta.get("own_profile_first_refused_predicate"),
+        own_profile_first_hierarchy_sha256=result.meta.get("own_profile_first_hierarchy_sha256"),
+        own_profile_navigation_subreason=result.meta.get("own_profile_navigation_subreason"),
     )
 
 
@@ -1415,7 +1443,24 @@ def verify_active_instagram_account_matches_expected(
             )
         return popup_identity
 
-    if not open_own_profile_from_bottom_nav(
+    def _retain_first_navigation_refusal(first: OwnProfileNavigationResult) -> bool:
+        artifact = _capture_identity_failure_artifacts(
+            d, first.hierarchy_xml, account_id=account_id, run_id=run_id, stage=stage,
+            capture_screenshot=False, observation_role="navigation_first",
+            observed_at_monotonic=first.observed_at_monotonic,
+        )
+        post_verification_metadata.update({
+            "own_profile_first_refused_predicate": first.evidence.get("first_refused_predicate", "destination_not_proved"),
+            "own_profile_first_outcome": first.outcome.value,
+            "own_profile_first_xml_basename": artifact.get("xml_basename", ""),
+            "own_profile_first_xml_captured": bool(artifact.get("xml_dump_captured")),
+            "own_profile_first_hierarchy_sha256": hashlib.sha256(first.hierarchy_xml.encode("utf-8")).hexdigest(),
+            "own_profile_first_observed_at_monotonic": first.observed_at_monotonic,
+            "own_profile_first_ui_epoch": first.ui_epoch,
+        })
+        return bool(artifact.get("xml_dump_captured"))
+
+    navigation = navigate_to_own_profile_from_bottom_nav(
         d,
         expected_package_name=str(
             expected_package_name
@@ -1423,8 +1468,21 @@ def verify_active_instagram_account_matches_expected(
             or ""
         ),
         expected_username=expected_raw,
-    ):
-        hierarchy = _dump_hierarchy(d)
+        on_first_refusal=_retain_first_navigation_refusal,
+    )
+    if not isinstance(navigation, OwnProfileNavigationResult):
+        navigation = OwnProfileNavigationResult(
+            outcome=OwnProfileNavigationOutcome.UNKNOWN_SCREEN, clicked=False,
+            evidence={"failure_reason": "structured_navigation_result_missing"},
+        )
+    post_verification_metadata.update({
+        "own_profile_reobservation_used": navigation.reobservation_used,
+        "own_profile_observation_generation": navigation.observation_generation,
+        "own_profile_navigation_subreason": navigation.evidence.get("failure_reason", ""),
+    })
+    if not navigation.ok:
+        # This is the decision observation, not a fresh replacement for its cause.
+        hierarchy = navigation.hierarchy_xml
         challenge_identity = _human_confirmation_identity_boundary(hierarchy)
         if challenge_identity is not None:
             _log_identity_failure(
@@ -1445,10 +1503,19 @@ def verify_active_instagram_account_matches_expected(
                 stage=stage,
             )
             return restriction_identity
-        destination_outcome, destination_evidence = classify_own_profile_destination(
-            hierarchy,
-            expected_username=expected_raw,
-        )
+        popup_identity = _ads_data_consent_identity_boundary(hierarchy)
+        if popup_identity is not None:
+            # Login identity-only handoff remains unchanged. A post-navigation
+            # consent interruption cannot admit the ordinary business preflight.
+            if popup_identity.ok:
+                popup_identity = replace(
+                    popup_identity, ok=False,
+                    failure_reason=ADS_DATA_CONSENT_BUSINESS_PAUSED_REASON,
+                    meta={**popup_identity.meta, "business_actions_allowed": False},
+                )
+            _log_identity_failure(popup_identity, account_id=account_id, run_type=run_type, run_id=run_id, stage=stage)
+            return popup_identity
+        destination_outcome, destination_evidence = navigation.outcome, navigation.evidence
         failure_reason = {
             OwnProfileNavigationOutcome.WHAT_HAPPENED_SCREEN: "own_profile_navigation_what_happened_screen",
             OwnProfileNavigationOutcome.LOADING_INTERMEDIATE: "own_profile_navigation_loading",
@@ -1477,6 +1544,8 @@ def verify_active_instagram_account_matches_expected(
                     account_id=account_id,
                     run_id=run_id,
                     stage=stage,
+                    observation_role="navigation_final",
+                    observed_at_monotonic=navigation.observed_at_monotonic,
                 ),
             },
         )
@@ -1489,7 +1558,9 @@ def verify_active_instagram_account_matches_expected(
         )
         return result
 
+    ui_continuity_v1.require_epoch(navigation.ui_epoch, "own_profile:identity_requalification_begin")
     hierarchy = _dump_hierarchy(d)
+    ui_continuity_v1.finish_observation(navigation.ui_epoch, "own_profile:identity_requalification_read")
     challenge_identity = _human_confirmation_identity_boundary(hierarchy)
     if challenge_identity is not None:
         _log_identity_failure(
@@ -1512,6 +1583,12 @@ def verify_active_instagram_account_matches_expected(
         return restriction_identity
     popup_identity = _ads_data_consent_identity_boundary(hierarchy)
     if popup_identity is not None:
+        if navigation.reobservation_used and popup_identity.ok:
+            popup_identity = replace(
+                popup_identity, ok=False,
+                failure_reason=ADS_DATA_CONSENT_BUSINESS_PAUSED_REASON,
+                meta={**popup_identity.meta, "business_actions_allowed": False},
+            )
         if not popup_identity.ok:
             _log_identity_failure(
                 popup_identity,
@@ -1521,6 +1598,36 @@ def verify_active_instagram_account_matches_expected(
                 stage=stage,
             )
         return popup_identity
+    if navigation.reobservation_used:
+        package = str(expected_package_name or getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
+        foreground_ok = (
+            _device_foreground_package(d) == package
+            and _own_profile_xml_package_proved(hierarchy, package)
+        )
+        fresh_outcome, _ = classify_own_profile_destination(
+            hierarchy, expected_username=expected_raw,
+        )
+        ui_continuity_v1.require_epoch(navigation.ui_epoch, "own_profile:identity_requalification_admission")
+        if not foreground_ok or fresh_outcome is not OwnProfileNavigationOutcome.PROFILE_OPENED:
+            result = _identity_failure_result(
+                expected_raw=expected_raw, expected_stable_id=expected_stable_id,
+                failure_reason="own_profile_open_failed",
+                verification_method="own_profile_reobservation_identity_requalification",
+                meta={
+                    **post_verification_metadata,
+                    "own_profile_navigation_subreason": (
+                        "identity_requalification_package_unproved" if not foreground_ok
+                        else "identity_requalification_surface_unproved"
+                    ),
+                    "screen_type": fresh_outcome.value,
+                    **_capture_identity_failure_artifacts(
+                        d, hierarchy, account_id=account_id, run_id=run_id, stage=stage,
+                        observation_role="identity_requalification",
+                    ),
+                },
+            )
+            _log_identity_failure(result, account_id=account_id, run_type=run_type, run_id=run_id, stage=stage)
+            return result
     actual_raw, method, meta = _extract_own_profile_username_from_hierarchy(hierarchy)
     actual = normalize_account_username(actual_raw)
     if actual and actual == expected:

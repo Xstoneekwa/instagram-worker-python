@@ -68,7 +68,7 @@ class AdsDataConsentIdentityTests(unittest.TestCase):
                 "dashboard_action_id": "action-1",
                 "detected_at": "2026-08-13T16:31:00+00:00",
             }) as publish,
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav") as open_profile,
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav") as open_profile,
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,

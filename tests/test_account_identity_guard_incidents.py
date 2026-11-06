@@ -35,7 +35,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_incidents_disabled_result_unchanged(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(runtime_incidents.config, "RUNTIME_INCIDENTS_ENABLED", False, create=True),
@@ -50,7 +50,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_publish_success_payload(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(
@@ -83,7 +83,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_status_publish_success_payload(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(
@@ -141,7 +141,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_status_publish_disabled_result_unchanged(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(runtime_incidents, "publish_account_incident", return_value={"published": True}),
@@ -160,7 +160,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_status_publish_raises_result_unchanged(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(runtime_incidents, "publish_account_incident", return_value={"published": True}),
@@ -179,7 +179,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_mismatch_publish_raises_result_unchanged(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(guard, "_extract_own_profile_username_from_hierarchy", return_value=self._mismatch_extract()),
             patch.object(
@@ -202,7 +202,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_identity_check_ok_does_not_publish(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(
                 guard,
@@ -237,7 +237,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_own_profile_open_failed_does_not_publish(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=False),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.UNKNOWN_SCREEN, True)),
             patch.object(runtime_incidents, "publish_account_incident") as publish,
             patch.object(instagram_account_status_publisher, "publish_instagram_account_status") as status_publish,
         ):
@@ -250,7 +250,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
 
     def test_actual_logged_in_username_not_detected_does_not_publish(self) -> None:
         with (
-            patch.object(guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(guard, "navigate_to_own_profile_from_bottom_nav", return_value=guard.OwnProfileNavigationResult(guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
             patch.object(guard, "_dump_hierarchy", return_value="<xml />"),
             patch.object(
                 guard,

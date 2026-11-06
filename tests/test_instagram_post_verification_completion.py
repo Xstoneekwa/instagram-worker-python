@@ -408,7 +408,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         device = FakeDevice([HOME_XML, HOME_XML])
         with (
             patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=False),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.UNKNOWN_SCREEN, True)),
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,
@@ -434,7 +434,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         device = FakeDevice([MODERN_HOME_XML, MODERN_HOME_XML])
         with (
             patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=False),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.HOME_FEED, True, hierarchy_xml=MODERN_HOME_XML)),
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,
@@ -459,7 +459,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         device = FakeDevice([LOCATION_XML, HOME_XML, HOME_XML, HOME_XML, PROFILE_XML])
         with (
             patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,
@@ -477,7 +477,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         )
         with (
             patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,
@@ -500,7 +500,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         device = FakeDevice([LOCATION_XML, HOME_XML, HOME_XML, HOME_XML, wrong_profile])
         with (
             patch.object(identity_guard.config, "INSTAGRAM_PACKAGE", PACKAGE),
-            patch.object(identity_guard, "open_own_profile_from_bottom_nav", return_value=True),
+            patch.object(identity_guard, "navigate_to_own_profile_from_bottom_nav", return_value=identity_guard.OwnProfileNavigationResult(identity_guard.OwnProfileNavigationOutcome.PROFILE_OPENED, True)),
         ):
             result = identity_guard.verify_active_instagram_account_matches_expected(
                 device,
@@ -586,7 +586,7 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertNotEqual(result.outcome, OwnProfileNavigationOutcome.PROFILE_OPENED)
 
     def test_loading_after_click_retries_once_and_requires_profile_proof(self) -> None:
-        loading = '<hierarchy><node class="android.widget.ProgressBar" /></hierarchy>'
+        loading = f'<hierarchy><node package="{PACKAGE}" class="android.widget.ProgressBar" /></hierarchy>'
         device = FakeDevice([loading, PROFILE_XML])
         with (
             patch("own_profile_navigation.config.INSTAGRAM_PACKAGE", PACKAGE),
