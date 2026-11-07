@@ -170,6 +170,7 @@ class EffectivePerformanceTests(unittest.TestCase):
         self.assertNotIn("legacy_profile_probe",new["calls"])
         fin=new["result"][1]["post_finalize"]
         self.assertTrue(fin["navigation_deferred_to_sender"])
+        self.assertTrue(fin["post_send_fast_finalize_used"])
         self.assertFalse(fin["back_to_profile_ok"]);self.assertFalse(fin["back_to_search_ok"])
         self.assertTrue(next(f for s,f in new["events"] if s=="draft_verify")["result"])
         self.assertTrue(next(f for s,f in new["events"] if s=="typing_readback")["original_editor_used"])

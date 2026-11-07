@@ -61,6 +61,7 @@ from instagram_navigation import (
     verify_dm_composer_safe,
     verify_dm_draft_text,
     _dm_446_context,
+    outreach_446_restoration_thread_proved,
     verify_profile,
     verify_welcome_dm_thread_recipient_exact,
     _welcome_dm_thread_recipient_identity_from_hierarchy,
@@ -1266,6 +1267,7 @@ def prepare_dm_sender_global_search_surface(
     context: str,
     last_recipient_username: str = "",
     prefer_back_stack_to_search: bool = False,
+    _outreach_permission_check_owned: bool = False,
 ) -> bool:
     """
     Leave Followers list / DM thread / profile and open verified global Instagram Search.
@@ -1283,6 +1285,7 @@ def prepare_dm_sender_global_search_surface(
 
     invalidate_search_surface_cache(f"dm_sender_prepare:{context}")
 
+    version_context = None
     try:
         version_context = _dm_446_context(d) if prefer_back_stack_to_search else None
         if (
@@ -1411,6 +1414,11 @@ def prepare_dm_sender_global_search_surface(
         return False
 
     if _check_dm_sender_permission_blocker(d, context=context):
+        if _outreach_permission_check_owned:
+            _record_dm_sender_post_job_restore_attempt(
+                attempt='permission_blocker', ok=False, reason='permission_blocker',
+                final_mode='restore_failed',
+            )
         log(
             "error",
             "dm_sender_post_job_surface_prepare_failed",
@@ -1436,7 +1444,15 @@ def prepare_dm_sender_global_search_surface(
         profile_ok = False
         try:
             if last_recipient_username:
-                if is_lightweight_search_screen(d, pkg):
+                # The existing strict grammar plus exact current recipient may
+                # dominate the alternative Search probe. No UI mutation intervenes.
+                current_thread_proved = bool(
+                    version_context is not None and version_context.package == pkg
+                    and outreach_446_restoration_thread_proved(
+                        d, last_recipient_username, pkg,
+                    )
+                )
+                if not current_thread_proved and is_lightweight_search_screen(d, pkg):
                     verified, why = _verify_dm_sender_global_search_surface(
                         d, pkg=pkg, account_username=src, full_followers_check=False
                     )
@@ -1472,7 +1488,7 @@ def prepare_dm_sender_global_search_surface(
                             reuse_ms=(time.perf_counter() - t_restore) * 1000.0,
                         )
                         return True
-                start_dm_thread_visible = bool(is_dm_thread_screen(d, pkg))
+                start_dm_thread_visible = current_thread_proved or bool(is_dm_thread_screen(d, pkg))
                 version_context = _dm_446_context(d)
                 start_composer_visible = (
                     None
@@ -2400,12 +2416,19 @@ def _navigate_to_recipient_dm_thread(
     )
 
     t_field = time.perf_counter()
-    ed = _wait_search_edittext(d)
+    current_search_context = _dm_446_context(d) if dm_type_norm == 'outreach' else None
+    diagnostic_probe_deferred = bool(
+        current_search_context is not None and current_search_context.package == pkg
+    )
+    # Diagnostic only: type_search still resolves its current editor and
+    # performs the unchanged fresh surface precheck immediately before typing.
+    ed = None if diagnostic_probe_deferred else _wait_search_edittext(d)
     log(
         "info",
         "dm_sender_search_field_ready",
         username=uname,
-        search_field_ready=bool(ed is not None),
+        search_field_ready=None if diagnostic_probe_deferred else bool(ed is not None),
+        observation='deferred_to_type_search_current_resolver' if diagnostic_probe_deferred else 'sampled',
         open_search_to_field_ready_ms=round((time.perf_counter() - t_field) * 1000.0, 2),
     )
 
@@ -2594,7 +2617,18 @@ def _safe_teardown_navigation(
     _reset_dm_sender_post_job_restore()
     if prefer_back_stack_to_search:
         _set_dm_sender_post_job_restore(post_job_restore_used_back_stack=True)
-    if _check_dm_sender_permission_blocker(
+    try:
+        context = _dm_446_context(d) if prefer_back_stack_to_search else None
+    except Exception:
+        _record_dm_sender_post_job_restore_attempt(
+            attempt='version_context', ok=False, reason='dm_version_context_unproved',
+            final_mode='restore_failed',
+        )
+        return
+    delegate_permission_probe = bool(context is not None and context.package == pkg)
+    # The qualified branch reaches the existing later veto without another
+    # device read or UI mutation. Keep that fresher veto once.
+    if not delegate_permission_probe and _check_dm_sender_permission_blocker(
         d, username=username, context="post_job_teardown"
     ):
         _record_dm_sender_post_job_restore_attempt(
@@ -2610,6 +2644,7 @@ def _safe_teardown_navigation(
         context="dm_sender_post_job",
         last_recipient_username=username,
         prefer_back_stack_to_search=prefer_back_stack_to_search,
+        **({'_outreach_permission_check_owned': True} if delegate_permission_probe else {}),
     )
 
 
@@ -3402,7 +3437,16 @@ def _resolve_dm_text_composer(
             caller=caller,
         )
         return None, "draft_composer_not_resolved"
-    bounds = (ed.info or {}).get("bounds") if hasattr(ed, "info") else None
+    focus_context = _dm_446_context(d) if caller == 'real_send' and str(dm_type or '').strip().lower() == 'outreach' else None
+    if focus_context is not None and focus_context.package == pkg:
+        # hasattr invokes the remote property getter. Read it once.
+        try:
+            info = ed.info
+        except AttributeError:
+            info = None
+        bounds = (info or {}).get('bounds')
+    else:
+        bounds = (ed.info or {}).get("bounds") if hasattr(ed, "info") else None
     log(
         "info",
         "dm_sender_text_composer_resolved",
@@ -3924,6 +3968,7 @@ def _perform_real_welcome_dm_send(
             # This intentionally makes no claim that profile/search is visible.
             send_out['post_finalize'] = dict(
                 navigation_deferred_to_sender=True, back_to_profile_ok=False,
+                post_send_fast_finalize_used=True,
                 back_to_search_ok=False, post_send_cleanup_reason='sender_owned_restore_deferred',
             )
             log('info', 'dm_send_post_finalize_deferred_to_sender',

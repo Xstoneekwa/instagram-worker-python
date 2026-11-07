@@ -8534,6 +8534,27 @@ def _dm_446_observation(d, package, *, _record=None):
         raise
 
 
+def outreach_446_restoration_thread_proved(d, username, pkg):
+    """Current strict thread hint for restoration; never Send authority."""
+    try:
+        context = _dm_446_context(d)
+        if context is None or context.package != pkg:
+            return False
+        observation = {}
+        xml, composer = _dm_446_observation(d, pkg, _record=observation)
+        _dm_retention.capture_xml('outreach_restore_current_thread', xml)
+        if not composer.get('visible') or composer.get('context') != 'thread':
+            return False
+        exact, _reason, _observed = _welcome_dm_thread_recipient_identity_from_hierarchy(
+            xml, username,
+        )
+        return bool(exact)
+    except Exception as exc:
+        log('info', 'dm_sender_restore_current_thread_unproved',
+            reason=type(exc).__name__)
+        return False
+
+
 def _dm_446_composer(d, package):
     """Exact current selector, never a generic EditText fallback or a tap."""
     from dm_446_observation_retention import begin_composer

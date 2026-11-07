@@ -1,0 +1,113 @@
+{
+  "schema": "DM446_WORKER1083_NATIVE_COST_FIXTURE_V1",
+  "RUN_ID": "5c014535-fd26-400a-ab88-5b7cab50282b",
+  "parent": "1083a465e1c965b6f2e187226f882e9f4d1af880",
+  "native_receipt": {
+    "path": "/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5c014535-fd26-400a-ab88-5b7cab50282b/6e3a8e93-5761-4187-aa8e-81cba56e39ba/composer-3267cd7d47a943b1ac01674b789c2c13/receipt.json",
+    "sha256": "493d56e5b69be05cffd26e64c52a4928c23816d14d247951d5ce08da4607c8b5"
+  },
+  "native_post_send": [
+    {
+      "job_id": "4c86f61b-a940-4d02-8a5c-0fae864bd738",
+      "path": "/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5c014535-fd26-400a-ab88-5b7cab50282b/6e3a8e93-5761-4187-aa8e-81cba56e39ba/composer-3267cd7d47a943b1ac01674b789c2c13/observation_047.xml",
+      "sha256": "653c22aa3f4d5975c170bdec5428ebbaccfb557891a1125427c907b2eaf2136f"
+    },
+    {
+      "job_id": "0e331b32-0461-486f-afdf-312b22ae643d",
+      "path": "/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5c014535-fd26-400a-ab88-5b7cab50282b/6e3a8e93-5761-4187-aa8e-81cba56e39ba/composer-3267cd7d47a943b1ac01674b789c2c13/observation_053.xml",
+      "sha256": "163ed08e652acbe36cbfda2693cc36357fca97ac5524c497672cb26797a89f8f"
+    },
+    {
+      "job_id": "cc693e4a-7309-49ce-b594-777582205c76",
+      "path": "/Users/admin/phonefarm-runtime/logs/dm446-exact-observations/5c014535-fd26-400a-ab88-5b7cab50282b/6e3a8e93-5761-4187-aa8e-81cba56e39ba/composer-3267cd7d47a943b1ac01674b789c2c13/observation_059.xml",
+      "sha256": "3da5522b0031b7ccfbf90afe2ddcace7137ddf0ad551186e12bd3a655fb2b1a9"
+    }
+  ],
+  "runtime_log": {
+    "path": "/Users/admin/phonefarm-runtime/logs/runs/run_20261107T155414_810011Z_5c014535-fd26-400a-ab88-5b7cab50282b.log",
+    "sha256": "3843bfefc69ee91ffa806806f66123e92052fe45cc066427fb9a98c8b97a49d9"
+  },
+  "duplicate_guard_cost_ms": 8164.605,
+  "parent_total_run_s": 409.478572,
+  "real_new_candidate_gain": false,
+  "scope": "Past native trace only; no recipient identity/message content constants; exact future mix unknown",
+  "native_IO_counts": {
+    "candidate": {
+      "xml_capture:dump_hierarchy": 3
+    },
+    "draft_verify": {
+      "uiautomator:app_current": 12,
+      "uiautomator:window_size": 6,
+      "xml_capture:dump_hierarchy": 6,
+      "uiautomator:get_text": 3,
+      "uiautomator:info": 3,
+      "uiautomator:count": 3
+    },
+    "focus": {
+      "uiautomator:app_current": 15,
+      "uiautomator:exists": 12,
+      "uiautomator:info": 9,
+      "uiautomator:click": 3,
+      "uiautomator:window_size": 6,
+      "xml_capture:dump_hierarchy": 6,
+      "uiautomator:count": 3
+    },
+    "navigation": {
+      "uiautomator:app_current": 76,
+      "uiautomator:wait": 62,
+      "uiautomator:exists": 33,
+      "uiautomator:info": 32,
+      "uiautomator:window_size": 25,
+      "xml_capture:dump_hierarchy": 27,
+      "uiautomator:get_text": 13,
+      "uiautomator:click": 10,
+      "uiautomator:count": 13,
+      "uiautomator:set_text": 4
+    },
+    "outbound_proof": {
+      "xml_capture:dump_hierarchy": 3
+    },
+    "pretyping_qualification": {
+      "uiautomator:app_current": 18,
+      "uiautomator:wait": 21,
+      "uiautomator:window_size": 9,
+      "uiautomator:info": 6,
+      "xml_capture:dump_hierarchy": 6,
+      "uiautomator:get_text": 3,
+      "uiautomator:count": 3
+    },
+    "restore": {
+      "uiautomator:wait": 128,
+      "uiautomator:app_current": 32,
+      "uiautomator:exists": 36,
+      "uiautomator:click": 4,
+      "uiautomator:info": 8,
+      "uiautomator:get_text": 4,
+      "uiautomator:press": 4,
+      "uiautomator:window_size": 4,
+      "xml_capture:dump_hierarchy": 4,
+      "uiautomator:count": 4
+    },
+    "send": {
+      "uiautomator:app_current": 18,
+      "xml_capture:dump_hierarchy": 27,
+      "uiautomator:window_size": 12,
+      "uiautomator:info": 9,
+      "uiautomator:get_text": 3,
+      "uiautomator:click": 3,
+      "uiautomator:count": 3
+    },
+    "set_text": {
+      "uiautomator:set_text": 3
+    },
+    "typing": {
+      "uiautomator:app_current": 12,
+      "uiautomator:click": 3,
+      "uiautomator:window_size": 6,
+      "uiautomator:get_text": 3,
+      "xml_capture:dump_hierarchy": 6,
+      "uiautomator:info": 3,
+      "uiautomator:count": 3
+    }
+  }
+}
