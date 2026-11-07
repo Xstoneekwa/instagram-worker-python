@@ -130,7 +130,8 @@ class SlotBudget:
             'target_reached' if self.sent >= self.target else 'no_safe_work')
         if code != 0:
             reason = 'unsafe_stop' if reason == 'human_manual_stop' else 'technical_failure'
-        if not cleanup_ok:
+        startup_stop = getattr(self, 'startup_cancellation', None)
+        if not cleanup_ok and not startup_stop:
             reason = 'cleanup_failure'
         real_clock = self.wall is time.time and self.monotonic is time.monotonic
         observations = {'measurement_source': 'outreach_real' if self.device_verified and real_clock else 'unverified',
@@ -141,6 +142,11 @@ class SlotBudget:
             'mode':(self.context.get('execution_policy') or {}).get('mode'),
             'successful_units':self.observations,'cleanup_ms':cleanup_ms,
             'promotion_status':'candidate_only'}
+        if startup_stop:
+            # Observations preserve the first cause independently of the RPC's
+            # conservative failure class. False means no physical cleanup PASS.
+            observations['startup_cancellation'] = dict(startup_stop)
+            observations['startup_cleanup_disposition'] = self.startup_cleanup_disposition
         summary=self.rpc('finish_outreach_slot_v2',{'p_request_id':self.context['request_id'],
             'p_reason':reason,'p_cleanup_ok':bool(cleanup_ok),'p_observations':observations})
         summary = validate_terminal_receipt(summary, self.context, run_id=fields.get('run_id'))

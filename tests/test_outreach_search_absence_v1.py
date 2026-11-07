@@ -209,4 +209,8 @@ class SearchAbsenceScopeTests(TestCase):
         for name in ("unfollow_hybrid_strategy.py","tests/test_certification_admission.py",
                      "outreach_slot_contract.py","run_latency_observability_v1.py","dm_thread_truth.py"):
             parent=subprocess.check_output(["git","show","cf069a3fc0a3e1bf3fd5806f8ff88c6fea11626e:"+name],cwd=root)
-            self.assertEqual((root/name).read_bytes(),parent)
+            from tests.test_worker_startup_cancellation_v1 import restore_startup_exact_delta
+            current = (root/name).read_text()
+            if name == 'outreach_slot_contract.py':
+                current = restore_startup_exact_delta(name, current)
+            self.assertEqual(current.encode(), parent)

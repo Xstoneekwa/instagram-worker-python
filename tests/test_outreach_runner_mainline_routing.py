@@ -211,6 +211,8 @@ class OutreachRunnerRoutingTests(unittest.TestCase):
 
     def test_exact_single_conditional_is_entire_runner_delta(self):
         self.assertEqual(self.source.count(ADDITION),1)
-        restored = restore_exact_ui_profile_delta('runner.py', restore_exact_product_delta('runner.py', self.source))
+        from tests.test_worker_startup_cancellation_v1 import restore_startup_exact_delta
+        source = restore_startup_exact_delta('runner.py', self.source)
+        restored = restore_exact_ui_profile_delta('runner.py', restore_exact_product_delta('runner.py', source))
         original=restored.replace(ADDITION,'',1)
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),BASELINE_RUNNER_SHA256)

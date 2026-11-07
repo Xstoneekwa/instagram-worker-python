@@ -174,3 +174,39 @@ def terminal_receipt(context, *, sent=25, reason='slot_deadline', cleanup=True, 
             'cleanup_ok':cleanup, 'stop_reason':reason, 'terminal_class':state,
             'business_failure':not cleanup or ambiguous>0 or reason in ('unsafe_stop','technical_failure','cleanup_failure','dispatcher_watchdog'),
             'persisted_at':context['slot_end']}
+
+
+class StartupTerminalObservationTests(unittest.TestCase):
+    def test_startup_refusal_preserves_cause_without_false_cleanup_or_send(self):
+        from unittest.mock import Mock
+        f=SlotTests();f.setUp();b=f.budget(sent_confirmed_in_slot=0)
+        b.stop_reason='human_manual_stop'
+        b.startup_cancellation=dict(state='STOP',reason='startup_request_terminal',
+            request_status='canceled',run_status='UNKNOWN',stop_reason='human_manual_stop',
+            duration_ms=1,boundary='after_integrity_and_activation')
+        b.startup_cleanup_disposition='not_required_no_startup_phone_mutation'
+        receipt=terminal_receipt(b.context,sent=0,cleanup=False,reason='unsafe_stop')
+        b.rpc=Mock(return_value=receipt)
+        self.assertEqual(b.finish(cleanup_ok=False,cleanup_ms=0,code=1,run_id='run'),receipt)
+        name,payload=b.rpc.call_args.args
+        self.assertEqual(name,'finish_outreach_slot_v2')
+        self.assertFalse(payload['p_cleanup_ok'])
+        self.assertEqual(payload['p_reason'],'unsafe_stop')
+        self.assertEqual(payload['p_observations']['startup_cancellation'],b.startup_cancellation)
+        self.assertEqual(payload['p_observations']['startup_cleanup_disposition'],'not_required_no_startup_phone_mutation')
+        self.assertEqual(payload['p_observations']['successful_units'],[])
+        self.assertEqual(b.sent,0)
+        self.assertEqual(b.finish(cleanup_ok=False,cleanup_ms=0,code=1,run_id='run'),receipt)
+        b.rpc.assert_called_once()
+
+    def test_unknown_startup_reason_never_becomes_a_successful_unit(self):
+        from unittest.mock import Mock
+        from outreach_terminal_receipt import receipt_allows_success
+        f=SlotTests();f.setUp();b=f.budget(sent_confirmed_in_slot=0)
+        b.stop_reason='technical_failure'
+        b.startup_cancellation=dict(state='UNKNOWN',reason='startup_control_plane_unavailable')
+        b.startup_cleanup_disposition='not_performed_after_startup_mutation'
+        b.rpc=Mock(return_value=terminal_receipt(b.context,sent=0,cleanup=False,reason='technical_failure'))
+        receipt=b.finish(cleanup_ok=False,cleanup_ms=0,code=1,run_id='run')
+        self.assertFalse(receipt_allows_success(receipt));self.assertEqual(receipt['sent_confirmed_in_slot'],0)
+        self.assertEqual(b.rpc.call_args.args[1]['p_observations']['startup_cancellation']['reason'],'startup_control_plane_unavailable')

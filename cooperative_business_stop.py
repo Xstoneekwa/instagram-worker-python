@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,6 +171,140 @@ def read_stop(context: StopContext | None) -> dict[str, Any] | None:
     if session_start is not None and requested < session_start:
         return None
     return payload
+
+
+@dataclass(frozen=True)
+class StartupStopDecision:
+    """One startup boundary, never an admission or a reusable UI capability."""
+    state: str
+    reason: str
+    request_status: str = "UNKNOWN"
+    run_status: str = "UNKNOWN"
+    stop_reason: str = ""
+    duration_ms: float = 0.0
+
+
+class StartupCancellationStopped(RuntimeError):
+    def __init__(self, decision: StartupStopDecision):
+        self.decision = decision
+        super().__init__(decision.reason)
+
+
+def startup_stop_decision(
+    context: StopContext | None, *, account_id: str, request_id: str,
+    run_id: str, device_id: str, read_request=None, read_run=None,
+    monotonic=time.monotonic,
+) -> StartupStopDecision:
+    """Fail closed at a startup boundary using the existing token and GETs.
+
+    No retries, sleeps or phone IO. Each existing GET is bounded by five
+    seconds and the complete decision by ten. The original spawn token key
+    stays unchanged when its initially empty run_id is later linked.
+    """
+    started = monotonic()
+    request_status = run_status = "UNKNOWN"
+
+    def verdict(state, reason, stop_reason=""):
+        return StartupStopDecision(state, reason, request_status, run_status,
+                                   stop_reason, max(0.0, (monotonic()-started)*1000))
+
+    def expired():
+        elapsed = monotonic()-started
+        return not 0 <= elapsed <= 10.0
+
+    def local_stop():
+        intent = read_stop(context)
+        if intent:
+            return verdict("STOP", "startup_cooperative_stop", intent["reason"])
+        # An unreadable/corrupt token at this exact execution key is not absence.
+        try:
+            _path(context, "intent").lstat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return verdict("UNKNOWN", "startup_stop_token_unproved")
+        return verdict("UNKNOWN", "startup_stop_token_unproved")
+
+    if (context is None or not all(type(x) is str and x.strip() for x in
+            (account_id, request_id, run_id, device_id, context.business_session_id, context.generation))
+            or (context.account_id, context.request_id, context.device_id) !=
+               (account_id, request_id, device_id)
+            or context.run_id not in ("", run_id)):
+        return verdict("UNKNOWN", "startup_stop_context_unproved")
+    stopped = local_stop()
+    if stopped:
+        return stopped
+    if read_request is None:
+        from account_run_control import get_account_run_request
+        read_request = get_account_run_request
+    if read_run is None:
+        from supabase_client import load_run_row
+        read_run = load_run_row
+    try:
+        request = read_request(request_id, bounded_pre_device=True)
+        if expired():
+            return verdict("UNKNOWN", "startup_stop_decision_timeout")
+        if not isinstance(request, dict) or request.get("id") != request_id or request.get("account_id") != account_id:
+            return verdict("UNKNOWN", "startup_request_binding_unproved")
+        meta = request.get("metadata_safe")
+        if not isinstance(meta, dict):
+            return verdict("UNKNOWN", "startup_request_binding_unproved")
+        session = meta.get("business_session_id") or meta.get("schedule_session_id") or request_id
+        generation = request.get("claimed_at") or request_id
+        if generation != context.generation:
+            from reconciliation_scan import parse_reconciliation_timestamp
+            try:
+                if parse_reconciliation_timestamp(generation) != parse_reconciliation_timestamp(context.generation):
+                    return verdict("UNKNOWN", "startup_request_generation_unproved")
+            except (ValueError, TypeError):
+                return verdict("UNKNOWN", "startup_request_generation_unproved")
+        lock = meta.get("device_lock_binding")
+        slot = meta.get("outreach_slot_v1")
+        devices = [request.get("device_id")]
+        if isinstance(lock, dict):
+            if lock.get("request_id") != request_id or lock.get("account_id") != account_id:
+                return verdict("UNKNOWN", "startup_request_device_unproved")
+            devices.append(lock.get("device_id"))
+        if isinstance(slot, dict):
+            if slot.get("account_id") != account_id:
+                return verdict("UNKNOWN", "startup_request_device_unproved")
+            devices.append(slot.get("device_id"))
+        devices = [x for x in devices if x is not None]
+        if (session != context.business_session_id or not devices or
+                any(x != device_id for x in devices) or request.get("run_id") != run_id):
+            return verdict("UNKNOWN", "startup_request_binding_unproved")
+        state = request.get("status")
+        if state in ("cancel_requested", "canceled", "cancelled", "completed", "failed", "stopped", "expired"):
+            request_status = state
+            return verdict("STOP", "startup_request_terminal", "human_manual_stop" if state in ("cancel_requested", "canceled", "cancelled", "stopped") else "")
+        if state not in ("starting", "running"):
+            return verdict("UNKNOWN", "startup_request_state_unproved")
+        request_status = state
+        remaining = 10.0-(monotonic()-started)
+        if remaining <= 0:
+            return verdict("UNKNOWN", "startup_stop_decision_timeout")
+        run = read_run(run_id, request_timeout=min(5.0, remaining), max_retries=0)
+        if expired():
+            return verdict("UNKNOWN", "startup_stop_decision_timeout")
+        if not isinstance(run, dict) or run.get("id") != run_id or run.get("account_id") != account_id:
+            return verdict("UNKNOWN", "startup_run_binding_unproved")
+        state = run.get("status")
+        if state in ("stopped", "canceled", "cancelled", "completed", "failed", "expired"):
+            run_status = state
+            return verdict("STOP", "startup_run_terminal", "human_manual_stop" if state in ("stopped", "canceled", "cancelled") else "")
+        if state not in ("pending", "running"):
+            return verdict("UNKNOWN", "startup_run_state_unproved")
+        run_status = state
+        # A token delivered during either GET wins over the earlier active row.
+        stopped = local_stop()
+        if stopped:
+            return stopped
+        if expired():
+            return verdict("UNKNOWN", "startup_stop_decision_timeout")
+        return verdict("ACTIVE", "startup_cancellation_clear")
+    except Exception:
+        # Never log rows/transport errors (which may contain URLs or credentials).
+        return verdict("UNKNOWN", "startup_control_plane_unavailable")
 
 
 def acknowledge_stop(

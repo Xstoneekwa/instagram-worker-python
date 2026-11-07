@@ -206,3 +206,54 @@ class ReceiptTests(unittest.TestCase):
         for fn in (budget.claim,lambda:budget.before_send('job')):
             with self.assertRaises(contract.SlotBlocked):fn()
         budget.rpc.assert_called_once()
+
+
+class StartupCleanupTests(unittest.TestCase):
+    def cleanup(self, *, started=False, late_stop=False, false_receipt=False):
+        from cooperative_business_stop import StartupCancellationStopped, StartupStopDecision
+        f=fixtures.SlotTests();f.setUp();budget=f.budget(sent_confirmed_in_slot=0)
+        budget.stop_reason='human_manual_stop'
+        budget.startup_phase_in_progress=True
+        budget.startup_phone_mutations_started=started
+        cause=dict(state='STOP',reason='startup_request_terminal',request_status='canceled')
+        if not late_stop:
+            budget.suppress_startup_phone_cleanup=True;budget.startup_cancellation=cause
+        def refusal(**kwargs):
+            budget.suppress_startup_phone_cleanup=True;budget.startup_cancellation=cause
+            raise StartupCancellationStopped(StartupStopDecision('STOP','startup_request_terminal'))
+        cleanup_receipt=fixtures.terminal_receipt(budget.context,sent=0,cleanup=false_receipt,
+            reason='unsafe_stop')
+        budget.rpc=Mock(return_value=cleanup_receipt)
+        env={'set_wait_event_callback':Mock(),'time':SimpleNamespace(monotonic=lambda:0),
+             'log':Mock(),'_CURRENT_RUN_ID':'run','_require_startup_cancellation_clear':Mock(side_effect=refusal),
+             'StartupCancellationStopped':StartupCancellationStopped}
+        fn=actual_function('runner.py','_outreach_cleanup_and_finish',env)
+        device=SimpleNamespace(press=Mock())
+        with patch.object(contract,'active',return_value=budget),patch('device.shell') as shell, \
+             patch('cooperative_business_stop.StopContext.from_env',return_value=None):
+            code=fn(device if started else None,1)
+            shell.assert_not_called();device.press.assert_not_called()
+            if not false_receipt:
+                self.assertEqual(fn(device,1),1)
+        self.assertEqual(code,1);budget.rpc.assert_called_once()
+        self.assertFalse(budget.rpc.call_args.args[1]['p_cleanup_ok'])
+        return budget,env
+
+    def test_no_phone_cleanup_when_canceled_during_integrity(self):
+        budget,_=self.cleanup()
+        self.assertEqual(budget.startup_cleanup_disposition,'not_required_no_startup_phone_mutation')
+        self.assertFalse(budget.terminal['cleanup_ok'])
+        self.assertEqual(budget.terminal['sent_confirmed_in_slot'],0)
+
+    def test_no_phone_cleanup_when_stop_was_observed_after_connection(self):
+        budget,_=self.cleanup(started=True)
+        self.assertEqual(budget.startup_cleanup_disposition,'not_performed_after_startup_mutation')
+
+    def test_cancellation_delivered_before_finally_is_checked_before_cleanup(self):
+        _,env=self.cleanup(started=True,late_stop=True)
+        env['_require_startup_cancellation_clear'].assert_called_once_with(account_id='a',
+            request_id='r',run_id='run',device_id='d',boundary='before_startup_cleanup',required=True)
+
+    def test_a_successful_cleanup_receipt_cannot_mask_unperformed_cleanup(self):
+        budget,_=self.cleanup(false_receipt=True)
+        self.assertFalse(budget.finished)

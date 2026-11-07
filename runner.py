@@ -65,6 +65,7 @@ import storage_health
 from runtime_artifacts import runtime_artifact_path
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
+from cooperative_business_stop import StartupCancellationStopped
 from worker_runtime_identity import (
     WorkerRuntimeIdentity,
     bind_worker_runtime_identity,
@@ -1109,6 +1110,43 @@ def _run_request_cancel_requested(run_request_id: str | None) -> bool:
     except Exception as exc:
         log("warning", "run_request_cancel_check_failed", run_request_id=rid, error=str(exc)[:200])
         return False
+
+
+def _require_startup_cancellation_clear(*, account_id, request_id, run_id,
+                                       device_id, boundary, required):
+    if not required:
+        return
+    from outreach_slot_contract import active
+    slot = active()
+    if slot is not None:
+        slot.startup_phase_in_progress = True
+    from cooperative_business_stop import StopContext, startup_stop_decision
+    decision = startup_stop_decision(StopContext.from_env(), account_id=str(account_id or ''),
+        request_id=str(request_id or ''), run_id=str(run_id or ''), device_id=str(device_id or ''))
+    safe = dict(state=decision.state, reason=decision.reason,
+        request_status=decision.request_status, run_status=decision.run_status,
+        stop_reason=decision.stop_reason, duration_ms=round(decision.duration_ms, 3), boundary=boundary)
+    log('info' if decision.state == 'ACTIVE' else 'warning',
+        'startup_cancellation_boundary', account_id=account_id, request_id=request_id,
+        run_id=run_id, **safe)
+    if decision.state == 'ACTIVE':
+        return
+    if slot is not None:
+        slot.startup_cancellation = safe
+        slot.suppress_startup_phone_cleanup = True
+        slot.stop_reason = 'human_manual_stop' if decision.stop_reason == 'human_manual_stop' else 'technical_failure'
+    raise StartupCancellationStopped(decision)
+
+
+def _startup_phone_mutation(guard, boundary, action, *args, **kwargs):
+    """Only startup actions: fresh decision immediately before the existing call."""
+    guard(boundary)
+    from outreach_slot_contract import active
+    slot = active()
+    if slot is not None:
+        # Set before the call: a lost response must not look like zero device work.
+        slot.startup_phone_mutations_started = True
+    return action(*args, **kwargs)
 
 
 def _abort_if_run_request_canceled(
@@ -27228,6 +27266,14 @@ def _main_impl() -> int:
         _follow60_engine_active = False
         return 96
 
+    def _startup_boundary(boundary):
+        _require_startup_cancellation_clear(account_id=account_id,
+            request_id=run_request_id, run_id=run_id, device_id=dispatch_ctx.get('device_id'),
+            boundary=boundary, required=bool(supabase_mode and run_request_id
+                and (outreach_session_run or account_session_run)))
+
+    _startup_boundary('after_integrity_and_activation')
+
     # Follow60 is resolved later than the initial request/run link.  Certify
     # the persistence binding now when the canonical control has activated the
     # canary; otherwise every eligible candidate would fail closed at the
@@ -27366,12 +27412,13 @@ def _main_impl() -> int:
 
     # The canonical device-activity gate above still precedes any ADB work.
     # Resolve and persist the exact build before connection/lifecycle/UI actions.
+    _startup_boundary('before_ui_profile_preparation')
     _prepare_instagram_ui_profile(
         dispatch_ctx, device_serial, account_id, run_id, run_request_id,
         args=args, account_session_run=account_session_run,
     )
     _t_device_ready = time.perf_counter()
-    d = connect_device(device_serial)
+    d = _startup_phone_mutation(_startup_boundary, 'before_device_connect', connect_device, device_serial)
     instagram_ui_profile_v1.attach(d)
     startup_evidence["device_connected_at"] = datetime.now(timezone.utc).isoformat()
     _CURRENT_DEVICE = d
@@ -27409,7 +27456,7 @@ def _main_impl() -> int:
             metadata={"run_type": dispatch_run_type or None},
         )
 
-    disable_android_animations(device_serial)
+    _startup_phone_mutation(_startup_boundary, 'before_animation_settings', disable_android_animations, device_serial)
     t = _phase("disable_android_animations", t)
 
     if not health_check(d):
@@ -27451,7 +27498,10 @@ def _main_impl() -> int:
     _t_version_lock = time.perf_counter()
     if bool(getattr(config, "LOCK_INSTAGRAM_AUTO_UPDATE", False)):
         try:
-            lock_instagram_update_system(d, getattr(config, "INSTAGRAM_PACKAGE", None))
+            _startup_phone_mutation(_startup_boundary, 'before_update_lock',
+                lock_instagram_update_system, d, getattr(config, "INSTAGRAM_PACKAGE", None))
+        except StartupCancellationStopped:
+            raise
         except Exception as e:
             log("warning", "instagram_auto_update_lock_runner_wrap_failed", error=str(e))
         t = _phase("instagram_auto_update_lock", t)
@@ -27459,7 +27509,10 @@ def _main_impl() -> int:
         getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False)
     ):
         try:
-            _lock_check = check_instagram_version_lock(d)
+            _lock_check = _startup_phone_mutation(_startup_boundary, 'before_version_lock',
+                check_instagram_version_lock, d)
+        except StartupCancellationStopped:
+            raise
         except Exception as e:
             log("warning", "instagram_version_lock_check_failed", error=str(e))
             _lock_check = {"unsafe_for_automation": True, "error": str(e),
@@ -27558,12 +27611,14 @@ def _main_impl() -> int:
             )
         else:
             time.sleep(config.WARM_SESSION_MICRO_WAIT_S)
+        _startup_boundary('after_warm_session_wait')
         t = _phase("warm_session_skip_force_stop", t)
     else:
         log("warning", "warm_session_rejected", reason=warm_reason)
         if warm_reason == "android_permission_dialog":
             log("warning", "unsupported_start_surface_detected", reason=warm_reason)
-            denied = dismiss_android_permission_dialog(d)
+            denied = _startup_phone_mutation(_startup_boundary, 'before_known_permission_recovery',
+                dismiss_android_permission_dialog, d)
             log(
                 "info",
                 "permission_recovery_restart",
@@ -27575,7 +27630,7 @@ def _main_impl() -> int:
         force_stop_used = True
         _t_force_stop = time.perf_counter()
         _package_before_force_stop = _current_package_safe(d)
-        force_stop(d, config.INSTAGRAM_PACKAGE)
+        _startup_phone_mutation(_startup_boundary, 'before_force_stop', force_stop, d, config.INSTAGRAM_PACKAGE)
         _startup_timing_log(
             "startup_app_readiness_force_stop_completed",
             _t_force_stop,
@@ -27595,7 +27650,7 @@ def _main_impl() -> int:
             timezone.utc
         ).isoformat()
         _package_before_app_start = _current_package_safe(d)
-        app_start(d, config.INSTAGRAM_PACKAGE)
+        _startup_phone_mutation(_startup_boundary, 'before_app_start', app_start, d, config.INSTAGRAM_PACKAGE)
         app_start_command_ms = (time.perf_counter() - _t_app_start_cmd) * 1000.0
         _startup_timing_log(
             "startup_app_readiness_app_start_completed",
@@ -27722,6 +27777,7 @@ def _main_impl() -> int:
                 performance_summary={"reason": "instagram_not_foreground"},
             )
         return _return_with_cleanup(d, 3)
+    _startup_boundary('after_app_readiness')
     startup_evidence["instagram_foreground_verified_at"] = datetime.now(
         timezone.utc
     ).isoformat()
@@ -27801,7 +27857,8 @@ def _main_impl() -> int:
             if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False))
             else "supabase_account_run"
         )
-        identity = _prepare_device_for_account_identity_preflight(
+        identity = _startup_phone_mutation(_startup_boundary, 'before_identity_device_preflight',
+            _prepare_device_for_account_identity_preflight,
             d,
             expected_package=config.INSTAGRAM_PACKAGE,
             expected_account_username=account_username,
@@ -27809,7 +27866,8 @@ def _main_impl() -> int:
             run_id=run_id or None,
         )
         if identity is None:
-            identity = verify_active_instagram_account_matches_expected(
+            identity = _startup_phone_mutation(_startup_boundary, 'before_emitter_identity',
+                verify_active_instagram_account_matches_expected,
                 d,
                 expected_account_username=account_username,
                 account_id=account_id,
@@ -27887,6 +27945,11 @@ def _main_impl() -> int:
             return _return_with_cleanup(d, 75)
         if isinstance(identity.actual_logged_in_username, str):
             verified_current_account_username = identity.actual_logged_in_username or None
+
+    _startup_boundary('after_emitter_identity')
+    from outreach_slot_contract import active as _startup_slot_active
+    if _startup_slot_active() is not None:
+        _startup_slot_active().startup_phase_in_progress = False
 
     if account_session_run and supabase_mode and account_id:
         from auto_restart_runtime import load_resume_policy_from_env
@@ -29640,10 +29703,19 @@ def _main_impl() -> int:
 
 def _main_with_existing_handlers() -> int:
     import dm_certification_admission as dm_certification
+    from cooperative_business_stop import StartupCancellationStopped
     try:
         if certification_admission.is_enabled():
             certification_admission.validate_execution_context()
         return _main_impl()
+    except StartupCancellationStopped as exc:
+        # Canonical terminal/canceled states belong to the control plane. Never
+        # overwrite them or manufacture cleanup/foreground/Send proof here.
+        log('warning', 'startup_cancellation_safe_stop',
+            account_id=_CURRENT_ACCOUNT_ID, request_id=_CURRENT_RUN_REQUEST_ID,
+            run_id=_CURRENT_RUN_ID, reason=exc.decision.reason,
+            cancellation_state=exc.decision.state, safe_to_continue_ui=False)
+        return 1
     except dm_certification.CertificationStop as exc:
         from outreach_slot_contract import active as outreach_slot_active
         if outreach_slot_active():
@@ -30106,7 +30178,22 @@ def _outreach_cleanup_and_finish(d, code, *, allow_device_cleanup=True):
     set_wait_event_callback(None)
     started = time.monotonic()
     slot.event('outreach_slot_cleanup_started')
-    cleanup_ok = d is not None and allow_device_cleanup
+    if getattr(slot, 'startup_phase_in_progress', False) and not getattr(slot, 'suppress_startup_phone_cleanup', False):
+        try:
+            _require_startup_cancellation_clear(account_id=slot.context['account_id'],
+                request_id=slot.context['request_id'], run_id=_CURRENT_RUN_ID,
+                device_id=slot.context['device_id'], boundary='before_startup_cleanup', required=True)
+        except StartupCancellationStopped:
+            pass  # The boundary recorded its refusal; no phone cleanup follows.
+    startup_stop = bool(getattr(slot, 'suppress_startup_phone_cleanup', False))
+    cleanup_ok = d is not None and allow_device_cleanup and not startup_stop
+    if startup_stop:
+        slot.startup_cleanup_disposition = ('not_performed_after_startup_mutation'
+            if getattr(slot, 'startup_phone_mutations_started', False)
+            else 'not_required_no_startup_phone_mutation')
+        slot.event('outreach_startup_cleanup_without_phone_action',
+            cleanup_ok=False, disposition=slot.startup_cleanup_disposition,
+            first_causal_reason=slot.startup_cancellation['reason'])
     if cleanup_ok:
         # Dedicated outreach always attempts both cleanup operations. Existing
         # full_cycle CLOSE_APPS/HOME behavior is untouched.
