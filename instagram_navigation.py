@@ -173,7 +173,8 @@ def _observe_outreach_missing_search(
                 if current.get("package") != pkg:
                     raise ValueError(reason)
                 reason = "search_activity_unproved"
-                if _activity_family(current.get("activity")) not in {"MainActivity", "InstagramMainActivity"}:
+                if (_activity_family(current.get("activity")) not in {"MainActivity", "InstagramMainActivity"}
+                        and not _followers_row_activity_allowed(d, pkg, str(current.get("activity") or ""))):
                     raise ValueError(reason)
                 reason = "search_query_unproved"
                 if (len(queries) != 1 or normalize_username(queries[0].get("text")) != query

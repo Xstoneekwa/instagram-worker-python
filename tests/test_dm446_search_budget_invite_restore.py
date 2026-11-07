@@ -48,16 +48,58 @@ class SearchDevice(absence.Device):
         return super().app_current()
 
 class SearchBudgetTests(unittest.TestCase):
-    def observe(self,frames=None,*,cost=.79,activity='com.instagram.mainactivity.InstagramMainActivity',capture=True):
+    def observe(self,frames=None,*,cost=.79,activity='com.instagram.mainactivity.InstagramMainActivity',capture=True,qualified=False,wrap=None):
         clock=Clock();d=SearchDevice(clock,frames,cost=cost,activity=activity)
+        if qualified:
+            import instagram_ui_446_compat as compat
+            d.serial='offline-search-serial'
+            d._instagram_search_observed_version=(id(d),d.serial,P,*compat.VERSION)
+            compat.retain_context(d,serial=d.serial,package=P,version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False)
+        subject=wrap(d) if wrap else d
         out={};buffer=absence.recorder_buffer()
         with ExitStack() as stack:
             for m in (nav,search):stack.enter_context(patch.object(m,'time',clock));stack.enter_context(patch.object(m,'log'))
             stack.enter_context(patch.object(nav._dm_retention,'_composer_buffer',buffer))
             retype=stack.enter_context(patch.object(nav,'type_search',return_value=True))
             if not capture:stack.enter_context(patch.object(nav._dm_retention,'capture_xml'))
-            exact=nav._observe_outreach_missing_search(d,absence.QUERY,outcome=out)
+            exact=nav._observe_outreach_missing_search(subject,absence.QUERY,outcome=out)
         return exact,out,d,clock,buffer,retype
+
+    def test_qualified_MainTab_reuses_local_authority_with_same_eight_IO_calls(self):
+        for activity in ('.activity.MainTabActivity','com.instagram.android.activity.MainTabActivity'):
+            with self.subTest(activity=activity):
+                exact,out,d,clock,buf,retype=self.observe(activity=activity,qualified=True)
+                self.assertFalse(exact);self.assertEqual(out['state'],'confirmed_absent')
+                self.assertEqual(d.calls,['dump_hierarchy','app_current']*4)
+                self.assertEqual([len(r) for r in out['proof'].rounds],[2,2])
+                self.assertLessEqual(clock.now-10,7.);retype.assert_called_once()
+                self.assertEqual([x['xml'] for x in buf['native_xml']],[absence.xml()]*2)
+
+    def test_MainTab_native_shaped_suggestion_remains_unknown_under_real_elapsed_budget(self):
+        exact,out,d,clock,buf,retype=self.observe([absence.suggestion_xml()],activity='.activity.MainTabActivity',qualified=True)
+        self.assertFalse(exact);self.assertNotIn('proof',out);self.assertNotEqual(out['state'],'confirmed_absent')
+        self.assertNotEqual(out['reason'],'search_activity_unproved')
+        self.assertLessEqual(clock.now-10,3.5);self.assertLessEqual(d.reads,3)
+        self.assertEqual(d.calls,['dump_hierarchy','app_current']*d.reads)
+        retype.assert_not_called();self.assertEqual(buf['native_xml'][0]['xml'],absence.suggestion_xml())
+
+    def test_exact_device_timing_proxy_only_no_forged_kind_subclass_or_nested_authority(self):
+        from run_latency_observability_v1 import _TimedProxy
+        def proxy(d,kind='device',cls=_TimedProxy):return cls(d,kind=kind,emit=None,methods=frozenset({'dump_hierarchy','app_current'}))
+        exact,out,d,_,_,_=self.observe(activity='.activity.MainTabActivity',qualified=True,wrap=proxy)
+        self.assertFalse(exact);self.assertEqual(out['state'],'confirmed_absent');self.assertEqual(d.reads,4)
+        class ForeignProxy(_TimedProxy):pass
+        for wrap in (lambda d:proxy(d,kind='selector'),lambda d:proxy(d,cls=ForeignProxy),lambda d:proxy(proxy(d))):
+            exact,out,d,_,_,retype=self.observe(activity='.activity.MainTabActivity',qualified=True,wrap=wrap)
+            self.assertFalse(exact);self.assertEqual(out['reason'],'search_activity_unproved')
+            self.assertNotIn('proof',out);self.assertEqual(d.reads,1);retype.assert_not_called()
+
+    def test_MainTab_has_no_extra_observation_after_late_or_failed_IO(self):
+        for frame,cost,reason in [(absence.xml(),4.,'search_observation_stale'),
+                                  (RuntimeError('private adapter error'),.79,'search_hierarchy_read_failed')]:
+            exact,out,d,_,_,retype=self.observe([frame],activity='.activity.MainTabActivity',qualified=True,cost=cost)
+            self.assertFalse(exact);self.assertNotIn('proof',out);self.assertEqual(out['reason'],reason)
+            self.assertEqual(d.reads,1);retype.assert_not_called()
 
     def test_positive_empty_requires_two_fresh_rounds_one_retype_and_original_XML(self):
         exact,out,d,clock,buf,retype=self.observe()
@@ -348,6 +390,41 @@ class CanonicalCompletionBindingTests(unittest.TestCase):
         _,_,kw,result,error,count,sends=self.execute(navigate=False)
         self.assertIsNone(error);self.assertNotIn('_sent_completion',kw)
         self.assertEqual((count,sends),(0,0));self.assertEqual(result['outcome'],'failed_retry')
+
+
+class MainTabActivityExactInverseTests(unittest.TestCase):
+    def test_only_activity_predicate_changes_and_existing_local_authority_is_byte_preserved(self):
+        import test_certification_admission as pins
+        base=subprocess.check_output(['git','show','b0ad19da5660878e28c3728e58f5ae28fb1646ec:instagram_navigation.py'],cwd=ROOT,text=True)
+        source=(ROOT/'instagram_navigation.py').read_text()
+        self.assertEqual(pins.restore_main_tab_activity_exact_delta('instagram_navigation.py',source),base)
+        nodes=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+        before,after=nodes(base),nodes(source)
+        self.assertEqual(set(before),set(after))
+        self.assertEqual({n for n in before if before[n]!=after[n]},{'_observe_outreach_missing_search'})
+        rest=lambda s:[ast.dump(n) for n in ast.parse(s).body if not isinstance(n,ast.FunctionDef) or n.name!='_observe_outreach_missing_search']
+        self.assertEqual(rest(base),rest(source))
+
+    def test_full_source_and_exact_single_hunk_reject_foreign_missing_moved_duplicate_bytes(self):
+        import base64,zlib,test_certification_admission as pins
+        rows=json.loads(zlib.decompress(base64.b64decode(pins._MAIN_TAB_ACTIVITY_EXACT_INVERSE)))
+        self.assertEqual(set(rows),{'instagram_navigation.py'})
+        row=rows['instagram_navigation.py'];self.assertEqual(len(row['hunks']),1)
+        source=(ROOT/'instagram_navigation.py').read_text();h=row['hunks'][0];at,new=h['offset'],h['new']
+        for bad in (source+'\n',source[:at]+source[at+1:],source[:at]+new+source[at:],
+                    source[:at]+source[at+len(new):]+new):
+            with self.subTest(hash=hashlib.sha256(bad.encode()).hexdigest()):
+                with self.assertRaises(AssertionError):pins.restore_main_tab_activity_exact_delta('instagram_navigation.py',bad)
+        self.assertEqual(pins.restore_main_tab_activity_exact_delta('not_a_scoped_file','unchanged'),'unchanged')
+
+    def test_prior_inverse_constants_and_all_existing_Golden_assertion_nodes_stay_intact(self):
+        base=subprocess.check_output(['git','show','b0ad19da5660878e28c3728e58f5ae28fb1646ec:tests/test_certification_admission.py'],cwd=ROOT,text=True)
+        current=(ROOT/'tests/test_certification_admission.py').read_text()
+        constants=lambda s:{n.targets[0].id:ast.literal_eval(n.value) for n in ast.parse(s).body if isinstance(n,ast.Assign)
+            and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id.endswith('_EXACT_INVERSE')}
+        for name,value in constants(base).items():self.assertEqual(constants(current)[name],value,name)
+        classes=lambda s:[ast.dump(n) for n in ast.parse(s).body if isinstance(n,ast.ClassDef)]
+        self.assertEqual(classes(base),classes(current))
 
 class SearchBudgetInviteExactInverseTests(unittest.TestCase):
     def test_full_parent_and_exact_hunks_are_required_foreign_missing_moved_duplicates_rejected(self):

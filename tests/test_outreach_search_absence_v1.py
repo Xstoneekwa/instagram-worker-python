@@ -63,6 +63,106 @@ def ack(j, **kwargs):
     return {**j,"status":"skipped","skip_reason":"search_no_results_confirmed","next_retry_at":None,
             "metadata":{**j["metadata"],**kwargs["metadata_patch"]}}
 
+
+def main_tab_device(frames=None, *, activity=".activity.MainTabActivity", package=PKG):
+    """Retain the same local version authority; never probe the device."""
+    import instagram_ui_446_compat as compat
+    d=Device(frames,package=package,activity=activity)
+    d.serial="offline-search-serial"
+    d._instagram_search_observed_version=(id(d),d.serial,package,*compat.VERSION)
+    compat.retain_context(d,serial=d.serial,package=package,
+                         version_name=compat.VERSION[0],version_code=compat.VERSION[1],unsafe=False)
+    return d
+
+def suggestion_xml():
+    # Deidentified native shape: exact typed query plus a magnifying-glass
+    # typeahead row, without profile resource-id or positive empty label.
+    return xml(label="",extra=(
+        '<node package="'+PKG+'" class="android.view.ViewGroup" clickable="true" bounds="[0,120][540,205]">'
+        '<node package="'+PKG+'" class="android.widget.ImageView" bounds="[20,140][52,172]"/>'
+        '<node package="'+PKG+'" class="android.widget.TextView" text="'+QUERY+'" bounds="[75,140][430,180]"/>'
+        '</node>'))
+
+class SearchMainTabActivityTests(TestCase):
+    def test_short_and_full_MainTab_keep_two_positive_rounds_and_one_exact_retype(self):
+        for activity in (".activity.MainTabActivity","com.instagram.android.activity.MainTabActivity"):
+            with self.subTest(activity=activity):
+                d=main_tab_device(activity=activity)
+                exact,out,retype=observe(d)
+                self.assertFalse(exact);self.assertEqual(out["state"],"confirmed_absent")
+                self.assertEqual([len(r) for r in out["proof"].rounds],[2,2])
+                self.assertEqual(d.reads,4)
+                retype.assert_called_once_with(d,QUERY,trusted_search_surface=True)
+
+    def test_missing_foreign_or_changed_retained_binding_never_reaches_absence(self):
+        import instagram_ui_446_compat as compat
+        changes=[
+            lambda d:setattr(d,"_instagram_search_observed_version",None),
+            lambda d:setattr(d,"_instagram_search_observed_version",list(d._instagram_search_observed_version)),
+            lambda d:setattr(d,"_instagram_search_observed_version",(0,d.serial,PKG,*compat.VERSION)),
+            lambda d:setattr(d,"_instagram_search_observed_version",(id(d),"foreign",PKG,*compat.VERSION)),
+            lambda d:setattr(d,"_instagram_search_observed_version",(id(d),d.serial,"foreign",*compat.VERSION)),
+            lambda d:setattr(d,"_instagram_search_observed_version",(id(d),d.serial,PKG,"372.0.0.48.60",377611059)),
+            lambda d:setattr(d,"_instagram_search_observed_version",(id(d),d.serial,PKG,compat.VERSION[0],True)),
+            lambda d:setattr(d,"serial","changed-serial"),
+            lambda d:setattr(d,"_instagram_446_observed_context",None),
+            lambda d:setattr(d,"_instagram_446_observed_context",replace(d._instagram_446_observed_context,device_identity=0)),
+            lambda d:setattr(d,"_instagram_446_observed_context",replace(d._instagram_446_observed_context,serial="foreign")),
+            lambda d:setattr(d,"_instagram_446_observed_context",replace(d._instagram_446_observed_context,package="foreign")),
+            lambda d:setattr(d,"_instagram_446_observed_context",replace(d._instagram_446_observed_context,version=("foreign",1))),
+        ]
+        for i,change in enumerate(changes):
+            with self.subTest(binding=i):
+                d=main_tab_device();change(d)
+                exact,out,retype=observe(d)
+                self.assertFalse(exact);self.assertNotIn("proof",out);self.assertEqual(d.reads,1)
+                self.assertEqual(out["reason"],"search_activity_unproved");retype.assert_not_called()
+                self.assertTrue(out["first_failure"]["first_observation_retained"])
+                self.assertTrue(out["first_failure"]["xml_retained"])
+
+    def test_MainTab_is_not_a_suffix_or_foreign_package_exception(self):
+        for activity,package in [
+            ("foreign.MainTabActivity",PKG),("MainTabActivity",PKG),
+            ("com.instagram.modal.ModalActivity",PKG),("OtherActivity",PKG),
+            (".activity.MainTabActivity","foreign.package"),
+        ]:
+            with self.subTest(activity=activity,package=package):
+                d=main_tab_device(activity=activity,package=package)
+                exact,out,retype=observe(d)
+                self.assertFalse(exact);self.assertNotIn("proof",out);self.assertEqual(d.reads,1)
+                self.assertIn(out["reason"],("search_activity_unproved","search_package_mismatch"))
+                retype.assert_not_called()
+
+    def test_retained_MainTab_suggestion_only_still_cannot_authorize_SKIP(self):
+        d=main_tab_device([suggestion_xml()])
+        exact,out,retype=observe(d)
+        self.assertFalse(exact);self.assertNotIn("proof",out)
+        self.assertNotEqual(out["state"],"confirmed_absent")
+        self.assertNotEqual(out["reason"],"search_activity_unproved")
+        self.assertLessEqual(retype.call_count,1)
+
+    def test_retained_MainTab_exact_profile_is_returned_for_fresh_rescan_without_tap(self):
+        d=main_tab_device([xml(label="",row=QUERY)])
+        exact,out,retype=observe(d)
+        self.assertTrue(exact);self.assertNotIn("proof",out);self.assertEqual(d.reads,2)
+        retype.assert_not_called()
+
+    def test_retained_MainTab_does_not_bypass_query_overlay_or_retention_guards(self):
+        frames=[xml(query="foreign_query"),xml(extra='<node class="android.app.Dialog"/>'),
+                xml(extra='<node package="com.android.permissioncontroller"/>'),
+                xml(extra='<node class="android.widget.ProgressBar"/>'),"<broken"]
+        for frame in frames:
+            with self.subTest(frame=frame):
+                d=main_tab_device([frame])
+                exact,out,retype=observe(d)
+                self.assertFalse(exact);self.assertNotIn("proof",out);self.assertEqual(d.reads,1)
+                self.assertNotEqual(out["reason"],"search_activity_unproved")
+                retype.assert_not_called()
+        with patch.object(nav._dm_retention,"capture_xml"):
+            exact,out,retype=observe(main_tab_device())
+        self.assertFalse(exact);self.assertEqual(out["reason"],"search_observation_retention_unproved")
+        retype.assert_not_called()
+
 class SearchAbsenceProofTests(TestCase):
     def test_two_positive_rounds_require_one_exact_retype_and_four_fresh_reads(self):
         d=Device();exact,out,retype=observe(d)
