@@ -111,7 +111,7 @@ def _observe_outreach_missing_search(
     """
     from unfollow_hybrid_strategy import (
         _wait_for_exact_search_result, classify_search_surface_xml, _is_no_results_label, _node_value,
-        normalize_username, SEARCH_NO_RESULTS_CONFIRMED,
+        normalize_username, SEARCH_NO_RESULTS_CONFIRMED, SEARCH_SURFACE_UNHEALTHY,
         SEARCH_RESULT_MAX_WAIT_S, SEARCH_RESULT_STABLE_NO_RESULTS_POLLS,
     )
 
@@ -123,58 +123,118 @@ def _observe_outreach_missing_search(
     reason = "search_surface_unhealthy"
     outcome["state"] = "unknown"
 
+    def retain(label: str, xml: str, *, failure: bool = False) -> bool:
+        # The existing writer buffers private original XML. Its public method
+        # deliberately has no success return; verify this exact new record,
+        # rather than treating a no-op/volume refusal as retained evidence.
+        try:
+            buffer = _dm_retention._ordinary_buffer()
+            if buffer is None:
+                return False
+            previous = {id(row) for row in buffer["native_xml"]}
+            _dm_retention.capture_xml(label, xml, failure=failure)
+            return any(id(row) not in previous and row.get("label") == label
+                       and row.get("xml") == xml and row.get("job_id") == buffer.get("job_id")
+                       and row.get("phase") == buffer["phase"]
+                       for row in buffer["native_xml"])
+        except Exception:
+            return False
+
     class Observation:
+        def __init__(self, round_index: int):
+            self.round_index = round_index
+            self.first_retained = False
+            self.reads = 0
+
         def dump_hierarchy(self, **kwargs: Any) -> str:
             nonlocal reason, last
             ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:read")
             captured = time.monotonic()
             captured_wall = time.time()
-            xml = str(d.dump_hierarchy(**kwargs) or "")
-            classification = classify_search_surface_xml(xml, query)
-            current = d.app_current() or {}
-            root = ET.fromstring(xml)
-            nodes = list(root.iter())
-            queries = [n for n in nodes if str(n.get("resource-id") or "") in {
-                pkg + ":id/action_bar_search_edit_text", pkg + ":id/search_edit_text",
-                pkg + ":id/search_src_text",
-            }]
-            safe = bool(
-                current.get("package") == pkg
-                and _activity_family(current.get("activity")) in {"MainActivity", "InstagramMainActivity"}
-                and len(queries) == 1
-                and normalize_username(queries[0].get("text")) == query
-                and queries[0].get("package") == pkg
-            )
-            overlay = any(
-                "permissioncontroller" in str(n.get("package") or "")
-                or "dialog" in str(n.get("class") or "").casefold()
-                or str(n.get("resource-id") or "").endswith(("/alertTitle", "/button1", "/dialog_root"))
-                or str(n.get("class") or "").endswith("ProgressBar")
-                for n in nodes
-            )
-            if not safe or overlay:
-                reason = "search_surface_unhealthy"
-                raise ValueError(reason)
-            if not 0 <= time.monotonic() - captured <= SEARCH_RESULT_MAX_WAIT_S:
-                reason = "search_observation_stale"
-                raise ValueError(reason)
-            last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
-            if classification.get("state") == SEARCH_NO_RESULTS_CONFIRMED:
-                # The shared reader intentionally supports broader Unfollow
-                # semantics. Outreach rejects contradictory committed rows.
-                if (not any(n.get("package") == pkg and _is_no_results_label(_node_value(n)) for n in nodes)
-                        or any(str(n.get("resource-id") or "").endswith("/row_search_user_username") for n in nodes)):
-                    reason = "search_empty_state_contradictory"
+            xml = None
+            current = {}
+            try:
+                reason = "search_hierarchy_read_failed"
+                xml = str(d.dump_hierarchy(**kwargs) or "")
+                self.reads += 1
+                if self.reads == 1:
+                    self.first_retained = retain(f"outreach_search_round_{self.round_index}_first", xml)
+                reason = "search_foreground_read_failed"
+                current = d.app_current() or {}
+                reason = "search_hierarchy_unparseable"
+                root = ET.fromstring(xml)
+                classification = classify_search_surface_xml(xml, query)
+                nodes = list(root.iter())
+                queries = [n for n in nodes if str(n.get("resource-id") or "") in {
+                    pkg + ":id/action_bar_search_edit_text", pkg + ":id/search_edit_text",
+                    pkg + ":id/search_src_text",
+                }]
+                reason = "search_package_mismatch"
+                if current.get("package") != pkg:
                     raise ValueError(reason)
-                # Keep only fresh reads; identical hashes alone prove nothing.
-                snapshots.append(hashlib.sha256(xml.encode("utf-8")).hexdigest())
-            return xml
+                reason = "search_activity_unproved"
+                if _activity_family(current.get("activity")) not in {"MainActivity", "InstagramMainActivity"}:
+                    raise ValueError(reason)
+                reason = "search_query_unproved"
+                if (len(queries) != 1 or normalize_username(queries[0].get("text")) != query
+                        or queries[0].get("package") != pkg):
+                    raise ValueError(reason)
+                reason = "search_overlay_unproved"
+                if any(
+                    "permissioncontroller" in str(n.get("package") or "")
+                    or "dialog" in str(n.get("class") or "").casefold()
+                    or str(n.get("resource-id") or "").endswith(("/alertTitle", "/button1", "/dialog_root"))
+                    or str(n.get("class") or "").endswith("ProgressBar")
+                    for n in nodes
+                ):
+                    raise ValueError(reason)
+                reason = "search_observation_stale"
+                ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:observed")
+                if not 0 <= time.monotonic() - captured <= SEARCH_RESULT_MAX_WAIT_S:
+                    raise ValueError(reason)
+                if classification.get("state") == SEARCH_SURFACE_UNHEALTHY:
+                    reason = str(classification.get("reason") or "search_surface_unhealthy")
+                    raise ValueError(reason)
+                reason = "search_observation_retention_unproved"
+                if not self.first_retained:
+                    raise ValueError(reason)
+                last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
+                if classification.get("state") == SEARCH_NO_RESULTS_CONFIRMED:
+                    # Broader Unfollow semantics never authorize Outreach absence.
+                    if (not any(n.get("package") == pkg and _is_no_results_label(_node_value(n)) for n in nodes)
+                            or any(str(n.get("resource-id") or "").endswith("/row_search_user_username") for n in nodes)):
+                        reason = "search_empty_state_contradictory"
+                        raise ValueError(reason)
+                    snapshots.append(hashlib.sha256(xml.encode("utf-8")).hexdigest())
+                if self.reads == 1:
+                    _dm_retention.capture_event(
+                        f"outreach_search_round_{self.round_index}_first",
+                        reason=classification.get("reason"), observed_at_monotonic=captured,
+                        foreground={k: current.get(k) for k in ("package", "activity")},
+                        xml_retained=self.first_retained,
+                    )
+                return xml
+            except Exception as exc:
+                if "first_failure" not in outcome:
+                    kept = retain("outreach_search_first_refusal", xml, failure=True) if xml is not None else False
+                    evidence = dict(reason=reason, exception_class=type(exc).__name__,
+                                    round_index=self.round_index, poll_index=self.reads,
+                                    xml_retained=kept, first_observation_retained=self.first_retained,
+                                    observed_at_monotonic=captured,
+                                    duration_ms=round((time.monotonic() - captured) * 1000, 2),
+                                    foreground={k: current.get(k) for k in ("package", "activity")})
+                    outcome["first_failure"] = evidence
+                    _dm_retention.capture_event("outreach_search_first_refusal", failure=True, **evidence)
+                raise
 
     try:
         for attempt in range(2):
             snapshots: list[str] = []
             last = {}
-            result = _wait_for_exact_search_result(Observation(), query)
+            result = _wait_for_exact_search_result(
+                Observation(attempt + 1), query, elapsed_budget_s=SEARCH_RESULT_MAX_WAIT_S,
+                propagate_observation_errors=True,
+            )
             outcome["reason"] = str(result.get("reason") or reason)
             if result.get("reason") == "search_results_loading_timeout":
                 outcome["state"] = "transient"
@@ -8534,21 +8594,76 @@ def _dm_446_observation(d, package, *, _record=None):
         raise
 
 
-def outreach_446_restoration_thread_proved(d, username, pkg):
+def outreach_446_restoration_thread_proved(d, username, pkg, *, sent_completion=None):
     """Current strict thread hint for restoration; never Send authority."""
     try:
+        epoch = ui_continuity_v1.observe('outreach_restore:begin')
         context = _dm_446_context(d)
         if context is None or context.package != pkg:
             return False
         observation = {}
         xml, composer = _dm_446_observation(d, pkg, _record=observation)
         _dm_retention.capture_xml('outreach_restore_current_thread', xml)
-        if not composer.get('visible') or composer.get('context') != 'thread':
-            return False
+        ui_continuity_v1.require_epoch(epoch, 'outreach_restore:observed')
         exact, _reason, _observed = _welcome_dm_thread_recipient_identity_from_hierarchy(
             xml, username,
         )
-        return bool(exact)
+        if not exact:
+            return False
+        if composer.get('visible') and composer.get('context') == 'thread':
+            return True  # Historical qualified active-composer branch unchanged.
+        # A disabled Invite is not a composer. Reuse the existing strict
+        # message-row/path and complete-text/direction readers, independently
+        # of identity, only after this operation's actual canonical sent row.
+        if type(sent_completion) is not dict:
+            return False
+        from outreach_slot_contract import active
+        slot = active()
+        job = sent_completion.get('job')
+        row = sent_completion.get('canonical_row')
+        if slot is None or type(job) is not dict or type(row) is not dict:
+            return False
+        meta, returned = job.get('metadata') or {}, row.get('metadata') or {}
+        scope = slot.context
+        if (sent_completion.get('device_identity') != id(d)
+                or sent_completion.get('continuity_epoch') != epoch
+                or not sent_completion.get('run_id')
+                or sent_completion['run_id'] != scope.get('run_id')
+                or scope.get('managed_campaign') is not True
+                or not scope.get('request_id') or not scope.get('client_id')
+                or not job.get('id') or not job.get('message_body')
+                or not 0 <= time.monotonic() - sent_completion['observed_at_monotonic'] <= 5.0
+                or row.get('id') != job['id'] or row.get('status') != 'sent'
+                or not row.get('sent_at') or row.get('message_body') != job['message_body']
+                or meta.get('origin') != 'CLIENT_LIST' or meta.get('managed_campaign') is not True
+                or any(job.get(k) != row.get(k) for k in ('account_id', 'campaign_id', 'dm_type', 'recipient_username'))
+                or job.get('account_id') != scope.get('account_id')
+                or job.get('campaign_id') != scope.get('campaign_id') or job.get('dm_type') != 'outreach'
+                or job.get('recipient_username') != username
+                or any(meta.get(k) != v or returned.get(k) != v for k, v in (
+                    ('client_id', scope['client_id']), ('campaign_revision', scope.get('campaign_revision')),
+                    ('outreach_request_id', scope['request_id']),
+                ))):
+            return False
+        root = ET.fromstring(xml)
+        def one(role):
+            matches = [n for n in root.iter() if n.get('resource-id') == pkg + ':id/' + role]
+            return matches[0] if len(matches) == 1 else None
+        title, explanation, messages = (one(k) for k in (
+            'thread_disabled_title', 'thread_disabled_bottom_description', 'message_list'))
+        if (title is None or explanation is None or messages is None
+                or title.get('text') != 'Invite sent'
+                or explanation.get('text') != 'You can send more messages after your invite is accepted.'
+                or any(n.get('resource-id') == pkg + ':id/row_thread_composer_edittext'
+                       or n.get('resource-id') == pkg + ':id/row_thread_composer_send_button_container'
+                       and n.get('enabled') == 'true' for n in root.iter())):
+            return False
+        from dm_thread_truth import _qualified_compose_message_rows
+        mode = _dm_outbound_expected_message_match_mode(xml, job['message_body'])
+        qualified = _qualified_compose_message_rows(root, messages, pkg)
+        return bool(mode in {'invite_postsend_exact', 'compose_outgoing_exact', 'compose_outgoing_export_equivalent'}
+                    and any(r['outgoing'] and _dm_full_exported_text_match_mode(
+                        r['bubble'].get('text', ''), job['message_body']) for r in qualified))
     except Exception as exc:
         log('info', 'dm_sender_restore_current_thread_unproved',
             reason=type(exc).__name__)

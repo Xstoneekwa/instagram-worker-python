@@ -661,8 +661,22 @@ def _search_surface_committed(hierarchy_xml: str) -> bool:
     )
 
 
-def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, object]:
-    """Poll one typed query until an exact row appears or absence is proved."""
+def _wait_for_exact_search_result(
+    device: object, expected: str, *, elapsed_budget_s: float | None = None,
+    propagate_observation_errors: bool = False,
+) -> dict[str, object]:
+    """Poll one query; the opt-in deadline includes sleeps and returned I/O.
+
+    A synchronous call already in flight cannot be preempted here. Its late
+    result never authorizes a tap or absence, and no further read is started.
+    Callers without the new options retain the historical Unfollow policy.
+    """
+
+    deadline = None
+    if elapsed_budget_s is not None:
+        if type(elapsed_budget_s) not in (int, float) or not 0 < elapsed_budget_s <= SEARCH_RESULT_MAX_WAIT_S:
+            raise ValueError("search_elapsed_budget_invalid")
+        deadline = time.monotonic() + elapsed_budget_s
 
     max_polls = max(
         2,
@@ -684,16 +698,32 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
     last_reason = "search_results_loading"
     last_specific_unhealthy_reason = ""
     for poll_index in range(1, max_polls + 1):
+        if deadline is not None and time.monotonic() + SEARCH_RESULT_POLL_INTERVAL_S >= deadline:
+            break
         time.sleep(SEARCH_RESULT_POLL_INTERVAL_S)
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
             try:
                 hierarchy = str(device.dump_hierarchy(compressed=False) or "")
             except TypeError:
+                if propagate_observation_errors or deadline is not None and time.monotonic() >= deadline:
+                    raise
                 hierarchy = str(device.dump_hierarchy() or "")
         except Exception:
+            if propagate_observation_errors:
+                raise
             hierarchy = ""
         observed_poll_count = poll_index
+        if deadline is not None and time.monotonic() >= deadline:
+            last_state = SEARCH_SURFACE_UNHEALTHY
+            last_reason = "search_observation_deadline_expired"
+            break
         classification = classify_search_surface_xml(hierarchy, expected)
+        if deadline is not None and time.monotonic() >= deadline:
+            last_state = SEARCH_SURFACE_UNHEALTHY
+            last_reason = "search_observation_deadline_expired"
+            break
         state = str(classification.get("state") or SEARCH_SURFACE_UNHEALTHY)
         last_state = state
         last_reason = str(classification.get("reason") or "search_surface_unhealthy")
@@ -845,7 +875,11 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
         "status": "search_surface_unhealthy",
         "reason": (
             "search_results_loading_timeout"
-            if last_state == SEARCH_RESULTS_LOADING
+            if last_state == SEARCH_RESULTS_LOADING and not (
+                deadline is not None and last_reason in {
+                    "search_query_suggestion_only", "search_results_non_match_only",
+                }
+            )
             else last_specific_unhealthy_reason or last_reason
         ),
         "search_surface_state": last_state,

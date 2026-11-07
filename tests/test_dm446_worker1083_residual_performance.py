@@ -269,7 +269,7 @@ class ResidualExactInverseTests(unittest.TestCase):
              '_safe_teardown_navigation','_resolve_dm_text_composer','_perform_real_welcome_dm_send'},set()),
           'instagram_navigation.py':(set(),{'outreach_446_restoration_thread_proved'})}
         for name,(modified,added) in expected.items():
-            current=(ROOT/name).read_text()
+            current=pins.restore_search_budget_invite_exact_delta(name,(ROOT/name).read_text())
             parent=pins.restore_worker1083_residual_exact_delta(name,current)
             a,b=functions(parent),functions(current)
             self.assertEqual(set(b)-set(a),added);self.assertEqual(set(a)-set(b),set())

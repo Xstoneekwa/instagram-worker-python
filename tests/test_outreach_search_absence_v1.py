@@ -9,6 +9,7 @@ import time
 import ast
 import subprocess
 from pathlib import Path
+from threading import get_ident
 
 import instagram_navigation as nav
 import dm_sender_engine as engine
@@ -37,9 +38,15 @@ class Device:
     def app_current(self):return dict(self.current)
     def __getattr__(self,name):raise AssertionError("unexpected physical operation: "+name)
 
+def recorder_buffer():
+    return dict(ordinary_certification=True, owner=get_ident(), phase="search",
+                job_id="job", native_xml=[], events=[], keys=set(),
+                event_bytes=0, xml_bytes=0, incomplete=False)
+
 def observe(d):
     outcome={}
-    with patch.object(nav.time,"sleep"),patch.object(nav,"type_search",return_value=True) as retype:
+    with patch.object(nav.time,"sleep"),patch.object(nav,"type_search",return_value=True) as retype, \
+         patch.object(nav._dm_retention,"_composer_buffer",recorder_buffer()):
         exact=nav._observe_outreach_missing_search(d,QUERY,outcome=outcome)
     return exact,outcome,retype
 
@@ -108,7 +115,8 @@ class SearchAbsenceProofTests(TestCase):
 
     def test_retype_failure_never_confirms_absence(self):
         d=Device();out={}
-        with patch.object(nav.time,"sleep"),patch.object(nav,"type_search",return_value=False):
+        with patch.object(nav.time,"sleep"),patch.object(nav,"type_search",return_value=False), \
+             patch.object(nav._dm_retention,"_composer_buffer",recorder_buffer()):
             self.assertFalse(nav._observe_outreach_missing_search(d,QUERY,outcome=out))
         self.assertNotIn("proof",out);self.assertEqual(out["reason"],"search_retype_failed")
 

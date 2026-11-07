@@ -1268,6 +1268,7 @@ def prepare_dm_sender_global_search_surface(
     last_recipient_username: str = "",
     prefer_back_stack_to_search: bool = False,
     _outreach_permission_check_owned: bool = False,
+    _sent_completion: dict[str, Any] | None = None,
 ) -> bool:
     """
     Leave Followers list / DM thread / profile and open verified global Instagram Search.
@@ -1450,6 +1451,7 @@ def prepare_dm_sender_global_search_surface(
                     version_context is not None and version_context.package == pkg
                     and outreach_446_restoration_thread_proved(
                         d, last_recipient_username, pkg,
+                        **({'sent_completion': _sent_completion} if _sent_completion is not None else {}),
                     )
                 )
                 if not current_thread_proved and is_lightweight_search_screen(d, pkg):
@@ -2612,6 +2614,7 @@ def _safe_teardown_navigation(
     pkg: str,
     account_username: str = "",
     prefer_back_stack_to_search: bool = False,
+    _sent_completion: dict[str, Any] | None = None,
 ) -> None:
     """Exit DM thread safely, then restore verified global Search (no percent-fallback from DM)."""
     _reset_dm_sender_post_job_restore()
@@ -2645,6 +2648,7 @@ def _safe_teardown_navigation(
         last_recipient_username=username,
         prefer_back_stack_to_search=prefer_back_stack_to_search,
         **({'_outreach_permission_check_owned': True} if delegate_permission_probe else {}),
+        **({'_sent_completion': _sent_completion} if delegate_permission_probe and _sent_completion is not None else {}),
     )
 
 
@@ -4342,12 +4346,19 @@ def execute_dm_job_real_send(
                 outcome=outcome,
             )
             with _dm_latency.dm446_span('restore', emit=log):
+                completion = None
+                if dm_type == 'outreach' and send_confirmed and outcome == 'sent' and type(updated_job) is dict:
+                    import ui_continuity_v1
+                    completion = dict(job=job, canonical_row=updated_job, run_id=str(run_id or ''),
+                                      device_identity=id(d), observed_at_monotonic=time.monotonic(),
+                                      continuity_epoch=ui_continuity_v1.observe('outreach_restore:persisted'))
                 _safe_teardown_navigation(
                     d,
                     recipient,
                     pkg=pkg,
                     account_username=account_username,
                     prefer_back_stack_to_search=(dm_type == "outreach"),
+                    **({'_sent_completion': completion} if completion is not None else {}),
                 )
             post_job_restore = _get_dm_sender_post_job_restore()
         post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)
