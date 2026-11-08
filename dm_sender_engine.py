@@ -3208,6 +3208,32 @@ def _complete_job_failed_retry(
         retry_delay_seconds=delay,
         metadata_patch=patch,
     )
+    if job.get("dm_type") == "outreach":
+        # Report the canonical acknowledgement, never infer a retry from the
+        # requested delay. No second persistence attempt on an uncertain ack.
+        from outreach_slot_contract import SlotBlocked
+        if not isinstance(row, dict):
+            raise SlotBlocked("outreach_failure_completion_unproved")
+        status = row.get("status")
+        attempts = (row or {}).get("attempts")
+        maximum = (row or {}).get("max_attempts")
+        bound = (isinstance(row, dict) and row.get("id") == job_id
+                 and row.get("account_id") == job.get("account_id")
+                 and type(attempts) is int and type(maximum) is int
+                 and type(job.get("attempts")) is int and attempts == job["attempts"] + 1
+                 and 0 < attempts <= maximum and maximum > 0
+                 and row.get("sent_at") is None)
+        metadata = (row or {}).get("metadata") or {}
+        if (not bound or not isinstance(metadata, dict)
+                or metadata.get("automatic_retry_blocked")
+                or metadata.get("manual_reconciliation_required")):
+            raise SlotBlocked("outreach_failure_completion_unproved")
+        if status == "failed" and attempts == maximum and row.get("next_retry_at") is None and row.get("finished_at"):
+            log("warning", "dm_sender_job_failed_exhausted", job_id=job_id,
+                attempts=attempts, max_attempts=maximum, retry_scheduled=False)
+            return row, "failed_terminal"
+        if status != "pending" or attempts >= maximum or not row.get("next_retry_at") or row.get("finished_at"):
+            raise SlotBlocked("outreach_failure_completion_unproved")
     log(
         "info",
         "dm_sender_job_failed_retry_scheduled",
@@ -4146,7 +4172,8 @@ def execute_dm_job_real_send(
                 updated_job, outcome = _complete_job_failed_retry(
                     job, last_error="navigation_failed", thread_state=thread_state,
                     metadata_patch={"search_failure_reason": search_outcome.get("reason"),
-                                    "search_failure_state": search_outcome.get("state", "unknown")}
+                                    "search_failure_state": search_outcome.get("state", "unknown"),
+                                    "search_observation_detail": search_outcome.get("observation_detail")}
                     if dm_type == "outreach" and search_outcome else None,
                 )
             final_status = str((updated_job or {}).get("status") or "pending")
@@ -4825,6 +4852,11 @@ def run_dm_sender_send(
             ):
                 from terminal_summary_projection import native_reason_code
                 native_reason = native_reason_code(native_reason)
+                metadata = native_job.get("metadata") or {}
+                search_reason = native_reason_code(metadata.get("search_failure_reason")) if isinstance(metadata, dict) else ""
+                if native_reason == "navigation_failed" and search_reason.startswith("search_"):
+                    summary["generic_navigation_reason"] = native_reason
+                    native_reason = search_reason
                 if native_reason:
                     summary["first_causal_reason"] = native_reason
         if slot:
@@ -4935,7 +4967,7 @@ def run_dm_sender_send(
                 summary["existing_thread_skips_count"] += 1
             if not bool(last_result.get("sendable")):
                 summary["sendability_failures_count"] += 1
-        elif outcome == "failed_retry":
+        elif outcome in ("failed_retry", "failed_terminal"):
             summary["jobs_failed_count"] += 1
             summary["failed_recipients"].append(recipient)
 

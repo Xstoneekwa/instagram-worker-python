@@ -22,10 +22,37 @@ import certification_admission as ca
 
 
 
+# Exact owner-scoped diagnostic inverse; historical safety assertions unchanged.
+_AUDITED_FAILURE_EXACT_INVERSE = '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'
+
+def restore_audited_failure_exact_delta(name, source):
+    import base64, zlib
+    row=json.loads(zlib.decompress(base64.b64decode(_AUDITED_FAILURE_EXACT_INVERSE))).get(name)
+    if row is None or hashlib.sha256(source.encode()).hexdigest()==row['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest()!=row['candidate_sha256']:
+        raise AssertionError('audited_failure_source_changed:'+name)
+    for h in reversed(row['hunks']):
+        at,new=h['offset'],h['new']
+        if source[at:at+len(new)]!=new:
+            raise AssertionError('audited_failure_hunk_changed:'+name)
+        source=source[:at]+h['old']+source[at+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest()!=row['base_sha256']:
+        raise AssertionError('audited_failure_inverse_mismatch:'+name)
+    return source
+
+def _restore_audited_failure_if_exact_candidate(name, source):
+    import base64, zlib
+    row=json.loads(zlib.decompress(base64.b64decode(_AUDITED_FAILURE_EXACT_INVERSE))).get(name)
+    if row and hashlib.sha256(source.encode()).hexdigest()==row['candidate_sha256']:
+        return restore_audited_failure_exact_delta(name, source)
+    return source
+
 # Exact owner-scoped activity compatibility inverse; prior Golden bytes stay fixed.
 _MAIN_TAB_ACTIVITY_EXACT_INVERSE = 'eNq1kMtqwzAURH9FaOWACZJlPexdl130C+pirvVwRBwp2EpCMP73OoH0RbvsXc7AzLkzYx+mBP0IhzbA2feQfAzb4xXXM+5gsu20g4ILXGNCKWHcWlqyTnKgllihQeuOWisJJxWruCiV41JqyY112glaMKq0VBSEwjnWEIw3kL6kaqAFOKWEJUq6slTQccF4px1zuiNm1YwyXFrgWotCF4RVJeWS2JJXptBr6u4U9hOuX2ccnZtswrVgVOY4DmYtQD/OO9SCTv7s07V1cPDDNdOncbQhbXubsgY/3AZvNijEhHxAc4NfwIenDytHDX5+TPfdWuomrFjBXn6vz/67vwnoj1v3vye2Lg5DvNhxasd4+eSBu2oyk6Pjvs/RlMa/4VAcV4gb5eb28fK2LO8OVLi2'
 
 def restore_main_tab_activity_exact_delta(name, source):
+    source = _restore_audited_failure_if_exact_candidate(name, source)
     import base64, zlib
     row=json.loads(zlib.decompress(base64.b64decode(_MAIN_TAB_ACTIVITY_EXACT_INVERSE))).get(name)
     if row is None or hashlib.sha256(source.encode()).hexdigest()==row['base_sha256']:
@@ -42,6 +69,7 @@ def restore_main_tab_activity_exact_delta(name, source):
     return source
 
 def _restore_main_tab_activity_if_exact_candidate(name, source):
+    source = _restore_audited_failure_if_exact_candidate(name, source)
     import base64, zlib
     row=json.loads(zlib.decompress(base64.b64decode(_MAIN_TAB_ACTIVITY_EXACT_INVERSE))).get(name)
     if row and hashlib.sha256(source.encode()).hexdigest()==row['candidate_sha256']:

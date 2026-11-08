@@ -442,12 +442,14 @@ class SearchBudgetInviteExactInverseTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):pins.restore_search_budget_invite_exact_delta(name,bad)
 
     def test_only_scoped_runtime_functions_change_and_all_earlier_inverse_constants_preserved(self):
+        import test_certification_admission as pins
         expected={'instagram_navigation.py':{'_observe_outreach_missing_search','outreach_446_restoration_thread_proved'},
                   'unfollow_hybrid_strategy.py':{'_wait_for_exact_search_result'},
                   'dm_sender_engine.py':{'prepare_dm_sender_global_search_surface','_safe_teardown_navigation','execute_dm_job_real_send'}}
         for name,changed in expected.items():
             old=subprocess.check_output(['git','show',PARENT+':'+name],cwd=ROOT,text=True)
-            new=(ROOT/name).read_text()
+            # Historical search-budget delta only; exact new diagnostic bytes are qualified separately.
+            new=pins._restore_audited_failure_if_exact_candidate(name,(ROOT/name).read_text())
             nodes=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
             a,b=nodes(old),nodes(new);self.assertEqual(set(a),set(b))
             self.assertEqual({k for k in a if a[k]!=b[k]},changed)

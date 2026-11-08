@@ -281,11 +281,13 @@ class PersistenceAndRestorationTests(unittest.TestCase):
     setUp = EffectivePerformanceTests.setUp
     # End-to-end engine state/persistence order with fake backend transport only.
     def execute(self, *, state="empty_new_thread", restore_ok=True, uncertain=False):
-        d=Transport();order=[];row=dict(id="job-1",recipient_username="fixture_recipient",dm_type="outreach",message_body=LONG)
+        d=Transport();order=[];row=dict(id="job-1",recipient_username="fixture_recipient",dm_type="outreach",message_body=LONG,attempts=0,max_attempts=3)
         snap=dict(composer_visible=True,composer_signal="resource_id_exact_composer_pkg")
         def finish(job,status,**kw):
             order.append(("persist",status))
-            return dict(row,status=status,sent_at="persisted" if status=="sent" else None,metadata=kw.get("metadata_patch",{}))
+            return dict(row,status="pending" if status=="failed" and kw.get("retry_delay_seconds") else status,
+                        attempts=1,max_attempts=3,finished_at=None,next_retry_at="2030-01-01T00:05:00Z" if status=="failed" else None,
+                        sent_at="persisted" if status=="sent" else None,metadata=kw.get("metadata_patch",{}))
         def restore(*a,**kw):
             order.append(("restore",restore_ok))
             engine._set_dm_sender_post_job_restore(post_job_restore_final_mode="previous_search_results_reused" if restore_ok else "restore_failed")

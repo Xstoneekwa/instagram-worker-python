@@ -32,7 +32,7 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
             "id": "offline-job",
             "account_id": "offline-account",
             "recipient_username": "controlled_recipient_",
-            "dm_type": dm_type,
+            "dm_type": dm_type, "attempts": 0, "max_attempts": 3,
             "message_body": "offline draft",
             "metadata": {"retained_source_reference": "offline-source"},
         }
@@ -51,9 +51,10 @@ class OutreachSendUnverifiedQuarantineTest(unittest.TestCase):
                 return None
             return {
                 **job,
-                "status": status,
+                "status": "pending" if status == "failed" and kwargs.get("retry_delay_seconds") else status,
+                "attempts": job["attempts"] + int(bool(kwargs.get("increment_attempt"))),
                 "last_error": kwargs.get("last_error"),
-                "skip_reason": kwargs.get("skip_reason"), "sent_at": None, "next_retry_at": None,
+                "skip_reason": kwargs.get("skip_reason"), "sent_at": None, "next_retry_at": "2030-01-01T00:00:00Z" if status == "failed" and kwargs.get("retry_delay_seconds") else None,
                 "metadata": {**job["metadata"], **kwargs.get("metadata_patch", {})},
             }
 

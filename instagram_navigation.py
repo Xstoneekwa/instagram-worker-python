@@ -145,6 +145,8 @@ def _observe_outreach_missing_search(
             self.round_index = round_index
             self.first_retained = False
             self.reads = 0
+            self.last_xml = None
+            self.last_semantic_reason = None
 
         def dump_hierarchy(self, **kwargs: Any) -> str:
             nonlocal reason, last
@@ -157,6 +159,7 @@ def _observe_outreach_missing_search(
                 reason = "search_hierarchy_read_failed"
                 xml = str(d.dump_hierarchy(**kwargs) or "")
                 self.reads += 1
+                self.last_xml = xml
                 if self.reads == 1:
                     self.first_retained = retain(f"outreach_search_round_{self.round_index}_first", xml)
                 reason = "search_foreground_read_failed"
@@ -199,6 +202,7 @@ def _observe_outreach_missing_search(
                 reason = "search_observation_retention_unproved"
                 if not self.first_retained:
                     raise ValueError(reason)
+                self.last_semantic_reason = str(classification.get("reason") or "search_surface_unhealthy")
                 last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
                 if classification.get("state") == SEARCH_NO_RESULTS_CONFIRMED:
                     # Broader Unfollow semantics never authorize Outreach absence.
@@ -232,11 +236,29 @@ def _observe_outreach_missing_search(
         for attempt in range(2):
             snapshots: list[str] = []
             last = {}
+            observation = Observation(attempt + 1)
+            started = time.monotonic()
             result = _wait_for_exact_search_result(
-                Observation(attempt + 1), query, elapsed_budget_s=SEARCH_RESULT_MAX_WAIT_S,
+                observation, query, elapsed_budget_s=SEARCH_RESULT_MAX_WAIT_S,
                 propagate_observation_errors=True,
             )
             outcome["reason"] = str(result.get("reason") or reason)
+            # Paired diagnostic evidence only. A late returned XML is not a
+            # counted semantic poll and never becomes positive absence proof.
+            elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+            deadline = result.get("reason") == "search_observation_deadline_expired"
+            retained = False
+            if deadline and observation.last_xml is not None:
+                retained = retain(f"outreach_search_round_{attempt + 1}_deadline", observation.last_xml, failure=True)
+            outcome["observation_detail"] = dict(
+                reason=outcome["reason"], last_safe_semantic_reason=observation.last_semantic_reason,
+                round_index=attempt + 1, read_count=observation.reads,
+                waiter_poll_count=int(result.get("poll_count") or 0),
+                late_result_discarded=deadline,
+                budget_ms=SEARCH_RESULT_MAX_WAIT_S * 1000, elapsed_ms=elapsed_ms,
+                deadline_expired=deadline, last_xml_retained=retained,
+            )
+            _dm_retention.capture_event("outreach_search_observation_result", **outcome["observation_detail"])
             if result.get("reason") == "search_results_loading_timeout":
                 outcome["state"] = "transient"
             if result.get("ok") is True:
