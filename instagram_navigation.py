@@ -101,6 +101,7 @@ class OutreachSearchAbsenceProof:
 
 def _observe_outreach_missing_search(
     d: u2.Device, username: str, *, outcome: dict[str, Any],
+    _shared_deadline: float | None = None,
 ) -> bool:
     """Reuse the bounded canonical observer, with stricter positive-empty proof.
 
@@ -115,6 +116,10 @@ def _observe_outreach_missing_search(
         SEARCH_RESULT_MAX_WAIT_S, SEARCH_RESULT_STABLE_NO_RESULTS_POLLS,
     )
 
+    if _shared_deadline is not None and (
+            type(_shared_deadline) not in (float, int) or not math.isfinite(_shared_deadline)
+            or _shared_deadline - time.monotonic() > 12.0):
+        raise ValueError("search_shared_deadline_invalid")
     query = normalize_username(username)
     pkg = str(config.INSTAGRAM_PACKAGE or "")
     proof_epoch = ui_continuity_v1.observe("outreach_search_absence:begin")
@@ -156,14 +161,23 @@ def _observe_outreach_missing_search(
             xml = None
             current = {}
             try:
+                reason = "search_observation_deadline_expired"
+                if _shared_deadline is not None and time.monotonic() >= _shared_deadline:
+                    raise ValueError(reason)
                 reason = "search_hierarchy_read_failed"
                 xml = str(d.dump_hierarchy(**kwargs) or "")
                 self.reads += 1
                 self.last_xml = xml
                 if self.reads == 1:
                     self.first_retained = retain(f"outreach_search_round_{self.round_index}_first", xml)
+                reason = "search_observation_deadline_expired"
+                if _shared_deadline is not None and time.monotonic() >= _shared_deadline:
+                    raise ValueError(reason)
                 reason = "search_foreground_read_failed"
                 current = d.app_current() or {}
+                reason = "search_observation_deadline_expired"
+                if _shared_deadline is not None and time.monotonic() >= _shared_deadline:
+                    raise ValueError(reason)
                 reason = "search_hierarchy_unparseable"
                 root = ET.fromstring(xml)
                 classification = classify_search_surface_xml(xml, query)
@@ -238,8 +252,13 @@ def _observe_outreach_missing_search(
             last = {}
             observation = Observation(attempt + 1)
             started = time.monotonic()
+            if _shared_deadline is not None and started >= _shared_deadline:
+                outcome["reason"] = "search_observation_deadline_expired"
+                return False
             result = _wait_for_exact_search_result(
-                observation, query, elapsed_budget_s=SEARCH_RESULT_MAX_WAIT_S,
+                observation, query,
+                **({"shared_deadline": _shared_deadline, "strict_positive_empty_only": True}
+                   if _shared_deadline is not None else {"elapsed_budget_s": SEARCH_RESULT_MAX_WAIT_S}),
                 propagate_observation_errors=True,
             )
             outcome["reason"] = str(result.get("reason") or reason)
@@ -255,7 +274,7 @@ def _observe_outreach_missing_search(
                 round_index=attempt + 1, read_count=observation.reads,
                 waiter_poll_count=int(result.get("poll_count") or 0),
                 late_result_discarded=deadline,
-                budget_ms=SEARCH_RESULT_MAX_WAIT_S * 1000, elapsed_ms=elapsed_ms,
+                budget_ms=(12000.0 if _shared_deadline is not None else SEARCH_RESULT_MAX_WAIT_S * 1000), elapsed_ms=elapsed_ms,
                 deadline_expired=deadline, last_xml_retained=retained,
             )
             _dm_retention.capture_event("outreach_search_observation_result", **outcome["observation_detail"])
@@ -272,6 +291,9 @@ def _observe_outreach_missing_search(
             else:
                 rounds.append(tuple(snapshots[-SEARCH_RESULT_STABLE_NO_RESULTS_POLLS:]))
             if attempt == 0:
+                if _shared_deadline is not None and time.monotonic() >= _shared_deadline:
+                    outcome["reason"] = "search_observation_deadline_expired"
+                    return False
                 ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:retype")
                 if not type_search(d, query, trusted_search_surface=True):
                     outcome["reason"] = "search_retype_failed"
@@ -5407,6 +5429,10 @@ def tap_account_result(
     _TAP_ACCOUNT_RESULT_FAILURE_REASON = None
     follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
     outreach_active = bool(outreach_search_context)
+    early_context = _dm_446_context(d) if outreach_active and not follow_ct_active and isinstance(outreach_search_outcome, dict) else None
+    early_semantic = bool(early_context is not None and early_context.package == str(config.INSTAGRAM_PACKAGE or ""))
+    search_deadline = time.monotonic() + 12.0 if early_semantic else None
+    early_observed = False
     preverified_bounds: dict[str, int] = {}
     preverified_age_ms: float | None = None
     preverified_rejection_reason = ""
@@ -5464,6 +5490,10 @@ def tap_account_result(
     except Exception as exc:
         preverified_rejection_reason = f"preverified_exact_validation_failed:{type(exc).__name__}"
         preverified_bounds = {}
+    if early_semantic and time.monotonic() >= search_deadline:
+        outreach_search_outcome.update(state="unknown", reason="search_observation_deadline_expired")
+        _TAP_ACCOUNT_RESULT_FAILURE_REASON = "search_observation_deadline_expired"
+        return False
     if preverified_exact_row_bounds and not preverified_bounds:
         log(
             "warning",
@@ -5731,6 +5761,9 @@ def tap_account_result(
             )
 
     fused = _peek_pending_fused_fast_ime_row(username)
+    if early_semantic and fused:
+        _clear_pending_fused_fast_ime_row()
+        fused = None
     preverified_exact_used = bool(preverified_bounds)
     if fused and not preverified_exact_used:
         _clear_pending_fused_fast_ime_row()
@@ -5840,7 +5873,7 @@ def tap_account_result(
     else:
         el = None
         fast_accept_used = False
-        if get_search_ui_mode() == "mixed_results":
+        if get_search_ui_mode() == "mixed_results" or early_semantic:
             if follow_ct_active or outreach_active:
                 poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
                     poll_source="initial_hot_row",
@@ -5866,6 +5899,16 @@ def tap_account_result(
                         username=username,
                         via=hot_via,
                     )
+            if early_semantic and el is None:
+                early_observed = True
+                if _observe_outreach_missing_search(
+                        d, username, outcome=outreach_search_outcome, _shared_deadline=search_deadline):
+                    if time.monotonic() < search_deadline:
+                        el = scan_once()
+                if time.monotonic() >= search_deadline:
+                    el = None
+                    outreach_search_outcome.pop("proof", None)
+                    outreach_search_outcome["reason"] = "search_observation_deadline_expired"
             fast_poll_max_s = float(
                 getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_MAX_S", 2.0)
             )
@@ -5873,7 +5916,7 @@ def tap_account_result(
                 fast_poll_max_s = max(fast_poll_max_s, 8.0)
             fast_deadline = time.monotonic() + fast_poll_max_s
             fast_poll_s = float(getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_S", 0.10))
-            while time.monotonic() < fast_deadline and el is None:
+            while not early_observed and time.monotonic() < fast_deadline and el is None:
                 poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
                     poll_source="fast_poll_hot_row"
                     if (follow_ct_active or outreach_active)
@@ -5906,7 +5949,7 @@ def tap_account_result(
                     break
                 time.sleep(fast_poll_s)
 
-        if el is None:
+        if el is None and not early_observed:
             timeout = (
                 float(getattr(config, "MIXED_RESULTS_ROW_DETECT_MAX_S", 2.5))
                 if get_search_ui_mode() == "mixed_results"
@@ -5942,7 +5985,8 @@ def tap_account_result(
     _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
     if el is None:
         if outreach_active and not follow_ct_active and outreach_search_outcome is not None:
-            if _observe_outreach_missing_search(d, username, outcome=outreach_search_outcome):
+            if not early_observed and _observe_outreach_missing_search(
+                    d, username, outcome=outreach_search_outcome, _shared_deadline=search_deadline):
                 el = scan_once()
             if el is None and outreach_search_outcome.get("proof") is not None:
                 _TAP_ACCOUNT_RESULT_FAILURE_REASON = "search_no_results_confirmed"
@@ -5979,6 +6023,11 @@ def tap_account_result(
                 final_reason=_TAP_ACCOUNT_RESULT_FAILURE_REASON,
             )
             return False
+    if early_semantic and time.monotonic() >= search_deadline:
+        outreach_search_outcome.pop("proof", None)
+        outreach_search_outcome["reason"] = "search_observation_deadline_expired"
+        _TAP_ACCOUNT_RESULT_FAILURE_REASON = "search_observation_deadline_expired"
+        return False
     _perf["row_tap_command_ms"] = 0.0
     _perf["post_tap_settle_ms"] = 0.0
     _perf["profile_transition_wait_ms"] = 0.0
@@ -10009,6 +10058,51 @@ def open_dm_thread_from_profile(
     return thread_state
 
 
+@dataclass(frozen=True)
+class _Outreach446ImmediateComposer:
+    device: object
+    context: object
+    package: str
+    binding: tuple
+    buffer: object
+    epoch: int
+    at: float
+    composer: object
+
+
+def _outreach446_composer_binding(d, buffer):
+    from run_latency_observability_v1 import _TimedProxy
+    if type(d) is not _TimedProxy or vars(d).get("_kind") != "device":
+        return None
+    c = _dm_latency.current_context()
+    b = buffer.get("context") or {}
+    binding = (c.get("account_id"), c.get("run_id"), c.get("job_id"), c.get("ui_generation"))
+    if (not all(type(x) is str and x for x in binding[:3])
+            or type(binding[3]) is not int
+            or b.get("account_id") != binding[0] or b.get("run_id") != binding[1]
+            or buffer.get("job_id") != binding[2]):
+        return None
+    return binding
+
+
+def _consume_outreach446_pretyping_composer(d, pkg, packet):
+    buffer = _dm_retention._ordinary_buffer()
+    if buffer is None or packet is None:
+        return None
+    issued = buffer.pop("_immediate_pretyping_composer", None)
+    if (type(packet) is not _Outreach446ImmediateComposer or issued is not packet
+            or packet.buffer is not buffer or packet.device is not d or packet.package != pkg
+            or _dm_446_context(d) is not packet.context
+            or _outreach446_composer_binding(d, buffer) != packet.binding
+            or not 0 <= time.monotonic() - packet.at <= 0.250):
+        return None
+    try:
+        ui_continuity_v1.require_epoch(packet.epoch, "outreach_pretyping_composer:consume")
+    except Exception:
+        return None
+    return packet.composer
+
+
 def verify_dm_composer_safe(
     d: u2.Device, pkg: str | None = None, *, _pretyping_readback=None,
 ) -> tuple[bool, str]:
@@ -10035,6 +10129,15 @@ def verify_dm_composer_safe(
                 )
                 if not _pretyping_readback.get('read_succeeded'):
                     return False, 'no_dm_composer'
+                buffer = _dm_retention._ordinary_buffer()
+                binding = _outreach446_composer_binding(d, buffer) if buffer is not None else None
+                if binding is not None and _dm_446_context(d) is context:
+                    packet = _Outreach446ImmediateComposer(
+                        d, context, p, binding, buffer,
+                        ui_continuity_v1.observe("outreach_pretyping_composer:issue"),
+                        time.monotonic(), composer)
+                    buffer["_immediate_pretyping_composer"] = packet
+                    _pretyping_readback["_immediate_composer"] = packet
             return True, "ok"
         _dm_latency.dm446_wait(0.08, reason='composer_poll', sleep=time.sleep, emit=log)
     _emit_wait_event("dm_composer_wait", (time.perf_counter() - w0) * 1000)
@@ -10049,9 +10152,16 @@ def type_dm_draft_only(
     force_method: str | None = None,
     composer: Any | None = None,
     _outreach_446_readback: bool = False,
+    _outreach_446_pretyping=None,
 ) -> tuple[bool, Any]:
     _ = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
+    reused = (_consume_outreach446_pretyping_composer(d, _, _outreach_446_pretyping)
+              if _outreach_446_readback else None)
+    if reused is not None:
+        composer = reused
+        log("info", "dm_sender_outreach_immediate_pretyping_composer_reused",
+            source="mandatory_current_pretyping_read", maximum_age_ms=250, single_use=True)
     ed = composer or _dm_find_focus_composer(d)
     if ed is None:
         return False, "no_composer"

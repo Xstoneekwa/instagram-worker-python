@@ -664,6 +664,8 @@ def _search_surface_committed(hierarchy_xml: str) -> bool:
 def _wait_for_exact_search_result(
     device: object, expected: str, *, elapsed_budget_s: float | None = None,
     propagate_observation_errors: bool = False,
+    shared_deadline: float | None = None,
+    strict_positive_empty_only: bool = False,
 ) -> dict[str, object]:
     """Poll one query; the opt-in deadline includes sleeps and returned I/O.
 
@@ -673,14 +675,23 @@ def _wait_for_exact_search_result(
     """
 
     deadline = None
+    shared = shared_deadline is not None
+    if shared:
+        if (type(shared_deadline) not in (int, float)
+                or not float("-inf") < shared_deadline < float("inf")
+                or shared_deadline - time.monotonic() > 12.0
+                or type(strict_positive_empty_only) is not bool):
+            raise ValueError("search_shared_deadline_invalid")
+        deadline = float(shared_deadline)
     if elapsed_budget_s is not None:
         if type(elapsed_budget_s) not in (int, float) or not 0 < elapsed_budget_s <= SEARCH_RESULT_MAX_WAIT_S:
             raise ValueError("search_elapsed_budget_invalid")
-        deadline = time.monotonic() + elapsed_budget_s
+        local_deadline = time.monotonic() + elapsed_budget_s
+        deadline = min(deadline, local_deadline) if shared else local_deadline
 
     max_polls = max(
         2,
-        int(SEARCH_RESULT_MAX_WAIT_S / SEARCH_RESULT_POLL_INTERVAL_S),
+        int((12.0 if shared else SEARCH_RESULT_MAX_WAIT_S) / SEARCH_RESULT_POLL_INTERVAL_S),
     )
     committed_surface_count = 0
     observed_poll_count = 0
@@ -699,6 +710,8 @@ def _wait_for_exact_search_result(
     last_specific_unhealthy_reason = ""
     for poll_index in range(1, max_polls + 1):
         if deadline is not None and time.monotonic() + SEARCH_RESULT_POLL_INTERVAL_S >= deadline:
+            if shared and time.monotonic() >= deadline:
+                last_state, last_reason = SEARCH_SURFACE_UNHEALTHY, "search_observation_deadline_expired"
             break
         time.sleep(SEARCH_RESULT_POLL_INTERVAL_S)
         if deadline is not None and time.monotonic() >= deadline:
@@ -841,7 +854,8 @@ def _wait_for_exact_search_result(
                 "stable_no_results_poll_count": stable_no_results_poll_count,
             }
         if (
-            stable_suggestion_only_poll_count
+            not strict_positive_empty_only
+            and stable_suggestion_only_poll_count
             >= SEARCH_RESULT_STABLE_SUGGESTION_ONLY_POLLS
         ):
             return {
@@ -857,7 +871,8 @@ def _wait_for_exact_search_result(
                 ),
             }
         if (
-            stable_non_match_only_poll_count
+            not strict_positive_empty_only
+            and stable_non_match_only_poll_count
             >= SEARCH_RESULT_STABLE_SUGGESTION_ONLY_POLLS
         ):
             return {

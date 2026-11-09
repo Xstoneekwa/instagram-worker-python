@@ -1,0 +1,14 @@
+{
+  "schema": "DM446_C75_HISTORICAL_COST_TARGETS_V1",
+  "source_worker": "c75b354ceff50828b0bb6ced225cc43cb6ca34d5",
+  "evidence_kind": "deidentified_existing_run_call_costs_not_candidate_physical_gains",
+  "source_log_sha256": "15e0087bdf2f252c209a0f0392549683996ea6c4adf8c69953341d693273e05b",
+  "typing_requalification_ms": [3711.141, 3652.312],
+  "negative_alternate_search_probe_ms": [3669.139, 3581.156],
+  "unknown_legacy_selector_ms": 14156.443,
+  "removed_calls_per_eligible_send": 18,
+  "removed_xml_dumps_per_eligible_send": 2,
+  "four_integral_text_reads_preserved": 4,
+  "physical_gain_seconds": null,
+  "target_30_dm_40_min_certified": false
+}

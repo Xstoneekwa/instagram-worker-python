@@ -396,7 +396,7 @@ class MainTabActivityExactInverseTests(unittest.TestCase):
     def test_only_activity_predicate_changes_and_existing_local_authority_is_byte_preserved(self):
         import test_certification_admission as pins
         base=subprocess.check_output(['git','show','b0ad19da5660878e28c3728e58f5ae28fb1646ec:instagram_navigation.py'],cwd=ROOT,text=True)
-        source=(ROOT/'instagram_navigation.py').read_text()
+        source=pins._restore_c75_early_search_if_exact_candidate('instagram_navigation.py',(ROOT/'instagram_navigation.py').read_text())
         self.assertEqual(pins.restore_main_tab_activity_exact_delta('instagram_navigation.py',source),base)
         nodes=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
         before,after=nodes(base),nodes(source)

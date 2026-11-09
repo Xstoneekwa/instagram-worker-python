@@ -25,7 +25,34 @@ import certification_admission as ca
 # Exact owner-scoped diagnostic inverse; historical safety assertions unchanged.
 _AUDITED_FAILURE_EXACT_INVERSE = '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'
 
+# Exact test-only inverse of the owner-scoped c75 early semantic Search delta.
+_C75_EARLY_SEARCH_EXACT_INVERSE = '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'
+
+def restore_c75_early_search_exact_delta(name, source):
+    import base64, zlib
+    row=json.loads(zlib.decompress(base64.b64decode(_C75_EARLY_SEARCH_EXACT_INVERSE))).get(name)
+    if row is None or hashlib.sha256(source.encode()).hexdigest()==row['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest()!=row['candidate_sha256']:
+        raise AssertionError('c75_early_search_source_changed:'+name)
+    for h in reversed(row['hunks']):
+        at,new=h['offset'],h['new']
+        if source[at:at+len(new)]!=new:
+            raise AssertionError('c75_early_search_hunk_changed:'+name)
+        source=source[:at]+h['old']+source[at+len(new):]
+    if hashlib.sha256(source.encode()).hexdigest()!=row['base_sha256']:
+        raise AssertionError('c75_early_search_inverse_mismatch:'+name)
+    return source
+
+def _restore_c75_early_search_if_exact_candidate(name, source):
+    import base64, zlib
+    row=json.loads(zlib.decompress(base64.b64decode(_C75_EARLY_SEARCH_EXACT_INVERSE))).get(name)
+    if row and hashlib.sha256(source.encode()).hexdigest()==row['candidate_sha256']:
+        return restore_c75_early_search_exact_delta(name, source)
+    return source
+
 def restore_audited_failure_exact_delta(name, source):
+    source = _restore_c75_early_search_if_exact_candidate(name, source)
     import base64, zlib
     row=json.loads(zlib.decompress(base64.b64decode(_AUDITED_FAILURE_EXACT_INVERSE))).get(name)
     if row is None or hashlib.sha256(source.encode()).hexdigest()==row['base_sha256']:
@@ -42,6 +69,7 @@ def restore_audited_failure_exact_delta(name, source):
     return source
 
 def _restore_audited_failure_if_exact_candidate(name, source):
+    source = _restore_c75_early_search_if_exact_candidate(name, source)
     import base64, zlib
     row=json.loads(zlib.decompress(base64.b64decode(_AUDITED_FAILURE_EXACT_INVERSE))).get(name)
     if row and hashlib.sha256(source.encode()).hexdigest()==row['candidate_sha256']:
@@ -792,31 +820,32 @@ def _restore_postsend_if_exact_candidate(name, source):
 
 # Exact inverse of the signed ordinary-certification observation-only delta.
 # Unknown source bytes are refused; no runtime or approval gate uses this helper.
-_PERSISTENT_CERTIFICATION_EXACT_INVERSE = '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'
+# Exact historical source references contain no serialized business identities.
+# Objects are read locally only; missing objects never trigger a fetch.
+_PERSISTENT_CERTIFICATION_EXACT_REFERENCES = {'dm_446_observation_retention.py': {'base_commit': '0a44138f7e0a3447446e7b0c14561067fdebf041', 'parent_blob_oid': 'a96431f06f3122a22b19dd6731d57c881e5dbcac', 'base_sha256': 'b2ea6a0fedf391704dab847398d12fb9462f21ba59f5f9c41e8bfa6a1cbad6ed', 'candidate_sha256': '24982ba3a2879d7c8ff787c885f595e77b3b20b9d7d5688a12da1ec3ea007f68', 'candidate_blob_oid': '3228d1d742a14f98a6a5dc9bbd74a3359ff63af1'}, 'instagram_navigation.py': {'base_commit': '0a44138f7e0a3447446e7b0c14561067fdebf041', 'parent_blob_oid': 'e75c7b3cb57c1405ec4ed23c8b4345ea221e3eda', 'base_sha256': 'cab7d01012a807efc94f231bf9d7f472d11249118af98ddd41593b3c6d480b1a', 'candidate_sha256': 'bce30d290dfd74ae74db863959ee9c8532d28701223f880de3b9f73d5d24a301', 'candidate_blob_oid': '78f9127b43c01a567f978a738cafe8332b202ff9'}, 'dm_sender_engine.py': {'base_commit': '0a44138f7e0a3447446e7b0c14561067fdebf041', 'parent_blob_oid': '9fe11139aeacc1c51e48ce83748d2d980e7853a4', 'base_sha256': '546efea4df518ea08e2d40734e12f8ea65b806407b59dac3944e22486b0ee59e', 'candidate_sha256': '88c04cbd51f42d16aa90f49fff98e96b37b5787023c0de8d919febb1c1a26568', 'candidate_blob_oid': '627286be74eb6ae809a02690b746ad6f34943b6f'}, 'outreach_session_orchestrator.py': {'base_commit': '0a44138f7e0a3447446e7b0c14561067fdebf041', 'parent_blob_oid': '7ae7a00afd9a0ca86d9f7f47b5b8e377244071c3', 'base_sha256': 'ce9fa411817c800534cf53ccdc8a7a893e2a472bfd1d31ceb1760745b3fa422f', 'candidate_sha256': '1f511c8298079c4108c9e37fd00711dcc35b024eeccabb574c26e4663566f733', 'candidate_blob_oid': '4c41c9ba1105849d96e59d61da621cb7e2cec477'}}
 
 def restore_persistent_certification_recorder_delta(name, source):
     source = _restore_chronometric_if_exact_candidate(name, source)
     source = _restore_postsend_if_exact_candidate(name, source)
-    import base64,zlib
-    record=json.loads(zlib.decompress(base64.b64decode(_PERSISTENT_CERTIFICATION_EXACT_INVERSE))).get(name)
+    record = _PERSISTENT_CERTIFICATION_EXACT_REFERENCES.get(name)
     if record is None:
         return source
-    if hashlib.sha256(source.encode()).hexdigest()!=record['candidate_sha256']:
-        raise AssertionError('persistent_certification_source_changed:'+name)
-    for hunk in reversed(record['hunks']):
-        offset,new=hunk['offset'],hunk['new']
-        if source[offset:offset+len(new)]!=new:
-            raise AssertionError('persistent_certification_hunk_changed:'+name)
-        source=source[:offset]+hunk['old']+source[offset+len(new):]
-    if hashlib.sha256(source.encode()).hexdigest()!=record['base_sha256']:
-        raise AssertionError('persistent_certification_inverse_mismatch:'+name)
-    return source
+    if hashlib.sha256(source.encode()).hexdigest() != record['candidate_sha256']:
+        raise AssertionError('persistent_certification_source_changed:' + name)
+    try:
+        parent = subprocess.check_output([
+            'git', '-C', str(ROOT), 'cat-file', 'blob', record['parent_blob_oid'],
+        ], stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AssertionError('persistent_certification_parent_blob_unavailable:' + name) from exc
+    if hashlib.sha256(parent).hexdigest() != record['base_sha256']:
+        raise AssertionError('persistent_certification_inverse_mismatch:' + name)
+    return parent.decode('utf-8')
 
 def _restore_persistent_if_exact_candidate(name, source):
     source = _restore_chronometric_if_exact_candidate(name, source)
     source = _restore_postsend_if_exact_candidate(name, source)
-    import base64,zlib
-    record=json.loads(zlib.decompress(base64.b64decode(_PERSISTENT_CERTIFICATION_EXACT_INVERSE))).get(name)
+    record = _PERSISTENT_CERTIFICATION_EXACT_REFERENCES.get(name)
     if record is not None and hashlib.sha256(source.encode()).hexdigest()==record['candidate_sha256']:
         return restore_persistent_certification_recorder_delta(name,source)
     return source
@@ -1806,6 +1835,25 @@ class TwoCandidateProcessTests(unittest.TestCase):
 
 
 class TwoCandidateConfigurationTests(unittest.TestCase):
+    def legacy_identity_fixture(self):
+        # Exercise the unchanged identity-specific legacy guard without shipping
+        # its operational identifiers as literals in a public test fixture.
+        raw = Path(ca.__file__).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         '1aeb7b7334761486d5540728f8617c8e23b1596cbaf57a54d34ecd366fc45d95')
+        function = next(n for n in ast.parse(raw).body if isinstance(n, ast.FunctionDef)
+                        and n.name == 'configure_from_signed_permit')
+        exact = next(ast.literal_eval(n.value) for n in ast.walk(function)
+                     if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'exact' for t in n.targets))
+        instances = [ast.literal_eval(n.comparators[0]) for n in ast.walk(function)
+                     if isinstance(n, ast.Compare) and len(n.comparators) == 1
+                     and isinstance(n.left, ast.Call) and isinstance(n.left.func, ast.Attribute)
+                     and n.left.func.attr == 'get' and len(n.left.args) == 1
+                     and isinstance(n.left.args[0], ast.Constant) and n.left.args[0].value == 'app_instance_id'
+                     and isinstance(n.comparators[0], ast.Constant)]
+        self.assertEqual(len(instances), 1)
+        return exact, instances[0]
+
     def configure_fixture(self, mutate=lambda m,b:None, *, verified=True):
         # Only external signature/read RPC responses are fixtures. Exact
         # configure, canonical row validation and durable store execute.
@@ -1813,9 +1861,11 @@ class TwoCandidateConfigurationTests(unittest.TestCase):
         import follow60_deployment_gate_v1 as dg
         import auto_restart_device_lock as locks,account_run_control as requests,supabase_client as db
         now=datetime.now(timezone.utc)
-        a=dict(permit_id='fixture',nonce='fresh-fixture',candidate_sha=BASE,account_id='76c1dff8-d16a-40cf-83df-8138d2ca5bd4',device_id='ddec36ad-19d8-4f00-9f7d-a8c2d29fe540',serial='RFGL62N646V',package='com.instagram.android',version_name='446.0.0.49.77',certification_not_before=(now-timedelta(minutes=1)).isoformat(),certification_expires_at=(now+timedelta(minutes=2)).isoformat(),max_candidate_admissions=2)
+        a=dict(permit_id='fixture',nonce='fresh-fixture',candidate_sha=BASE,account_id='00000000-0000-4000-8000-000000000001',device_id='00000000-0000-4000-8000-000000000002',serial='TEST_SERIAL_001',package='com.instagram.android',version_name='446.0.0.49.77',certification_not_before=(now-timedelta(minutes=1)).isoformat(),certification_expires_at=(now+timedelta(minutes=2)).isoformat(),max_candidate_admissions=2)
+        legacy, instance = self.legacy_identity_fixture()
+        a.update(legacy)
         sql={k:a[k] for k in ('permit_id','nonce','candidate_sha','device_id','serial','package','version_name','max_candidate_admissions')}
-        sql.update(account=a['account_id'],app_instance_id='36495109-0581-408c-baf0-d419c5caf534',version_code=385211304,expires_at=a['certification_expires_at'])
+        sql.update(account=a['account_id'],app_instance_id=instance,version_code=385211304,expires_at=a['certification_expires_at'])
         b={k:a[k] for k in ('account_id','device_id','serial','package','version_name','candidate_sha')}
         b.update(run_id='real-generated-run',request_id='real-generated-request',worker_id='fixture-worker',lease_id='fixture-lease')
         m=dict(certified_candidate_sha=BASE,a0_candidate_admission_permits=[a],physical_canary_permits=[sql]);mutate(m,b)
@@ -2046,22 +2096,63 @@ class DM446ExactFreezeTests(unittest.TestCase):
 
 class PersistentCertificationExactInverseTests(unittest.TestCase):
     def test_entire_parent_bytes_restored_and_unknown_changes_rejected(self):
-        import base64,zlib
-        records=json.loads(zlib.decompress(base64.b64decode(_PERSISTENT_CERTIFICATION_EXACT_INVERSE)))
-        for name,record in records.items():
-            source=_e2e_parent_source(name)
-            expected=subprocess.check_output(['git','-C',str(ROOT),'show',record['base_commit']+':'+name],text=True)
-            self.assertEqual(restore_persistent_certification_recorder_delta(name,source),expected)
-            for bad in (source+'\n',source.replace(record['hunks'][0]['new'],'',1)):
+        for name, record in _PERSISTENT_CERTIFICATION_EXACT_REFERENCES.items():
+            source = subprocess.check_output(['git','-C',str(ROOT),'cat-file','blob',record['candidate_blob_oid']], text=True)
+            self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), record['candidate_sha256'])
+            expected = subprocess.check_output([
+                'git', '-C', str(ROOT), 'show', record['base_commit'] + ':' + name,
+            ], text=True)
+            self.assertEqual(restore_persistent_certification_recorder_delta(name, source), expected)
+            for bad in (source + '\n', source[:-1], source + source,
+                        '#' + source, source[:len(source)//2] + '#' + source[len(source)//2:]):
                 with self.assertRaises(AssertionError):
-                    restore_persistent_certification_recorder_delta(name,bad)
+                    restore_persistent_certification_recorder_delta(name, bad)
 
     def test_classifier_shapes_and_protected_identity_unchanged(self):
         for name in ('dm_ui_446_surface.py','dm_ui_446_surface_shapes.json','dm_ui_446_evidence.py',
                      'dm_thread_truth.py','outreach_slot_contract.py','outreach_measurements.py'):
             source = restore_timestamp_prespawn_exact_delta(name, _e2e_parent_source(name)).encode()
-            self.assertEqual(source,subprocess.check_output(['git','-C',str(ROOT),'show',
-                '0a44138f7e0a3447446e7b0c14561067fdebf041:'+name]))
+            self.assertEqual(source, subprocess.check_output(['git','-C',str(ROOT),'show',
+                '0a44138f7e0a3447446e7b0c14561067fdebf041:' + name]))
+
+    def test_missing_parent_blob_fails_without_any_network_fetch(self):
+        name = 'outreach_session_orchestrator.py'
+        source = _e2e_parent_source(name)
+        with patch.object(subprocess, 'check_output', side_effect=subprocess.CalledProcessError(1, 'git')) as call:
+            with self.assertRaisesRegex(AssertionError, 'parent_blob_unavailable'):
+                restore_persistent_certification_recorder_delta(name, source)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args[0][3:5], ['cat-file', 'blob'])
+        self.assertNotIn('fetch', call.call_args.args[0])
+
+    def test_foreign_parent_bytes_fail_the_original_full_hash(self):
+        name = 'outreach_session_orchestrator.py'
+        source = _e2e_parent_source(name)
+        with patch.object(subprocess, 'check_output', return_value=b'foreign historical bytes'):
+            with self.assertRaisesRegex(AssertionError, 'inverse_mismatch'):
+                restore_persistent_certification_recorder_delta(name, source)
+
+    def test_source_mutation_is_rejected_before_reading_a_git_object(self):
+        name = 'outreach_session_orchestrator.py'
+        source = _e2e_parent_source(name)
+        with patch.object(subprocess, 'check_output') as call:
+            with self.assertRaisesRegex(AssertionError, 'source_changed'):
+                restore_persistent_certification_recorder_delta(name, source + '\n')
+        call.assert_not_called()
+
+    def test_reference_schema_is_only_immutable_source_identity(self):
+        import re
+        expected = {'base_commit','parent_blob_oid','candidate_blob_oid','base_sha256','candidate_sha256'}
+        self.assertEqual(len(_PERSISTENT_CERTIFICATION_EXACT_REFERENCES), 4)
+        for name, row in _PERSISTENT_CERTIFICATION_EXACT_REFERENCES.items():
+            self.assertEqual(set(row), expected)
+            self.assertRegex(row['base_commit'], r'^[a-f0-9]{40}$')
+            self.assertRegex(row['parent_blob_oid'], r'^[a-f0-9]{40}$')
+            self.assertRegex(row['candidate_blob_oid'], r'^[a-f0-9]{40}$')
+            self.assertRegex(row['base_sha256'], r'^[a-f0-9]{64}$')
+            self.assertRegex(row['candidate_sha256'], r'^[a-f0-9]{64}$')
+        serialized = json.dumps(_PERSISTENT_CERTIFICATION_EXACT_REFERENCES)
+        self.assertIsNone(re.search(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', serialized))
 
 
 class TimestampPreSpawnExactInverseTests(unittest.TestCase):

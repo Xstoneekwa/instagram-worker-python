@@ -93,7 +93,7 @@ class EffectivePerformanceTests(unittest.TestCase):
     def run_sender(self, parent=False, *, surface=None, version=446, kind="outreach",
                    partial=False, read_error=False, duplicate=False, identity=True,
                    verified=True, proof_len=0, restore_owned=True, gate_blocked=False,
-                   changed_context=False):
+                   changed_context=False, instrumented=False):
         d=Transport(surface,version);d.clock=self.clock;d.partial=partial;d.read_error=read_error
         self.clock.now=0.;events=[];calls=d.calls
         if changed_context:
@@ -146,7 +146,8 @@ class EffectivePerformanceTests(unittest.TestCase):
                 ns[name]=getattr(nav,name)
             result=None;error=None
             try:
-                result=fn(d,username="fixture_recipient",message_body=LONG,thread_state="empty_new_thread",
+                subject = obs.instrument_device(d, observe_properties=True) if instrumented else d
+                result=fn(subject,username="fixture_recipient",message_body=LONG,thread_state="empty_new_thread",
                     pkg=P,dm_type=kind,thread_snapshot=dict(composer_visible=True,composer_signal="resource_id_exact_composer_pkg"),
                     **({"sender_restoration_owned":restore_owned} if not parent else {}))
             except slot_contract.SlotBlocked as exc:error=str(exc)

@@ -1545,7 +1545,12 @@ def prepare_dm_sender_global_search_surface(
                     thread_to_profile_ms = round(
                         (time.perf_counter() - t_thread_profile) * 1000.0, 2
                     )
-                    if is_lightweight_search_screen(d, pkg):
+                    # Prefer a positive current destination over probing the alternative
+                    # Search surface. Never infer the profile from the preceding Back.
+                    profile_ready = bool(current_thread_proved and version_context is not None
+                                         and version_context.package == pkg
+                                         and verify_profile(d, last_recipient_username))
+                    if not profile_ready and is_lightweight_search_screen(d, pkg):
                         verified, why = _verify_dm_sender_global_search_surface(
                             d, pkg=pkg, account_username=src, full_followers_check=False
                         )
@@ -1583,7 +1588,7 @@ def prepare_dm_sender_global_search_surface(
                                 method="thread_back_direct_to_search_fast_path",
                             )
                             return True
-                    profile_ready = bool(verify_profile(d, last_recipient_username))
+                    profile_ready = profile_ready or bool(verify_profile(d, last_recipient_username))
                     if profile_ready:
                         t_profile_search = time.perf_counter()
                         search_ok = bool(return_to_search_from_profile(d, pkg))
@@ -3819,6 +3824,9 @@ def _perform_real_welcome_dm_send(
         clear_dm_draft(d)
 
     if not reused_draft:
+        immediate_packet = (pretyping_readback.pop('_immediate_composer', None)
+                            if pretyping_readback is not None and (not existing_draft.strip() or existing_draft_is_placeholder)
+                            else None)
         force_method = "set_text" if strategy == "set_text" else None
         with _dm_retention.phase('typing'), _dm_latency.dm446_span('typing', emit=log):
             ok_type, type_info = type_dm_draft_only(
@@ -3827,7 +3835,9 @@ def _perform_real_welcome_dm_send(
                 pkg,
                 force_method=force_method,
                 composer=_ed if bool(composer_fast_path_state.get("used")) else None,
-                **({'_outreach_446_readback': True} if qualified_446 else {}),
+                **({'_outreach_446_readback': True,
+                    **({'_outreach_446_pretyping': immediate_packet} if immediate_packet is not None else {})}
+                   if qualified_446 else {}),
             )
         log(
             "info",
