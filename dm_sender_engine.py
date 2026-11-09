@@ -55,6 +55,8 @@ from instagram_navigation import (
     set_search_ui_mode,
     tap_account_result,
     OutreachSearchAbsenceProof,
+    begin_outreach_search_restoration,
+    reuse_outreach_search_restoration,
     type_dm_draft_only,
     type_search,
     verify_app_foreground,
@@ -1269,6 +1271,7 @@ def prepare_dm_sender_global_search_surface(
     prefer_back_stack_to_search: bool = False,
     _outreach_permission_check_owned: bool = False,
     _sent_completion: dict[str, Any] | None = None,
+    _search_restoration: dict[str, Any] | None = None,
 ) -> bool:
     """
     Leave Followers list / DM thread / profile and open verified global Instagram Search.
@@ -1430,6 +1433,20 @@ def prepare_dm_sender_global_search_surface(
         return False
 
     if context == "dm_sender_post_job" and prefer_back_stack_to_search:
+        if type(_search_restoration) is dict and reuse_outreach_search_restoration(
+            d, _search_restoration.get("candidate"),
+            account_id=_search_restoration.get("account_id"), sender=src,
+            run_id=_search_restoration.get("run_id"), job_id=_search_restoration.get("job_id"),
+            query=last_recipient_username,
+        ):
+            _mark_dm_sender_global_search_ready(src, context=context)
+            _record_dm_sender_post_job_restore_attempt(
+                attempt="already_on_search", ok=True, reason="already_search_verified",
+                final_mode="previous_search_results_reused", used_back_stack=True,
+            )
+            log("info", "dm_sender_post_job_search_first_reused", context=context,
+                thread_probe_skipped=True, fresh_search_verified=True)
+            return True
         t_restore = time.perf_counter()
         _set_dm_sender_post_job_restore(
             post_job_back_to_previous_search_attempted=True,
@@ -2345,6 +2362,7 @@ def _navigate_to_recipient_dm_thread(
     previous_username: str | None = None,
     parent_search_ready: dict[str, Any] | None = None,
     outreach_search_outcome: dict[str, Any] | None = None,
+    _search_restore_job: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """
     Search → profile → DM thread. Returns (thread_state, navigation_ok).
@@ -2495,6 +2513,11 @@ def _navigate_to_recipient_dm_thread(
         set_search_ui_mode("accounts_tab" if accounts_tab_clicked else "mixed_results")
 
     t_tap = time.perf_counter()
+    if dm_type_norm == "outreach" and outreach_search_outcome is not None:
+        begin_outreach_search_restoration(
+            d, _search_restore_job, outreach_search_outcome,
+            account_id=account_id, sender=src, run_id=run_id,
+        )
     if not tap_account_result(
         d,
         uname,
@@ -2620,6 +2643,7 @@ def _safe_teardown_navigation(
     account_username: str = "",
     prefer_back_stack_to_search: bool = False,
     _sent_completion: dict[str, Any] | None = None,
+    _search_restoration: dict[str, Any] | None = None,
 ) -> None:
     """Exit DM thread safely, then restore verified global Search (no percent-fallback from DM)."""
     _reset_dm_sender_post_job_restore()
@@ -2654,6 +2678,7 @@ def _safe_teardown_navigation(
         prefer_back_stack_to_search=prefer_back_stack_to_search,
         **({'_outreach_permission_check_owned': True} if delegate_permission_probe else {}),
         **({'_sent_completion': _sent_completion} if delegate_permission_probe and _sent_completion is not None else {}),
+        **({'_search_restoration': _search_restoration} if _search_restoration is not None else {}),
     )
 
 
@@ -4152,6 +4177,7 @@ def execute_dm_job_real_send(
                 previous_username=previous_username,
                 parent_search_ready=parent_search_ready,
                 outreach_search_outcome=search_outcome if dm_type == "outreach" else None,
+                **({'_search_restore_job': job} if dm_type == "outreach" else {}),
             )
         navigation_finished = True
         nav_timings = _get_dm_sender_nav_timings()
@@ -4396,6 +4422,11 @@ def execute_dm_job_real_send(
                     account_username=account_username,
                     prefer_back_stack_to_search=(dm_type == "outreach"),
                     **({'_sent_completion': completion} if completion is not None else {}),
+                    **({'_search_restoration': dict(
+                        candidate=search_outcome['_search_restoration'], account_id=account_id,
+                        run_id=run_id, job_id=job_id,
+                    )} if dm_type == 'outreach' and not nav_ok and
+                        search_outcome.get('_search_restoration') is not None else {}),
                 )
             post_job_restore = _get_dm_sender_post_job_restore()
         post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)

@@ -99,6 +99,219 @@ class OutreachSearchAbsenceProof:
     rounds: tuple[tuple[str, ...], ...]
 
 
+
+@dataclass(eq=False)
+class _OutreachSearchRestoration:
+    """One job's comparison-only Search context; never absence/Send authority."""
+    device: object
+    job: dict
+    outcome: dict
+    sender: str
+    binding: tuple
+    buffer: dict
+    slot: object
+    version: object
+    eligible: bool = False
+    no_profile_entry: bool = False
+    observed_at: float = 0.0
+    epoch: int = -1
+    generation: int = -1
+    used: bool = False
+
+    def __reduce__(self):
+        raise TypeError("search_restoration_is_process_local")
+
+
+def _outreach_search_restore_binding(d, job, account_id, sender, run_id):
+    """Reuse admitted context, not phone/DB reads or a new identity decision."""
+    from outreach_slot_contract import active
+    slot, buffer, version = active(), _dm_retention._ordinary_buffer(), _dm_446_context(d)
+    correlated = _dm_latency.current_context()
+    if (slot is None or buffer is None or version is None or not sender
+            or not getattr(slot, "device_verified", False) or getattr(slot, "finished", True)
+            or slot.stop_reason or slot.remaining_ms() <= 0):
+        raise ValueError("search_restore_context_unproved")
+    c, b, meta = slot.context, buffer["context"], job.get("metadata") or {}
+    if (job.get("dm_type") != "outreach" or job.get("account_id") != account_id
+            or job.get("id") != buffer.get("job_id") or c.get("managed_campaign") is not True
+            or meta.get("outreach_request_id") != c.get("request_id")
+            or meta.get("outreach_slot_id") != c.get("slot_id")
+            or any(correlated.get(k) != v for k, v in
+                   (("account_id", account_id), ("run_id", run_id), ("job_id", job["id"])))
+            or type(correlated.get("ui_generation")) is not int
+            or correlated["ui_generation"] < 0):
+        raise ValueError("search_restore_job_binding_changed")
+    expected = dict(account_id=account_id, run_id=run_id, request_id=c.get("request_id"),
+                    device_id=c.get("device_id"), app_instance_id=c.get("app_instance_id"),
+                    serial=c.get("adb_serial"), package=c.get("package_name"),
+                    version_name=version.version[0], version_code=version.version[1])
+    if (any(not v or b.get(k) != v for k, v in expected.items())
+            or c.get("account_id") != account_id or version.serial != expected["serial"]
+            or version.package != expected["package"]):
+        raise ValueError("search_restore_admitted_scope_changed")
+    return (tuple(expected.items()) + (("sender", sender), ("job_id", job["id"]),
+            ("recipient", job.get("recipient_username")))), buffer, slot, version
+
+
+def begin_outreach_search_restoration(d, job, outcome, *, account_id, sender, run_id):
+    """Create eligibility only; the same reader must still prove no row was tapped."""
+    try:
+        if type(job) is not dict or type(outcome) is not dict:
+            return
+        binding, buffer, slot, version = _outreach_search_restore_binding(d, job, account_id, sender, run_id)
+        outcome["_search_restoration"] = _OutreachSearchRestoration(
+            d, job, outcome, sender, binding, buffer, slot, version)
+    except Exception:
+        return  # Missing authority preserves the original path without any new I/O.
+
+
+def _search_restoration_surface(xml, query, package, activity):
+    """Positive retained446 Search grammar; unknown overlays are not normal loading."""
+    from unfollow_hybrid_strategy import classify_search_surface_xml, normalize_username, _parse_bounds
+    from instagram_ads_data_consent_popup import classify_instagram_ads_data_consent_popup
+    from instagram_human_confirmation_challenge import classify_instagram_human_confirmation
+    from account_identity_guard import classify_instagram_account_restriction
+    root = ET.fromstring(xml)
+    nodes = list(root.iter("node"))
+    prefix = package + ":id/"
+    ime = str(getattr(config, "FAST_IME", "")).split("/", 1)[0]
+    if (classify_instagram_account_restriction(xml).detected
+            or classify_instagram_ads_data_consent_popup(xml).detected
+            or classify_instagram_human_confirmation(
+                xml, package_name=package, activity_name=activity).detected):
+        return False
+    if any(n.get("package", package) not in {package, "com.android.systemui", ime}
+           or any(x in n.get("class", "").lower() for x in ("dialog", "webview", "progressbar"))
+           or n.get("resource-id", "").endswith(("/alertTitle", "/button1", "/dialog_root"))
+           for n in nodes):
+        return False
+    # These empty containers are present in the retained native Search family.
+    # A populated sheet/modal/overlay must never become a Search reuse proof.
+    for name in ("modal_container", "overlay_layout_container", "bottom_sheet_camera_container"):
+        containers = [n for n in nodes if n.get("resource-id") == prefix + name]
+        if len(containers) != 1 or len(containers[0]):
+            return False
+    fields = [n for n in nodes if n.get("resource-id") == prefix + "action_bar_search_edit_text"]
+    results = [n for n in nodes if n.get("resource-id") == prefix + "recycler_view"]
+    headers = [n for n in nodes if n.get("resource-id") == prefix + "action_bar"]
+    if len(fields) != 1 or len(results) != 1 or len(headers) != 1:
+        return False
+    field = fields[0]
+    field_bounds = _parse_bounds(str(field.get("bounds", "")))
+    result_bounds = _parse_bounds(str(results[0].get("bounds", "")))
+    if not field_bounds or not result_bounds:
+        return False
+    # Only native status/navigation chrome may accompany Search. A SystemUI
+    # shade or foreign Android window covering its content is not authority.
+    for node in nodes:
+        if node.get("package") == "com.android.systemui":
+            bounds = _parse_bounds(str(node.get("bounds", "")))
+            if (not bounds or not (bounds["bottom"] <= field_bounds["top"]
+                    or bounds["top"] >= result_bounds["bottom"])):
+                return False
+    # The already-configured slim FastIME is a separate native window. Accept
+    # only its inert bottom strip, not an arbitrary foreign popup or keyboard.
+    for node in nodes:
+        if node.get("package") == ime:
+            bounds = _parse_bounds(str(node.get("bounds", "")))
+            if (not bounds or node.get("clickable") == "true"
+                    or bounds["top"] < result_bounds["bottom"] -
+                    (field_bounds["bottom"] - field_bounds["top"])):
+                return False
+    if (field.get("package") != package or field.get("class") != "android.widget.EditText"
+            or field.get("enabled") != "true" or normalize_username(field.get("text")) != normalize_username(query)
+            or field not in list(headers[0].iter())
+            or any(n.get("visible-to-user") == "false" or n.get("displayed") == "false"
+                   for n in (field, results[0], headers[0]))):
+        return False
+    allowed = set(headers[0].iter()) | set(results[0].iter())
+    parents = {child: parent for parent in root.iter() for child in parent}
+    for surface in (headers[0], results[0]):
+        while surface in parents:
+            surface = parents[surface]
+            allowed.add(surface)
+    empty_chrome = {prefix + name for name in (
+        "layout_container_right", "layout_container_main",
+        "activity_and_camera_shared_views_main_container", "modal_container",
+        "overlay_layout_container", "bottom_sheet_camera_container")}
+    # Non-Search interactive/text surfaces (including an opaque sheet) fail closed.
+    if any(n not in allowed and n.get("package") == package
+           and (n.get("resource-id") not in empty_chrome or len(n)
+                or n.get("clickable") == "true" or n.get("text", "").strip())
+           for n in nodes):
+        return False
+    classification = classify_search_surface_xml(xml, query)
+    return bool(classification.get("query_field_confirmed")
+                and classification.get("reason") in
+                {"search_query_suggestion_only", "search_results_non_match_only"})
+
+
+def _observe_search_restoration_candidate(d, outcome, xml, current, query):
+    candidate = outcome.get("_search_restoration")
+    if type(candidate) is not _OutreachSearchRestoration:
+        return
+    candidate.eligible = False
+    try:
+        if _search_restoration_surface(xml, query, str(config.INSTAGRAM_PACKAGE), current.get("activity", "")):
+            candidate.observed_at = time.monotonic()
+            candidate.epoch = ui_continuity_v1.observe("search_restore:comparison")
+            candidate.generation = _dm_latency.current_context().get("ui_generation", -1)
+            candidate.eligible = True
+    except Exception:
+        pass  # An optional shortcut cannot change the canonical Search verdict.
+
+
+def reuse_outreach_search_restoration(d, candidate, *, account_id, sender, run_id, job_id, query):
+    """One fresh bracketed Search observation, never a cached authority or gesture."""
+    if type(candidate) is not _OutreachSearchRestoration or candidate.used:
+        return False
+    candidate.used = True
+    try:
+        if (candidate.device is not d or not candidate.eligible or not candidate.no_profile_entry
+                or candidate.outcome.get("_search_restoration") is not candidate
+                or candidate.job.get("id") != job_id or candidate.job.get("recipient_username") != query
+                or not 0 <= time.monotonic() - candidate.observed_at <= 12.0):
+            return False
+        binding, buffer, slot, version = _outreach_search_restore_binding(
+            d, candidate.job, account_id, sender, run_id)
+        if (binding != candidate.binding or buffer is not candidate.buffer
+                or slot is not candidate.slot or version is not candidate.version
+                or _dm_latency.current_context().get("ui_generation") != candidate.generation):
+            return False
+        ui_continuity_v1.require_epoch(candidate.epoch, "search_restore:begin")
+        started = time.monotonic()
+        before = dict(d.app_current() or {})
+        if time.monotonic() - started > 3.5:
+            return False
+        xml = str(d.dump_hierarchy(compressed=False) or "")
+        if time.monotonic() - started > 3.5:
+            return False
+        after = dict(d.app_current() or {})
+        package = version.package
+        if (before != after or after.get("package") != package
+                or (_activity_family(after.get("activity")) not in {"MainActivity", "InstagramMainActivity"}
+                    and not _followers_row_activity_allowed(d, package, str(after.get("activity", ""))))
+                or not _search_restoration_surface(xml, query, package, str(after.get("activity", "")))):
+            return False
+        # Require retention of this exact new observation, not the old Search XML.
+        previous = {id(row) for row in buffer["native_xml"]}
+        _dm_retention.capture_xml("outreach_search_restore_current", xml)
+        retained = any(id(row) not in previous and row.get("xml") == xml
+                       and row.get("label") == "outreach_search_restore_current"
+                       and row.get("job_id") == job_id and row.get("phase") == buffer["phase"]
+                       for row in buffer["native_xml"])
+        fresh_binding, fresh_buffer, fresh_slot, fresh_version = _outreach_search_restore_binding(
+            d, candidate.job, account_id, sender, run_id)
+        ui_continuity_v1.require_epoch(candidate.epoch, "search_restore:consume")
+        return bool(retained and fresh_binding == binding and fresh_buffer is buffer
+                    and fresh_slot is slot and fresh_version is version
+                    and _dm_latency.current_context().get("ui_generation") == candidate.generation
+                    and 0 <= time.monotonic() - started <= 3.5)
+    except Exception as exc:
+        log("info", "outreach_search_restore_rejected", reason=type(exc).__name__)
+        return False
+
+
 def _observe_outreach_missing_search(
     d: u2.Device, username: str, *, outcome: dict[str, Any],
     _shared_deadline: float | None = None,
@@ -218,6 +431,8 @@ def _observe_outreach_missing_search(
                     raise ValueError(reason)
                 self.last_semantic_reason = str(classification.get("reason") or "search_surface_unhealthy")
                 last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
+                if outcome.get("_search_restoration") is not None:
+                    _observe_search_restoration_candidate(d, outcome, xml, current, query)
                 if classification.get("state") == SEARCH_NO_RESULTS_CONFIRMED:
                     # Broader Unfollow semantics never authorize Outreach absence.
                     if (not any(n.get("package") == pkg and _is_no_results_label(_node_value(n)) for n in nodes)
@@ -234,6 +449,9 @@ def _observe_outreach_missing_search(
                     )
                 return xml
             except Exception as exc:
+                candidate = outcome.get("_search_restoration")
+                if type(candidate) is _OutreachSearchRestoration and reason != "search_observation_deadline_expired":
+                    candidate.eligible = False
                 if "first_failure" not in outcome:
                     kept = retain("outreach_search_first_refusal", xml, failure=True) if xml is not None else False
                     evidence = dict(reason=reason, exception_class=type(exc).__name__,
@@ -6010,6 +6228,9 @@ def tap_account_result(
             _perf["post_tap_settle_ms"] = 0.0
             _perf["profile_transition_wait_ms"] = 0.0
             _log_row_evaluation_summary(found=False, selected_path="not_found")
+            candidate = (outreach_search_outcome or {}).get("_search_restoration")
+            if type(candidate) is _OutreachSearchRestoration:
+                candidate.no_profile_entry = True
             _dump_no_real_account_row_debug(d, username)
             _TAP_ACCOUNT_RESULT_FAILURE_REASON = (
                 "search_results_still_blank_after_recovery"
