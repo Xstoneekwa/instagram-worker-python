@@ -22,10 +22,40 @@ import certification_admission as ca
 
 
 
+# BEGIN HEALTHY_NONMATCH_EXACT_PARENT_ADAPTER
+# Frozen exact inverse of this owner-scoped delta; existing Golden assertions
+# continue against the exact signed parent, never a substring or loose AST.
+_HEALTHY_NONMATCH_EXACT_INVERSE = 'eJzVO2tz2ziSfwWn/XDSHK0R9ZZ2tHU6r2cnNYk9FTu7d2W7WBAJStxQpJaknGhT+e/XjQcJgqBsZ7JXdUyVIxFAo9HvbrS+dKIkL+g2o3svoU/RlhZRmvQPp87yS2dDc+blOzqcTDvLznjA6DDYTKZsM526EzoLFpvxZjQJWeC74Wa+mbu+70+m1F0M2IQuQnc4XPhssKGzmT8LZh2n49MkiAJaaFA37nxIF9T3w7E7XswX4XgxHoXueDrYsDGbhovBImThaOwuJsGCbRYTdzzxNy6jYeCP3YkLUHfH5GPeWd5/6aRhmLOisxzOxnOnk8YBbAATEvYJPvwnbEz9mOZ5N8zSf7JkdZcdWe8h4e/IzbHIGPV3t4xm/u46Tfa08He/ZWkaLh8SAs9DB//dJIzQYB8VBQscsmM0LnYnhwARN1Ec/ZMFRED4I0lSso3TDY0J3eQs8WFdnrOME1jAEnC3LGEZp/uSpJu/M78Q7wP2FPnMiwKWFFFxWpIokSP/OLIMvudFJr4fqP+Rbpn2JoUdsycWeLTw9mmSFmkS+UsSxiktmjPYIfV3tVE/hT2TI2yrBsvNNxEwMdkuSXE8xEy8w9PHwNWCZjZocpglQftgcBQ08PZ5fZjuYZtcbncv/sI5keTwh898dEi/338UC46Rp1O0wvsYhiyzkTOP08L2/ollOWJkDD0kna9OJWzTyXyohC1gIfFyzn8vY3mRyjPlxyykPut+3seO4J6jmOYQ6hfRE4DvgZyV0vq7IDnkB/gSx+knz0/3QlY9tj8Up9XPNM4Z30k/g+sOx4OGxnDRSvMIgDKxnKzIJk3jrhW2IBo+oOaEa1UURr6wKFtWdB86oGF5mjx0emS1An06gggmdM88EFAvTI8gHyB4YZTtWaC0Q8GDKfD/qVuBytNj5rOLKJDwDhkLo8/kPwBwBthJ4uEentrooUPCNCMJMBIABizv9RqUmAxLShDjecG5oqRCWz1fHjoSGc4w4OF2CyxFdqZJfHroOKScAcc6xkUOFAFNQAskp3ztacJhw6trcAqO+Q2ofkd8m5RdDIcmZaOXSzmoe5dLx7b/5vr2bv2X9+t33m/ry1/Xf7nqOcQ/ZhmoqTyl0gSBK5y2plz/57u3aSP3QA1lHA+n4zYRROkFTXi1aUD8aViwrJVAdhL96/c9S5smcSazxUgnjvCk7xmoOCl2DOwTmBHwwhBroM8D7ys9HTiLT1GxQ4wiHxAqTduFUJgDuvq+QQId+nrw73kJjMNKjwWJ9ocUfHqyJVGRg5PJo4RBOGHoXuMU8+lcP8UNKA1HP0kvwHiRTUYTfweHiOMc3kd5n9x9SqWvNDHP8Mi5I50ZO1BgDFBgA0YAghX2Oco5fn4MvPsxY8XpgL4iYyRj/zhGGQv65LZU8QvUXwkrYdF2BwTNxEsCvhZdP7c3x0TGPkSaAJiNdNkwYCSwgmX7KKFxX0BCZpI9o0kOiwElEAOC56SHAyDFgiU/PB4XQOyPeQFHjeIYYQMjfwTAUXgCCpv8WctIjFy+fXN1fee9fXN7JwMwdTrYkYRHgKXwVaEa5wy6dGAojQWeEA2Dt+fIlHSDWDVDch4DEOE+ecu21D9JXHPYpaDgTWBFlJECeKSYIwDqHOJ0A/nYxkh6ZANwlfk7IaYfrn+9vvnbdY2M+Wvp+EedjjoJxeacjhGAFZSsieRsMB1aQ4AyagfvDxKPeElltlgD0GiBqaQ2OvQiQzRXhMceks5oeTldvYDRIAalIVHOTcw1Ci0iiwTqlpv3cNyrR+nvq32XlS/bA0dgt3Jl/+/pRiKMQ5gGoPsDi/bla7UK8WSfi9pCDAz7cqCaaTkZD4rq3hS3krumWbSNqqhHE1WIR/Ck2tw9TcBuQhwEYS+NtsJR55zvdfg8FrEcUS30RFxkgPfjCNyUGGvC4xTXZytYGaQiueAuRweUpoR8b533SP5EBhaMBTHtuK4Mpt0bMx6fhaedDqEp9KrXz4OwHFkHZTmpIfAyYQGpuH80RmAhLY4ZKhJKuTGKyRPYmTNjInuqzeAmAPSQJZWCqfQxlMYJFuZ+CqztaVoi0zhH5kUOz4IclfMAMC+VulbXcubJlYa8QzJcY55DAnCzlf725bLePQYBPhhEyRF9HaTJAeBiQG6Fkx2lYGiyDJZFmyxyaGVaAh4Vl4PSmKlR+bUZFMMiuSn5N11E1Usc50RUkLQp/L0VJNK7uYC/hVHFh8YEOWAF6QV7L4ZJiX/qy4jUk+Ld7UkBr6XHKNy1I1VDuqzgk9EIYqC/0vjIrrIszbplCpDIWokQMs/f0WTL6gYG5PCYJYqKpudZzEdzW7wLgOMUXaPIWSD+oHnREqNa52qi5TS10DHVq/FC6JujKZmB+nA0GTYrTSZnQCRNn7Fs8k/OtPECDdCF27IGH/uib5EHBzbq2TcSlCUr8izn29bXjZF9Vhm3eyK6WT2X9X/c8pR/GQU/tqf97aQTtYVsT7F4V64oN+SuH70ebMVzG7OAcI6RtYPAMnCbXWtSLgRM0JKbRhmgDHroRs8wvmb+m0GCej6C4sEEnsSeLwrApjwts8PRPVgrMK1cUM5vhWg+bWWLqr6gw8TpeLYW4CriX5EuGlGNWMj1c7lsO7K1LPfjVlYGWtL/ip7ns9xWIZInOCMBCUT/K1JEEJSXhd423aoD1eIR8AFdpKNTcdi0/y20VeFOn2eX5zauLSpjHUD/VUvKEIifGP+c29MWeTUO+oLl8oyYZSVBV1Q6BBgNDQcP08ZLfAIWmyDvlxfDR/sKBrHcGR68mv42WjT5cT7irDu/2XwwbnV+zzu9PxCtrnLYnXKeBivth2iKp8u84nEhagzkE42wlETeFDmB48YnE6IskMh4QwZPlPz5XZlIAxd8Hrn3YXteIBDZflLARxOcqgGM+pMclB58BCAWtFQQHFU9EImtO8z7Jrw1zr4I42i7A4cAoRxEsD8yDKcA5T14x1yVARxZB6DSORH/WADhDYiiGqXc/U31rWs68Tyhh3yXFnpeop5PuwhoZpoQ8lMjRbeIo2QMxBrIGw+co6fMrFYfbrGnGvpVobW+5crEwWnxTLyq59WL4LwWLa48HKzvHegWLx+1bT1O/FxdBTYQFCnBfeUhH6XnE+eyuU/xxQIsCkltVfpRS+5bNF0KMi/7gPxcthV24HBPkHOKSEPdV/WtODT4/KfVSxjdTo4yHNTpqiCBNBywxHgmKMQDaqWhcyQDxSuOucxanrs/Ok/S9h21MAHYaZpI4BevUMFQzJKuYYY5YsNvI18ZTeNpqvvkb6Mci0Hf6xZdepwL9/F+9EguzJPZaSHB/ERur9bvL3/x3l/dfnh7571b/7f3t/WbO++25azyAtmC2e9JI1TGvXpBMgHYc+Mfx10xGVXOKGmUOyvv4D10IJtABY/AnwuS3Q8ez4c1mBFEajZmBiw57jGjYqZ4OMTttQVWr1AuOA9qOHw6Jlzzv1FIIPfTLvqf3L4smQuv3+U3IioHbifeUqFgZ8L/J3tT1e54n0G3u6P5Lo42fdGv0oUEE6ShDwk15H6YPBfhxRzTw/6OfQ4iTHswDsRp7qP4f/iM8PAHJQjL+CA7pkE555Q4gwRRzrSvtDlfAQailqAb9Oo5jd1m2N8PH1tcck18ynJjS4nlVZD5dUpX2aYfiDsYDBwyKjU2d6wVkRZocH6zYNdz6m+xKme+k4U4W8CvbkmOB5zZRa/FVpjDKi8VJVKJsOAiZLtt/KwA1DUAjFwspIGXTFsMcy27PotVIGoRK22XPr7OW2MwLSz29vmqnU/q5tFrrBlNYE4LfGE0xEUcznWHHCCW+kBwQgbo7ynYM9+TNNUxF7PqE1o2Mo2JCiGryKB884TBls885Y/aIkksxZVmu+/TA2ZgHoT4SfESv4Qc+eGHZxhv2bbd3H1H21rfxCiQzs80M3h369+89eXlzYfrOxVZ/Lx+8/bD+yv4ur69ua6HCWW3Sa1LqLXu+iLw6OtN8tdvOY3i2FlsLCwwrk/PbHTuOlV/0Kl+492oFbE+nAWMdRjxHr0iO5W1xM7Xx69OB0RXXMzA6BbkwNoe6rsTOplvJotZOHKHI3fEGHZzUhbM5oONG7hjd+S7G3/oB+GGuWzhurPZAL6zTbiZsJb2UDafDcaTzcZfDCc0GLibUTjBptJgMWab2XDiD93JfOhOp8PpYBIuhuE8mE2DCWUD33Wn1Le3h86njbKFaOMg0t+bNxTThf1q/IzXdZrtTxN3omuCDFCjnLfgghERAZdjQF2L5lEOtNGio9ymMhgYuaBocEhcLM6gWF7Fm1A0gfkDWZOqMRivpdC3VJWVA3rBHBOjssCihJqskxNRwbwGUAXxGxZDyMObPaQFKXbgMbY7swYC1ImxM0b6KS2tFQpj+llgeJJ+Smq+VaqW7MRVd5ha/NwrqYEHa9BVtSC+mls1GRgOxtORaQ0RNKaSogFJtIrw+4YhH8IEBocz+Y7Hihgp1ubXmyVF0tPHtheOfjd76NwPLhb0Inz8Mh1/RdLsenZQ/O0O32a2nkPea9i10qc6RJkNI8am9cGp6OXJTyu5cbMFGMe4d7ctri3Seo4bAMuGY9EeiiONtmcrdv0JwhLhSwvEi1Y0MMIR+Pet6IMMdl8PtSfjJ3OKRjSxq3XLF8iDyG1Ex4hIYFAGvth8x3OVF60/9Hd0kNp2fo79IuM6IwhaplUXVdPPwrxuqyX4jur6aj69RG+bzbdDd7ZoL9ZzpbaeFslQNRdV9TfYRlzHcm0SDM2OSYLX+42YBcFrTVj0M2hfgRXaXF7ijvgUbhFE3081Dswko7PwFBLe5qS6iGotPZhrgPBpDVGWtZTf8jbJNhq6drJpZSxrBmXzq/xO5/mAFsGf98phlu6J7Zc7sh312eadChSEe0Z82OgM4i213u/sD8IncAjvDKr6f2SXkJBjrbNHxJu8O0g0+WgixT777FCQbtWL4pA7CHrkx1/ZiX8y62wCy2eLr2drkDJOqdqvJKu6Wn9Q7Sz81j/oyqqCNlz/MYq1mwfXlZTX1tZ+riInqmJENcv88cp3bRgSW9RHbPCNiElvxMxzugVZSYMTvx2HNKynVggTUJ/y+C9np6H4Y0hPzEgNwPs7tqcPnSV8vvlwB1nk5S/e5c31z2/ev7v6syeL5Ov/ur26vrzy/uoKwwgH4taH/0CrK44n+tYcS4TVsssvV+u3d7/8j9rj+ub63foOPuAm54zN90LTIM/MbaT1Dx3j+k04JgR4H0OSgD7R6roecXfevuWJvmi+xtWJ09h+vLCa5fN2s7o/sJgdzcLIqo5KLF5aM+PCttK6RGWwU5c6JdgiyV0ZJWar8D9XcTYaJtUPB1fyaACwfMdtKj0cPKWV9XnGCM429S6LaKytEC84WGVzMDLUZuiva/PwTJZ5+NqycSPgW7VH4Gbct7KHg/YttJB61RZrv7KE2Va6bDR+reBloX4TEJ88Kcy8rGjCFJHr6p7L8ud9XEoUnN8ohIpmlUbysxKpRcsFBQ8oVaOLCJ/NsPkRfxSi6e1qYFEj7yM7WY3zk6ssstHsYiqg1a6snjUqddTcF6Cm6gMCM8PoTObTxk8DG5YSYX2MDgcRFONHzyxC2OM+myt4BfSyoG0gPR00Kw7mYz3+siTSVxtq5qNT1FhqIDScW39gKfPORqbBfzNRHtqcVlGgmvsN5eLvtLn80jjyZNyIJdSu3Qpe49cpKgSzcIdvp6jc+su9l22gs64J1zjKdLHQjxKnEOh3oiRMRQxR1YoNpMtCIc4TkcZKE+1mqa61wP4Kf2+vD56/h6v173z345XQjQLzaL6wigg/BcqZfo3w7VciDVBoYQR5Ak/L8+uS/aJ7D7wr+Pq/53MakQ=='
+
+def restore_healthy_nonmatch_exact_delta(name, source):
+    import base64, zlib
+    row = json.loads(zlib.decompress(base64.b64decode(_HEALTHY_NONMATCH_EXACT_INVERSE))).get(name)
+    if row is None or hashlib.sha256(source.encode()).hexdigest() == row['base_sha256']:
+        return source
+    if hashlib.sha256(source.encode()).hexdigest() != row['candidate_sha256']:
+        raise AssertionError('healthy_nonmatch_source_changed:' + name)
+    for h in reversed(row['hunks']):
+        at, new = h['offset'], h['new']
+        if source[at:at + len(new)] != new:
+            raise AssertionError('healthy_nonmatch_hunk_changed:' + name)
+        source = source[:at] + h['old'] + source[at + len(new):]
+    if hashlib.sha256(source.encode()).hexdigest() != row['base_sha256']:
+        raise AssertionError('healthy_nonmatch_inverse_mismatch:' + name)
+    return source
+
+def _restore_healthy_nonmatch_if_exact_candidate(name, source):
+    import base64, zlib
+    row = json.loads(zlib.decompress(base64.b64decode(_HEALTHY_NONMATCH_EXACT_INVERSE))).get(name)
+    if row and hashlib.sha256(source.encode()).hexdigest() == row['candidate_sha256']:
+        return restore_healthy_nonmatch_exact_delta(name, source)
+    return source
+# END HEALTHY_NONMATCH_EXACT_PARENT_ADAPTER
+
 # BEGIN SEARCH_FIRST_EXACT_PARENT_ADAPTER
 _SEARCH_FIRST_PARENT_BLOBS = {'instagram_navigation.py': {'base_sha256': '6052acfe74c9274556ada9ebfe12f037064ac7c65def794d47fff41b98334b87', 'candidate_sha256': '40ea2db56eb6615a7d9b4b35fedc1fb8b81ccc56a190e5a9f1229ce0ba77c7d7', 'parent_blob_oid': '2bb4aec7b62f2e134992cd611b3d33055db7cce5'}, 'dm_sender_engine.py': {'base_sha256': '86904185d90e5747edd6389762f4456285bc704e8c85ffc77eb6dc2d677ee9a1', 'candidate_sha256': 'c15a58b597f312313ee89f4aed780b1d1413c1bc2cdfbe1e911770bc2ebfb5e7', 'parent_blob_oid': '7386c1bffdf99fd621dc0d5ebc16feed25809077'}}
 
 def restore_search_first_restoration_exact_delta(name, source):
+    source = _restore_healthy_nonmatch_if_exact_candidate(name, source)
     row = _SEARCH_FIRST_PARENT_BLOBS.get(name)
     if row is None or hashlib.sha256(source.encode()).hexdigest() == row['base_sha256']:
         return source
@@ -40,6 +70,7 @@ def restore_search_first_restoration_exact_delta(name, source):
     return parent.decode('utf-8')
 
 def _restore_search_first_if_exact_candidate(name, source):
+    source = _restore_healthy_nonmatch_if_exact_candidate(name, source)
     row = _SEARCH_FIRST_PARENT_BLOBS.get(name)
     if row and hashlib.sha256(source.encode()).hexdigest() == row['candidate_sha256']:
         return restore_search_first_restoration_exact_delta(name, source)

@@ -99,6 +99,26 @@ class OutreachSearchAbsenceProof:
     rounds: tuple[tuple[str, ...], ...]
 
 
+@dataclass(frozen=True)
+class OutreachSearchNonmatchProof:
+    """One admitted, healthy, stabilized Search; no global absence assertion."""
+    generation: object
+    device_identity: int
+    query: str
+    package: str
+    observed_at_monotonic: float
+    observed_at_epoch: float
+    continuity_epoch: int
+    binding: tuple
+    stable_start_epoch: float
+    stable_end_epoch: float
+    stable_duration_ms: float
+    samples: tuple[tuple[str, str, float], ...]
+    ui_generation: int
+    buffer_identity: int
+    slot_identity: int
+    version_identity: int
+
 
 @dataclass(eq=False)
 class _OutreachSearchRestoration:
@@ -165,7 +185,7 @@ def begin_outreach_search_restoration(d, job, outcome, *, account_id, sender, ru
         return  # Missing authority preserves the original path without any new I/O.
 
 
-def _search_restoration_surface(xml, query, package, activity):
+def _search_restoration_surface(xml, query, package, activity, *, allow_committed_empty=False):
     """Positive retained446 Search grammar; unknown overlays are not normal loading."""
     from unfollow_hybrid_strategy import classify_search_surface_xml, normalize_username, _parse_bounds
     from instagram_ads_data_consent_popup import classify_instagram_ads_data_consent_popup
@@ -241,9 +261,12 @@ def _search_restoration_surface(xml, query, package, activity):
            for n in nodes):
         return False
     classification = classify_search_surface_xml(xml, query)
+    positive_empty = bool(allow_committed_empty
+        and classification.get("reason") == "username_not_found_confirmed"
+        and not any(n.get("resource-id") == prefix + "row_search_user_username" for n in nodes))
     return bool(classification.get("query_field_confirmed")
-                and classification.get("reason") in
-                {"search_query_suggestion_only", "search_results_non_match_only"})
+                and (positive_empty or classification.get("reason") in
+                     {"search_query_suggestion_only", "search_results_non_match_only"}))
 
 
 def _observe_search_restoration_candidate(d, outcome, xml, current, query):
@@ -252,7 +275,7 @@ def _observe_search_restoration_candidate(d, outcome, xml, current, query):
         return
     candidate.eligible = False
     try:
-        if _search_restoration_surface(xml, query, str(config.INSTAGRAM_PACKAGE), current.get("activity", "")):
+        if _search_restoration_surface(xml, query, str(config.INSTAGRAM_PACKAGE), current.get("activity", ""), allow_committed_empty=True):
             candidate.observed_at = time.monotonic()
             candidate.epoch = ui_continuity_v1.observe("search_restore:comparison")
             candidate.generation = _dm_latency.current_context().get("ui_generation", -1)
@@ -291,7 +314,7 @@ def reuse_outreach_search_restoration(d, candidate, *, account_id, sender, run_i
         if (before != after or after.get("package") != package
                 or (_activity_family(after.get("activity")) not in {"MainActivity", "InstagramMainActivity"}
                     and not _followers_row_activity_allowed(d, package, str(after.get("activity", ""))))
-                or not _search_restoration_surface(xml, query, package, str(after.get("activity", "")))):
+                or not _search_restoration_surface(xml, query, package, str(after.get("activity", "")), allow_committed_empty=True)):
             return False
         # Require retention of this exact new observation, not the old Search XML.
         previous = {id(row) for row in buffer["native_xml"]}
@@ -316,12 +339,12 @@ def _observe_outreach_missing_search(
     d: u2.Device, username: str, *, outcome: dict[str, Any],
     _shared_deadline: float | None = None,
 ) -> bool:
-    """Reuse the bounded canonical observer, with stricter positive-empty proof.
+    """Reuse A0's observer without importing its business classification.
 
-    Only the no-row branch calls this. Two stable positive-empty rounds,
-    separated by one existing clear/retype, are required. Suggestion-only,
-    neighbour-only, loading and unhealthy results never become terminal.
-    True means an exact row appeared: the caller must still rescan/verify it.
+    Admitted CLIENT_LIST Search requires a full healthy stabilization interval
+    inside the existing shared budget. Legacy callers retain their two positive
+    empty rounds and single retype. Technical UNKNOWN never becomes terminal.
+    True means an exact row appeared; the caller still rescans and verifies it.
     """
     from unfollow_hybrid_strategy import (
         _wait_for_exact_search_result, classify_search_surface_xml, _is_no_results_label, _node_value,
@@ -340,6 +363,34 @@ def _observe_outreach_missing_search(
     last: dict[str, Any] = {}
     reason = "search_surface_unhealthy"
     outcome["state"] = "unknown"
+    candidate = outcome.get("_search_restoration")
+    healthy_contract = False
+    if _shared_deadline is not None and type(candidate) is _OutreachSearchRestoration:
+        meta = candidate.job.get("metadata") or {}
+        context = candidate.slot.context
+        healthy_contract = bool(
+            meta.get("origin") == "CLIENT_LIST" and meta.get("managed_campaign") is True
+            and candidate.job.get("campaign_id") and meta.get("client_id")
+            and type(meta.get("campaign_revision")) is int and meta["campaign_revision"] > 0
+            and context.get("campaign_id") == candidate.job["campaign_id"]
+            and context.get("client_id") == meta["client_id"]
+            and context.get("campaign_revision") == meta["campaign_revision"])
+    healthy_samples = []
+    healthy_signature = None
+    healthy_started = None
+    healthy_started_epoch = None
+    exact_seen = False
+
+    def retained_scope():
+        binding, buffer, slot, version = _outreach_search_restore_binding(
+            d, candidate.job, dict(candidate.binding)["account_id"], candidate.sender,
+            dict(candidate.binding)["run_id"])
+        if (candidate.device is not d or candidate.outcome is not outcome
+                or binding != candidate.binding or buffer is not candidate.buffer
+                or slot is not candidate.slot or version is not candidate.version
+                or _dm_latency.current_context().get("ui_generation") != candidate.generation):
+            raise ValueError("search_nonmatch_scope_changed")
+        return binding
 
     def retain(label: str, xml: str, *, failure: bool = False) -> bool:
         # The existing writer buffers private original XML. Its public method
@@ -367,7 +418,7 @@ def _observe_outreach_missing_search(
             self.last_semantic_reason = None
 
         def dump_hierarchy(self, **kwargs: Any) -> str:
-            nonlocal reason, last
+            nonlocal reason, last, candidate, healthy_signature, healthy_started, healthy_started_epoch, exact_seen
             ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_absence:read")
             captured = time.monotonic()
             captured_wall = time.time()
@@ -429,6 +480,32 @@ def _observe_outreach_missing_search(
                 reason = "search_observation_retention_unproved"
                 if not self.first_retained:
                     raise ValueError(reason)
+                if healthy_contract:
+                    if candidate.generation == -1:
+                        candidate.generation = _dm_latency.current_context().get("ui_generation", -1)
+                    reason = "search_nonmatch_scope_changed"
+                    retained_scope()
+                    canonical_exact = any(n.get("resource-id") == pkg + ":id/row_search_user_username"
+                        and normalize_username(n.get("text")) == query for n in nodes)
+                    if canonical_exact or int(classification.get("exact_match_count") or 0) > 0:
+                        exact_seen = True
+                    kind = str(classification.get("reason") or "")
+                    signature = str(classification.get("suggestion_signature")
+                                    or classification.get("non_match_signature") or kind)
+                    healthy = (not exact_seen and _search_restoration_surface(
+                        xml, query, pkg, str(current.get("activity") or ""), allow_committed_empty=True))
+                    if healthy:
+                        now = time.monotonic()
+                        if healthy_signature != (kind, signature):
+                            healthy_samples.clear()
+                            healthy_started = now
+                            healthy_started_epoch = time.time()
+                        healthy_signature = (kind, signature)
+                        healthy_samples.append((xml, kind, time.time(), now))
+                        del healthy_samples[:-2]
+                    else:
+                        healthy_samples.clear()
+                        healthy_signature = healthy_started = healthy_started_epoch = None
                 self.last_semantic_reason = str(classification.get("reason") or "search_surface_unhealthy")
                 last = {"safe": True, "monotonic": captured, "epoch": captured_wall}
                 if outcome.get("_search_restoration") is not None:
@@ -465,6 +542,58 @@ def _observe_outreach_missing_search(
                 raise
 
     try:
+        if healthy_contract:
+            # Reuse A0's physical classifier and stable-result waiter. Its early
+            # stable return is not a DM terminal decision. Require the entire
+            # existing3.5s qualified stabilization interval, inside shared12s.
+            # An in-flight overrun/error remains UNKNOWN, never a normal cutoff.
+            observation = Observation(1)
+            snapshots = []
+            while time.monotonic() < _shared_deadline:
+                result = _wait_for_exact_search_result(
+                    observation, query, shared_deadline=_shared_deadline,
+                    strict_positive_empty_only=False, propagate_observation_errors=True)
+                outcome["reason"] = str(result.get("reason") or reason)
+                if result.get("ok") is True:
+                    return True  # Caller still rescans and proves exact identity.
+                if time.monotonic() >= _shared_deadline:
+                    outcome["reason"] = "search_observation_deadline_expired"
+                    return False
+                if result.get("status") != "username_not_found_confirmed":
+                    return False
+                if exact_seen or healthy_started is None or len(healthy_samples) != 2:
+                    outcome["reason"] = "search_nonmatch_not_stabilized"
+                    return False
+                elapsed = healthy_samples[-1][3] - healthy_started
+                if elapsed < SEARCH_RESULT_MAX_WAIT_S:
+                    continue
+                reason = "search_nonmatch_scope_changed"
+                binding = retained_scope()
+                if not all(retain("outreach_search_nonmatch_terminal_" + str(i), sample[0])
+                           for i, sample in enumerate(healthy_samples, 1)):
+                    outcome["reason"] = "search_observation_retention_unproved"
+                    return False
+                ui_continuity_v1.require_epoch(proof_epoch, "outreach_search_nonmatch:proved")
+                if time.monotonic() >= _shared_deadline:
+                    outcome["reason"] = "search_observation_deadline_expired"
+                    return False
+                samples = tuple((hashlib.sha256(row[0].encode("utf-8")).hexdigest(), row[1], row[2])
+                                for row in healthy_samples)
+                outcome["proof"] = OutreachSearchNonmatchProof(
+                    outcome, id(d), query, pkg, healthy_samples[-1][3], healthy_samples[-1][2],
+                    proof_epoch, binding, healthy_started_epoch, healthy_samples[-1][2],
+                    round(elapsed * 1000, 3), samples, candidate.generation,
+                    id(candidate.buffer), id(candidate.slot), id(candidate.version))
+                outcome.update(state="not_found_in_search", reason="not_found_in_search")
+                outcome["observation_detail"] = dict(
+                    classification="not_found_in_search", read_count=observation.reads,
+                    stabilization_ms=round(elapsed * 1000, 3), required_stabilization_ms=3500,
+                    shared_budget_ms=12000, last_safe_semantic_reason=observation.last_semantic_reason,
+                    deadline_expired=False, exact_seen=False, evidence_retained=True)
+                _dm_retention.capture_event("outreach_search_nonmatch_terminal", **outcome["observation_detail"])
+                return False
+            outcome["reason"] = "search_observation_deadline_expired"
+            return False
         for attempt in range(2):
             snapshots: list[str] = []
             last = {}
@@ -6207,7 +6336,10 @@ def tap_account_result(
                     d, username, outcome=outreach_search_outcome, _shared_deadline=search_deadline):
                 el = scan_once()
             if el is None and outreach_search_outcome.get("proof") is not None:
-                _TAP_ACCOUNT_RESULT_FAILURE_REASON = "search_no_results_confirmed"
+                _TAP_ACCOUNT_RESULT_FAILURE_REASON = str(outreach_search_outcome.get("reason") or "search_no_results_confirmed")
+                candidate = outreach_search_outcome.get("_search_restoration")
+                if type(candidate) is _OutreachSearchRestoration:
+                    candidate.no_profile_entry = True
                 return False
         if follow_ct_active:
             el = _recover_follow_ct_blank_search_results_once(

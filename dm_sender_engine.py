@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import hashlib
 import math
 import xml.etree.ElementTree as ET
 from typing import Any, Callable
@@ -55,6 +56,7 @@ from instagram_navigation import (
     set_search_ui_mode,
     tap_account_result,
     OutreachSearchAbsenceProof,
+    OutreachSearchNonmatchProof,
     begin_outreach_search_restoration,
     reuse_outreach_search_restoration,
     type_dm_draft_only,
@@ -3153,7 +3155,12 @@ def _complete_confirmed_search_absence(
     from outreach_slot_contract import active, SlotBlocked
 
     proof = search.pop("proof", None)
-    if not isinstance(proof, OutreachSearchAbsenceProof):
+    healthy_nonmatch = type(proof) is OutreachSearchNonmatchProof
+    if healthy_nonmatch:
+        # A navigation verdict is not a persisted terminal outcome. Any changed
+        # binding below must return through UNKNOWN, never stale not_found.
+        search.update(state="unknown", reason="search_absence_binding_unproved")
+    if not healthy_nonmatch and not isinstance(proof, OutreachSearchAbsenceProof):
         return None
     metadata = job.get("metadata") or {}
     slot = active()
@@ -3164,13 +3171,24 @@ def _complete_confirmed_search_absence(
         proof.generation is search and proof.device_identity == id(d)
         and proof.query == normalize_username(job.get("recipient_username"))
         and proof.package == pkg and math.isfinite(age) and 0 <= age <= SEARCH_RESULT_MAX_WAIT_S
-        and len(proof.rounds) == 2 and all(len(r) == 2 for r in proof.rounds)
-        and all(re.fullmatch(r"[0-9a-f]{64}", h) for r in proof.rounds for h in r)
+        and ((healthy_nonmatch and len(proof.samples) == 2
+              and 3500 <= proof.stable_duration_ms <= 12000
+              and proof.stable_start_epoch <= proof.stable_end_epoch == proof.observed_at_epoch
+              and 3.5 <= round(proof.stable_end_epoch - proof.stable_start_epoch, 3) <= 12.0
+              and abs((proof.stable_end_epoch - proof.stable_start_epoch) * 1000 - proof.stable_duration_ms) <= 1
+              and all(re.fullmatch(r"[0-9a-f]{64}", row[0]) and row[1] in {
+                  "username_not_found_confirmed", "search_query_suggestion_only", "search_results_non_match_only"}
+                  and proof.stable_start_epoch <= row[2] <= proof.stable_end_epoch for row in proof.samples))
+             or (not healthy_nonmatch and len(proof.rounds) == 2 and all(len(r) == 2 for r in proof.rounds)
+                 and all(re.fullmatch(r"[0-9a-f]{64}", h) for r in proof.rounds for h in r)))
         and job.get("dm_type") == "outreach" and job.get("account_id") == account_id
         and metadata.get("origin") == "CLIENT_LIST" and metadata.get("managed_campaign") is True
         and metadata.get("outreach_send_state", "before_send") == "before_send"
         and metadata.get("automatic_retry_blocked", False) is False and job.get("sent_at") is None
         and type(job.get("attempts")) is int
+        and (not healthy_nonmatch or (job.get("status") in ("reserved", "running")
+             and job.get("max_attempts") == 3 and 0 <= job["attempts"] < 3
+             and job.get("reserved_by") == context.get("request_id") and job.get("reserved_at")))
         and job.get("id") and job.get("campaign_id") and metadata.get("client_id") and run_id
         and type(metadata.get("campaign_revision")) is int and metadata["campaign_revision"] > 0
         and context.get("managed_campaign") is True
@@ -3191,30 +3209,61 @@ def _complete_confirmed_search_absence(
     if not 0 <= time.monotonic() - proof.observed_at_monotonic <= SEARCH_RESULT_MAX_WAIT_S:
         search["reason"] = "search_observation_stale"
         return None
+    reason = "not_found_in_search" if healthy_nonmatch else "search_no_results_confirmed"
+    if healthy_nonmatch:
+        from instagram_navigation import _outreach_search_restore_binding
+        try:
+            binding, buffer, bound_slot, version = _outreach_search_restore_binding(
+                d, job, account_id, dict(proof.binding)["sender"], run_id)
+        except (ValueError, TypeError, KeyError):
+            search["reason"] = "search_nonmatch_scope_changed"
+            return None
+        if (binding != proof.binding or id(buffer) != proof.buffer_identity
+                or id(bound_slot) != proof.slot_identity or id(version) != proof.version_identity
+                or _dm_latency.current_context().get("ui_generation") != proof.ui_generation
+                or not isinstance(job.get("message_body"), str) or not job["message_body"]):
+            search["reason"] = "search_nonmatch_scope_changed"
+            return None
     evidence = {
-        "schema": "OUTREACH_CONFIRMED_SEARCH_ABSENCE_V1", "job_id": str(job["id"]),
+        "schema": "OUTREACH_HEALTHY_SEARCH_NONMATCH_V1" if healthy_nonmatch else "OUTREACH_CONFIRMED_SEARCH_ABSENCE_V1", "job_id": str(job["id"]),
         "account_id": account_id, "client_id": metadata["client_id"],
         "campaign_id": job["campaign_id"], "campaign_revision": metadata["campaign_revision"],
         "request_id": context["request_id"], "run_id": str(run_id), "slot_id": context["slot_id"],
         "recipient": proof.query, "query": proof.query, "package": pkg,
         "observed_at_epoch": proof.observed_at_epoch,
-        "positive_empty_rounds": [list(r) for r in proof.rounds], "local_retypes": 1,
         "before_send": True,
     }
+    if healthy_nonmatch:
+        binding = dict(proof.binding)
+        evidence.update(classification="not_found_in_search", scope="campaign_only",
+            message_sha256=hashlib.sha256(job["message_body"].encode("utf-8")).hexdigest(),
+            device_id=binding["device_id"], app_instance_id=binding["app_instance_id"],
+            serial=binding["serial"], version_name=binding["version_name"], version_code=binding["version_code"],
+            stable_start_epoch=proof.stable_start_epoch, stable_end_epoch=proof.stable_end_epoch,
+            stable_duration_ms=proof.stable_duration_ms, required_stabilization_ms=3500,
+            shared_budget_ms=12000, exact_match_count=0, technically_healthy=True,
+            samples=[dict(xml_sha256=h, semantic_reason=kind, observed_at_epoch=epoch)
+                     for h, kind, epoch in proof.samples], local_retypes=0)
+        evidence_key = "search_nonmatch_v1"
+    else:
+        evidence.update(positive_empty_rounds=[list(r) for r in proof.rounds], local_retypes=1)
+        evidence_key = "search_absence_v1"
     row = supabase_client.complete_dm_job(
-        str(job["id"]), "skipped", skip_reason="search_no_results_confirmed",
+        str(job["id"]), "skipped", skip_reason=reason,
         increment_attempt=False, retry_delay_seconds=None,
         metadata_patch={"thread_state": "unknown", "outreach_send_state": "before_send",
-                        "search_absence_v1": evidence},
+                        evidence_key: evidence},
     )
     if not (type(row) is dict and row.get("id") == job["id"]
             and row.get("account_id") == account_id and row.get("campaign_id") == job["campaign_id"]
-            and row.get("status") == "skipped" and row.get("skip_reason") == "search_no_results_confirmed"
+            and row.get("status") == "skipped" and row.get("skip_reason") == reason
             and row.get("attempts") == job["attempts"] and "sent_at" in row and "next_retry_at" in row
             and row.get("sent_at") is None and row.get("next_retry_at") is None
-            and (row.get("metadata") or {}).get("search_absence_v1") == evidence):
+            and (row.get("metadata") or {}).get(evidence_key) == evidence):
         raise SlotBlocked("outreach_search_absence_completion_unconfirmed")
-    log("info", "dm_sender_search_absence_persisted", job_id=job["id"], reason="search_no_results_confirmed")
+    if healthy_nonmatch:
+        search.update(state="not_found_in_search", reason=reason)
+    log("info", "dm_sender_search_absence_persisted", job_id=job["id"], reason=reason)
     return row
 
 
@@ -4203,7 +4252,7 @@ def execute_dm_job_real_send(
                 navigation_finished = True
             if updated_job is not None:
                 outcome = "skipped"
-                skip_candidate = "search_no_results_confirmed"
+                skip_candidate = str(updated_job.get("skip_reason") or "search_no_results_confirmed")
             else:
                 updated_job, outcome = _complete_job_failed_retry(
                     job, last_error="navigation_failed", thread_state=thread_state,
