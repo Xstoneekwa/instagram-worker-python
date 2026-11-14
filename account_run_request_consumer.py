@@ -1072,22 +1072,25 @@ def _account_is_launch_allowed(account_id: str, cfg: DispatcherConfig) -> tuple[
 
 
 def _validate_assignment(account_id: str, run_type: str, cfg: DispatcherConfig) -> tuple[bool, str | None, dict[str, Any]]:
+    login_requires_assignment = _is_login_run_type(run_type)
     ctx = resolve_account_assignment_runtime_context(
         account_id,
         run_type,
-        require_assignment=cfg.require_assignment,
+        require_assignment=cfg.require_assignment or login_requires_assignment,
         enforce_window=cfg.enforce_assignment_window,
     )
     reason = str(ctx.get("reason") or "")
     if reason == "assignment_device_missing_adb_serial":
-        if _integration_noop_runner_enabled():
+        if _integration_noop_runner_enabled() and not login_requires_assignment:
             ctx = dict(ctx)
             ctx["adb_serial"] = "integration-noop"
             return True, None, ctx
         return False, reason, ctx
-    if cfg.require_assignment and not bool(ctx.get("assignment_found")):
+    if (cfg.require_assignment or login_requires_assignment) and not bool(ctx.get("assignment_found")):
         reason = str(ctx.get("reason") or "assignment_not_found")
         return False, reason, ctx
+    if login_requires_assignment and (reason != "assignment_resolved" or ctx.get("fallback_used")):
+        return False, reason or "assignment_not_proven", ctx
     return True, None, ctx
 
 
@@ -3722,6 +3725,61 @@ def _wait_for_subprocess(
         time.sleep(1.0)
 
 
+def _finalize_unstarted_login_lease(
+    *, request: dict[str, Any], request_id: str, account_id: str,
+    run_type: str, reason_code: str, phase: str,
+) -> dict[str, Any]:
+    """Release only the captured enqueue generation of a proven prelaunch failure."""
+    denied = {"applicable": True, "ok": False, "released": False}
+    if (not _is_login_run_type(run_type)
+            or phase not in {"request", "request_binding", "package_runtime_contract"}):
+        return {"applicable": False, "ok": False, "released": False}
+    try:
+        if (request.get("id") != request_id or request.get("account_id") != account_id
+                or request.get("requested_run_type") != run_type
+                or request.get("started_at") is not None or request.get("run_id") is not None):
+            return {**denied, "reason": "prelaunch_request_binding_not_proven"}
+        binding = device_lock_binding_from_request(
+            request, account_id=account_id, request_id=request_id)
+        if binding["worker_id"] != "pending-request:" + request_id:
+            return {**denied, "reason": "prelaunch_pending_lease_owner_not_proven"}
+        canonical = get_account_run_request(request_id, bounded_pre_device=True)
+        if (not isinstance(canonical, dict)
+                or not {"run_id", "started_at", "metadata_safe"} <= canonical.keys()
+                or canonical.get("id") != request_id or canonical.get("account_id") != account_id
+                or canonical.get("requested_run_type") != run_type
+                or canonical.get("status") not in {"blocked", "failed"}
+                or canonical.get("error_code") != reason_code
+                or not canonical.get("completed_at")
+                or canonical.get("run_id") is not None or canonical.get("started_at") is not None):
+            return {**denied, "reason": "prelaunch_terminal_request_not_proven"}
+        current_binding = device_lock_binding_from_request(
+            canonical, account_id=account_id, request_id=request_id)
+        frozen_fields = ("binding_version", "assignment_id", "device_id", "app_instance_id", "package_name", "clone_index")
+        original_metadata = request.get("metadata_safe") or {}
+        current_metadata = canonical["metadata_safe"]
+        if (current_binding != binding or any(original_metadata.get(k) != current_metadata.get(k)
+                                              for k in frozen_fields)):
+            return {**denied, "reason": "prelaunch_captured_binding_changed"}
+        # Existing adapter makes one CAS, then only reads its exact receipt if the reply is lost.
+        result = release_device_lock_for_request(
+            request_id=request_id, worker_id=binding["worker_id"],
+            device_id=binding["device_id"], account_id=account_id,
+            expected_lease_id=binding["lease_id"])
+        expected = {k: binding[k] for k in ("request_id", "worker_id", "device_id", "account_id", "lease_id", "generation")}
+        if (not isinstance(result, dict) or result.get("ok") is not True
+                or result.get("released") is not True
+                or any(result.get(k) != value for k, value in expected.items())):
+            return {**denied, "reason": "prelaunch_lease_release_not_proven"}
+        return {"applicable": True, "ok": True, "released": True,
+                "reconciled": result.get("reconciled") is True}
+    except Exception as exc:
+        log("error", "auto_login_prelaunch_lease_cleanup_not_proven",
+            account_id=account_id, request_id=request_id, reason_code=reason_code,
+            phase=phase, error_type=type(exc).__name__)
+        return {**denied, "reason": "prelaunch_lease_cleanup_not_proven"}
+
+
 def _publish_auto_login_dispatch_failure(
     *,
     request: dict[str, Any],
@@ -3736,6 +3794,13 @@ def _publish_auto_login_dispatch_failure(
     """Publish one structured Auto Login incident before a worker result exists."""
     if not _is_login_run_type(run_type):
         return
+    cleanup = _finalize_unstarted_login_lease(
+        request=request, request_id=request_id, account_id=account_id,
+        run_type=run_type, reason_code=reason_code, phase=phase)
+    if cleanup.get("applicable"):
+        log("info" if cleanup.get("ok") else "error", "auto_login_prelaunch_lease_cleanup",
+            account_id=account_id, request_id=request_id, phase=phase,
+            reason_code=reason_code, cleanup=cleanup)
     snapshot = {
         **request,
         "error_code": reason_code,
@@ -3765,6 +3830,7 @@ def _publish_auto_login_dispatch_failure(
             "device_id": snapshot.get("device_id"),
             "app_instance_id": snapshot.get("app_instance_id"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "prelaunch_lease_cleanup": cleanup,
         },
         request_snapshot=snapshot,
     )

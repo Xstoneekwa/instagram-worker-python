@@ -21,8 +21,8 @@ SUPPORTED_RUN_ASSIGNMENT_TYPES: dict[str, set[str]] = {
     "unfollow_outreach_pipeline": {"full_cycle"},
     "dm_welcome_baseline": {"full_cycle"},
     "dm_welcome_session_send": {"full_cycle"},
-    "login_provisioning": {"full_cycle"},
-    "login_email_code_resume": {"full_cycle"},
+    "login_provisioning": {"full_cycle", "outreach_only"},
+    "login_email_code_resume": {"full_cycle", "outreach_only"},
 }
 
 

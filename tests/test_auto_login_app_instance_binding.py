@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import account_run_request_consumer as consumer
+import assignment_dispatch_resolver as resolver
 
 
 def binding(index: int, package: str, *, prefix: str = "tenant-a") -> dict:
@@ -25,6 +27,55 @@ def context(index: int, package: str, *, prefix: str = "tenant-a") -> dict:
         "package_name": package,
         "app_instance_index": index,
     }
+
+
+class CanonicalLoginAssignmentAdmissionTests(unittest.TestCase):
+    def test_exact_new_onboarding_binding_passes_without_legacy_device(self):
+        for pool in ("full_cycle", "outreach_only"):
+            for run_type in ("login_provisioning", "login_email_code_resume"):
+                for required in (False, True):
+                    with self.subTest(pool=pool, run_type=run_type, required=required):
+                        b = binding(1, "com.instagram.androie")
+                        row = dict(id=b["assignment_id"], device_id=b["device_id"], app_instance_id=b["app_instance_id"],
+                            assignment_type=pool, slot_kind="manual_only", status="reserved",
+                            phone_device={"adb_serial": "SYNTHETIC_SERIAL"},
+                            phone_app_instance={"id":b["app_instance_id"], "instance_index":1, "package_name":b["package_name"]})
+                        cfg = SimpleNamespace(require_assignment=required, enforce_assignment_window=False, test_account_ids=set())
+                        with patch.object(consumer.supabase_client,"load_account",return_value={"id":"new-account", "status":"inactive", "device_id":None}), patch.object(
+                                resolver.supabase_client,"load_open_account_assignment_for_dispatch",return_value=row):
+                            self.assertEqual(consumer._account_is_launch_allowed("new-account",cfg),(True,None))
+                            ok, reason, ctx = consumer._validate_assignment("new-account",run_type,cfg)
+                        self.assertTrue(ok, reason)
+                        self.assertTrue(consumer._validate_login_request_binding(b,ctx)[0])
+                        with patch.object(consumer,"_load_expected_username",return_value="synthetic_owner"):
+                            command = consumer._build_login_provisioner_command("new-account",run_type,"request",device_serial=ctx["adb_serial"],
+                                package_name=ctx["package_name"],app_instance_id=ctx["app_instance_id"])
+                        self.assertEqual(command[command.index("-m")+1],"instagram_login_provisioner_cli")
+                        self.assertEqual(command[command.index("--package-name")+1],b["package_name"])
+
+    def test_legacy_optional_assignment_never_admits_unknown_login_context(self):
+        cfg = SimpleNamespace(require_assignment=False,enforce_assignment_window=False)
+        for ctx in ({"assignment_found":False,"reason":"assignment_type_incompatible"},
+                    {"assignment_found":False,"reason":"assignment_not_found"},
+                    {"assignment_found":True,"reason":"unknown"},
+                    {"assignment_found":True,"reason":"assignment_resolved","fallback_used":True},
+                    {"assignment_found":True}):
+            with self.subTest(ctx=ctx), patch.object(consumer,"resolve_account_assignment_runtime_context",return_value=ctx) as read:
+                self.assertFalse(consumer._validate_assignment("account","login_provisioning",cfg)[0])
+                self.assertTrue(read.call_args.kwargs["require_assignment"])
+
+    def test_noop_cannot_invent_a_login_device(self):
+        cfg=SimpleNamespace(require_assignment=False,enforce_assignment_window=False)
+        with patch.object(consumer,"resolve_account_assignment_runtime_context",return_value={"reason":"assignment_device_missing_adb_serial"}), patch.object(
+                consumer,"_integration_noop_runner_enabled",return_value=True):
+            self.assertFalse(consumer._validate_assignment("account","login_provisioning",cfg)[0])
+
+    def test_business_optional_assignment_behavior_is_unchanged(self):
+        cfg=SimpleNamespace(require_assignment=False,enforce_assignment_window=False)
+        ctx={"assignment_found":False,"reason":"assignment_not_found"}
+        with patch.object(consumer,"resolve_account_assignment_runtime_context",return_value=ctx) as read:
+            self.assertTrue(consumer._validate_assignment("account","account_session",cfg)[0])
+            self.assertFalse(read.call_args.kwargs["require_assignment"])
 
 
 class AutoLoginAppInstanceBindingTests(unittest.TestCase):

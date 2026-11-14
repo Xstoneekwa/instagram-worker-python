@@ -58,6 +58,64 @@ def _assignment(
     }
 
 
+class LoginAssignmentPoolTests(unittest.TestCase):
+    def resolve(self, assignment, run_type="login_provisioning", **kw):
+        with patch.object(resolver.supabase_client, "load_open_account_assignment_for_dispatch", return_value=assignment):
+            return resolver.resolve_account_assignment_runtime_context("account-1", run_type, require_assignment=True, **kw)
+
+    def test_both_services_use_the_exact_assigned_clone_for_both_login_types(self):
+        for pool in ("full_cycle", "outreach_only"):
+            for run_type in ("login_provisioning", "login_email_code_resume"):
+                with self.subTest(pool=pool, run_type=run_type):
+                    row = _assignment(assignment_type=pool)
+                    row.update(slot_kind="manual_only", starts_at=None, ends_at=None)
+                    with patch.object(supabase_client, "load_account", side_effect=AssertionError("legacy_account_device_not_authority")):
+                        ctx = self.resolve(row, run_type)
+                    self.assertTrue(ctx["assignment_found"])
+                    self.assertEqual(ctx["reason"], "assignment_resolved")
+                    self.assertFalse(ctx["fallback_used"])
+                    self.assertEqual(ctx["package_name"], "com.instagram.androie")
+                    self.assertEqual(ctx["app_instance_index"], 1)
+                    self.assertEqual(ctx["device_id"], row["device_id"])
+
+    def test_missing_assignment_remains_unknown(self):
+        ctx = self.resolve(None)
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_not_found")
+
+    def test_unrecognized_pool_is_not_login_capacity(self):
+        ctx = self.resolve(_assignment(assignment_type="unsupported_pool"))
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+
+    def test_missing_serial_cannot_fall_back_to_a_different_device(self):
+        ctx = self.resolve(_assignment(adb_serial=""))
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_device_missing_adb_serial")
+
+    def test_explicitly_enforced_window_is_still_enforced(self):
+        now = datetime.now(timezone.utc)
+        ctx = self.resolve(_assignment(starts_at=(now+timedelta(hours=1)).isoformat(),
+                                      ends_at=(now+timedelta(hours=2)).isoformat()), enforce_window=True)
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_window_inactive")
+
+    def test_existing_outreach_slot_authority_is_not_bypassed(self):
+        row = _assignment()
+        row["metadata"] = {"outreach_slot_grid_v1": {"enabled": True}}
+        with patch.object(resolver, "_evaluate_schedule_gate", return_value={"ok": False, "reason": "canonical_hold"}):
+            ctx = self.resolve(row)
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "canonical_hold")
+
+    def test_outreach_login_does_not_grant_follow_unfollow_or_welcome(self):
+        for run_type in ("account_session", "unfollow_session", "unfollow_outreach_pipeline", "dm_welcome_baseline", "dm_welcome_session_send", "scheduled_session_preflight"):
+            with self.subTest(run_type=run_type):
+                ctx = self.resolve(_assignment(), run_type)
+                self.assertFalse(ctx["assignment_found"])
+                self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+
+
 class AssignmentDispatchResolverTest(unittest.TestCase):
     def _resolve(self, assignment: dict | None, **kwargs) -> dict:
         with patch.object(
