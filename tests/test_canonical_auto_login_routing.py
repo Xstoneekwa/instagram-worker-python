@@ -33,7 +33,7 @@ class CanonicalAutoLoginRoutingTest(unittest.TestCase):
     def test_login_provisioning_routes_directly_to_canonical_cli(self) -> None:
         command = self._command()
 
-        self.assertEqual(command[command.index("-m") + 1], "instagram_login_provisioner_cli")
+        self.assertEqual(Path(command[1]), ROOT / "instagram_login_provisioner_cli.py")
         self.assertNotIn("historical_auto_login_07ee_adapter", command)
         self.assertEqual(
             command[command.index("--request-id") + 1],
@@ -45,7 +45,7 @@ class CanonicalAutoLoginRoutingTest(unittest.TestCase):
     def test_email_resume_uses_the_same_canonical_cli(self) -> None:
         command = self._command("login_email_code_resume")
 
-        self.assertEqual(command[command.index("-m") + 1], "instagram_login_provisioner_cli")
+        self.assertEqual(Path(command[1]), ROOT / "instagram_login_provisioner_cli.py")
         self.assertNotIn("historical_auto_login_07ee_adapter", command)
 
     def test_authoritative_runtime_implementation_count_is_one(self) -> None:

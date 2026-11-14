@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -1232,8 +1233,7 @@ def _build_login_provisioner_command(
     cli_module = "instagram_login_provisioner_cli"
     cmd = [
         sys.executable,
-        "-m",
-        cli_module,
+        str(Path(__file__).resolve().parent / (cli_module + ".py")),
         "--account-id",
         account_id,
         "--expected-username",
@@ -1542,6 +1542,46 @@ def _create_and_link_login_run(account_id: str, request_id: str, worker_id: str)
             error=str(exc)[:200],
         )
         return None
+
+
+def _known_login_bootstrap_failure(stderr: str | None) -> dict[str, Any]:
+    """Recognize only interpreter refusals that prove CLI code never ran.
+
+    Missing engine summaries, tracebacks and arbitrary nonzero exits do not
+    prove this boundary. Never persist stderr or exception values here.
+    """
+    text = str(stderr or "")
+    if len(text) > 4096:
+        return {}
+    line = text.strip()
+    module_error = f"{sys.executable}: No module named instagram_login_provisioner_cli"
+    cli_path = str(Path(__file__).resolve().parent / "instagram_login_provisioner_cli.py")
+    file_errors = {
+        f"{sys.executable}: can't open file '{cli_path}': [Errno 2] No such file or directory",
+        f"{sys.executable}: can't open file '{cli_path}': [Errno 13] Permission denied",
+    }
+    if line != module_error and line not in file_errors:
+        return {}
+    return {"reason": "worker_start_failed", "phase": "worker_start",
+            "app_start_attempted": False, "bootstrap_failure": "entrypoint_unavailable"}
+
+
+def _read_login_bootstrap_stderr(handle: Any) -> str:
+    """Bound classification input, preserving the existing private stderr sink."""
+    handle.seek(0)
+    diagnostic = handle.read(4097)
+    handle.seek(0)
+    try:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            sys.stderr.write(chunk)
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        # A logging sink failure must not bypass terminalization/lease cleanup.
+        log("warning", "login_child_stderr_sink_unavailable")
+    return diagnostic
 
 
 def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, Any]:
@@ -2841,6 +2881,7 @@ def _finalize_manual_run_after_subprocess(
     cleanup_completed: bool | None = None,
     lock_released: bool | None = None,
     cooperative_stop: dict[str, Any] | None = None,
+    login_bootstrap_stderr: str | None = None,
 ) -> None:
     canonical_latest = get_account_run_request(
         request_id,
@@ -3254,6 +3295,8 @@ def _finalize_manual_run_after_subprocess(
         return
 
     summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
+    if not summary and _is_login_run_type(run_type):
+        summary = _known_login_bootstrap_failure(login_bootstrap_stderr)
     if _is_login_run_type(run_type):
         _log_auto_login_foreground_package_result(
             account_id=account_id,
@@ -3380,6 +3423,9 @@ def _finalize_manual_run_after_subprocess(
                 "run_type": run_type,
                 "device_id": str((request_snapshot or {}).get("device_id") or "").strip() or None,
                 "app_instance_id": str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
+                **({"app_start_attempted": False,
+                    "bootstrap_failure": "entrypoint_unavailable"}
+                   if summary.get("bootstrap_failure") == "entrypoint_unavailable" else {}),
             }
         )
     else:
@@ -4458,7 +4504,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     if _is_login_run_type(run_type):
         log(
             "info",
-            "auto_login_app_launch_requested",
+            "auto_login_runner_launch_requested",
             account_id=account_id,
             request_id=request_id,
             assignment_id=(login_binding or {}).get("assignment_id"),
@@ -4466,8 +4512,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             app_instance_id=(login_binding or {}).get("app_instance_id"),
             expected_package=(login_binding or {}).get("package_name"),
             clone_index=(login_binding or {}).get("clone_index"),
-            phase="open_instagram",
-            reason="explicit_bound_package_launch",
+            phase="worker_start",
+            reason="explicit_bound_cli_launch",
         )
     _heartbeat(cfg, status="running", metadata={"active_request_id": request_id, "account_id": account_id})
 
@@ -4609,6 +4655,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     runner_workdir = runtime_home()
     runner_workdir.mkdir(parents=True, exist_ok=True)
 
+    login_bootstrap_stderr = None
     global _last_integration_noop_proof
     _last_integration_noop_proof = None
     if _integration_noop_runner_enabled():
@@ -4649,6 +4696,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 continue
         exit_code = int(completed.returncode)
         timed_out = False
+        if _is_login_run_type(run_type):
+            login_bootstrap_stderr = completed.stderr
     else:
         if str(run_type or "").strip().lower() == "account_session":
             subprocess_env["ACCOUNT_RUN_WORKER_SPAWNED_AT"] = datetime.now(
@@ -4656,33 +4705,41 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             ).isoformat()
         if request_id not in _FLEET_EXECUTIONS and request.get('fleet_runtime_v1') is not None:
             _fleet_bind_authority(request_id, account_id, cfg.worker_id, request)
-        proc = _fleet_spawn_or_legacy(
-                request_id, cmd, runner_workdir, subprocess_env,
-                launch_binding={
-                    'account_id': account_id, 'request_id': request_id,
-                    'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
-                    'consumer_instance_id': cfg.worker_id,
-                    'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
-                })
-        if proc is None:
-            if device_id and device_lock_active:
-                release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
-            if cooperative_stop_context is not None:
-                clear_cooperative_stop_context(cooperative_stop_context)
-            return
-        exit_code, timed_out = _wait_for_subprocess(
-            cfg,
-            proc,
-            request_id=request_id,
-            account_id=account_id,
-            device_id=device_id if device_lock_active else None,
-            device_lock_renewal=device_lock_active,
-            stop_context=cooperative_stop_context,
-            business_action_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
-            scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
-            diagnostics=cooperative_stop_diagnostics,
-            outreach_cleanup_grace_ms=(dispatch_ctx.get('outreach_slot_v1') or {}).get('execution_policy',{}).get('cleanup_grace_ms'),
-         device_lock_binding=device_lock_binding)
+        # Login-only capture cannot block on a full PIPE. The temporary file
+        # is unlinked/closed by its context, outside immutable release sources.
+        with (tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
+              if _is_login_run_type(run_type) else contextlib.nullcontext(None)) as stderr_capture:
+            proc = _fleet_spawn_or_legacy(
+                    request_id, cmd, runner_workdir, subprocess_env,
+                    launch_binding={
+                        'account_id': account_id, 'request_id': request_id,
+                        'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
+                        'consumer_instance_id': cfg.worker_id,
+                        'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
+                    },
+                    popen_options={'stderr': stderr_capture} if stderr_capture is not None else None)
+            if proc is None:
+                if device_id and device_lock_active:
+                    release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                if cooperative_stop_context is not None:
+                    clear_cooperative_stop_context(cooperative_stop_context)
+                return
+            exit_code, timed_out = _wait_for_subprocess(
+                cfg,
+                proc,
+                request_id=request_id,
+                account_id=account_id,
+                device_id=device_id if device_lock_active else None,
+                device_lock_renewal=device_lock_active,
+                stop_context=cooperative_stop_context,
+                business_action_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
+                scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
+                diagnostics=cooperative_stop_diagnostics,
+                outreach_cleanup_grace_ms=(dispatch_ctx.get('outreach_slot_v1') or {}).get('execution_policy',{}).get('cleanup_grace_ms'),
+             device_lock_binding=device_lock_binding)
+
+            if stderr_capture is not None:
+                login_bootstrap_stderr = _read_login_bootstrap_stderr(stderr_capture)
 
     lock_released = False
     if device_id and device_lock_active:
@@ -4729,6 +4786,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         cleanup_completed=not timed_out,
         lock_released=lock_released,
         cooperative_stop=cooperative_stop_diagnostics,
+        login_bootstrap_stderr=login_bootstrap_stderr,
     )
     _fleet_finish_execution(request_id)
     if cooperative_stop_context is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -50,7 +51,7 @@ class CanonicalLoginAssignmentAdmissionTests(unittest.TestCase):
                         with patch.object(consumer,"_load_expected_username",return_value="synthetic_owner"):
                             command = consumer._build_login_provisioner_command("new-account",run_type,"request",device_serial=ctx["adb_serial"],
                                 package_name=ctx["package_name"],app_instance_id=ctx["app_instance_id"])
-                        self.assertEqual(command[command.index("-m")+1],"instagram_login_provisioner_cli")
+                        self.assertEqual(Path(command[1]), Path(consumer.__file__).resolve().parent / "instagram_login_provisioner_cli.py")
                         self.assertEqual(command[command.index("--package-name")+1],b["package_name"])
 
     def test_legacy_optional_assignment_never_admits_unknown_login_context(self):
