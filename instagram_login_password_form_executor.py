@@ -2478,6 +2478,16 @@ def _selector_info(target: Any) -> dict[str, Any]:
 
 
 def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
+    from instagram_post_verification_completion import classify_navigation_education_prompt, NAVIGATION_EDUCATION_POPUP_TYPE
+    education = classify_navigation_education_prompt(hierarchy_xml)
+    if education["state"] != "absent":
+        proved = education["state"] == "proved"
+        return {
+            "outcome": "unknown", "screen_type": NAVIGATION_EDUCATION_POPUP_TYPE if proved else "unknown",
+            "reason": NAVIGATION_EDUCATION_POPUP_TYPE if proved else "navigation_education_surface_unproved",
+            "navigation_education_prompt_present": proved, "package": education["package"],
+            "terminal": not proved, "screen_label": NAVIGATION_EDUCATION_POPUP_TYPE if proved else "unknown",
+        }
     probe = probe_login_ui_from_hierarchy(hierarchy_xml, stage="login_password_form_executor")
     signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
     if signals.get("password_required_dialog_present") is True:

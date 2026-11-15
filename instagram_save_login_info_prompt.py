@@ -44,7 +44,18 @@ def dismiss_save_login_info_prompt_once(
 ) -> SaveLoginInfoDismissResult:
     """Tap one uniquely-proved semantic ``Not now`` action, at most once."""
 
-    target_result = find_unique_not_now_target(d, hierarchy_xml=hierarchy_xml)
+    return _dismiss_semantic_action_once(d, hierarchy_xml=hierarchy_xml, action_kind="not_now")
+
+
+def _dismiss_semantic_action_once(
+    d: Any, *, hierarchy_xml: str, action_kind: str,
+) -> SaveLoginInfoDismissResult:
+    """Reuse the same single-target action for closed, caller-proved surfaces."""
+    prefix = "save_login_info_not_now" if action_kind == "not_now" else "navigation_education_got_it"
+
+    target_result = _find_unique_semantic_action_target(
+        d, hierarchy_xml=hierarchy_xml, action_kind=action_kind,
+    )
     target = target_result.get("target")
     failure_reason = str(target_result.get("failure_reason") or "")
     raw_count = int(target_result.get("raw_semantic_match_count") or 0)
@@ -52,7 +63,9 @@ def dismiss_save_login_info_prompt_once(
     if target is None or failure_reason:
         return SaveLoginInfoDismissResult(
             dismissed=False,
-            failure_reason=failure_reason or "not_now_button_not_found",
+            failure_reason=failure_reason or (
+                "not_now_button_not_found" if action_kind == "not_now" else "navigation_education_got_it_button_not_found"
+            ),
             matched_control_count=canonical_count,
             raw_semantic_match_count=raw_count,
             canonical_target_count=canonical_count,
@@ -62,7 +75,7 @@ def dismiss_save_login_info_prompt_once(
     if not callable(click):
         return SaveLoginInfoDismissResult(
             dismissed=False,
-            failure_reason="save_login_info_not_now_tap_unavailable",
+            failure_reason=prefix + "_tap_unavailable",
             matched_control_count=1,
             raw_semantic_match_count=raw_count,
             canonical_target_count=1,
@@ -72,7 +85,7 @@ def dismiss_save_login_info_prompt_once(
     except Exception:
         return SaveLoginInfoDismissResult(
             dismissed=False,
-            failure_reason="save_login_info_not_now_tap_failed",
+            failure_reason=prefix + "_tap_failed",
             matched_control_count=1,
             raw_semantic_match_count=raw_count,
             canonical_target_count=1,
@@ -88,7 +101,16 @@ def dismiss_save_login_info_prompt_once(
 def find_unique_not_now_target(d: Any, *, hierarchy_xml: str) -> dict[str, Any]:
     """Resolve semantic matches to one exact actionable ancestor or fail closed."""
 
-    canonical = canonicalize_semantic_action_targets(hierarchy_xml)
+    return _find_unique_semantic_action_target(d, hierarchy_xml=hierarchy_xml, action_kind="not_now")
+
+
+def _find_unique_semantic_action_target(
+    d: Any, *, hierarchy_xml: str, action_kind: str,
+) -> dict[str, Any]:
+    labels = _closed_action_labels(action_kind)
+    label = "not_now" if action_kind == "not_now" else "navigation_education_got_it"
+
+    canonical = canonicalize_semantic_action_targets(hierarchy_xml, _action_kind=action_kind)
     raw_count = int(canonical["raw_semantic_match_count"])
     targets = list(canonical["targets"])
     canonical_count = len(targets)
@@ -98,29 +120,32 @@ def find_unique_not_now_target(d: Any, *, hierarchy_xml: str) -> dict[str, Any]:
         "matched_control_count": canonical_count,
     }
     if canonical.get("parse_failed"):
-        return {**common, "target": None, "failure_reason": "not_now_hierarchy_unreadable"}
+        return {**common, "target": None, "failure_reason": label + "_hierarchy_unreadable"}
     if canonical_count == 0:
-        return {**common, "target": None, "failure_reason": "not_now_button_not_found"}
+        return {**common, "target": None, "failure_reason": label + "_button_not_found"}
     if canonical_count != 1:
-        return {**common, "target": None, "failure_reason": "ambiguous_not_now_control"}
+        return {**common, "target": None, "failure_reason": "ambiguous_" + label + "_control"}
 
-    selector = _resolve_unique_live_selector(d, targets[0])
+    selector = _resolve_unique_live_selector(d, targets[0], _labels=labels)
     if selector is None:
         return {
             **common,
             "target": None,
-            "failure_reason": "not_now_canonical_target_unaddressable",
+            "failure_reason": label + "_canonical_target_unaddressable",
         }
     return {**common, "target": selector, "failure_reason": ""}
 
 
-def canonicalize_semantic_action_targets(hierarchy_xml: str) -> dict[str, Any]:
+def canonicalize_semantic_action_targets(
+    hierarchy_xml: str, *, _action_kind: str = "not_now",
+) -> dict[str, Any]:
     """Collapse semantic descendants onto their nearest actionable ancestor.
 
     Node path, rather than label or geometry alone, is the canonical identity.
     This preserves real ambiguity when two separate buttons share a label.
     """
 
+    labels = _closed_action_labels(_action_kind)
     raw = str(hierarchy_xml or "").strip()
     if not raw:
         return {"raw_semantic_match_count": 0, "targets": (), "parse_failed": True}
@@ -147,7 +172,7 @@ def canonicalize_semantic_action_targets(hierarchy_xml: str) -> dict[str, Any]:
     raw_matches = 0
     canonical: dict[tuple[int, ...], CanonicalSemanticActionTarget] = {}
     for node in root.iter():
-        if not _is_not_now_semantic_node(node):
+        if not _is_not_now_semantic_node(node, _labels=labels):
             continue
         raw_matches += 1
         action = _nearest_enabled_clickable_ancestor(node, parents)
@@ -163,12 +188,22 @@ def canonicalize_semantic_action_targets(hierarchy_xml: str) -> dict[str, Any]:
     }
 
 
-def _is_not_now_semantic_node(node: ET.Element) -> bool:
+def _closed_action_labels(action_kind: str) -> frozenset[str]:
+    if action_kind == "not_now":
+        return NOT_NOW_LABELS
+    if action_kind == "navigation_education_ack":
+        return frozenset({"got it"})
+    raise ValueError("unsupported_semantic_action_kind")
+
+
+def _is_not_now_semantic_node(
+    node: ET.Element, *, _labels: frozenset[str] = NOT_NOW_LABELS,
+) -> bool:
     values = {
         _normalize_label(node.get("text")),
         _normalize_label(node.get("content-desc")),
     }
-    return bool(values & NOT_NOW_LABELS)
+    return bool(values & _labels)
 
 
 def _nearest_enabled_clickable_ancestor(
@@ -207,6 +242,8 @@ def _target_from_node(
 def _resolve_unique_live_selector(
     d: Any,
     target: CanonicalSemanticActionTarget,
+    *,
+    _labels: frozenset[str] = NOT_NOW_LABELS,
 ) -> Any | None:
     """Address the proved ancestor by semantic and actionable structure."""
 
@@ -217,9 +254,9 @@ def _resolve_unique_live_selector(
     if target.class_name:
         structural["className"] = target.class_name
     candidates: list[dict[str, Any]] = []
-    if _normalize_label(target.content_description) in NOT_NOW_LABELS:
+    if _normalize_label(target.content_description) in _labels:
         candidates.append({"description": target.content_description, **structural})
-    if _normalize_label(target.text) in NOT_NOW_LABELS:
+    if _normalize_label(target.text) in _labels:
         candidates.append({"text": target.text, **structural})
     for kwargs in candidates:
         try:

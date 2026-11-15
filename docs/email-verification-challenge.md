@@ -54,6 +54,28 @@ by a fresh hierarchy proving the exact expected Instagram package plus its
 bottom navigation and Profile tab; an explicit non-empty package mismatch is
 never bypassed.
 
+## Verification transition and navigation education
+
+After a one-shot code submission, a still-visible non-expired code form uses the
+remaining existing finite observations before it is considered still required.
+Explicit invalid/expired challenges remain terminal; observation never resends
+a code, reloads credentials or admits another RUN.
+
+The reviewed `Swipe to easily access Reels and messages` education modal is
+handled in the existing post-verification completion path, before any Home
+surface underneath it can be admitted. Exact package, title and supporting body
+are required. Its `Got it` action reuses the existing unique actionable-ancestor
+resolver and live structural checks, with no coordinate fallback. An unchanged,
+missing, disabled or ambiguous target fails closed; arbitrary `Got it` labels,
+privacy choices and unknown screens gain no dismissal authority. The same
+recovery and observation budgets apply. Own-profile identity proof remains
+required after completion before publishing connected/readiness.
+
+For a supervised existing session, a personally approved action covers only
+that one exact gesture. Observe immediately afterwards and stop for owner
+review before another popup or own-profile navigation. Source signatures do
+not themselves authorize physical actions.
+
 ## No-Leak Rules
 
 Never log or persist in metadata/results:

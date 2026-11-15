@@ -721,5 +721,108 @@ class PostVerificationCompletionTests(unittest.TestCase):
         self.assertEqual(evidence["destination_proof"], "confirmed_own_profile_alternate_title")
 
 
+def navigation_education_xml(*, package=PACKAGE, body=None, duplicate=False, enabled="true"):
+    body = body if body is not None else "We've simplified our navigation to help you find and enjoy your favorite parts of Instagram."
+    button = (f'<node package="{package}" class="android.widget.FrameLayout" content-desc="Got it" '
+              f'resource-id="{package}:id/igds_headline_primary_action_button" clickable="true" '
+              f'enabled="{enabled}" bounds="[10,20][100,60]">'
+              '<node text="Got it" clickable="false" enabled="true" bounds="[30,30][80,50]" /></node>')
+    return (f'<hierarchy><node package="{package}" resource-id="{package}:id/tab_bar">'
+            f'<node package="{package}" content-desc="Profile" resource-id="{package}:id/profile_tab" /></node>'
+            f'<node package="{package}" resource-id="{package}:id/igds_headline_headline" '
+            'text="Swipe to easily access Reels and messages" />'
+            f'<node package="{package}" resource-id="{package}:id/igds_headline_body" text="{body}" />'
+            + button + (button if duplicate else "") + '</hierarchy>')
+
+
+class NavigationEducationDevice(FakeDevice):
+    def __init__(self, hierarchies, *, package=PACKAGE, live_count=1):
+        super().__init__(hierarchies, current_package=package)
+        self.education_target = _ActionTarget("Got it", live_count)
+        self.education_target.info["className"] = "android.widget.FrameLayout"
+
+    def __call__(self, **kwargs):
+        if kwargs.get("description") == "Got it" or kwargs.get("text") == "Got it":
+            return self.education_target
+        return super().__call__(**kwargs)
+
+
+class NavigationEducationCompletionTests(unittest.TestCase):
+    def test_changed_title_does_not_expose_underlying_home(self):
+        xml = navigation_education_xml().replace("Swipe to easily access Reels and messages", "A different educational title")
+        screen, signals = classify_post_verification_surface(xml, expected_package_name=PACKAGE)
+        self.assertEqual(screen, "unknown")
+        self.assertFalse(signals.get("connected_surface_proof"))
+
+    def test_malformed_observed_overlay_does_not_expose_underlying_home(self):
+        xml = navigation_education_xml().replace("</hierarchy>", "<broken>")
+        screen, signals = classify_post_verification_surface(xml, expected_package_name=PACKAGE)
+        self.assertEqual(screen, "unknown")
+        self.assertFalse(signals.get("connected_surface_proof"))
+
+    def test_exact_overlay_wins_over_underlying_authenticated_navigation(self):
+        screen, signals = classify_post_verification_surface(navigation_education_xml(), expected_package_name=PACKAGE)
+        self.assertEqual(screen, "instagram_navigation_education_prompt")
+        self.assertFalse(signals["connected_surface_proof"])
+
+    def test_single_got_it_then_fresh_home_and_no_back(self):
+        d = NavigationEducationDevice([navigation_education_xml(), HOME_XML, HOME_XML])
+        r = prepare_post_verification_identity_surface(d, expected_package_name=PACKAGE, sleeper=lambda _: None)
+        self.assertTrue(r.safe_for_identity_guard)
+        self.assertEqual(d.education_target.click_calls, 1)
+        self.assertEqual(d.press_calls, [])
+        self.assertEqual(r.recovered_screen_types, ("instagram_navigation_education_prompt",))
+
+    def test_unchanged_popup_stops_after_one_action(self):
+        d = NavigationEducationDevice([navigation_education_xml()] * 3)
+        r = prepare_post_verification_identity_surface(d, expected_package_name=PACKAGE, sleeper=lambda _: None)
+        self.assertFalse(r.safe_for_identity_guard)
+        self.assertEqual(r.failure_reason, "post_verification_surface_unchanged_after_got_it")
+        self.assertEqual(d.education_target.click_calls, 1)
+
+    def test_wrong_supporting_body_never_falls_through_to_home_or_click(self):
+        d = NavigationEducationDevice([navigation_education_xml(body="Different consent or verification")])
+        r = prepare_post_verification_identity_surface(d, expected_package_name=PACKAGE, sleeper=lambda _: None)
+        self.assertFalse(r.safe_for_identity_guard)
+        self.assertEqual(r.screen_type, "unknown")
+        self.assertEqual(d.education_target.click_calls, 0)
+        self.assertEqual(d.press_calls, [])
+
+    def test_ambiguous_disabled_and_duplicate_live_targets_refuse(self):
+        for xml, count in [(navigation_education_xml(duplicate=True), 1),
+                           (navigation_education_xml(enabled="false"), 1),
+                           (navigation_education_xml(), 2)]:
+            with self.subTest(count=count, xml=hashlib.sha256(xml.encode()).hexdigest()):
+                d = NavigationEducationDevice([xml], live_count=count)
+                r = prepare_post_verification_identity_surface(d, expected_package_name=PACKAGE, sleeper=lambda _: None)
+                self.assertFalse(r.safe_for_identity_guard)
+                self.assertEqual(d.education_target.click_calls, 0)
+
+    def test_exact_package_required_and_no_identity_is_inferred(self):
+        from instagram_post_verification_completion import dismiss_navigation_education_prompt_once
+        d = NavigationEducationDevice([navigation_education_xml()], package="com.instagram.android")
+        r = dismiss_navigation_education_prompt_once(d, hierarchy_xml=navigation_education_xml(), expected_package_name=PACKAGE)
+        self.assertFalse(r.dismissed)
+        self.assertEqual(d.education_target.click_calls, 0)
+
+    def test_native_clone_frame_layout_shape_and_duplicate_semantics(self):
+        from instagram_post_verification_completion import dismiss_navigation_education_prompt_once
+        xml = navigation_education_xml(package="com.instagram.androie")
+        xml = xml.replace('[10,20][100,60]', '[135,1968][945,2092]')
+        d = NavigationEducationDevice([xml], package="com.instagram.androie")
+        d.education_target.info['bounds'] = dict(left=135, top=1968, right=945, bottom=2092)
+        r = dismiss_navigation_education_prompt_once(d, hierarchy_xml=xml, expected_package_name="com.instagram.androie")
+        self.assertTrue(r.dismissed)
+        self.assertEqual((r.raw_semantic_match_count, r.canonical_target_count), (2, 1))
+        self.assertEqual(d.education_target.click_calls, 1)
+
+    def test_got_it_never_confers_generic_consent_or_unknown_action_authority(self):
+        from instagram_post_verification_completion import dismiss_navigation_education_prompt_once
+        xml = navigation_education_xml().replace("Swipe to easily access Reels and messages", "Choose if we process your data for ads")
+        d = NavigationEducationDevice([xml])
+        self.assertFalse(dismiss_navigation_education_prompt_once(d, hierarchy_xml=xml, expected_package_name=PACKAGE).dismissed)
+        self.assertEqual(d.education_target.click_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

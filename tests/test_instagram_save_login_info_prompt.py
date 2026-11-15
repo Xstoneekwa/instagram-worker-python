@@ -176,5 +176,30 @@ class SaveLoginInfoPromptTests(unittest.TestCase):
         self.assertEqual(result.failure_reason, "not_now_canonical_target_unaddressable")
 
 
+class ClosedEducationSemanticTargetTests(unittest.TestCase):
+    def test_got_it_semantics_reuse_canonical_parent_resolution(self):
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        r = canonicalize_semantic_action_targets(navigation_education_xml(), _action_kind="navigation_education_ack")
+        self.assertEqual(r["raw_semantic_match_count"], 2)
+        self.assertEqual(len(r["targets"]), 1)
+        self.assertEqual(r["targets"][0].class_name, "android.widget.FrameLayout")
+
+    def test_default_not_now_does_not_resolve_got_it(self):
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        self.assertEqual(len(canonicalize_semantic_action_targets(navigation_education_xml())["targets"]), 0)
+
+    def test_arbitrary_action_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            canonicalize_semantic_action_targets(button_xml(SEMANTIC_CHILD), _action_kind="allow")
+
+    def test_live_bounds_mismatch_refuses_without_click(self):
+        from instagram_save_login_info_prompt import _find_unique_semantic_action_target
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        target = Target(1, bounds=(20, 30, 110, 70), class_name="android.widget.FrameLayout")
+        r = _find_unique_semantic_action_target(Device({("description", "Got it"): target}), hierarchy_xml=navigation_education_xml(), action_kind="navigation_education_ack")
+        self.assertIsNone(r["target"])
+        self.assertEqual(target.click_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

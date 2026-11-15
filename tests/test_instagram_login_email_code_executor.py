@@ -303,3 +303,65 @@ class EmailCodeExecutorTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_reason, "adb_keyboard_broadcast_failed")
         self.assertIn("verification_code_adb_keyboard_broadcast_failed", result.warnings)
+
+
+class PostCodeTransitionCompletionTests(unittest.TestCase):
+    def observe(self, hierarchies, *, budget=4, expected_package="com.instagram.androig"):
+        from tests.test_instagram_post_verification_completion import NavigationEducationDevice
+        d = NavigationEducationDevice(hierarchies)
+        waits = []; warnings = []; timings = {}
+        r = email_code_executor._observe_post_submit_settled(
+            d, timings=timings, warnings=warnings, timer=lambda: 0,
+            sleeper=waits.append, initial_wait_ms=10000, interval_ms=1000, max_observations=budget,
+            expected_package_name=expected_package,
+        )
+        return d, r, timings, waits, warnings
+
+    def test_transient_code_save_not_now_education_home_uses_same_four_observations(self):
+        from tests.test_instagram_post_verification_completion import SAVE_LOGIN_XML, HOME_XML, navigation_education_xml
+        d, r, timing, waits, warnings = self.observe([EMAIL_CODE_CHALLENGE_XML, SAVE_LOGIN_XML, navigation_education_xml(), CONNECTED_XML])
+        self.assertEqual(r['outcome'], 'connected')
+        self.assertEqual(timing['post_submit_observation_count'], 4)
+        self.assertEqual(waits, [10, 1, 1, 1])
+        self.assertEqual(d.save_not_now_target.click_calls, 1)
+        self.assertEqual(d.education_target.click_calls, 1)
+        self.assertEqual(d.press_calls, [])
+        self.assertIn('navigation_education_got_it_acknowledged', warnings)
+
+    def test_still_required_uses_finite_budget_without_resend_or_click(self):
+        d, r, timing, waits, _ = self.observe([EMAIL_CODE_CHALLENGE_XML] * 6)
+        self.assertEqual(r['outcome'], 'verification_pending')
+        self.assertEqual(timing['post_submit_observation_count'], 4)
+        self.assertEqual(len(waits), 4)
+        self.assertEqual(d.education_target.click_calls, 0)
+        self.assertEqual(d.press_calls, [])
+
+    def test_explicit_terminal_failure_does_not_consume_remaining_transition_budget(self):
+        with patch('instagram_login_password_form_executor._classify_post_submit_hierarchy', return_value={'outcome':'login_failed','terminal':True,'reason':'verification_code_invalid','screen_type':'verification_code_invalid'}):
+            _, r, timing, _, _ = self.observe([EMAIL_CODE_CHALLENGE_XML] * 4)
+        self.assertEqual(r['outcome'], 'login_failed')
+        self.assertEqual(timing['post_submit_observation_count'], 1)
+
+    def test_expired_code_is_not_treated_as_in_flight_transition(self):
+        with patch('instagram_login_password_form_executor._classify_post_submit_hierarchy', return_value={'outcome':'verification_pending','terminal':True,'verification_code_challenge_detected':True,'verification_code_expired':True}):
+            _, _, timing, _, _ = self.observe([EMAIL_CODE_CHALLENGE_XML] * 4)
+        self.assertEqual(timing['post_submit_observation_count'], 1)
+
+    def test_repeated_education_modal_is_not_clicked_twice(self):
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        d, r, _, _, _ = self.observe([navigation_education_xml()] * 4)
+        self.assertEqual(d.education_target.click_calls, 1)
+        self.assertEqual(r['reason'], 'navigation_education_surface_unchanged')
+        self.assertNotEqual(r['outcome'], 'connected')
+
+    def test_new_acknowledgement_refuses_another_clone_than_pre_code_package(self):
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        d, r, _, _, _ = self.observe([navigation_education_xml()], expected_package="com.instagram.androie")
+        self.assertEqual(d.education_target.click_calls, 0)
+        self.assertEqual(r['reason'], 'navigation_education_surface_unproved')
+
+    def test_new_acknowledgement_requires_pre_code_package_proof(self):
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        d, r, _, _, _ = self.observe([navigation_education_xml()], expected_package="")
+        self.assertEqual(d.education_target.click_calls, 0)
+        self.assertEqual(r['reason'], 'navigation_education_surface_unproved')

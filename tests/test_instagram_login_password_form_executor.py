@@ -2427,5 +2427,23 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(login.click_calls, 0)
 
 
+class NavigationEducationPostSubmitTests(unittest.TestCase):
+    def test_education_popup_is_not_connected_despite_bottom_navigation(self):
+        from instagram_login_password_form_executor import _classify_post_submit_hierarchy
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        r = _classify_post_submit_hierarchy(navigation_education_xml())
+        self.assertEqual(r['outcome'], 'unknown')
+        self.assertTrue(r['navigation_education_prompt_present'])
+        self.assertFalse(r['terminal'])
+
+    def test_unproved_education_body_is_terminal_unknown_not_password_failure(self):
+        from instagram_login_password_form_executor import _classify_post_submit_hierarchy
+        from tests.test_instagram_post_verification_completion import navigation_education_xml
+        r = _classify_post_submit_hierarchy(navigation_education_xml(body='Unknown instruction'))
+        self.assertEqual(r['outcome'], 'unknown')
+        self.assertTrue(r['terminal'])
+        self.assertFalse(r['navigation_education_prompt_present'])
+
+
 if __name__ == "__main__":
     unittest.main()

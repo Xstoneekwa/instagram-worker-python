@@ -72,6 +72,13 @@ def execute_email_code_challenge_resume(
     warnings: list[str] = []
 
     screen = _observe_current_screen(d, warnings=warnings)
+    # The canonical caller already checked its assigned foreground package.
+    # Pin that pre-input identity for the new acknowledgement; never derive it
+    # from the later popup, which could belong to another clone.
+    try:
+        code_form_package = str(d.app_current().get("package") or "")
+    except Exception:
+        code_form_package = ""
     verification_channel = str(
         screen.get("verification_channel") or screen.get("challenge_type") or ""
     ).strip()
@@ -289,6 +296,7 @@ def execute_email_code_challenge_resume(
 
     observed = _observe_post_submit_settled(
         d,
+        expected_package_name=code_form_package,
         timings=timings,
         warnings=warnings,
         timer=timer,
@@ -404,6 +412,7 @@ def _observe_post_submit_settled(
     initial_wait_ms: int,
     interval_ms: int,
     max_observations: int,
+    expected_package_name: str = "",
 ) -> dict[str, Any]:
     from instagram_login_password_form_executor import (
         _classify_post_submit_hierarchy,
@@ -415,6 +424,7 @@ def _observe_post_submit_settled(
     save_login_info_prompt_detected = False
     save_login_info_not_now_tapped = False
     save_login_info_dismiss_attempt_count = 0
+    navigation_education_ack_attempt_count = 0
     post_login_location_services_prompt_detected = False
     post_login_location_services_prompt_dismissed = False
     post_login_location_services_prompt_dismiss_attempt_count = 0
@@ -443,6 +453,20 @@ def _observe_post_submit_settled(
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
         last_observed = {**observed, "screen_label": screen_label}
+        if observed.get("navigation_education_prompt_present") is True:
+            from instagram_post_verification_completion import dismiss_navigation_education_prompt_once
+            if navigation_education_ack_attempt_count:
+                last_observed = {**last_observed, "reason": "navigation_education_surface_unchanged", "terminal": True}
+                break
+            navigation_education_ack_attempt_count += 1
+            result = dismiss_navigation_education_prompt_once(
+                d, hierarchy_xml=str(hierarchy_xml or ""), expected_package_name=expected_package_name,
+            )
+            if not result.dismissed:
+                last_observed = {**last_observed, "reason": result.failure_reason, "terminal": True}
+                break
+            warnings.append("navigation_education_got_it_acknowledged")
+            continue
         if observed.get("save_login_info_prompt_present") is True:
             save_login_info_prompt_detected = True
             warnings.append("instagram_save_login_info_prompt_detected")
@@ -507,6 +531,13 @@ def _observe_post_submit_settled(
                 "screen_label": "post_login_location_services_prompt_dismissed",
                 "terminal": False,
             }
+            continue
+        if (observed.get("outcome") == "verification_pending"
+                and observed.get("verification_code_challenge_detected") is True
+                and not observed.get("verification_code_expired")
+                and index + 1 < observations):
+            # Code entry is one-shot; observing its existing screen is not a resend.
+            # Use the remaining existing finite observations to prove the transition.
             continue
         if observed.get("terminal"):
             break

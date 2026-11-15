@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -25,12 +26,20 @@ from instagram_contact_sync_preparation_prompt import (
     is_contact_sync_preparation_prompt,
 )
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
-from instagram_save_login_info_prompt import dismiss_save_login_info_prompt_once
+from instagram_save_login_info_prompt import (
+    dismiss_save_login_info_prompt_once, canonicalize_semantic_action_targets,
+    _dismiss_semantic_action_once, SaveLoginInfoDismissResult,
+)
 from logs import log
 
 
 POST_VERIFICATION_MAX_RECOVERIES = 3
 POST_VERIFICATION_RECOVERY_WAIT_SECONDS = 0.65
+NAVIGATION_EDUCATION_POPUP_TYPE = "instagram_navigation_education_prompt"
+_NAVIGATION_EDUCATION_TITLE = "Swipe to easily access Reels and messages"
+_NAVIGATION_EDUCATION_BODY = (
+    "We've simplified our navigation to help you find and enjoy your favorite parts of Instagram."
+)
 
 _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
     {
@@ -49,6 +58,7 @@ _BACK_RECOVERABLE_SCREEN_TYPES = frozenset(
 _SEMANTIC_ACTION_RECOVERABLE_SCREEN_TYPES = frozenset(
     {
         "instagram_contact_sync_preparation_prompt",
+        NAVIGATION_EDUCATION_POPUP_TYPE,
     }
 )
 
@@ -174,6 +184,18 @@ def prepare_post_verification_identity_surface(
                         "fail_closed": True,
                     },
                 )
+        elif screen_type == NAVIGATION_EDUCATION_POPUP_TYPE:
+            recovery_action = "navigation_education_got_it"
+            acknowledgement = dismiss_navigation_education_prompt_once(
+                d, hierarchy_xml=hierarchy, expected_package_name=expected_package_name,
+            )
+            if not acknowledgement.dismissed:
+                return PostVerificationCompletionResult(
+                    safe_for_identity_guard=False, screen_type=screen_type,
+                    recovery_count=len(recovered), recovered_screen_types=tuple(recovered),
+                    failure_reason=acknowledgement.failure_reason,
+                    metadata={"semantic_action": "got_it", "fail_closed": True},
+                )
         elif screen_type == "instagram_contact_sync_preparation_prompt":
             recovery_action = "contact_sync_next"
             contact_result = activate_contact_sync_next_once(
@@ -224,7 +246,11 @@ def prepare_post_verification_identity_surface(
                 else (
                     "post_verification_contact_sync_next_recovery"
                     if recovery_action == "contact_sync_next"
-                    else "post_verification_known_surface_back_recovery"
+                        else (
+                            "post_verification_navigation_education_ack"
+                            if recovery_action == "navigation_education_got_it"
+                            else "post_verification_known_surface_back_recovery"
+                        )
                 )
             ),
             screen_type=screen_type,
@@ -246,7 +272,11 @@ def prepare_post_verification_identity_surface(
                     else (
                         "post_verification_surface_unchanged_after_contact_sync_next"
                         if recovery_action == "contact_sync_next"
-                        else "post_verification_surface_unchanged_after_back"
+                        else (
+                            "post_verification_surface_unchanged_after_got_it"
+                            if recovery_action == "navigation_education_got_it"
+                            else "post_verification_surface_unchanged_after_back"
+                        )
                     )
                 ),
                 fingerprint_changed=False,
@@ -271,6 +301,14 @@ def classify_post_verification_surface(
     signals = extract_login_screen_signals_from_hierarchy(str(hierarchy or ""))
     screen_type = str(signals.get("screen_type") or "unknown")
     normalized = _normalized_hierarchy_text(hierarchy)
+
+    education = classify_navigation_education_prompt(hierarchy, expected_package_name=expected_package_name)
+    if education["state"] != "absent":
+        # The modal must win over the authenticated navigation underneath it.
+        return (
+            NAVIGATION_EDUCATION_POPUP_TYPE if education["state"] == "proved" else "unknown",
+            {**signals, "connected_surface_proof": "", "navigation_education_proof": education["state"]},
+        )
 
     connected_surface_proof = _connected_instagram_surface_proof(
         hierarchy,
@@ -309,6 +347,8 @@ def _connected_instagram_surface_proof(
 ) -> str:
     raw = str(hierarchy or "")
     package = str(expected_package_name or "").strip()
+    if classify_navigation_education_prompt(raw, expected_package_name=package)["state"] != "absent":
+        return ""
     if package and f'package="{package}"' not in raw:
         return ""
     has_tab_bar = bool(re.search(r'resource-id="[^"]*:id/tab_bar"', raw))
@@ -332,6 +372,64 @@ def _connected_instagram_surface_proof(
     }:
         return "instagram_authenticated_surface_classifier"
     return ""
+
+
+def classify_navigation_education_prompt(
+    hierarchy: str, *, expected_package_name: str = "",
+) -> dict[str, str]:
+    """Recognize only the reviewed package-bound educational modal, never its feed."""
+    try:
+        try:
+            root = ET.fromstring(str(hierarchy or ""))
+        except ET.ParseError:
+            root = ET.fromstring("<hierarchy>" + str(hierarchy or "") + "</hierarchy>")
+    except ET.ParseError:
+        # An unreadable observed overlay cannot expose the feed behind it.
+        markers = (_NAVIGATION_EDUCATION_TITLE, _NAVIGATION_EDUCATION_BODY,
+                   ":id/igds_headline_primary_action_button")
+        return {"state": "unproved" if any(m in str(hierarchy or "") for m in markers) else "absent",
+                "package": ""}
+    normalize = lambda text: " ".join(str(text or "").split()).casefold()
+    title = [n for n in root.iter() if normalize(n.get("text")) == normalize(_NAVIGATION_EDUCATION_TITLE)]
+    if not title:
+        related = any(
+            normalize(n.get("text")) == normalize(_NAVIGATION_EDUCATION_BODY)
+            or str(n.get("resource-id") or "").endswith(":id/igds_headline_primary_action_button")
+            for n in root.iter()
+        )
+        return {"state": "unproved" if related else "absent", "package": ""}
+    if len(title) != 1:
+        return {"state": "unproved", "package": ""}
+    package = str(title[0].get("package") or "")
+    if (not package.startswith("com.instagram.") or (expected_package_name and package != expected_package_name)
+            or title[0].get("resource-id") != package + ":id/igds_headline_headline"):
+        return {"state": "unproved", "package": package}
+    bodies = [n for n in root.iter() if n.get("package") == package
+              and n.get("resource-id") == package + ":id/igds_headline_body"
+              and normalize(n.get("text")) == normalize(_NAVIGATION_EDUCATION_BODY)]
+    return {"state": "proved" if len(bodies) == 1 else "unproved", "package": package}
+
+
+def dismiss_navigation_education_prompt_once(
+    d: Any, *, hierarchy_xml: str, expected_package_name: str,
+) -> SaveLoginInfoDismissResult:
+    """A single exact Got it acknowledgement; caller never gains another gesture."""
+    proof = classify_navigation_education_prompt(hierarchy_xml, expected_package_name=expected_package_name)
+    if not expected_package_name or proof["state"] != "proved":
+        return SaveLoginInfoDismissResult(False, "navigation_education_surface_unproved")
+    try:
+        if d.app_current().get("package") != expected_package_name:
+            return SaveLoginInfoDismissResult(False, "navigation_education_package_mismatch")
+    except Exception:
+        return SaveLoginInfoDismissResult(False, "navigation_education_foreground_unproved")
+    canonical = canonicalize_semantic_action_targets(hierarchy_xml, _action_kind="navigation_education_ack")
+    targets = canonical["targets"]
+    if (len(targets) != 1 or targets[0].resource_id != expected_package_name + ":id/igds_headline_primary_action_button"):
+        return SaveLoginInfoDismissResult(
+            False, "navigation_education_target_unproved", canonical_target_count=len(targets),
+            raw_semantic_match_count=canonical["raw_semantic_match_count"],
+        )
+    return _dismiss_semantic_action_once(d, hierarchy_xml=hierarchy_xml, action_kind="navigation_education_ack")
 
 
 def _is_sync_contacts_prompt(text: str) -> bool:
