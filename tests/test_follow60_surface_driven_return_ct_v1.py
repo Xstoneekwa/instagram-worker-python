@@ -83,6 +83,29 @@ class SurfaceProbeContractTest(unittest.TestCase):
             "activity_mismatch",
         )
 
+    def test_exact_post_mute_return_uses_one_back_and_can_retain_canonical_detection(self):
+        proof = {"is_followers_list": True, "action_bar_title": "ct", "current_package": PKG}
+        for post_mute, xml_valid in ((True, True), (True, False), (False, False)):
+            with self.subTest(post_mute=post_mute, xml_valid=xml_valid):
+                device = _Device()
+                with mock.patch.object(nav, "verify_app_foreground", return_value=True), mock.patch.object(
+                    nav, "_FOLLOW_ROW_SESSION",
+                ) as session, mock.patch.object(
+                    nav, "_return_ct_446_xml_snapshot", return_value=proof if xml_valid else {},
+                ) as fast, mock.patch.object(
+                    nav, "detect_followers_list_screen", return_value=proof,
+                ) as fallback:
+                    session.get.return_value = ({"package": PKG}, "emitter")
+                    ok, method, failure = nav.post_follow_controlled_return_to_followers_list(
+                        device, pkg=PKG, source_profile_username="ct", follower_username="candidate",
+                        visual_candidate_id="row", det=None, compact_after_follow_verified_mute=True,
+                        immediate_candidate_back_proof=True, post_mute_exact_return=post_mute,
+                    )
+                self.assertEqual((ok, method, failure), (True, "fresh_candidate_proof_one_back_then_exact_ct", None))
+                self.assertEqual(device.backs, 1)
+                self.assertEqual(fast.call_count, int(post_mute))
+                self.assertEqual(fallback.call_count, int(not xml_valid))
+
 
 class SurfaceDrivenPreparationTest(unittest.TestCase):
     def _prepare(self, device: _Device) -> dict[str, object]:

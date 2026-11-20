@@ -116,6 +116,71 @@ class Follow60ReturnCtTransientIdentityResumeTests(unittest.TestCase):
         )
         self.assertEqual(termination, "non_recoverable_failure")
 
+    @staticmethod
+    def _ct_xml(pkg, title="source.ct", *, selected="true"):
+        return f"""<hierarchy>
+            <node package="{pkg}" resource-id="{pkg}:id/action_bar_title" text="{title}"/>
+            <node package="{pkg}" resource-id="{pkg}:id/unified_follow_list_tab_layout">
+                <node text="8 followers" selected="{selected}"/>
+            </node>
+            <node class="androidx.recyclerview.widget.RecyclerView">
+                <node package="{pkg}" resource-id="{pkg}:id/follow_list_container">
+                    <node package="{pkg}" resource-id="{pkg}:id/follow_list_username" text="next.user"/>
+                </node>
+            </node>
+        </hierarchy>"""
+
+    def _fresh_return(self, pkg, hierarchy, *, current=None, activity_ok=True,
+                      generations=(1, 1), stopped=(False, False)):
+        device = _Device()
+        with mock.patch.object(nav.config, "INSTAGRAM_PACKAGE", pkg), mock.patch.object(
+            nav, "_followers_current_pkg_activity", return_value={
+                "current_package": current or pkg, "current_activity": ".activity.MainTabActivity",
+            }
+        ), mock.patch.object(
+            nav, "_follow_446_activity_authority", return_value=activity_ok,
+        ), mock.patch.object(nav, "_followers_surface_scope"), mock.patch.object(
+            nav.followers_proof, "current_generations", side_effect=generations,
+        ), mock.patch.object(nav.device_action_latch, "stop_requested", side_effect=stopped), mock.patch.object(
+            nav, "followers_dump_fresh_hierarchy", return_value=hierarchy,
+        ) as read:
+            output = nav._return_ct_446_xml_snapshot(device, package=pkg, source="source.ct", candidate="different")
+            return output, read.call_count
+
+    def test_exact_clone_or_primary_fresh_list_with_one_capture(self):
+        for pkg in ("com.instagram.android", "org.assignedfixture.slot7"):
+            with self.subTest(pkg=pkg):
+                det, reads = self._fresh_return(pkg, self._ct_xml(pkg))
+                self.assertEqual(reads, 1)
+                self.assertTrue(det["is_followers_list"])
+                self.assertEqual(det["action_bar_title"], "source.ct")
+                self.assertEqual(det["visible_usernames_sample"], ["next.user"])
+
+    def test_exact_ct_proof_denies_stale_foreign_and_contradictory_surfaces(self):
+        pkg = "org.assignedfixture.slot7"
+        valid = self._ct_xml(pkg)
+        contradictory = valid.replace(
+            "</hierarchy>",
+            f'<node package="{pkg}" resource-id="{pkg}:id/action_bar_title" text="foreign.ct"/></hierarchy>',
+        )
+        cases = (
+            (valid, {"current": "foreign.pkg"}, 0),
+            (valid, {"activity_ok": False}, 0),
+            (valid, {"generations": (1, 2)}, 1),
+            (valid, {"stopped": (False, True)}, 1),
+            (valid, {"stopped": (True,)}, 0),
+            (self._ct_xml(pkg, "different"), {}, 1),
+            (self._ct_xml(pkg, ""), {}, 1),
+            (self._ct_xml(pkg, selected="false"), {}, 1),
+            (self._ct_xml("foreign.pkg"), {}, 1),
+            (contradictory, {}, 1),
+        )
+        for hierarchy, options, expected_reads in cases:
+            with self.subTest(options=options, hierarchy=hierarchy[:100]):
+                det, reads = self._fresh_return(pkg, hierarchy, **options)
+                self.assertFalse(det)
+                self.assertEqual(reads, expected_reads)
+
 
 if __name__ == "__main__":
     unittest.main()

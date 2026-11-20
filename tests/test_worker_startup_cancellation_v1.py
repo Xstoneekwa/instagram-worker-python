@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest import TestCase, mock
 import cooperative_business_stop as stops
 import outreach_slot_contract as slots
+from run_latency_observability_v1 import observed_operation
 
 # Exact approved startup delta only, using the existing frozen inverse contract.
 # Historical Golden pins remain byte-identical. A foreign byte is never normalized.
@@ -12,6 +13,19 @@ _STARTUP_EXACT_INVERSE = 'eNrNG2tz27jxr6DKB1EZnUJK4sutOvWkuZtMW+caJ+2HOMOBSNDimC
 
 def restore_startup_exact_delta(name, source):
     if name == 'runner.py':
+        import hashlib
+        import subprocess
+        # This byte-exact telemetry delta has no authority over any other source.
+        if hashlib.sha256(source.encode()).hexdigest() in (
+            '9408bbb4694d1fc2d7d623f708166cffc11c4dd3f7f35f78a78f3cd3ad9f88ff',
+            'f14a4570677c735aaecdaaa8fc00f501df86462757628a8e0616f7a56d8f4d0f',
+        ):
+            source = subprocess.check_output(
+                ['git', 'show', 'fefa18b2c458683edc37a26e79fd9125a378d2b6:runner.py'],
+                cwd=ROOT, text=True,
+            )
+            if hashlib.sha256(source.encode()).hexdigest() != '5119b9b814d34f9c81b8e15fe7d082bd8196e70803ce6e35356aa6d565a566e2':
+                raise AssertionError('startup_telemetry_base_mismatch')
         from tests.test_certification_admission import follow446_parent_for_comparison
         source = follow446_parent_for_comparison(name, source)
     import base64, hashlib, json, zlib
@@ -45,7 +59,8 @@ class RunnerStartupCancellationTests(TestCase):
         self.slot=SimpleNamespace(context={'account_id':'a','request_id':'r','device_id':'d'},event=mock.Mock())
         self.active=mock.patch.object(slots,'active',return_value=self.slot)
         self.active.start();self.addCleanup(self.active.stop)
-        self.env={'log':mock.Mock(),'StartupCancellationStopped':stops.StartupCancellationStopped}
+        self.env={'log':mock.Mock(),'StartupCancellationStopped':stops.StartupCancellationStopped,
+                  'observed_operation':observed_operation}
         self.require=actual('_require_startup_cancellation_clear',self.env)
         self.mutate=actual('_startup_phone_mutation',self.env)
         self.context=stops.StopContext('a','r','d','r',generation='generation')
@@ -118,6 +133,11 @@ class RunnerStartupCancellationTests(TestCase):
         self.assertEqual(self.mutate(self.guard,'before_app_start',action,'d','pkg',flag=True),'original-result')
         action.assert_called_once_with('d','pkg',flag=True)
         self.assertTrue(self.slot.startup_phone_mutations_started)
+        observed = [call.kwargs for call in self.env['log'].call_args_list
+                    if call.args[1] == 'run_latency_operation_v1']
+        self.assertEqual(len(observed), 1)
+        self.assertEqual((observed[0]['operation'], observed[0]['io_kind']),
+                         ('before_app_start', 'adb'))
 
     def test_non_dispatched_legacy_route_does_not_gain_a_new_get(self):
         self.require(account_id=None,request_id=None,run_id=None,device_id=None,boundary='legacy',required=False)

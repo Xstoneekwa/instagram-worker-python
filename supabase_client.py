@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from logs import log
+from run_latency_observability_v1 import current_context, timing_enabled
 import account_protection_lists
 
 BUSINESS_TIMEZONE = ZoneInfo("Africa/Johannesburg")
@@ -207,6 +208,7 @@ def _request_urlopen(
     timeout: float | None = None,
     max_retries: int | None = None,
     retry_backoff_cap: float | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> bytes:
     """Issue a Supabase REST request with bounded retries and safe errors."""
     timeout_s = float(timeout if timeout is not None else _rest_timeout_seconds())
@@ -222,6 +224,9 @@ def _request_urlopen(
 
     for attempt in range(retry_limit + 1):
         started = time.monotonic()
+        if timing is not None:
+            timing["attempt_count"] = attempt + 1
+            timing["backoff_ms"] = timing.get("backoff_ms", 0.0)
         try:
             with request.urlopen(req, timeout=timeout_s) as resp:
                 return resp.read()
@@ -270,7 +275,12 @@ def _request_urlopen(
             latency_ms=getattr(last_exc, "latency_ms", None),
         )
         if backoff_s > 0:
-            time.sleep(backoff_s * (attempt + 1))
+            backoff_started = time.monotonic() if timing is not None else None
+            try:
+                time.sleep(backoff_s * (attempt + 1))
+            finally:
+                if backoff_started is not None:
+                    timing["backoff_ms"] += (time.monotonic() - backoff_started) * 1000.0
 
     if last_exc is not None:
         raise last_exc
@@ -294,6 +304,29 @@ def _service_key() -> str:
     return key
 
 
+def _log_rpc_timing(method, resource, data, started, status, timing, binding, *, defer_timing=False):
+    try:
+        finished = time.monotonic()
+        log(
+            "info", "run_latency_rpc_timing_v1",
+            schema_version="RUN_LATENCY_OBSERVABILITY_V1",
+            rpc_method=str(method or "")[:12],
+            rpc_resource=str(resource or "")[:120],
+            duration_ms=round(max(0.0, (finished - started) * 1000.0), 2),
+            monotonic_ms=round(finished * 1000.0, 3),
+            attempt_count=timing.get("attempt_count") if timing else None,
+            backoff_ms=round(timing["backoff_ms"], 3) if timing and "backoff_ms" in timing else None,
+            status=status,
+            request_body_bytes=len(data or b""),
+            response_payload_captured=False,
+            extra_rpc_call=False,
+            **({"_defer_follow_timing": True} if defer_timing else {}),
+            **binding,
+        )
+    except Exception:
+        pass
+
+
 def _request_json(
     method: str,
     table: str,
@@ -308,6 +341,8 @@ def _request_json(
 ) -> Any:
     latency_started = time.monotonic()
     latency_status = "failed"
+    timing: dict[str, Any] | None = {} if timing_enabled() else None
+    binding = current_context() if timing is not None else {}
     base = _base_url()
     key = _service_key()
     params = f"?{parse.urlencode(query or {})}" if query else ""
@@ -338,6 +373,7 @@ def _request_json(
             timeout=request_timeout,
             max_retries=max_retries,
             retry_backoff_cap=retry_backoff_cap,
+            timing=timing,
         )
         if not raw:
             latency_status = "success_empty"
@@ -355,24 +391,7 @@ def _request_json(
             detail=str(e)[:200],
         ) from e
     finally:
-        try:
-            log(
-                "info",
-                "run_latency_rpc_timing_v1",
-                schema_version="RUN_LATENCY_OBSERVABILITY_V1",
-                rpc_method=str(method or "")[:12],
-                rpc_resource=str(table or "")[:120],
-                duration_ms=round(
-                    max(0.0, (time.monotonic() - latency_started) * 1000.0),
-                    2,
-                ),
-                status=latency_status,
-                request_body_bytes=len(data or b""),
-                response_payload_captured=False,
-                extra_rpc_call=False,
-            )
-        except Exception:
-            pass
+        _log_rpc_timing(method, table, data, latency_started, latency_status, timing, binding)
 
 
 def _strip_one_unknown_column(body: dict[str, Any], err: str) -> dict[str, Any] | None:
@@ -3418,18 +3437,25 @@ def _call_rpc(
     body = params if params is not None else {}
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     req = request.Request(url=url, method="POST", headers=headers, data=data)
+    started = time.monotonic()
+    status = "failed"
+    timing = {} if timing_enabled() else None
+    binding = current_context() if timing is not None else {}
     try:
         raw = _request_urlopen(
             req,
             op=f"RPC {fn}",
             timeout=max(1.0, float(timeout_seconds)),
             max_retries=max_retries,
+            timing=timing,
         )
         if not raw:
+            status = "success_empty"
             return None
         decoded = json.loads(raw.decode("utf-8"))
         if fn == _CT_RESUME_CLAIM_RPC:
             _log_ct_resume_rpc_structure(stage="rpc_json_decoded", value=decoded)
+        status = "success"
         return decoded
     except SupabaseRestError:
         raise
@@ -3440,6 +3466,10 @@ def _call_rpc(
             path=f"rpc/{fn}",
             detail=str(e)[:200],
         ) from e
+    finally:
+        if timing:
+            _log_rpc_timing("POST", f"rpc/{fn}", data, started, status, timing, binding,
+                            defer_timing=True)
 
 
 def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:

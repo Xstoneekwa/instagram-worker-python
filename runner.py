@@ -50,6 +50,7 @@ from follow_target_private_streak_retirement_v1 import (
 from run_latency_observability_v1 import (
     first_scroll_segment_fields,
     instrument_device,
+    observed_operation,
     observed_wait,
 )
 from terminal_summary_projection import terminal_reason, reconcile_terminal_progress
@@ -1146,7 +1147,12 @@ def _startup_phone_mutation(guard, boundary, action, *args, **kwargs):
     if slot is not None:
         # Set before the call: a lost response must not look like zero device work.
         slot.startup_phone_mutations_started = True
-    return action(*args, **kwargs)
+    kind = "adb" if boundary in {
+        "before_device_connect", "before_animation_settings", "before_update_lock",
+        "before_version_lock", "before_force_stop", "before_app_start",
+    } else "startup"
+    with observed_operation(boundary, kind=kind, emit=log):
+        return action(*args, **kwargs)
 
 
 def _abort_if_run_request_canceled(
@@ -5527,6 +5533,10 @@ def _terminalize_run_request_after_cleanup(run_status: str) -> None:
 def _return_with_cleanup(d, code: int) -> int:
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
+    log("info", "follow_latency_run_ending", run_id=_CURRENT_RUN_ID, request_id=_CURRENT_RUN_REQUEST_ID,
+        reason="runner_cleanup_boundary", exit_code=int(code),
+        _defer_follow_timing=bool(_PENDING_TERMINAL_RUN_STATUS)
+        or (d is not None and bool(getattr(config, "CLOSE_APPS_AFTER_RUN", True))))
     set_wait_event_callback(None)
     try:
         from follow_60s_canary import stats as _follow_60s_canary_stats
@@ -14541,6 +14551,8 @@ def _run_followers_list_engine_session(
                 ),
             )
     followers_list_ready = True
+    log("info", "follow_latency_ct_confirmed", run_id=run_id, request_id=_CURRENT_RUN_REQUEST_ID,
+        source_profile_username=source_profile_username, target_id=target_id, _defer_follow_timing=True)
     navigation_loop_state: dict[str, Any] = {"last_state": None}
 
     succ_payload = {
@@ -26330,6 +26342,7 @@ def _main_impl() -> int:
         supabase_mode=supabase_mode,
         account_id=account_id or None,
         run_id=run_id or None,
+        request_id=run_request_id or None,
         run_type=_parse_run_type(args) or None,
     )
     if _abort_if_run_request_canceled(
@@ -27725,6 +27738,8 @@ def _main_impl() -> int:
         app_start_wait_attempts = 0
         app_start_wait_foreground_ok = False
         app_start_wait_package_seen = ""
+        app_start_probe_ms = 0.0
+        app_start_poll_sleep_ms = 0.0
         app_start_wait_deadline = time.monotonic() + app_start_wait_deadline_s
         _startup_timing_log(
             "startup_app_readiness_app_start_wait_poll_started",
@@ -27741,14 +27756,18 @@ def _main_impl() -> int:
         )
         while True:
             app_start_wait_attempts += 1
+            probe_started = time.monotonic()
             app_start_wait_package_seen = _current_package_safe(d)
+            app_start_probe_ms += (time.monotonic() - probe_started) * 1000.0
             if app_start_wait_package_seen == _expected_package:
                 app_start_wait_foreground_ok = True
                 break
             remaining_s = app_start_wait_deadline - time.monotonic()
             if remaining_s <= 0:
                 break
+            wait_started = time.monotonic()
             time.sleep(min(0.1, remaining_s))
+            app_start_poll_sleep_ms += (time.monotonic() - wait_started) * 1000.0
         app_start_wait_ms = (time.perf_counter() - ws) * 1000.0
         _startup_timing_log(
             "startup_app_readiness_app_start_wait_poll_completed",
@@ -27757,6 +27776,8 @@ def _main_impl() -> int:
             substep="app_start_wait_poll",
             source="runner_app_readiness",
             attempts=int(app_start_wait_attempts),
+            foreground_probe_ms=round(app_start_probe_ms, 3),
+            poll_sleep_ms=round(app_start_poll_sleep_ms, 3),
             early_exit=bool(app_start_wait_foreground_ok),
             foreground_ok=bool(app_start_wait_foreground_ok),
             deadline_ms=round(app_start_wait_deadline_ms, 2),

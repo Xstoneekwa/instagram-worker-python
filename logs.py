@@ -6,6 +6,7 @@ import json
 import errno
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,9 @@ _RUN_LOG_PATH: str | None = None
 _STDOUT_DEGRADED = False
 _FILE_DEGRADED = False
 _DEGRADED_DIAGNOSTIC_EMITTED = False
+_FOLLOW_TIMING = threading.local()
+_FOLLOW_TIMING_LIMIT = 64
+_OUTPUT_LOCK = threading.RLock()
 
 _OUTPUT_ERRNOS = frozenset(
     value
@@ -51,6 +55,7 @@ def close_run_file_logging() -> None:
         except OSError as exc:
             _classify_output_error(exc, channel="run_log_close")
         _RUN_LOG_FILE = None
+    _FOLLOW_TIMING.carrier = None
     _FILE_DEGRADED = False
 
 
@@ -140,23 +145,31 @@ def _classify_output_error(exc: OSError, *, channel: str) -> None:
     _emit_degraded_diagnostic_once(exc, channel=channel)
 
 
-def _write_payload(payload: dict[str, Any]) -> None:
+def _write_payload(payload: dict[str, Any], *, observations=()) -> None:
     global _STDOUT_DEGRADED, _FILE_DEGRADED
-    line = json.dumps(payload, default=str) + "\n"
-    if not _STDOUT_DEGRADED:
+    lines = [json.dumps(payload, default=str) + "\n"]
+    for observation in observations:
         try:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-        except OSError as exc:
-            _classify_output_error(exc, channel="stdout")
-            _STDOUT_DEGRADED = True
-    if _RUN_LOG_FILE is not None and not _FILE_DEGRADED:
-        try:
-            _RUN_LOG_FILE.write(line)
-            _RUN_LOG_FILE.flush()
-        except OSError as exc:
-            _classify_output_error(exc, channel="run_file")
-            _FILE_DEGRADED = True
+            lines.append(json.dumps(observation, default=str) + "\n")
+        except Exception:
+            # A malformed optional row must never suppress its primary record.
+            continue
+    line = "".join(lines)
+    with _OUTPUT_LOCK:
+        if not _STDOUT_DEGRADED:
+            try:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            except OSError as exc:
+                _classify_output_error(exc, channel="stdout")
+                _STDOUT_DEGRADED = True
+        if _RUN_LOG_FILE is not None and not _FILE_DEGRADED:
+            try:
+                _RUN_LOG_FILE.write(line)
+                _RUN_LOG_FILE.flush()
+            except OSError as exc:
+                _classify_output_error(exc, channel="run_file")
+                _FILE_DEGRADED = True
 
 
 def logging_health() -> dict[str, Any]:
@@ -173,76 +186,125 @@ def _reset_logging_state_for_tests() -> None:
     _STDOUT_DEGRADED = False
     _FILE_DEGRADED = False
     _DEGRADED_DIAGNOSTIC_EMITTED = False
+    _FOLLOW_TIMING.carrier = None
     storage_health._reset_for_tests()
 
 
+_TIMING_KEYS = ("run_id", "request_id", "account_id")
+_DEFERRED_TIMING_EVENTS = frozenset({
+    "run_latency_operation_v1", "run_latency_wait_v1", "run_latency_rpc_timing_v1",
+    "follow_latency_ct_confirmed", "follow_latency_run_ending",
+})
+
+
+def _timing_binding(fields, context):
+    explicit = {key: fields[key] for key in _TIMING_KEYS if fields.get(key)}
+    if any(context.get(key) and value != context[key] for key, value in explicit.items()):
+        return explicit
+    return {**{key: context[key] for key in _TIMING_KEYS if context.get(key)}, **explicit}
+
+
+def _same_timing_run(left, right):
+    return (
+        any(left.get(key) and left[key] == right.get(key) for key in ("run_id", "request_id"))
+        and all(left[key] == right[key] for key in left.keys() & right.keys())
+    )
+
+
+def _take_follow_timing(binding):
+    slot = _FOLLOW_TIMING.__dict__
+    saved = slot.pop("carrier", None)
+    if saved is None:
+        return []
+    owner, rows, omitted = saved
+    if not _same_timing_run(owner, binding):
+        slot.setdefault("carrier", saved)
+        return []
+    if omitted:
+        rows = [*rows, {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": "warning",
+            "event": "run_latency_observation_v1",
+            "metric": "unavailable_timing_samples",
+            "reason": "carrier_limit",
+            "sample_count": omitted,
+            **owner,
+        }]
+    return rows
+
+
+def _observer_rows(observer, event_name, event, fields):
+    try:
+        return [{"ts": datetime.now(timezone.utc).isoformat(), "level": "info",
+                 "event": event_name, **row}
+                for row in observer(event, fields) if isinstance(row, dict)]
+    except Exception:
+        return []
+
+
 def log(level: str, event: str, **fields: Any) -> None:
-    """Emit one JSON object and feed failure-isolated CPU-only observers."""
+    """Emit JSONL, sharing an existing write with correlated timing observations."""
     include_null = bool(fields.pop("_include_null_fields", False))
-    if str(event or "").startswith("run_latency_"):
+    defer_timing = bool(fields.pop("_defer_follow_timing", False)) and event in _DEFERRED_TIMING_EVENTS
+    is_timing = str(event or "").startswith("run_latency_")
+    context = {}
+    if defer_timing or is_timing or getattr(_FOLLOW_TIMING, "carrier", None):
         try:
             from run_latency_observability_v1 import current_context
 
-            for key, value in current_context().items():
-                fields.setdefault(key, value)
+            context = current_context()
+            if is_timing and all(not (fields.get(key) and context.get(key))
+                                 or fields[key] == context[key] for key in _TIMING_KEYS):
+                for key, value in context.items():
+                    fields.setdefault(key, value)
         except Exception:
             pass
-    payload: dict[str, Any] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "level": level,
-        "event": event,
-    }
-    observed_fields: dict[str, Any] = {}
-    for k, v in fields.items():
-        if include_null or v is not None:
-            payload[k] = v
-            observed_fields[k] = v
-    _write_payload(payload)
 
-    # The observer only reads fields already emitted by V1.  It is isolated so
-    # import, enrichment, or serialization failures can never affect V1 logs or
-    # execution.  Terminal events bypass ``log`` to prevent recursion.
+    observed = {key: value for key, value in fields.items() if include_null or value is not None}
+    payload = {"ts": datetime.now(timezone.utc).isoformat(), "level": level, "event": event, **observed}
+    binding = _timing_binding(observed, context)
+    defer_timing = defer_timing and bool(binding.get("run_id") or binding.get("request_id"))
+
+    shadow_rows = []
+    latency_rows = []
     try:
-        from follow60_ordering_v2_shadow import (
-            PUBLIC_EVENT,
-            observe_runtime_event,
-        )
+        if not defer_timing:
+            try:
+                from follow60_ordering_v2_shadow import PUBLIC_EVENT, observe_runtime_event
 
-        terminal_events = observe_runtime_event(event, observed_fields)
-        for terminal in terminal_events:
-            if not isinstance(terminal, dict):
-                continue
-            _write_payload(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "level": "info",
-                    "event": PUBLIC_EVENT,
-                    **terminal,
-                }
-            )
-    except Exception:
-        pass
+                shadow_rows = _observer_rows(observe_runtime_event, PUBLIC_EVENT, event, observed)
+            except Exception:
+                pass
+        try:
+            from run_latency_observability_v1 import PUBLIC_EVENT as LATENCY_EVENT
+            from run_latency_observability_v1 import observe_runtime_event as observe_latency
 
-    # Latency V1 consumes only operations that V1 already emitted.  Derived
-    # records bypass ``log`` so instrumentation can neither recurse nor affect
-    # Instagram behavior when it fails.
-    try:
-        from run_latency_observability_v1 import (
-            PUBLIC_EVENT as LATENCY_PUBLIC_EVENT,
-            observe_runtime_event as observe_latency_event,
-        )
+            latency_rows = _observer_rows(observe_latency, LATENCY_EVENT, event, observed)
+        except Exception:
+            pass
+    finally:
+        if not defer_timing:
+            observations = _take_follow_timing(binding) + latency_rows
+            # Preserve the primary and Ordering shadow boundaries and order.
+            if shadow_rows:
+                _write_payload(payload)
+                try:
+                    for row in shadow_rows[:-1]:
+                        _write_payload(row)
+                    _write_payload(shadow_rows[-1], observations=observations)
+                except Exception:
+                    pass
+            elif observations:
+                _write_payload(payload, observations=observations)
+            else:
+                _write_payload(payload)
 
-        latency_events = observe_latency_event(event, observed_fields)
-        for latency_event in latency_events:
-            if not isinstance(latency_event, dict):
-                continue
-            _write_payload(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "level": "info",
-                    "event": LATENCY_PUBLIC_EVENT,
-                    **latency_event,
-                }
-            )
-    except Exception:
-        pass
+    if defer_timing:
+        saved = getattr(_FOLLOW_TIMING, "carrier", None)
+        owner, rows, omitted = saved if saved and _same_timing_run(saved[0], binding) else (binding, [], 0)
+        # Only supplemental timings ride a later event. Business receipts
+        # and security events write synchronously at their own callsites.
+        additions = [payload, *latency_rows]
+        space = _FOLLOW_TIMING_LIMIT - len(rows)
+        _FOLLOW_TIMING.carrier = ({**owner, **binding}, rows + additions[:space],
+                                  omitted + max(0, len(additions) - space))

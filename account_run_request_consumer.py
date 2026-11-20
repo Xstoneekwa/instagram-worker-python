@@ -7,6 +7,7 @@ RunControl-4: claim + controlled subprocess launch when explicitly enabled.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import json
 import re
@@ -59,6 +60,9 @@ from auto_restart_runtime import (
     validate_claimed_auto_restart_request,
 )
 from logs import log
+from run_latency_observability_v1 import observed_operation, timing_enabled
+
+
 import incident_notifications
 import runtime_incidents
 import supabase_client
@@ -100,6 +104,30 @@ from cooperative_business_stop import (
     record_termination_origin,
     request_stop as request_cooperative_stop,
 )
+
+
+def _observed_device_lock(action, outcome_key: str, *, run_id=None, enabled=True, **params):
+    """Observe one fenced call at its existing site. The result still belongs to the caller."""
+    if not enabled or not timing_enabled():
+        return action(**params)
+    expected = params.get("expected_lease_id")
+    with observed_operation(
+        f"device_lock_{outcome_key}", kind="control_plane", emit=log,
+        request_id=params.get("request_id"), run_id=run_id,
+        account_id=params.get("account_id"), device_id=params.get("device_id"),
+        expected_generation_ref=hashlib.sha256(expected.encode()).hexdigest()[:16]
+        if isinstance(expected, str) and expected else None,
+    ) as trace:
+        result = action(**params)
+        proved = isinstance(result, dict) and result.get("ok") is True and result.get(outcome_key) is True
+        reason = result.get("reason") if isinstance(result, dict) else None
+        trace["status"] = "proven" if proved else "unproven"
+        if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason):
+            trace["reason"] = reason
+        generation = result.get("generation") if proved else None
+        if isinstance(generation, str) and generation:
+            trace["verified_generation_ref"] = hashlib.sha256(generation.encode()).hexdigest()[:16]
+        return result
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
@@ -3710,11 +3738,14 @@ def _wait_for_subprocess(
 
         if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:
             try:
-                renewal_result = renew_device_lock(
+                renewal_result = _observed_device_lock(
+                    renew_device_lock, "renewed", enabled=run_type == "account_session",
+                    run_id=(latest or {}).get("run_id"),
                     device_id=device_id,
                     worker_id=cfg.worker_id,
                     request_id=request_id,
-                 expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                    expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+                )
                 if renewal_result.get("ok") is not True or renewal_result.get("renewed") is not True:
                     reason = renewal_result.get("reason")
                     log("error", "device_lock_generation_lost_while_child_active",
@@ -4345,13 +4376,15 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 error_message_safe=f"Auto Restart blocked: {resume_reason or 'resume_runtime_not_supported'}.",
             )
             if device_lock_binding is not None:
-                release_device_lock(
+                _observed_device_lock(
+                    release_device_lock, "released", enabled=run_type == "account_session",
                     device_id=device_lock_binding["device_id"],
                     worker_id=device_lock_binding["worker_id"], request_id=request_id,
                     expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
             return
     if device_lock_binding is not None:
-        transfer_result = transfer_device_lock(
+        transfer_result = _observed_device_lock(
+            transfer_device_lock, "transferred", enabled=run_type == "account_session",
             device_id=device_id, request_id=request_id, new_worker_id=cfg.worker_id,
             previous_worker_id=device_lock_binding["worker_id"],
             expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
@@ -4394,7 +4427,11 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
         )
         if device_lock_active and device_id:
-            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+            _observed_device_lock(
+                release_device_lock, "released", enabled=run_type == "account_session",
+                device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id,
+                expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+            )
         return
 
     if _is_scheduled_session_preflight_run_type(run_type) and not adb_serial:
@@ -4421,7 +4458,11 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             payload={"request_id": request_id, "run_type": run_type, "assignment": safe_dispatch},
         )
         if device_lock_active and device_id:
-            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+            _observed_device_lock(
+                release_device_lock, "released", enabled=run_type == "account_session",
+                device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id,
+                expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+            )
         return
 
     if run_type == "login_email_code_resume":
@@ -4449,12 +4490,15 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     admitted_run_id: str | None = None
     if run_type == "account_session" and _control_plane_reliability_v1_enabled():
         try:
-            admitted_run_id = _admit_account_session_v1(
-                request_id=request_id,
-                worker_id=cfg.worker_id,
-                dispatch_ctx=dispatch_ctx,
-                device_lock_binding=device_lock_binding,
-            )
+            with observed_operation("dispatcher_admission", kind="control_plane", emit=log,
+                                    request_id=request_id, account_id=account_id, device_id=device_id) as trace:
+                admitted_run_id = _admit_account_session_v1(
+                    request_id=request_id,
+                    worker_id=cfg.worker_id,
+                    dispatch_ctx=dispatch_ctx,
+                    device_lock_binding=device_lock_binding,
+                )
+                trace["admitted_run_id"] = admitted_run_id
         except AtomicAdmissionRejected as exc:
             reason = str(exc)[:120] or "atomic_admission_rejected"
             _safe_complete_account_run_request(
@@ -4465,7 +4509,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 error_message_safe="Account session atomic admission rejected before Worker spawn.",
             )
             if device_id and device_lock_active:
-                release_device_lock(
+                _observed_device_lock(
+                    release_device_lock, "released", enabled=run_type == "account_session",
                     device_id=device_id,
                     worker_id=lock_owner_worker_id,
                     request_id=request_id,
@@ -4614,7 +4659,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                                 and terminal.get("error_code") == reason))):
                 raise RuntimeError("outreach_pre_spawn_terminal_unconfirmed") from exc
             if device_id and device_lock_active:
-                released = release_device_lock(
+                released = _observed_device_lock(
+                    release_device_lock, "released", enabled=run_type == "account_session",
                     device_id=device_id, worker_id=lock_owner_worker_id,
                     request_id=request_id, expected_lease_id=device_lock_binding["lease_id"],
                     account_id=account_id)
@@ -4702,7 +4748,11 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 popen_options={'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'text': True})
         if noop_proc is None:
             if device_id and device_lock_active:
-                release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                _observed_device_lock(
+                    release_device_lock, "released", enabled=run_type == "account_session",
+                    device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id,
+                    expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+                )
             if cooperative_stop_context is not None:
                 clear_cooperative_stop_context(cooperative_stop_context)
             return
@@ -4734,18 +4784,28 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         # is unlinked/closed by its context, outside immutable release sources.
         with (tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
               if _is_login_run_type(run_type) else contextlib.nullcontext(None)) as stderr_capture:
-            proc = _fleet_spawn_or_legacy(
-                    request_id, cmd, runner_workdir, subprocess_env,
-                    launch_binding={
-                        'account_id': account_id, 'request_id': request_id,
-                        'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
-                        'consumer_instance_id': cfg.worker_id,
-                        'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
-                    },
-                    popen_options={'stderr': stderr_capture} if stderr_capture is not None else None)
+            spawn_observation = (observed_operation(
+                "dispatcher_worker_spawn", kind="control_plane", emit=log,
+                request_id=request_id, run_id=admitted_run_id, account_id=account_id, device_id=device_id,
+            ) if run_type == "account_session" else contextlib.nullcontext({}))
+            with spawn_observation as trace:
+                proc = _fleet_spawn_or_legacy(
+                        request_id, cmd, runner_workdir, subprocess_env,
+                        launch_binding={
+                            'account_id': account_id, 'request_id': request_id,
+                            'attempt_id': str(admitted_run_id or linked_login_run_id or request.get('run_id') or request_id),
+                            'consumer_instance_id': cfg.worker_id,
+                            'consumer_boot_id': _FLEET_CONSUMER_BOOT_ID,
+                        },
+                        popen_options={'stderr': stderr_capture} if stderr_capture is not None else None)
+                trace["status"] = "spawned" if proc is not None else "not_spawned"
             if proc is None:
                 if device_id and device_lock_active:
-                    release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id, expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
+                    _observed_device_lock(
+                        release_device_lock, "released", enabled=run_type == "account_session",
+                        device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id,
+                        expected_lease_id=device_lock_binding["lease_id"], account_id=account_id,
+                    )
                 if cooperative_stop_context is not None:
                     clear_cooperative_stop_context(cooperative_stop_context)
                 return
@@ -4770,7 +4830,9 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     lock_released = False
     if device_id and device_lock_active:
         if _is_scheduled_session_preflight_run_type(run_type) and int(exit_code) == 0:
-            renew_device_lock(
+            _observed_device_lock(
+                renew_device_lock, "renewed", enabled=run_type == "account_session",
+                    run_id=admitted_run_id,
                 device_id=device_id,
                 worker_id=lock_owner_worker_id,
                 request_id=request_id,
@@ -4778,7 +4840,9 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         else:
             if dispatch_ctx.get('outreach_slot_v1'):
                 try:
-                    release_result = release_device_lock(
+                    release_result = _observed_device_lock(
+                        release_device_lock, "released", enabled=run_type == "account_session",
+                    run_id=admitted_run_id,
                         device_id=device_id,
                         worker_id=lock_owner_worker_id,
                         request_id=request_id,
@@ -4789,7 +4853,9 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 if not lock_released:
                     exit_code = 1
             else:
-                release_result = release_device_lock(
+                release_result = _observed_device_lock(
+                    release_device_lock, "released", enabled=run_type == "account_session",
+                    run_id=admitted_run_id,
                     device_id=device_id,
                     worker_id=lock_owner_worker_id,
                     request_id=request_id,

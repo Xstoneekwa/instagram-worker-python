@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 import uiautomator2 as u2
 
 import config
+import device_action_latch
 import dm_446_observation_retention as _dm_retention
 import run_latency_observability_v1 as _dm_latency
 import account_protection_lists
@@ -49273,10 +49274,11 @@ def open_follower_profile_from_list(
             live_selector_reason=live_selector_reason,
         )
         try:
-            if live_selector is not None:
-                live_selector.click()
-            else:
-                d.click(int(rc[0]), int(rc[1]))
+            with _dm_latency.observed_operation("candidate_tap", kind="uiautomator", emit=log):
+                if live_selector is not None:
+                    live_selector.click()
+                else:
+                    d.click(int(rc[0]), int(rc[1]))
         except Exception as e:
             log(
                 "error",
@@ -49286,7 +49288,10 @@ def open_follower_profile_from_list(
                 reason="click_failed",
             )
             return _finish_open_profile(False)
-        time.sleep(float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12)))
+        _dm_latency.observed_wait(
+            float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12)),
+            reason="candidate_tap_stabilize", sleep=time.sleep, emit=log, defer_timing=True,
+        )
         ok = verify_profile(d, un)
         if ok:
             _ab_open = _action_bar_title()
@@ -49529,10 +49534,11 @@ def open_follower_profile_from_list(
         )
 
         try:
-            if tap_strategy == "jit_live_exact_row_selector" and live_selector is not None:
-                live_selector.click()
-            else:
-                d.click(tx, ty)
+            with _dm_latency.observed_operation("candidate_tap", kind="uiautomator", emit=log):
+                if tap_strategy == "jit_live_exact_row_selector" and live_selector is not None:
+                    live_selector.click()
+                else:
+                    d.click(tx, ty)
         except Exception as e:
             last_fail_reason = f"click_failed:{e}"
             log(
@@ -50615,6 +50621,68 @@ def _post_follow_compact_foreign_profile_visual_followers_list_check(
     return False, "ct_check_failed_no_ct_marker_after_visual_ok", vf
 
 
+def _return_ct_446_xml_snapshot(d, *, package: str, source: str, candidate: str) -> dict[str, Any]:
+    """Reuse one post-Back hierarchy only when its assigned CT surface is exact."""
+    if not _normalize_handle(source) or _normalize_handle(source) == _normalize_handle(candidate):
+        return {}
+    if device_action_latch.stop_requested():
+        return {}
+    scope = _followers_surface_scope(d, source_profile_username=source)
+    generation = followers_proof.current_generations(scope)
+    meta = _followers_current_pkg_activity(d)
+    activity = str(meta.get("current_activity") or "")
+    if meta.get("current_package") != package or _follow_446_activity_authority(
+        d, package, activity, row_scope=scope,
+    ) is not True:
+        return {}
+    hierarchy = followers_dump_fresh_hierarchy(d)
+    if not hierarchy:
+        return {}
+    with _dm_latency.observed_operation("return_ct_hierarchy", kind="xml_parse", emit=log):
+        try:
+            nodes = ET.fromstring(hierarchy)
+        except ET.ParseError:
+            return {}
+        prefix = f"{package}:id/"
+        relevant = (
+            node for node in nodes.iter()
+            if any(proof in (node.get("resource-id") or "") for proof in (
+                "action_bar_title", "unified_follow_list_tab_layout", "follow_list_container",
+                "follow_list_username",
+            ))
+        )
+        titles = set()
+        for node in relevant:
+            resource = node.get("resource-id") or ""
+            if not resource.startswith(prefix) or node.get("package") != package:
+                return {}
+            if "action_bar_title" in resource:
+                name = _normalize_handle(node.get("text") or node.get("content-desc") or "")
+                if name:
+                    titles.add(name)
+        if titles != {_normalize_handle(source)}:
+            return {}
+        ok, detection, _reason, _own = _followers_entry_post_tap_xml_fast_detect_from_hierarchy(
+            hierarchy, source_profile_username=source, pkg_meta=meta,
+        )
+        if not ok:
+            return {}
+        rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+            hierarchy, source_profile_username=source, runtime_seen=set(),
+        )
+        if not rows or followers_proof.current_generations(scope) != generation:
+            return {}
+        if device_action_latch.stop_requested() or _follow_446_activity_authority(
+            d, package, activity, row_scope=scope,
+        ) is not True:
+            return {}
+        return {
+            **detection,
+            "candidate_rows_snapshot": rows,
+            "visible_usernames_sample": [str(row.get("username") or "") for row in rows[:12]],
+        }
+
+
 def post_follow_controlled_return_to_followers_list(
     d: u2.Device,
     *,
@@ -50627,6 +50695,7 @@ def post_follow_controlled_return_to_followers_list(
     compact_after_follow_verified_mute: bool = False,
     compact_reason: str | None = None,
     immediate_candidate_back_proof: bool = False,
+    post_mute_exact_return: bool = False,
 ) -> tuple[bool, str, str | None]:
     """
     Return to the CT followers list after follow / mute.
@@ -50924,17 +50993,33 @@ def post_follow_controlled_return_to_followers_list(
                 fallback_used=True,
             )
         else:
+            row_session = _FOLLOW_ROW_SESSION.get()
+            xml_first = bool(post_mute_exact_return and row_session and row_session[0]
+                             and row_session[0]["package"] == pkg)
+            proof_method = "standard_detection"
             try:
-                d.press("back")
+                with _dm_latency.observed_operation("return_ct_back", kind="uiautomator", emit=log):
+                    d.press("back")
                 try:
                     from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
 
                     _invalidate_follow_60s_proofs("planned_return_back")
                 except Exception:
                     pass
-                ok_fast, det_fast, ct_poll_attempts, ct_poll_elapsed_s = (
-                    _poll_exact_ct_after_planned_back()
-                )
+                ct_poll_started = time.monotonic()
+                det_fast = _return_ct_446_xml_snapshot(
+                    d, package=pkg, source=src, candidate=cand,
+                ) if xml_first else {}
+                if det_fast:
+                    ok_fast, ct_poll_attempts = True, 1
+                    ct_poll_elapsed_s = time.monotonic() - ct_poll_started
+                    proof_method = "assigned_446_fresh_hierarchy"
+                elif xml_first and device_action_latch.stop_requested():
+                    return False, "", "manual_stop_before_return_ct_ack"
+                else:
+                    ok_fast, det_fast, ct_poll_attempts, ct_poll_elapsed_s = _poll_exact_ct_after_planned_back()
+                    if xml_first:
+                        ct_poll_elapsed_s = time.monotonic() - ct_poll_started
             except Exception:
                 ok_fast, det_fast, ct_poll_attempts, ct_poll_elapsed_s = (
                     False,
@@ -50942,6 +51027,8 @@ def post_follow_controlled_return_to_followers_list(
                     0,
                     0.0,
                 )
+            if xml_first and device_action_latch.stop_requested():
+                return False, "", "manual_stop_before_return_ct_ack"
             if ok_fast:
                 try:
                     from follow_60s_canary import (
@@ -51010,6 +51097,7 @@ def post_follow_controlled_return_to_followers_list(
                     back_count=1,
                     ct_poll_attempts=int(ct_poll_attempts),
                     ct_poll_elapsed_ms=round(float(ct_poll_elapsed_s) * 1000.0, 2),
+                    proof_method=proof_method,
                     fixed_sleep_skipped=True,
                     fallback_used=False,
                 )
@@ -65473,6 +65561,7 @@ def run_visual_candidate_post_follow_phase(
             compact_after_follow_verified_mute=compact_post_follow_return,
             compact_reason=compact_reason_str if compact_post_follow_return else None,
             immediate_candidate_back_proof=immediate_candidate_back_proof,
+            post_mute_exact_return=_ret_proof_source == "post_mute_exact_sheet_closed",
         )
     likes_out["post_follow_likes_return_ct_recovery_used"] = bool(
         likes_return_recovery_used

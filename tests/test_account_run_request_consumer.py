@@ -28,6 +28,40 @@ def _canonical_device_lease(worker_id, *, transferred=False):
     }
 
 
+class ObservedDeviceLockTests(unittest.TestCase):
+    def test_measures_the_exact_returned_generation_without_changing_the_rpc(self):
+        lease = _canonical_device_lease("worker")
+        params = {
+            "request_id": lease["request_id"], "device_id": lease["device_id"],
+            "expected_lease_id": lease["lease_id"], "account_id": lease["account_id"],
+        }
+        for key in ("transferred", "renewed", "released"):
+            with self.subTest(key=key), patch.object(consumer, "log") as log:
+                successor = _canonical_device_lease("worker", transferred=key == "transferred")
+                result = {**successor, "ok": True, key: True}
+                call = MagicMock(return_value=result)
+                self.assertIs(consumer._observed_device_lock(call, key, run_id=TEST_RUN_ID, **params), result)
+                call.assert_called_once_with(**params)
+                self.assertEqual(log.call_count, 1)
+                row = log.call_args.kwargs
+                self.assertEqual((row["operation"], row["outcome"]), ("device_lock_" + key, "proven"))
+                self.assertEqual(row["run_id"], TEST_RUN_ID)
+                self.assertNotIn(lease["lease_id"], str(row))
+                self.assertEqual(row["verified_generation_ref"] == row["expected_generation_ref"],
+                                 key != "transferred")
+
+    def test_unproved_or_interrupted_release_preserves_the_original_result(self):
+        with patch.object(consumer, "log") as log:
+            failure = {"ok": False, "released": False, "reason": "device_lock_release_not_proven"}
+            call = MagicMock(return_value=failure)
+            self.assertIs(consumer._observed_device_lock(call, "released"), failure)
+            self.assertEqual(log.call_args.kwargs["outcome"], "unproven")
+            self.assertNotIn("verified_generation_ref", log.call_args.kwargs)
+            with self.assertRaises(TimeoutError):
+                consumer._observed_device_lock(MagicMock(side_effect=TimeoutError), "released")
+            self.assertEqual(log.call_args.kwargs["outcome"], "interrupted")
+
+
 class AccountRunRequestConsumerTest(unittest.TestCase):
     def setUp(self) -> None:
         # Actual Fleet isolation writes remain enabled, but only in this test's
