@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from collections.abc import Callable
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 
 import social_memory
@@ -25920,6 +25920,15 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
     return db_targets, None
 
 
+def _run_verified_follow_target(device, *, verified_username, **options):
+    from instagram_navigation import verified_follow_row_session
+
+    with verified_follow_row_session(
+        options["account_id"], options["run_id"], options.get("run_request_id"), verified_username,
+    ):
+        return _run_followers_list_engine_session(device, **options)
+
+
 def _main_impl() -> int:
     global _CERTIFIED_RUNTIME_IDENTITY
     global _CURRENT_RUN_REQUEST_ID
@@ -29180,7 +29189,9 @@ def _main_impl() -> int:
             follow_targets=db_targets,
             max_follow_targets_per_run=None,
             max_follows_per_target_per_run=None,
-            run_followers_list_engine_session=_run_followers_list_engine_session,
+            run_followers_list_engine_session=partial(
+                _run_verified_follow_target, verified_username=verified_current_account_username,
+            ),
             fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_via_controlled_search,
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,

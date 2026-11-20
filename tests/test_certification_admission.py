@@ -150,7 +150,42 @@ def _reverse_follow446_reviewed_bytes(source, record):
     return result.decode('utf-8')
 
 
+# Reverse only the assigned-clone activity delta back to the exact 039517e blobs.
+_ASSIGNED_CLONE_PARENT = {
+    'instagram_navigation.py': (
+        'b6469787618a8d48380f134dc38853cf9a627cef14d59001d3cc014d07ceb3be',
+        '7a3f2989c4832c4e12fd120be5a893e678f54018',
+        '08715cd07448edbb56d1855d703f9df74dfe8f13f0408e0f688efc916cc56f69',
+        '6ee0d330d8706aa3e25d571493cda0d15b10e74bd074e69057685f258421a96b',
+        (
+            (289, 327, 289, 289),
+            (638161, 639326, 638123, 638123),
+            (639828, 639872, 638625, 638625),
+            (640133, 640209, 638886, 638886),
+            (1893957, 1894053, 1892634, 1892711),
+            (1894266, 1894370, 1892924, 1893080),
+            (1894391, 1895277, 1893101, 1893101),
+            (1897636, 1897723, 1895460, 1895530),
+        ),
+    ),
+    'runner.py': (
+        'c4789ea7e88e6a588646fc9c254db8fac4f43e176382c33721a6036a71a097fe',
+        '60d3e947c2bc4e834787948377149b8a87f759af',
+        '3cc02280aedfc0480b1e819ced19c7f73675a879f5ba796a1d06ea9f1fd3031d',
+        '28a129275eddba9f01afe905270b99850c57c1c5419e0060ac469d09f100b6be',
+        (
+            (377, 418, 377, 409),
+            (1198786, 1199142, 1198777, 1198777),
+            (1344895, 1345063, 1344530, 1344612),
+        ),
+    ),
+}
+
+
 def follow446_parent_for_comparison(name, source):
+    clone_delta = _ASSIGNED_CLONE_PARENT.get(name)
+    if clone_delta and hashlib.sha256(source.encode()).hexdigest() == clone_delta[0]:
+        source = _reverse_follow446_reviewed_bytes(source, clone_delta)
     record = _FOLLOW446_PARENT.get(name)
     if record and hashlib.sha256(source.encode()).hexdigest() == record[0]:
         return _reverse_follow446_reviewed_bytes(source, record)
@@ -161,6 +196,14 @@ def follow446_parent_for_comparison(name, source):
 def test_follow446_inverse_rejects_unauthorized_bytes_and_hunk_positions():
     for name, record in _FOLLOW446_PARENT.items():
         source = (ROOT / name).read_text()
+        if name in _ASSIGNED_CLONE_PARENT:
+            clone_delta = _ASSIGNED_CLONE_PARENT[name]
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_source_changed'):
+                _reverse_follow446_reviewed_bytes(source + 'x', clone_delta)
+            misplaced = clone_delta[:-1] + (clone_delta[-1] + (clone_delta[-1][-1],),)
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_invalid_hunk_position'):
+                _reverse_follow446_reviewed_bytes(source, misplaced)
+            source = _reverse_follow446_reviewed_bytes(source, clone_delta)
         parent = _reverse_follow446_reviewed_bytes(source, record)
         assert hashlib.sha256(parent.encode()).hexdigest() == record[2]
         for altered in (source + 'x', source[:-1], source[1:] + source[0],

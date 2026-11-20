@@ -14,6 +14,7 @@ import random
 import re
 import time
 import unicodedata
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
@@ -16848,6 +16849,33 @@ _OWN_UNIFIED_FOLLOWERS_TAB_TITLE_FR_RE = re.compile(
 )
 
 
+_FOLLOW_ROW_SESSION: ContextVar[tuple[dict, str] | None] = ContextVar("follow_row_session", default=None)
+
+
+@contextmanager
+def verified_follow_row_session(account_id, run_id, request_id, verified_username):
+    """Carry the admitted UI binding only while processing this Follow target."""
+    from instagram_ui_profile_v1 import snapshot
+    from follow_60s_canary import runtime_context
+
+    binding = snapshot()
+    session = None
+    if binding and binding["ui_profile"] == "UI_PROFILE_446" and binding["package"] != "com.instagram.android":
+        runtime = runtime_context()
+        emitter = _normalize_handle(verified_username or "")
+        if (binding["account_id"] == account_id == runtime["account_id"]
+                and binding["run_id"] == run_id == runtime["run_id"]
+                and binding["request_id"] == request_id
+                and binding["package"] == runtime["package"]
+                and emitter and emitter == _normalize_handle(runtime["account_username"] or "")):
+            session = (binding, emitter)
+    token = _FOLLOW_ROW_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _FOLLOW_ROW_SESSION.reset(token)
+
+
 def _followers_surface_scope(
     d: u2.Device | None = None,
     *,
@@ -16866,11 +16894,13 @@ def _followers_surface_scope(
             serial = str(get_device_serial(d) or "").strip()
         except Exception:
             serial = ""
+    row_session = _FOLLOW_ROW_SESSION.get()
     return followers_proof.FollowersSurfaceScope(
         device_serial=serial or str(runtime.get("device_serial") or "unbound"),
         app_instance_id=str(
             runtime.get("app_instance_id")
             or os.environ.get("PHONEFARM_APP_INSTANCE_ID")
+            or (row_session[0]["app_instance_id"] if row_session else None)
             or "unbound"
         ),
         account_id=str(runtime.get("account_id") or "unbound"),
@@ -48787,16 +48817,30 @@ def open_followers_list_from_profile(
     return False, fmeta
 
 
-def _followers_row_activity_allowed(d, package: str, activity: str) -> bool:
+def _followers_row_activity_allowed(d, package: str, activity: str, *, row_scope=None) -> bool:
     """Local membership only; consumes the already retained version evidence."""
     if not package:
         return False
     if activity == "com.instagram.mainactivity.InstagramMainActivity":
         return True
-    if package != "com.instagram.android" or activity not in (
-        "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity"
-    ):
+    if activity not in ("com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity"):
         return False
+    if package != "com.instagram.android":
+        from instagram_ui_profile_v1 import snapshot
+        from follow_60s_canary import runtime_context
+
+        session = _FOLLOW_ROW_SESSION.get()
+        if activity != ".activity.MainTabActivity" or session is None or row_scope is None:
+            return False
+        binding, emitter = session
+        runtime = runtime_context()
+        if (binding != snapshot() or binding["package"] != package
+                or binding["serial"] != row_scope.device_serial
+                or binding["app_instance_id"] != row_scope.app_instance_id
+                or not (binding["account_id"] == row_scope.account_id == runtime["account_id"])
+                or emitter != _normalize_handle(runtime["account_username"] or "")
+                or binding["run_id"] != runtime["run_id"] or runtime["package"] != package):
+            return False
     from run_latency_observability_v1 import _TimedProxy
     from instagram_ui_446_compat import context_matches
     owner = d
@@ -48853,7 +48897,7 @@ def _followers_prepare_exact_row_action_token(
             "current_package": current_package,
             "current_activity": current_activity,
         }
-    if not _followers_row_activity_allowed(d, pkg, current_activity):
+    if not _followers_row_activity_allowed(d, pkg, current_activity, row_scope=scope):
         return None, {
             "reason": "activity_mismatch",
             "current_package": current_package,

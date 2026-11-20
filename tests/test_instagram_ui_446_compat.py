@@ -545,6 +545,89 @@ class FollowersActivityTests(unittest.TestCase):
         d=self.make_device(version=None)
         self.assertFalse(nav._followers_row_activity_allowed(d,PACKAGE,self.TAB))
 
+    def test_assigned_clone_uses_only_the_verified_follow_row_path(self):
+        import instagram_ui_profile_v1 as ui
+        import follow_60s_canary as follow
+
+        pkg = "com.instagram.androig"
+        device = self.make_device(package=pkg, version=None)
+        metadata = ui.AppMetadata(pkg, *compat.VERSION)
+        binding = ui.RunUIBinding("account", "request", "run", "business", 1, "device",
+                                  device.serial, "instance-3", pkg, *compat.VERSION,
+                                  ui.resolve(metadata, pkg), "lease")
+        runtime = dict(account_id="account", run_id="run", account_username="pilot", package=pkg)
+        with patch.object(ui, "_SESSION", None), patch.object(nav.config, "INSTAGRAM_PACKAGE", pkg), \
+                patch.object(follow, "runtime_context", return_value=runtime), \
+                patch.dict(nav.os.environ, {"PHONEFARM_APP_INSTANCE_ID": ""}):
+            ui.arm(binding, lambda: metadata)
+            ui.attach(device)
+            def prepare():
+                nav.followers_proof.reset_for_tests()
+                return self.prepare(device, pkg)
+
+            import runner
+            options = dict(account_id="account", run_id="run", run_request_id="request")
+            with patch.object(runner, "_run_followers_list_engine_session", side_effect=lambda *a, **k: prepare()) as target:
+                self.assertIsNotNone(runner._run_verified_follow_target(device, verified_username="pilot", **options)[0])
+                target.assert_called_once_with(device, **options)
+                self.assertIsNone(prepare()[0])
+                self.assertIsNone(runner._run_verified_follow_target(device, verified_username="foreign", **options)[0])
+
+            for account, run, request, emitter in (
+                ("other", "run", "request", "pilot"), ("account", "other", "request", "pilot"),
+                ("account", "run", "other", "pilot"), ("account", "run", "request", "wrong"),
+                ("account", "run", "request", None),
+            ):
+                with self.subTest(account=account, run=run, request=request, emitter=emitter):
+                    with nav.verified_follow_row_session(account, run, request, emitter):
+                        self.assertIsNone(prepare()[0])
+
+            with nav.verified_follow_row_session("account", "run", "request", "pilot"):
+                device.calls.clear()
+                token, meta = prepare()
+                self.assertIsNotNone(token, meta)
+                self.assertEqual(token.scope.app_instance_id, "instance-3")
+                self.assertEqual(device.calls, ["dump_hierarchy", "app_current"])
+                self.assertFalse(nav._followers_row_activity_allowed(device, pkg, self.TAB))
+                from run_latency_observability_v1 import _TimedProxy
+                proxy = _TimedProxy(device, kind="device", emit=lambda *a, **k: None, methods=set())
+                self.assertTrue(nav._followers_row_activity_allowed(proxy, pkg, self.TAB, row_scope=token.scope))
+                with patch.object(device, "app_current", return_value={"package": "com.instagram.androif",
+                                                                       "activity": self.TAB}):
+                    blocked, proof = prepare()
+                    self.assertIsNone(blocked)
+                    self.assertEqual(proof["reason"], "package_mismatch")
+                with patch.object(device, "xml", "<hierarchy/>"):
+                    self.assertIsNone(prepare()[0])
+                with self.assertRaises(RuntimeError):
+                    with nav.verified_follow_row_session("account", "run", "request", "wrong"):
+                        self.assertIsNone(prepare()[0])
+                        raise RuntimeError("interrupted target")
+                self.assertIsNotNone(prepare()[0])
+                for foreign in ("com.instagram.androif", "foreign.package"):
+                    self.assertFalse(nav._followers_row_activity_allowed(device, foreign, self.TAB,
+                                                                        row_scope=token.scope))
+                for activity in ("com.instagram.android.activity.MainTabActivity", ".MainTabActivity",
+                                 "foreign.activity.MainTabActivity", self.TAB + "Overlay", ""):
+                    self.assertFalse(nav._followers_row_activity_allowed(device, pkg, activity,
+                                                                        row_scope=token.scope))
+                for key, value in (("app_instance_id", "instance-2"), ("account_id", "other"),
+                                   ("run_id", "prior"), ("account_username", "foreign"), ("package", "foreign")):
+                    with self.subTest(key=key), patch.dict(runtime, {key: value}):
+                        self.assertIsNone(prepare()[0])
+                with patch.dict(nav.os.environ, {"PHONEFARM_APP_INSTANCE_ID": "instance-2"}):
+                    self.assertIsNone(prepare()[0])
+                with patch.object(device, "serial", "other-device"):
+                    self.assertIsNone(prepare()[0])
+                for version in (("372.0.0.48.60", 377611059), (compat.VERSION[0], True)):
+                    with patch.dict(vars(device), {"_instagram_search_observed_version":
+                                                    (id(device), device.serial, pkg, *version)}):
+                        self.assertIsNone(prepare()[0])
+                with patch.object(ui, "_SESSION", None):
+                    self.assertIsNone(prepare()[0])
+            self.assertIsNone(prepare()[0])
+            self.assertTrue(all(call in ("dump_hierarchy", "app_current") for call in device.calls))
+
     def test_existing_timing_proxy_context_is_preserved(self):
         from run_latency_observability_v1 import _TimedProxy
         d=self.make_device(); proxy=_TimedProxy(d,kind='device',emit=lambda *a,**k:None,methods=set())
