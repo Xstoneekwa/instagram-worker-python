@@ -84,6 +84,7 @@ from account_protection_lists import (
     serialize_snapshot,
 )
 from runtime_incident_matrix import (
+    DEVICE_LOCK_RENEWAL_NOT_PROVEN,
     build_run_failure_incident_payload,
     classify_recoverable_python_retry,
     classify_terminal_run_failure,
@@ -2480,6 +2481,7 @@ def _publish_run_failure_incident(
     request_metadata: dict[str, Any] | None = None,
     cleanup_completed: bool | None = None,
     lock_released: bool | None = None,
+    device_lock_stop: bool = False,
 ) -> None:
     try:
         effective_request_metadata = dict(
@@ -2490,6 +2492,9 @@ def _publish_run_failure_incident(
         terminal_existing_plan = None
         run_status: str | None = None
         performance_summary: dict[str, Any] | None = dict(worker_summary or {}) or None
+        if device_lock_stop:
+            performance_summary = {**(performance_summary or {}),
+                                   "canonical_stop_reason": DEVICE_LOCK_RENEWAL_NOT_PROVEN}
         if run_id:
             try:
                 run_row = supabase_client.load_run_row(run_id) or {}
@@ -2507,7 +2512,7 @@ def _publish_run_failure_incident(
                     or (isinstance(raw_summary, dict)
                         and raw_summary.get("physical_preflight_passed") is True)
                 )
-                if not timed_out and not canceled and proof_candidate:
+                if not (timed_out or device_lock_stop or canceled) and proof_candidate:
                     try:
                         request_row = get_account_run_request(request_id) or {}
                         evidence_run, evidence_hold = run_row, None
@@ -2585,14 +2590,14 @@ def _publish_run_failure_incident(
                     "request_id": request_id,
                     "run_id": run_id,
                 }
-        retry_decision = classify_recoverable_python_retry(
+        retry_decision = None if device_lock_stop else classify_recoverable_python_retry(
             performance_summary=performance_summary,
             request_metadata=effective_request_metadata,
             run_id=run_id,
             cleanup_completed=cleanup_completed,
             lock_released=lock_released,
         )
-        if retry_decision.applies and (
+        if retry_decision is not None and retry_decision.applies and (
             retry_decision.restart_allowed or retry_decision.retries_exhausted
         ):
             plan = (
@@ -2704,6 +2709,7 @@ def _publish_run_failure_incident(
             canceled=canceled,
             performance_summary=performance_summary,
             run_type=run_type,
+            device_lock_stop=device_lock_stop,
         )
         log(
             "info",
@@ -2793,7 +2799,7 @@ def _publish_run_failure_incident(
                 incident_id=incident_id,
                 **({"terminal_summary": performance_summary,
                     "existing_resume_plan": terminal_existing_plan}
-                   if (performance_summary or {}).get("terminal_progress_reconciled") is True else {}),
+                   if device_lock_stop or (performance_summary or {}).get("terminal_progress_reconciled") is True else {}),
             )
             if not terminal_result.get("persisted"):
                 log("error", "resume_plan_terminal_reconciliation_required",
@@ -2962,8 +2968,15 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
+    stop_proof = dict(cooperative_stop or {})
+    device_lock_stop = (
+        run_type == "account_session"
+        and timed_out
+        and stop_proof.get("originating_stop_reason") == DEVICE_LOCK_RENEWAL_NOT_PROVEN
+    )
     if (
         run_type == "account_session"
+        and not device_lock_stop
         and int(exit_code) == PRE_DEVICE_SAFE_STOP_EXIT_CODE
         and run_id
     ):
@@ -2994,7 +3007,6 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
-    stop_proof = dict(cooperative_stop or {})
     if stop_proof:
         request_metadata["cooperative_stop"] = stop_proof
     if (
@@ -3034,7 +3046,11 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
-    if timed_out:
+    if timed_out and not (device_lock_stop and canceled):
+        lock_stop_message = (
+            "Dispatcher stopped the Worker because device lock renewal could not be proven."
+            if device_lock_stop else ""
+        )
         if _is_login_run_type(run_type):
             _terminal_result, timeout_summary = _terminalize_auto_login_failure(
                 cfg=cfg,
@@ -3052,8 +3068,8 @@ def _finalize_manual_run_after_subprocess(
                 request_id,
                 cfg.worker_id,
                 "failed",
-                error_code="dispatcher_watchdog_timeout",
-                error_message_safe="Worker did not exit before the canonical device boundary.",
+                error_code=(DEVICE_LOCK_RENEWAL_NOT_PROVEN if device_lock_stop else "dispatcher_watchdog_timeout"),
+                error_message_safe=lock_stop_message or "Worker did not exit before the canonical device boundary.",
             )
             _reconcile_linked_run(
                 account_id=account_id,
@@ -3066,7 +3082,8 @@ def _finalize_manual_run_after_subprocess(
             account_id=account_id,
             action_type="manual_run_failed",
             status="failed",
-            message="Dispatcher watchdog terminated a Worker that missed its cooperative stop boundary.",
+            message=(lock_stop_message or
+                     "Dispatcher watchdog terminated a Worker that missed its cooperative stop boundary."),
             run_id=run_id,
             payload={"request_id": request_id, **stop_proof},
         )
@@ -3076,13 +3093,14 @@ def _finalize_manual_run_after_subprocess(
             run_id=run_id,
             run_type=run_type,
             exit_code=exit_code,
-            timed_out=True,
+            timed_out=not device_lock_stop,
             canceled=canceled,
             worker_summary=timeout_summary or None,
             request_snapshot=request_snapshot,
             request_metadata=request_metadata,
             cleanup_completed=cleanup_completed,
             lock_released=lock_released,
+            device_lock_stop=device_lock_stop,
         )
         return
 
@@ -3503,6 +3521,7 @@ def _wait_for_subprocess(
     *,
     request_id: str,
     account_id: str,
+    run_type: str | None = None,
     device_id: str | None = None,
     device_lock_renewal: bool = False,
     device_lock_binding: dict[str, Any] | None = None,
@@ -3697,10 +3716,16 @@ def _wait_for_subprocess(
                     request_id=request_id,
                  expected_lease_id=device_lock_binding["lease_id"], account_id=account_id)
                 if renewal_result.get("ok") is not True or renewal_result.get("renewed") is not True:
+                    reason = renewal_result.get("reason")
                     log("error", "device_lock_generation_lost_while_child_active",
                         account_id=account_id, request_id=request_id,
-                        reason=renewal_result.get("reason"))
-                    return _terminate_subprocess(proc), True
+                        reason=reason)
+                    exit_code = _terminate_subprocess(proc)
+                    if (run_type == "account_session" and reason == DEVICE_LOCK_RENEWAL_NOT_PROVEN
+                            and diagnostics is not None):
+                        # Keep the forced-stop cleanup contract and report the actual cause.
+                        diagnostics["originating_stop_reason"] = reason
+                    return exit_code, True
             except Exception as exc:
                 log(
                     "warning",
@@ -4729,6 +4754,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 proc,
                 request_id=request_id,
                 account_id=account_id,
+                run_type=run_type,
                 device_id=device_id if device_lock_active else None,
                 device_lock_renewal=device_lock_active,
                 stop_context=cooperative_stop_context,

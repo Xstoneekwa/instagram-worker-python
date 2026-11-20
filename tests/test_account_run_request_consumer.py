@@ -1924,6 +1924,53 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             )
         terminalize.assert_not_called()
 
+    def test_device_lock_readback_proof_controls_whether_the_worker_continues(self) -> None:
+        from types import SimpleNamespace
+        import auto_restart_device_lock
+
+        cfg = SimpleNamespace(worker_id="run-dispatcher:test", heartbeat_seconds=20,
+                              subprocess_timeout_seconds=7200)
+        binding = _canonical_device_lease(cfg.worker_id)
+        for fresh in (True, False):
+            with self.subTest(fresh=fresh):
+                proc = MagicMock()
+                proc.poll.side_effect = [None, 0]
+                proc.wait.return_value = -15
+                diagnostics = {}
+
+                def read_back(_device_id):
+                    now = datetime.now(timezone.utc)
+                    heartbeat = now if fresh else now - timedelta(minutes=1)
+                    return {**binding, "heartbeat_at": heartbeat.isoformat(),
+                            "lease_expires_at": (now + timedelta(minutes=15)).isoformat()}
+
+                with (
+                    patch.object(consumer, "get_account_run_request", return_value=None),
+                    patch.object(consumer.time, "sleep"),
+                    patch.object(consumer.supabase_client, "call_rpc_once", side_effect=TimeoutError) as renew,
+                    patch.object(auto_restart_device_lock, "_load_device_lock", side_effect=read_back) as read,
+                ):
+                    result = consumer._wait_for_subprocess(
+                        cfg, proc, request_id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID,
+                        run_type="account_session", device_id=binding["device_id"],
+                        device_lock_renewal=True, device_lock_binding=binding,
+                        diagnostics=diagnostics,
+                    )
+
+                renew.assert_called_once()
+                self.assertEqual(renew.call_args.args[0], "auto_restart_renew_device_lock")
+                self.assertEqual(renew.call_args.args[1]["p_expected_lease_id"], binding["lease_id"])
+                read.assert_called_once_with(binding["device_id"])
+                if fresh:
+                    self.assertEqual(result, (0, False))
+                    self.assertEqual(diagnostics, {})
+                    proc.send_signal.assert_not_called()
+                else:
+                    self.assertEqual(result, (-15, True))
+                    self.assertEqual(diagnostics["originating_stop_reason"], "device_lock_renewal_not_proven")
+                    proc.send_signal.assert_called_once_with(consumer.signal.SIGTERM)
+                    proc.kill.assert_not_called()
+
     def test_wait_for_subprocess_terminates_on_cancel_request(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

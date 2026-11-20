@@ -24,6 +24,8 @@ from auto_login_failure_contract import (
     normalize_auto_login_failure,
 )
 
+DEVICE_LOCK_RENEWAL_NOT_PROVEN = "device_lock_renewal_not_proven"
+
 # Reasons that describe normal control-flow gates, not runtime failures.
 # They must never produce an incident nor a Slack/Discord notification.
 NON_INCIDENT_REASONS = frozenset(
@@ -607,6 +609,7 @@ def classify_terminal_run_failure(
     canceled: bool = False,
     performance_summary: dict[str, Any] | None = None,
     run_type: str | None = None,
+    device_lock_stop: bool = False,
 ) -> IncidentDecision:
     """Classify one terminal run outcome into a canonical incident decision.
 
@@ -633,12 +636,28 @@ def classify_terminal_run_failure(
         summary["reason"] = reason
     identity_reason = str(summary.get("account_identity_failure_reason") or "").strip()
 
-    if exit_code == 0 and not timed_out:
+    if exit_code == 0 and not timed_out and not device_lock_stop:
         return _skip("exit_zero")
     if canceled or status == "canceled":
         return _skip("manual_cancel")
     if status == "stopped":
         return _skip("manual_stop")
+    if device_lock_stop:
+        metadata_safe = _safe_summary_metadata(summary)
+        metadata_safe["exit_code"] = int(exit_code)
+        return IncidentDecision(
+            should_publish=True,
+            incident_type="run_worker_failure",
+            reason_code=DEVICE_LOCK_RENEWAL_NOT_PROVEN,
+            severity="error",
+            operator_label="Device lock renewal could not be verified",
+            action_required="Review the device lock evidence before authorizing another run.",
+            requires_operator_review=True,
+            blocking_campaign=True,
+            admin_message="Dispatcher stopped the Worker because device lock renewal could not be proven.",
+            notify_channels=True,
+            metadata_safe=metadata_safe,
+        )
     if exit_code == 143 and not timed_out:
         # SIGTERM outside dispatcher timeout: voluntary stop path.
         return _skip("sigterm_manual_stop")

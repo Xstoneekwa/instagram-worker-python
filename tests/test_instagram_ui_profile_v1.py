@@ -904,6 +904,14 @@ class ResumeProjectionTests(Isolated):
 
 
 class PreservationTests(Isolated):
+    device_lock_stop_base = "5cdc1b778fc76634b5151f3de4e2aabfc95fa943"
+    device_lock_stop_sha256 = {
+        "account_run_request_consumer.py": "1fca60cac0ff93fdfc180475b44b5489f0bd5de7080b2bea66968b87021ca12e",
+        "runtime_incident_matrix.py": "8986d4f8c84e893b3dc62ca6004a1c6dc43ebdbc97af4eda605dab6228433cf0",
+        "tests/test_account_run_request_consumer.py": "58dbe06c40ef97fccf4e2b17d888f1f03cd1f5ee2b9355418a8a09f423393b77",
+        "tests/test_run_failure_incident_publication.py": "98b60fa1423302540bb337bebb6cd34cc69d207f1d5e85327a968618256d1f31",
+    }
+
     def test_all_source_changes_stay_in_owner_scope(self):
         root = Path(runner.__file__).parent
         expected = {'account_session_orchestrator.py', 'account_session_resume_engine.py',
@@ -942,8 +950,13 @@ class PreservationTests(Isolated):
             'tests/test_dm446_healthy_search_nonmatch_v1.py', 'tests/test_instagram_ui_profile_v1.py',
             'tests/test_outreach_search_absence_v1.py', 'tests/test_post_open_intent_v2.py',
         }
-        delta = paths('diff', '--no-renames', '--name-only', '-z', '07150ea2ddcd36fd687650bb97689ba720fe34e8')
+        diff_names = ('diff', '--no-renames', '--name-only', '-z')
+        delta = paths(*diff_names, '07150ea2ddcd36fd687650bb97689ba720fe34e8', self.device_lock_stop_base)
         self.assertEqual(delta, frozen | historical_verifiers)
+        self.assertEqual(paths(*diff_names, self.device_lock_stop_base),
+                         set(self.device_lock_stop_sha256) | {'tests/test_instagram_ui_profile_v1.py'})
+        for name, expected_hash in self.device_lock_stop_sha256.items():
+            self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), expected_hash, name)
         self.assertFalse(paths('ls-files', '--others', '--exclude-standard', '-z'))
 
     def test_navigation_sender_truth_and_business_primitives_unchanged(self):
@@ -961,6 +974,10 @@ class PreservationTests(Isolated):
             installed = subprocess.check_output(['git', '-C', str(root), 'show',
                 '07150ea2ddcd36fd687650bb97689ba720fe34e8:'+name])
             source = (root/name).read_bytes()
+            if name == 'account_run_request_consumer.py':
+                self.assertEqual(hashlib.sha256(source).hexdigest(), self.device_lock_stop_sha256[name], name)
+                source = subprocess.check_output(['git', '-C', str(root), 'show',
+                                                  self.device_lock_stop_base + ':' + name])
             if name == 'instagram_navigation.py':
                 self.assertNotEqual(source, installed, 'Missing Follow 446 change')
             current = follow446_parent_for_comparison(name, source.decode()).encode()

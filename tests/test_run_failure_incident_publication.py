@@ -25,6 +25,65 @@ def _identity_run_row() -> dict:
 
 class PublishRunFailureIncidentTest(unittest.TestCase):
 
+    def test_device_lock_stop_preserves_native_reason_and_waits_for_human(self) -> None:
+        from types import SimpleNamespace
+        import account_session_resume_plan_store as resume
+
+        cfg = SimpleNamespace(worker_id="offline-dispatcher")
+        request = {"id": REQUEST_ID, "run_id": RUN_ID, "status": "running",
+                   "requested_run_type": "account_session"}
+        row = {"id": RUN_ID, "status": "failed", "performance_summary": {
+            "canonical_stop_reason": "worker_exit_nonzero",
+            "terminal_progress_reconciled": True,
+            "follows_completed_count": 0,
+        }}
+        incident_id = "offline-device-lock-incident"
+        reason = "device_lock_renewal_not_proven"
+        for exit_code in (-15, 0, 143, consumer.PRE_DEVICE_SAFE_STOP_EXIT_CODE):
+            with (
+                self.subTest(exit_code=exit_code),
+                patch.object(consumer, "get_account_run_request", return_value=request),
+                patch.object(consumer, "_safe_complete_account_run_request") as complete,
+                patch.object(consumer, "_reconcile_linked_run") as reconcile,
+                patch.object(consumer.supabase_client, "load_run_row", return_value=row),
+                patch.object(consumer.supabase_client, "get_account_username", return_value="offline_sender"),
+                patch.object(consumer.runtime_incidents, "publish_account_incident", return_value={
+                    "published": True, "incident_id": incident_id,
+                }) as publish,
+                patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "offline-action"}) as action,
+                patch.object(consumer.supabase_client, "mark_pre_device_safe_stop_v1") as pre_device_stop,
+                patch.object(consumer, "run_auto_restart_dispatcher_tick") as restart,
+                patch.object(consumer, "classify_recoverable_python_retry",
+                             return_value=SimpleNamespace(applies=False)) as classify_retry,
+                patch.object(consumer.incident_notifications, "dispatch_operator_review_action_notification"),
+                patch.object(consumer, "_audit"),
+                patch.object(resume, "load_resume_plan", return_value={"plan": {}}),
+                patch.object(resume, "_patch_plan_by_run_id", return_value={"persisted": True}) as patch_plan,
+            ):
+                consumer._finalize_manual_run_after_subprocess(
+                    cfg, request_id=REQUEST_ID, account_id=ACCOUNT_ID, exit_code=exit_code,
+                    timed_out=True, cleanup_completed=False, lock_released=True,
+                    cooperative_stop={"originating_stop_reason": reason},
+                )
+
+                complete.assert_called_once()
+                self.assertEqual(complete.call_args.args[2], "failed")
+                self.assertEqual(complete.call_args.kwargs["error_code"], reason)
+                self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "failed")
+                publish.assert_called_once()
+                self.assertEqual(publish.call_args.kwargs["incident_type"], "run_worker_failure")
+                self.assertEqual(publish.call_args.kwargs["reason"], reason)
+                self.assertNotIn("timed_out", publish.call_args.kwargs["metadata"])
+                self.assertTrue(action.call_args.args[1]["p_blocking_campaign"])
+                self.assertEqual(action.call_args.args[1]["p_incident_id"], incident_id)
+                plan = patch_plan.call_args.args[1]
+                self.assertEqual(plan["terminal_reason_code"], reason)
+                self.assertEqual(plan["resume_state"], "awaiting_human_resume_authorization")
+                self.assertFalse(plan["restart_allowed"])
+                pre_device_stop.assert_not_called()
+                classify_retry.assert_not_called()
+                restart.assert_not_called()
+
     def test_preparing_native_reason_uses_existing_incident_without_sensitive_trace(self) -> None:
         import json
         import instagram_ui_profile_v1 as ui
