@@ -182,7 +182,17 @@ _ASSIGNED_CLONE_PARENT = {
 }
 
 
+# Reverse only the reviewed CT summary and search diagnostic delta to d75e708.
+_CT_ROTATION_PARENT = {
+    'instagram_navigation.py': ('f539a646defac6d297a7b4a61b5909ecd0472e246e7d5ab5d7c70b7b2208474a', '9d789cde5359578e01975300176466df0427df44', 'b6469787618a8d48380f134dc38853cf9a627cef14d59001d3cc014d07ceb3be', '562ae9b35715bbc5dbfebc4d6922db095d2373401c3190ee57105e00eb7349ed', ((147477, 147524, 147477, 147477), (148415, 148565, 148368, 148368), (148967, 149006, 148770, 148838), (238121, 238172, 237953, 237953), (239082, 239133, 238863, 238863), (240246, 240628, 239976, 239976))),
+    'runner.py': ('a372faf6308e7d347bfade06bee6212a8e33fc3bc7ed4ef798b5588e1eac020e', '957faf4d460c69948e228afac89da7c2be7e7e33', 'c4789ea7e88e6a588646fc9c254db8fac4f43e176382c33721a6036a71a097fe', '1a1e355c8d3d0437694592f00913eaefc69a940e9467e88b0685c95bf1b59ba2', ((377, 409, 377, 418), (530359, 530413, 530368, 530368), (537065, 537333, 537020, 537020), (544269, 544301, 543956, 544113), (545067, 545103, 544879, 545056), (555129, 555161, 555082, 555315), (1198988, 1199484, 1199142, 1199142), (1345237, 1345348, 1344895, 1345063))),
+}
+
+
 def follow446_parent_for_comparison(name, source):
+    rotation_delta = _CT_ROTATION_PARENT.get(name)
+    if rotation_delta and hashlib.sha256(source.encode()).hexdigest() == rotation_delta[0]:
+        source = _reverse_follow446_reviewed_bytes(source, rotation_delta)
     clone_delta = _ASSIGNED_CLONE_PARENT.get(name)
     if clone_delta and hashlib.sha256(source.encode()).hexdigest() == clone_delta[0]:
         source = _reverse_follow446_reviewed_bytes(source, clone_delta)
@@ -196,6 +206,14 @@ def follow446_parent_for_comparison(name, source):
 def test_follow446_inverse_rejects_unauthorized_bytes_and_hunk_positions():
     for name, record in _FOLLOW446_PARENT.items():
         source = (ROOT / name).read_text()
+        if name in _CT_ROTATION_PARENT:
+            rotation_delta = _CT_ROTATION_PARENT[name]
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_source_changed'):
+                _reverse_follow446_reviewed_bytes(source + 'x', rotation_delta)
+            misplaced = rotation_delta[:-1] + (rotation_delta[-1] + (rotation_delta[-1][-1],),)
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_invalid_hunk_position'):
+                _reverse_follow446_reviewed_bytes(source, misplaced)
+            source = _reverse_follow446_reviewed_bytes(source, rotation_delta)
         if name in _ASSIGNED_CLONE_PARENT:
             clone_delta = _ASSIGNED_CLONE_PARENT[name]
             with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_source_changed'):

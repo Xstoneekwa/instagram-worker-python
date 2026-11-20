@@ -3871,6 +3871,7 @@ def _recover_follow_ct_blank_search_results_once(
     username: str,
     *,
     scan_once: Callable[[], object | None],
+    observation: dict[str, str] | None = None,
 ) -> object | None:
     query_text = _follow_ct_current_query_text(d)
     query_matches = _normalize_handle(query_text) == _normalize_handle(username)
@@ -3895,6 +3896,9 @@ def _recover_follow_ct_blank_search_results_once(
         return None
 
     if rows_before > 0:
+        final_reason = "search_results_ambiguous_no_exact_match"
+        if observation is not None:
+            observation["reason"] = final_reason
         log(
             "warning",
             "follow_ct_search_results_recovery_skipped",
@@ -3905,7 +3909,7 @@ def _recover_follow_ct_blank_search_results_once(
             recovery_method=recovery_method,
             rows_before_recovery=rows_before,
             rows_after_recovery=rows_before,
-            final_reason="search_results_ambiguous_no_exact_match",
+            final_reason=final_reason,
         )
         return None
 
@@ -6332,6 +6336,7 @@ def tap_account_result(
 
     _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
     if el is None:
+        follow_ct_observation: dict[str, str] = {}
         if outreach_active and not follow_ct_active and outreach_search_outcome is not None:
             if not early_observed and _observe_outreach_missing_search(
                     d, username, outcome=outreach_search_outcome, _shared_deadline=search_deadline):
@@ -6347,6 +6352,7 @@ def tap_account_result(
                 d,
                 username,
                 scan_once=scan_once,
+                observation=follow_ct_observation,
             )
             if el is not None:
                 fast_accept_used = False
@@ -6370,6 +6376,13 @@ def tap_account_result(
                 if follow_ct_active
                 else "account_result_not_found"
             )
+            if follow_ct_observation:
+                try:
+                    context_446 = _dm_446_context(d)
+                except ValueError:
+                    context_446 = None
+                if context_446 is not None and context_446.package == str(config.INSTAGRAM_PACKAGE or ""):
+                    _TAP_ACCOUNT_RESULT_FAILURE_REASON = follow_ct_observation["reason"]
             log(
                 "error",
                 "tap_account_no_element",

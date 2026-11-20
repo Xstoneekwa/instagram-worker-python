@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from collections.abc import Callable
 from datetime import datetime, timezone
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import Any
 
 import social_memory
@@ -13054,6 +13054,7 @@ def _run_followers_list_engine_session(
     worker_runtime_identity: WorkerRuntimeIdentity | None = None,
     account_session_snapshot: Any | None = None,
     verified_current_account_username: str | None = None,
+    invocation_summary: dict[str, Any] | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -13203,6 +13204,12 @@ def _run_followers_list_engine_session(
         "follow_stop_reason": "",
         "exit_code": None,
     }
+    def _save_session_summary() -> None:
+        if invocation_summary is not None:
+            invocation_summary.update(_followers_session_summary)
+        else:
+            _run_followers_list_engine_session.last_session_summary = dict(_followers_session_summary)
+
     _target_availability_existing_proof: dict[str, Any] = {}
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
     private_streak_retirement = PrivateProfileStreakRetirement(
@@ -13376,11 +13383,7 @@ def _run_followers_list_engine_session(
                 "exit_code": 97,
             }
         )
-        setattr(
-            _run_followers_list_engine_session,
-            "last_session_summary",
-            dict(_followers_session_summary),
-        )
+        _save_session_summary()
         return 97
     if account_id and supabase_mode:
         _future_v1_ambiguity_ok = _project_future_v1_post_tap_follow_intents(
@@ -13399,11 +13402,7 @@ def _run_followers_list_engine_session(
                     "exit_code": 97,
                 }
             )
-            setattr(
-                _run_followers_list_engine_session,
-                "last_session_summary",
-                dict(_followers_session_summary),
-            )
+            _save_session_summary()
             return 97
     if _p0c_state == "RECOVERY_BLOCKED_NONRETRYABLE":
         return 1
@@ -13630,14 +13629,7 @@ def _run_followers_list_engine_session(
         for key, value in private_streak_retirement.summary().items():
             updates.setdefault(key, value)
         _followers_session_summary.update(updates)
-        try:
-            setattr(
-                _run_followers_list_engine_session,
-                "last_session_summary",
-                dict(_followers_session_summary),
-            )
-        except Exception:
-            pass
+        _save_session_summary()
 
     _publish_followers_session_summary(
         follow_processed_count=0,
@@ -25929,6 +25921,20 @@ def _run_verified_follow_target(device, *, verified_username, **options):
         return _run_followers_list_engine_session(device, **options)
 
 
+def _bind_verified_follow_runner(verified_username):
+    """Give the rotation its own callback and publish only the current result."""
+    def run_target(device, **options):
+        run_target.last_session_summary = None
+        summary = {}
+        exit_code = _run_verified_follow_target(
+            device, verified_username=verified_username, invocation_summary=summary, **options
+        )
+        run_target.last_session_summary = summary
+        return exit_code
+
+    return run_target
+
+
 def _main_impl() -> int:
     global _CERTIFIED_RUNTIME_IDENTITY
     global _CURRENT_RUN_REQUEST_ID
@@ -29189,9 +29195,7 @@ def _main_impl() -> int:
             follow_targets=db_targets,
             max_follow_targets_per_run=None,
             max_follows_per_target_per_run=None,
-            run_followers_list_engine_session=partial(
-                _run_verified_follow_target, verified_username=verified_current_account_username,
-            ),
+            run_followers_list_engine_session=_bind_verified_follow_runner(verified_current_account_username),
             fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_via_controlled_search,
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,

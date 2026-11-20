@@ -668,6 +668,106 @@ class FollowersActivityTests(unittest.TestCase):
         self.assertIn('stale', reason)
 
 
+class FollowRotationSummaryTests(unittest.TestCase):
+    def test_verified_runner_preserves_only_current_summary(self):
+        import runner
+        from account_session_orchestrator import _last_follow_engine_summary
+
+        bound = runner._bind_verified_follow_runner("pilot")
+        options = dict(account_id="account", run_id="run", run_request_id="request")
+
+        def early_return(device, *, invocation_summary, **kwargs):
+            invocation_summary.update(target_safe_to_skip=True, exit_code=7)
+            return 7
+
+        with patch.object(runner, "_run_followers_list_engine_session", side_effect=early_return) as engine:
+            self.assertEqual(bound(None, **options), 7)
+            self.assertEqual(_last_follow_engine_summary(bound),
+                             {"target_safe_to_skip": True, "exit_code": 7})
+            engine.last_session_summary = {"target_safe_to_skip": True, "exit_code": 7}
+            engine.side_effect = None
+            engine.return_value = 96
+            self.assertEqual(bound(None, **options), 96)
+            self.assertEqual(_last_follow_engine_summary(bound), {})
+            engine.side_effect = RuntimeError("failed before publication")
+            with self.assertRaisesRegex(RuntimeError, "before publication"):
+                bound(None, **options)
+            self.assertEqual(_last_follow_engine_summary(bound), {})
+
+    def test_missing_ct_rotates_via_verified_runner_and_missing_summary_stops(self):
+        import runner
+        import account_session_orchestrator as session
+        from tests.test_follow_targets_runtime_p1b import target
+
+        seen = []
+
+        def acquire(device, *, target_id, invocation_summary, **kwargs):
+            seen.append(target_id)
+            if target_id == "t1":
+                invocation_summary.update(
+                    target_outcome="target_unavailable_retryable",
+                    first_causal_reason="search_results_ambiguous_no_exact_match",
+                    target_safe_to_skip=True,
+                    target_retryable=True,
+                    follows_completed_count=0,
+                )
+            return 7
+
+        with patch.object(runner, "_run_followers_list_engine_session", side_effect=acquire), \
+                patch.object(session, "_record_follow_target_metric") as metrics:
+            outcome = session._run_follow_target_rotation(
+                object(),
+                account_id="account",
+                account_username="pilot",
+                run_id="run",
+                follow_targets=[target("t1", "source_one", 0), target("t2", "source_two", 1),
+                                target("t3", "source_three", 2)],
+                run_followers_list_engine_session=runner._bind_verified_follow_runner("pilot"),
+                supabase_mode=True,
+                warm_session_used=False,
+                force_stop_used=False,
+                max_targets_per_run=3,
+                max_follows_per_target_per_run=30,
+                authorized_follow_quota=50,
+            )
+        self.assertEqual(seen, ["t1", "t2"])
+        self.assertEqual(outcome["reason"], "exit_code_7")
+        self.assertEqual(outcome["summary"]["follow_session_outcome"], "partial_not_resumable")
+        self.assertIn("search_results_ambiguous_no_exact_match",
+                      [call.kwargs.get("reason") for call in metrics.call_args_list])
+
+    def test_ambiguous_446_search_preserves_reason_without_selecting_suggestion(self):
+        from tests.test_follow_targets_runtime_p1b import FakeSearchDevice, FakeSearchElement
+
+        query = "studio.sample"
+        package = "com.instagram.androig"
+        account_rid = f"{package}:id/row_search_user_username"
+        suggestion_rid = f"{package}:id/row_search_keyword_title"
+        for version, expected in [
+            (compat.VERSION, "search_results_ambiguous_no_exact_match"),
+            (("372.0.0.48.60", 377611059), "search_results_still_blank_after_recovery"),
+        ]:
+            with self.subTest(version=version):
+                d = FakeSearchDevice(package, {
+                    ("resourceId", account_rid): [FakeSearchElement(query + "_other", account_rid)],
+                    ("resourceId", suggestion_rid): [FakeSearchElement(query, suggestion_rid)],
+                })
+                d.serial = "fixture-device"
+                d._instagram_search_observed_version = (id(d), d.serial, package, *version)
+                if version == compat.VERSION:
+                    compat.retain_context(d, serial=d.serial, package=package,
+                                          version_name=version[0], version_code=version[1], unsafe=False)
+                with patch.object(nav.config, "INSTAGRAM_PACKAGE", package), \
+                        patch.object(nav, "retry_until_jitter", side_effect=lambda probe, **kw: probe()), \
+                        patch.object(nav, "_follow_ct_current_query_text", return_value=query), \
+                        patch.object(nav, "_dump_no_real_account_row_debug") as dump, \
+                        patch.object(nav, "log"):
+                    self.assertFalse(nav.tap_account_result(d, query, follow_ct_search_context=True))
+                    self.assertEqual(nav.get_tap_account_result_failure_reason(), expected)
+                dump.assert_called_once_with(d, query)
+                self.assertNotIn(("resourceId", suggestion_rid), d.calls)
+
+
 class CandidateProfileActivityTests(unittest.TestCase):
     def check(self, d, *, expected='bytanyusha_', observed='bytanyusha_', package=PACKAGE, **kw):
         return nav._expected_profile_identity_boundary(
