@@ -721,6 +721,32 @@ class Qualified446ViewerActivityTests(unittest.TestCase):
                 out=self.audit(d,activity,live=live,package="com.instagram.androif",expected_package="com.instagram.androif")
                 self.assertEqual(bool(out.get("post_identity_confirmed")),expected,out)
 
+    def test_assigned_clone_snapshot_and_live_audits_keep_exact_identity(self):
+        import instagram_ui_profile_v1 as ui
+
+        package = "org.fixturefleet.clone7"
+        device = self.device(package=package)
+        for field in ("_instagram_446_observed_context", "_instagram_search_observed_version"):
+            vars(device).pop(field)
+        metadata = ui.AppMetadata(package, "446.0.0.49.77", 385211304)
+        binding = ui.RunUIBinding("account", "request", "run", "business", 1, "device",
+                                  device.serial, "instance", package, metadata.version_name,
+                                  metadata.version_code, "UI_PROFILE_446", "lease")
+        runtime = dict(account_id="account", account_username="emitter", run_id="run",
+                       package=package, attempt_id=1, app_instance_id="instance")
+        with mock.patch.object(ui, "_SESSION", None), mock.patch.object(nav.config, "INSTAGRAM_PACKAGE", package), \
+                mock.patch("follow_60s_canary.runtime_context", return_value=runtime):
+            ui.arm(binding, lambda: metadata)
+            ui.attach(device)
+            with nav.verified_follow_row_session("account", "run", "request", "emitter"):
+                for live in (False, True):
+                    args = {"live": live, "package": package, "expected_package": package}
+                    self.assertTrue(self.audit(device, **args)["post_identity_confirmed"])
+                    self.assertFalse(self.audit(device, story=True, **args)["post_identity_confirmed"])
+                    self.assertFalse(self.audit(device, elapsed=3001, **args)["post_identity_confirmed"])
+                    with mock.patch.dict(runtime, {"app_instance_id": "foreign"}):
+                        self.assertFalse(self.audit(device, **args)["post_identity_confirmed"])
+
     def test_context_activity_and_package_negatives_both_contracts(self):
         for live in (False, True):
             devices=[self.device(("445",385211304)),self.device(("446.0.0.49.77",True)),

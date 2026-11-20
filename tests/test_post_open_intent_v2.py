@@ -445,7 +445,11 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
 
     def test_all_other_navigation_bytes_and_routing_unchanged(self):
         import ast, subprocess
-        current=(self.root/"instagram_navigation.py").read_text()
+        from test_certification_admission import restore_generic_follow446_if_exact
+        name = "instagram_navigation.py"
+        candidate = (self.root/name).read_text()
+        current = restore_generic_follow446_if_exact(name, candidate)
+        self.assertNotEqual(current, candidate)
         def omit_helper(src):
             node=next(n for n in ast.parse(src).body if isinstance(n,ast.FunctionDef)
                       and n.name=="_post_open_intent_surface_from_final_proof")
@@ -476,6 +480,8 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
             assert_exact_baseline(current + "\n# unrelated navigation delta\n")
         for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
             current_bytes = (self.root/name).read_bytes()
+            if name == "follow60_ordering_v2_behavioral_canary_v1.py":
+                current_bytes = restore_generic_follow446_if_exact(name, current_bytes.decode()).encode()
             if name == "runner.py":
                 from tests.test_certification_admission import follow446_parent_for_comparison
                 installed = subprocess.check_output(["git", "show",

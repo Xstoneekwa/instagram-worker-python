@@ -489,13 +489,16 @@ class Reentry446ActivityAuthorityTests(unittest.TestCase):
     def test_only_exact_runtime_hunk_differs_from_signed_base(self):
         from pathlib import Path
         import subprocess
-        source=Path(engine.__file__).read_text()
+        from test_certification_admission import restore_generic_follow446_if_exact
+        candidate=Path(engine.__file__).read_text()
+        source=restore_generic_follow446_if_exact("follow_action_engine.py", candidate)
         before,after=REENTRY_ACTIVITY_HUNK
         baseline=subprocess.check_output(["git","show","04b327dd5b59600a4ffa51c00e1dce04f4ea6769:follow_action_engine.py"],cwd=Path(engine.__file__).parent,text=True)
         def restore(value):
             self.assertEqual(value.count(after),1)
             self.assertEqual(value.replace(after,before,1),baseline)
         restore(source)
+        self.assertNotEqual(source, candidate)
         for corrupt in (source.replace(after,before,1),source+after,source.replace(after,after.replace("except (AttributeError, TypeError)","except Exception"),1),source+"\n# unrelated"):
             with self.assertRaises(AssertionError): restore(corrupt)
 

@@ -84,6 +84,129 @@ class Follow60OrderingV2RunnerIntegrationTests(unittest.TestCase):
             scope, path=Path(self.directory.name) / "ledger.sqlite3"
         )
 
+    @patch.dict(os.environ, {contract.ENABLED_ENV: "1", contract.ALLOWLIST_ENV: ACCOUNT,
+                             "WORKER_GIT_SHA": SHA, "PHONEFARM_APP_INSTANCE_ID": ""})
+    def test_assigned_packages_reach_real_v2_reentry_on_consecutive_candidates(self):
+        import account_session_orchestrator as session
+        import follow_action_engine as actions
+        import instagram_navigation as nav
+        import instagram_ui_profile_v1 as ui
+        from tests.test_follow60_ordering_v2_reentry_surface import _Device, _Selector
+
+        class CandidateDevice(_Device):
+            def __call__(self, **selector):
+                self.selector_calls.append(dict(selector))
+                return _Selector(exists="resourceIdMatches" in selector, text=self.candidate)
+
+        for index, package in enumerate(("com.instagram.android", "com.instagram.androig",
+                                         "com.instagram.other_device", "org.fixturefleet.clone7")):
+            with self.subTest(package=package):
+                d = CandidateDevice()
+                d.package, d.serial = package, f"offline-device-{index}"
+                d.activity = ".activity.MainTabActivity"
+                metadata = ui.AppMetadata(package, "446.0.0.49.77", 385211304)
+                binding = ui.RunUIBinding(ACCOUNT, "request-a", "run-a", "session-a", 1,
+                                          f"device-{index}", d.serial, f"instance-{index}",
+                                          package, metadata.version_name, metadata.version_code,
+                                          "UI_PROFILE_446", "lease-a")
+                runtime = dict(account_id=ACCOUNT, run_id="run-a", account_username="emitter", package=package,
+                               attempt_id=1, ui_generation=7, navigation_counter=11)
+                completed = []
+                def simulate_target(device, *, target_id, invocation_summary, **options):
+                    if target_id == "target-absent":
+                        reason = "search_results_still_blank_after_recovery"
+                        invocation_summary.update(follows_completed_count=0, follow_stop_reason=reason,
+                            follow_session_outcome="target_unavailable_retryable", target_local_failure=True,
+                            target_safe_to_skip=True, target_retryable=True, target_completed=False,
+                            target_outcome="target_unavailable_retryable", first_causal_reason=reason)
+                        return 7
+                    for count, candidate in enumerate(("alice", "bob")):
+                        device.candidate = candidate
+                        ok, profile = nav._expected_profile_identity_boundary(
+                            device, candidate, package, observed_username=candidate,
+                        )
+                        self.assertTrue(ok, profile)
+                        self.assertFalse(nav._expected_profile_identity_boundary(
+                            device, candidate, package, observed_username="wrong-candidate",
+                        )[0])
+                        observed = {"package": package, "activity": device.activity}
+                        self.assertEqual(nav._post_open_intent_surface_from_final_proof(
+                            observed, expected_package=package, device_context=device,
+                        ), (package, device.activity))
+                        self.assertEqual(nav._post_open_intent_surface_from_final_proof(
+                            dict(observed, activity="foreign.activity.MainTabActivity"),
+                            expected_package=package, device_context=device,
+                        ), ("", ""))
+                        capture = dict(_mono_capture(), package=package, activity=device.activity,
+                                       xml=_xml().replace('text="alice"', f'text="{candidate}"'))
+                        stages = runner._follow60_ordering_v2_prepare_candidate(
+                            device, control=_control(), account_id=ACCOUNT, run_id="run-a",
+                            request_id="request-a", business_session_id="session-a", attempt_id=1,
+                            completed_v2_cycles=count, target_id=target_id, candidate_username=candidate,
+                            action_id=f"action-{index}-{count}", mono_capture=capture, pkg=package,
+                            source_profile_username="ct", pick={"username": candidate},
+                            dont_follow_private_accounts=True, private_probe_payload={},
+                            session_likes_used=count, commercial_policy_revision="policy-a",
+                            event_recorder=lambda **kw: {"ok": True, "v2_complete_count": count},
+                        )
+                        self.assertTrue(stages["selected"], stages["reason"])
+                        self.assertFalse(stages["abort_candidate"], stages["reason"])
+                        self.assertIn("ordering_v2_reentry", stages["pre_follow_context"])
+                        ledger = stages["ledger"]
+                        self.assertIn("profile_reentry_verified", ledger.load().stages)
+                        self.assertFalse(ledger.load().cycle_complete)
+                        # Simulated transport receipts exercise the production ledger in order.
+                        ledger.apply_receipt("follow_pending", {
+                            "candidate_username": candidate,
+                            "deferred_intent_nonce": stages["plan"].deferred_follow.intent_nonce,
+                            "fresh_reentry_proof": True,
+                        })
+                        ledger.apply_receipt("follow_verified", {
+                            "candidate_username": candidate, "follow_state_after": "following",
+                            "tap_sent": True,
+                        })
+                        for stage in ("mute_posts_verified", "mute_stories_verified"):
+                            ledger.apply_receipt(stage, {"verified": True, "engine": "mute_engine_v2"})
+                        ledger.apply_receipt("return_ct_exact", {"verified": True, "method": "fixture"})
+                        receipt = ledger.apply_receipt("cycle_complete", {
+                            "critical_persistence_acknowledged": True, "candidate_username": candidate,
+                        })
+                        self.assertTrue(ledger.load().cycle_complete)
+                        completed.append(receipt["idempotency_key"])
+                    invocation_summary.update(follows_completed_count=len(completed), follow_processed_count=2,
+                        follow_session_outcome="global_follow_cap_reached", follow_stop_reason="global_follow_cap_reached")
+                    return 0
+
+                with patch.object(ui, "_SESSION", None), patch.object(nav.config, "INSTAGRAM_PACKAGE", package), \
+                        patch("follow_60s_canary.runtime_context", return_value=runtime), \
+                        patch("follow_60s_canary.invalidate"), \
+                        patch.object(runner, "_run_followers_list_engine_session", side_effect=simulate_target), \
+                        patch.object(runner, "run_post_follow_post_likes_phase", return_value={
+                            "ok": True, "post_opened": True, "phase_outcome": "success",
+                            "liked_count": 1, "attempted_count": 1,
+                        }) as like, \
+                        patch.object(actions, "try_select_exact_profile_header_follow_fast", return_value=(
+                            object(), {"bounds": {"left": 700, "top": 300, "right": 1010, "bottom": 420},
+                                       "resource_id": f"{package}:id/profile_header_follow_button", "text": "Follow"},
+                        )), patch.object(ledger_module, "DurableOrderingLedgerV1", side_effect=self._factory):
+                    ui.arm(binding, lambda: metadata)
+                    ui.attach(d)
+                    targets = [{"target_id": "target-absent", "source_profile": "ct_missing"},
+                               {"target_id": "target-a", "source_profile": "ct"}]
+                    result = session._run_follow_target_rotation(
+                        d, account_id=ACCOUNT, account_username="emitter", run_id="run-a",
+                        run_request_id="request-a", follow_targets=targets,
+                        run_followers_list_engine_session=runner._bind_verified_follow_runner("emitter"),
+                        supabase_mode=False, warm_session_used=False, force_stop_used=False,
+                        max_targets_per_run=2, authorized_follow_quota=2,
+                        follow60_canary_active=True, follow60_canary_control=_control(),
+                        business_session_id="session-a",
+                    )
+                    self.assertEqual(result["global_follows_completed"], 2)
+                    self.assertEqual(len(set(completed)), 2)
+                    self.assertEqual(like.call_count, 2)
+                    self.assertIsNone(nav._follow_446_activity_authority(d, package, d.activity))
+
     @patch.dict(
         os.environ,
         {

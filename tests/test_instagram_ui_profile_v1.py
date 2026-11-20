@@ -113,6 +113,19 @@ class MetadataTests(Isolated):
         for version in (372, 446):
             self.assertEqual(ui.parse_installed_package(dumpsys(version), P), metadata(version))
 
+    def test_generic_name_requires_explicit_assigned_446_and_exact_installed_section(self):
+        package = 'org.fixturefleet.instagram_clone7'
+        raw = dumpsys(446, package)
+        value = ui.parse_installed_package(raw, package, assigned_446=True)
+        self.assertEqual(value, ui.AppMetadata(package, '446.0.0.49.77', 385211304))
+        for raw_text, name, qualified in (
+            (raw, package, False), (dumpsys(372, package), package, True),
+            (raw, 'org.fixturefleet.other', True), (raw+raw, package, True),
+            (raw, package+';bad', True), (raw, package+'\n', True),
+        ):
+            with self.subTest(name=name, qualified=qualified), self.assertRaises(ui.UIProfileStopped):
+                ui.parse_installed_package(raw_text, name, assigned_446=qualified)
+
     def test_first_foreign_section_never_selects_contract(self):
         raw = dumpsys(372, 'com.instagram.other') + dumpsys(446)
         self.assertEqual(ui.resolve(ui.parse_installed_package(raw, P), P), 'UI_PROFILE_446')
@@ -462,6 +475,32 @@ class RunnerTests(Isolated):
         self.assertIn('updated_at', self.operations[0]['query'])
         self.assertTrue(ui.armed())
 
+    def test_newly_assigned_package_uses_canonical_account_session_preparation(self):
+        package = 'org.fixturefleet.instagram_clone7'
+        self.context.update(package_name=package, account_id=A, assignment_found=True,
+                            assignment_id=ROOT_ID, source='account_assignments')
+        self.args.package_name = package
+        self.request['requested_run_type'] = 'account_session'
+        installed = ui.AppMetadata(package, '446.0.0.49.77', 385211304)
+        with patch.object(config, 'INSTAGRAM_PACKAGE', package), \
+                patch.object(ui, 'read_metadata', return_value=installed) as read, \
+                patch('account_session_resume_plan_store.bind_run_ui_profile', return_value={'persisted': True}):
+            with self.assertRaisesRegex(ui.UIProfileStopped, 'instagram_app_instance_unproved'):
+                self.prepare(account_session=False)
+            with patch.dict(self.context, assignment_found=False), \
+                    self.assertRaisesRegex(ui.UIProfileStopped, 'instagram_app_instance_unproved'):
+                self.prepare(account_session=True)
+            read.assert_not_called()
+            proof = self.prepare(account_session=True)
+            self.assertEqual((proof.package, proof.device_id, proof.app_instance_id, proof.lease_id),
+                             (package, D, I, L))
+            self.assertEqual(ui.snapshot(), proof.to_dict())
+            self.assertEqual(len(self.operations), 1)
+            self.assertEqual(read.call_count, 2)
+            for call in read.call_args_list:
+                self.assertEqual(call.args, ('serial-a', package))
+                self.assertEqual(call.kwargs, {'assigned_446': True})
+
     def atomic_request(self):
         self.request.pop('device_id', None)
         self.request.pop('app_instance_id', None)
@@ -790,7 +829,11 @@ class RunnerTests(Isolated):
         calls = [(n.lineno, ast.unparse(n.func)) for n in ast.walk(main) if isinstance(n, ast.Call)]
         prepare = next(line for line, name in calls if name == '_prepare_instagram_ui_profile')
         begin = next(line for line, name in calls if name == 'supabase_client.begin_device_activity_v1')
-        connect = next(line for line, name in calls if name == 'connect_device')
+        connect = next(n.lineno for n in ast.walk(main) if isinstance(n, ast.Call)
+                       and ast.unparse(n.func) == '_startup_phone_mutation'
+                       and [ast.unparse(arg) for arg in n.args[:3]] == [
+                           '_startup_boundary', "'before_device_connect'", 'connect_device'])
+        self.assertNotIn('connect_device', [name for line, name in calls])
         self.assertLess(begin, prepare);self.assertLess(prepare, connect)
         statement = next(n for n in main.body if isinstance(n, ast.Expr)
                          and isinstance(n.value, ast.Call) and ast.unparse(n.value.func) == '_prepare_instagram_ui_profile')
@@ -905,6 +948,7 @@ class ResumeProjectionTests(Isolated):
 
 class PreservationTests(Isolated):
     device_lock_stop_base = "5cdc1b778fc76634b5151f3de4e2aabfc95fa943"
+    generic_follow_base = "8d382efe8615db8d77f153511ad51936ae927d88"
     device_lock_stop_sha256 = {
         "account_run_request_consumer.py": "1fca60cac0ff93fdfc180475b44b5489f0bd5de7080b2bea66968b87021ca12e",
         "runtime_incident_matrix.py": "8986d4f8c84e893b3dc62ca6004a1c6dc43ebdbc97af4eda605dab6228433cf0",
@@ -953,8 +997,22 @@ class PreservationTests(Isolated):
         diff_names = ('diff', '--no-renames', '--name-only', '-z')
         delta = paths(*diff_names, '07150ea2ddcd36fd687650bb97689ba720fe34e8', self.device_lock_stop_base)
         self.assertEqual(delta, frozen | historical_verifiers)
-        self.assertEqual(paths(*diff_names, self.device_lock_stop_base),
+        self.assertEqual(paths(*diff_names, self.device_lock_stop_base, self.generic_follow_base),
                          set(self.device_lock_stop_sha256) | {'tests/test_instagram_ui_profile_v1.py'})
+        from test_certification_admission import _GENERIC_FOLLOW446_PARENT
+
+        candidate_delta = paths(*diff_names, self.generic_follow_base)
+        self.assertEqual({name for name in candidate_delta if not name.startswith('tests/')},
+                         set(_GENERIC_FOLLOW446_PARENT))
+        self.assertLessEqual(candidate_delta, set(_GENERIC_FOLLOW446_PARENT) | {
+            'tests/test_certification_admission.py',
+            'tests/test_follow60_ordering_v2_reentry_surface.py',
+            'tests/test_follow60_ordering_v2_runner_integration.py',
+            'tests/test_follow60_postopen_liketap_bridge_v1.py',
+            'tests/test_follow_targets_runtime_p1b.py',
+            'tests/test_instagram_ui_446_compat.py', 'tests/test_instagram_ui_profile_v1.py',
+            'tests/test_post_open_intent_v2.py', 'tests/test_post_viewer_story_highlight_identity_guard.py',
+        })
         for name, expected_hash in self.device_lock_stop_sha256.items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), expected_hash, name)
         self.assertFalse(paths('ls-files', '--others', '--exclude-standard', '-z'))

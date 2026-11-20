@@ -30151,12 +30151,28 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
         if row.get("id") != run_id or row.get("account_id") != account_id or row.get("status") not in ("running", "pending"):
             raise ui.UIProfileStopped("instagram_ui_run_identity_mismatch")
         stage = 'package_metadata'
-        installed = ui.read_metadata(serial, package)
+        assigned_446 = not bool(ui.PACKAGE.fullmatch(package))
+        if assigned_446 and (
+            not account_session_run or request.get("requested_run_type") != "account_session"
+            or context.get("assignment_found") is not True
+            or not context.get("assignment_id") or context.get("account_id") != account_id
+            or context.get("source") != "account_assignments"
+        ):
+            raise ui.UIProfileStopped("instagram_app_instance_unproved")
+
+        def metadata_reader():
+            if assigned_446:
+                return ui.read_metadata(serial, package, assigned_446=True)
+            return ui.read_metadata(serial, package)
+
+        installed = metadata_reader()
         stage = 'binding_construct'
         binding = ui.RunUIBinding(
             account_id, request_id, run_id, lineage["root_business_session_id"],
             lineage["execution_attempt_no"], device_id, serial, instance, package,
-            installed.version_name, installed.version_code, ui.resolve(installed, package), lease["lease_id"],
+            installed.version_name, installed.version_code,
+            ui.resolve(installed, package, assigned_446=assigned_446),
+            lease["lease_id"],
         )
         stage = 'parent_binding'
         parent = None
@@ -30206,7 +30222,7 @@ def _prepare_instagram_ui_profile(context, serial, account_id, run_id, request_i
             if not result.get("persisted"):
                 raise ui.UIProfileStopped("instagram_ui_resume_binding_persistence_unproved")
         stage = 'binding_arm'
-        ui.arm(binding, lambda: ui.read_metadata(serial, package), parent=parent)
+        ui.arm(binding, metadata_reader, parent=parent)
         return binding
     except ui.UIProfileStopped as exc:
         ui.preparation_failure(exc, stage)

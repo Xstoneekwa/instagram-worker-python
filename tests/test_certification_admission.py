@@ -189,7 +189,127 @@ _CT_ROTATION_PARENT = {
 }
 
 
+# Invert the reviewed generic 446 identity delta before historical comparisons.
+_GENERIC_FOLLOW446_PARENT = {
+    'account_session_orchestrator.py': (
+        'b3819c3d701b36f242ceaa139b0ad72910c7fd31a72df349bb1696987c10eb95',
+        '04e4699033a057556db51b390980da23d26f4ada',
+        '3b4a7ae3fc0859f21716799b2b777c90dab18c2feb4a3356a3314a09a5518330',
+        '3a049295c84eaeef4e1368e27094e4beebbc377a5e3cc6a8526da72c03264e49',
+        (
+            (107051, 107890, 107051, 107051),
+            (108597, 108671, 107758, 108127),
+            (111221, 111334, 110677, 110898),
+        ),
+    ),
+    'follow60_ordering_v2_behavioral_canary_v1.py': (
+        '1eeee6f56aa93a6719a71925f3a3f640898198542cf02d2b44f5961ec2e4aca8',
+        '01efd8022bf4c00f44f27f72c240ec7ae17674fd',
+        '57f75c698c550e8ac943ac7da67498058c5cbe2c8139200d8eb1966a892eb92e',
+        'd26ff67a2f8c1c300671ded04475e1aa27d4c4af85827bd23b7c44a5d6166f0c',
+        (
+            (16150, 16897, 16150, 16762),
+            (16978, 17010, 16843, 16976),
+        ),
+    ),
+    'follow_action_engine.py': (
+        'bfe2ab8d59fd37a5709eabb6b6a434635dcdb1e55135b3b753c9ee6fbca55402',
+        'f9d45210f65e5bad5f5f1c3d3a914130072e91b4',
+        '3240d8d6aa4f3ed59a3615706f8104644696910ca0e71a9f4e44598f7a6fb9df',
+        '928ea20748981a08d21c0600f5ce83999ccf5498348deb6b8f41148ae282cccc',
+        (
+            (12919, 13698, 12919, 13464),
+        ),
+    ),
+    'instagram_navigation.py': (
+        '5986c883b183ec3c5cdb05f8c3497f7d2e87de0be306a78e8b99ab6df863ff84',
+        '8c04e86bba2e63fc2f31cb43c0e37132be7a6c3f',
+        'f539a646defac6d297a7b4a61b5909ecd0472e246e7d5ab5d7c70b7b2208474a',
+        '47e10e8d41e43e366f3e1ff001be06e429544d15454e1d53f3d95fdf096aab71',
+        (
+            (209518, 209771, 209518, 209601),
+            (638983, 639103, 638813, 638919),
+            (639431, 639522, 639247, 639359),
+            (640948, 641043, 640785, 640861),
+            (1071088, 1071157, 1070906, 1070992),
+            (1081248, 1081393, 1081083, 1081230),
+            (1169668, 1169909, 1169505, 1169625),
+            (1386872, 1386917, 1386588, 1386588),
+            (1388338, 1388473, 1388009, 1388147),
+            (1389768, 1389813, 1389442, 1389442),
+            (1391626, 1391761, 1391255, 1391393),
+            (1398580, 1398610, 1398212, 1398212),
+            (1400265, 1400543, 1399867, 1399867),
+            (1404934, 1405018, 1404258, 1404258),
+            (1405136, 1405173, 1404376, 1404483),
+            (1405439, 1405476, 1404749, 1404856),
+            (1412802, 1412904, 1412182, 1412773),
+            (1412971, 1413082, 1412840, 1412840),
+            (1433537, 1434519, 1433295, 1434146),
+            (1894982, 1895043, 1894609, 1895929),
+            (1895915, 1898651, 1896801, 1896801),
+            (2253257, 2253397, 2251407, 2251564),
+            (2253403, 2253403, 2251570, 2252064),
+            (2258296, 2258458, 2256957, 2257125),
+            (2258464, 2258464, 2257131, 2257625),
+            (2301091, 2301178, 2300252, 2300369),
+            (2302120, 2302351, 2301311, 2301370),
+        ),
+    ),
+    'instagram_ui_profile_v1.py': (
+        'c348ca03118afc6942133174791fd8491f962178ba91ccebdbbf15a3777eed98',
+        'ded7f81c2d7bed6d6ffea4399b22cbc53cb7f102',
+        'f3b3614c5339c5f576b794339ffb463b7cbebea29d4287e8cdfd936635f1721e',
+        '083baa360e747d300749ae383aac379c7c91eccf53b9289e0bb856174175886d',
+        (
+            (640, 725, 640, 640),
+            (5327, 5382, 5242, 5274),
+            (5464, 5591, 5356, 5523),
+            (5742, 6039, 5674, 5743),
+            (6041, 6110, 5745, 5791),
+            (6189, 6320, 5870, 5942),
+            (7044, 7099, 6666, 6694),
+            (7118, 7177, 6713, 6749),
+            (7250, 7368, 6822, 6881),
+            (7691, 7774, 7204, 7260),
+            (8649, 8836, 8135, 8253),
+            (11891, 12018, 11308, 11357),
+        ),
+    ),
+    'runner.py': (
+        '5119b9b814d34f9c81b8e15fe7d082bd8196e70803ce6e35356aa6d565a566e2',
+        'b2beaa9e4741c5cddc6d16f0693c8dfa44b76bba',
+        'a372faf6308e7d347bfade06bee6212a8e33fc3bc7ed4ef798b5588e1eac020e',
+        'a6bc44c96732e224dc60f59e0da12745d8201d4f6eb84302072257cb8358a529',
+        (
+            (1390706, 1391418, 1390706, 1390760),
+            (1391653, 1391815, 1390995, 1391106),
+            (1394672, 1394728, 1393963, 1394045),
+        ),
+    ),
+}
+
+def restore_generic_follow446_if_exact(name, source):
+    record = _GENERIC_FOLLOW446_PARENT.get(name)
+    if record and hashlib.sha256(source.encode()).hexdigest() == record[0]:
+        return _reverse_follow446_reviewed_bytes(source, record)
+    return source
+
+def test_generic_follow446_inverse_requires_exact_candidate_and_hunk_positions():
+    for name, record in _GENERIC_FOLLOW446_PARENT.items():
+        source = (ROOT / name).read_text()
+        parent = restore_generic_follow446_if_exact(name, source)
+        assert hashlib.sha256(parent.encode()).hexdigest() == record[2]
+        for altered in (source + 'x', source[:-1], source[1:] + source[0], source + source):
+            assert restore_generic_follow446_if_exact(name, altered) == altered
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_source_changed'):
+                _reverse_follow446_reviewed_bytes(altered, record)
+        misplaced = record[:-1] + (record[-1] + (record[-1][-1],),)
+        with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_invalid_hunk_position'):
+            _reverse_follow446_reviewed_bytes(source, misplaced)
+
 def follow446_parent_for_comparison(name, source):
+    source = restore_generic_follow446_if_exact(name, source)
     rotation_delta = _CT_ROTATION_PARENT.get(name)
     if rotation_delta and hashlib.sha256(source.encode()).hexdigest() == rotation_delta[0]:
         source = _reverse_follow446_reviewed_bytes(source, rotation_delta)
@@ -205,7 +325,7 @@ def follow446_parent_for_comparison(name, source):
 
 def test_follow446_inverse_rejects_unauthorized_bytes_and_hunk_positions():
     for name, record in _FOLLOW446_PARENT.items():
-        source = (ROOT / name).read_text()
+        source = restore_generic_follow446_if_exact(name, (ROOT / name).read_text())
         if name in _CT_ROTATION_PARENT:
             rotation_delta = _CT_ROTATION_PARENT[name]
             with unittest.TestCase().assertRaisesRegex(AssertionError, 'follow446_source_changed'):
@@ -1206,6 +1326,7 @@ def restore_consolidated_projection_delta(name, source):
 
 
 def restore_exact_product_delta(name, source):
+    source = restore_generic_follow446_if_exact(name, source)
     source = _restore_chronometric_if_exact_candidate(name, source)
     source = _restore_e2e_if_exact_candidate(name, source)
     source = _restore_preparing_if_exact_candidate(name, source)

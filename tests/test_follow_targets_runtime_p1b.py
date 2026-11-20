@@ -1323,6 +1323,34 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
             "search_results_still_blank_after_recovery",
         )
 
+    def test_failure_on_later_target_owns_terminal_incident(self) -> None:
+        from runtime_incident_matrix import classify_terminal_run_failure
+
+        terminal = "followers_recovery_surface_unproved"
+        engine = FakeFollowersEngine([
+            (7, self._target_local_failure_summary()),
+            (42, {"follows_completed_count": 0, "follow_stop_reason": terminal,
+                  "follow_session_outcome": "partial_resumable"}),
+        ])
+        result = session._run_follow_target_rotation(
+            object(), account_id="acct", account_username="account", run_id="run",
+            follow_targets=[target("t1", "source_one", 0), target("t2", "source_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True, warm_session_used=False, force_stop_used=False,
+            max_targets_per_run=3,
+        )
+        self.assertEqual([call["target_id"] for call in engine.calls], ["t1", "t2"])
+        summary = result["summary"]
+        self.assertEqual(summary["first_causal_reason"], terminal)
+        self.assertEqual(summary["target_local_failures"][0]["first_causal_reason"],
+                         "search_results_still_blank_after_recovery")
+        decision = classify_terminal_run_failure(
+            exit_code=result["exit_code"], run_status="failed",
+            run_type="account_session", performance_summary=summary,
+        )
+        self.assertEqual(decision.reason_code, terminal)
+        self.assertTrue(decision.blocking_campaign)
+
     def test_two_unavailable_targets_are_excluded_and_ct4_runs(self) -> None:
         engine = FakeFollowersEngine([
             (7, self._target_local_failure_summary("ct2_missing")),

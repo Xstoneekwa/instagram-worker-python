@@ -555,7 +555,7 @@ class FollowersActivityTests(unittest.TestCase):
         binding = ui.RunUIBinding("account", "request", "run", "business", 1, "device",
                                   device.serial, "instance-3", pkg, *compat.VERSION,
                                   ui.resolve(metadata, pkg), "lease")
-        runtime = dict(account_id="account", run_id="run", account_username="pilot", package=pkg)
+        runtime = dict(account_id="account", run_id="run", account_username="pilot", package=pkg, attempt_id=1)
         with patch.object(ui, "_SESSION", None), patch.object(nav.config, "INSTAGRAM_PACKAGE", pkg), \
                 patch.object(follow, "runtime_context", return_value=runtime), \
                 patch.dict(nav.os.environ, {"PHONEFARM_APP_INSTANCE_ID": ""}):
@@ -612,7 +612,8 @@ class FollowersActivityTests(unittest.TestCase):
                     self.assertFalse(nav._followers_row_activity_allowed(device, pkg, activity,
                                                                         row_scope=token.scope))
                 for key, value in (("app_instance_id", "instance-2"), ("account_id", "other"),
-                                   ("run_id", "prior"), ("account_username", "foreign"), ("package", "foreign")):
+                                   ("run_id", "prior"), ("attempt_id", 2),
+                                   ("account_username", "foreign"), ("package", "foreign")):
                     with self.subTest(key=key), patch.dict(runtime, {key: value}):
                         self.assertIsNone(prepare()[0])
                 with patch.dict(nav.os.environ, {"PHONEFARM_APP_INSTANCE_ID": "instance-2"}):

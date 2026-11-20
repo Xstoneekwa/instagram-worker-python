@@ -2600,6 +2600,22 @@ def _run_follow_target_rotation(
             outcome="no_followable_candidates_all_targets",
         )
 
+    terminal_local_failure = target_local_failures[-1] if target_local_failures else None
+    rotation_causal_reason = None
+    if terminal_local_failure is not None:
+        rotation_causal_reason = str(target_local_failures[0].get("first_causal_reason") or "")
+        final_target_id = _as_target_id((final_target or {}).get("target_id"))
+        if (
+            final_exit_code not in (0, 97)
+            and final_reason
+            and final_reason != "all_targets_temporarily_unavailable"
+            and final_target_id
+            and final_target_id != _as_target_id(terminal_local_failure.get("target_id"))
+        ):
+            # The skipped targets remain in the attempt history. The incident
+            # must identify the distinct failure that ended the current target.
+            rotation_causal_reason = final_reason
+
     if attempts:
         final_summary["last_target_follows_completed_count"] = attempts[-1].get("follows_completed_count")
         final_summary["follows_completed_count"] = global_follows_completed
@@ -2612,12 +2628,7 @@ def _run_follow_target_rotation(
             final_summary["attempt_excluded_target_ids"] = sorted(
                 attempt_excluded_keys
             )
-            # The first target-local failure remains the causal boundary even
-            # when a later CT reaches a normal stop.  Do not let a downstream
-            # summary replace it with the last recovery/stop reason.
-            final_summary["first_causal_reason"] = str(
-                target_local_failures[0].get("first_causal_reason") or ""
-            )
+            final_summary["first_causal_reason"] = rotation_causal_reason
 
     remaining_target_ids = _follow_target_ids(
         [
@@ -2676,11 +2687,8 @@ def _run_follow_target_rotation(
             safe_boundary=True,
         )
 
-    if target_local_failures:
-        final_summary["first_causal_reason"] = str(
-            target_local_failures[0].get("first_causal_reason") or ""
-        )
-        terminal_local_failure = target_local_failures[-1]
+    if terminal_local_failure is not None:
+        final_summary["first_causal_reason"] = rotation_causal_reason
         terminal_local_reason = str(
             terminal_local_failure.get("first_causal_reason") or ""
         )

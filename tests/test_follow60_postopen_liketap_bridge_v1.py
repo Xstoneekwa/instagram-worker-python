@@ -229,9 +229,9 @@ class LikeContextActivityAuthority446Tests(unittest.TestCase):
         src = textwrap.dedent(inspect.getsource(nav.visual_like_open_post))
         tree = ast.parse(src)
         nodes = list(ast.walk(tree))
-        assignment = lambda key: next(n for n in nodes if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == key for t in n.targets))
-        initial = assignment('stage_activity_allowed')
+        assignment = lambda key: min((n for n in nodes if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == key for t in n.targets)), key=lambda n: n.lineno)
+        initial = assignment('stage_package')
         combined = assignment('stage_scoped_open_context_ok')
         extension = next(n for n in nodes if isinstance(n, ast.If)
                          and initial.lineno < n.lineno < combined.lineno)
@@ -243,6 +243,7 @@ class LikeContextActivityAuthority446Tests(unittest.TestCase):
         ctx.update(stage or {})
         ns = dict(d=device if device is not None else self.device(),
                   _followers_row_activity_allowed=nav._followers_row_activity_allowed,
+                  _follow_446_activity_authority=nav._follow_446_activity_authority,
                   _normalize_handle=nav._normalize_handle, stage_ctx=ctx,
                   meta0={'current_package':PKG, 'current_activity':activity},
                   expected_follower_username='candidate', post_opened_via_profile_grid=True,
@@ -250,7 +251,9 @@ class LikeContextActivityAuthority446Tests(unittest.TestCase):
                   like_tap_context_v2_required=v2, stage_context_rejection_reason='')
         ns.update(changes)
         code = compile(ast.fix_missing_locations(ast.Module(
-            body=[initial,extension,combined,reason],type_ignores=[])), '<real-consumer>', 'exec')
+            body=[initial, assignment('stage_activity'), assignment('same_activity'),
+                  assignment('stage_activity_allowed'), extension, combined, reason],
+            type_ignores=[])), '<real-consumer>', 'exec')
         exec(code,ns)
         return ns['stage_scoped_open_context_ok'], ns['stage_context_rejection_reason']
 
@@ -426,7 +429,10 @@ class LikeTapValidatorActivity446Tests(unittest.TestCase):
 
     def test_exact_inverse_hunk_rejects_changed_missing_duplicate(self):
         from pathlib import Path
-        source=Path(nav.__file__).read_text();after,before=VALIDATOR_ACTIVITY_HUNK
+        from test_certification_admission import restore_generic_follow446_if_exact
+        source=restore_generic_follow446_if_exact("instagram_navigation.py", Path(nav.__file__).read_text())
+        after,before=VALIDATOR_ACTIVITY_HUNK
+        self.assertEqual(source.count(after), 1)
         for mutation in [source.replace(after,''),source+after,
                          source.replace(after,after.replace('activity_allowed = False','activity_allowed = True'))]:
             with self.assertRaises(AssertionError):restore_liketap_validator_activity(mutation)

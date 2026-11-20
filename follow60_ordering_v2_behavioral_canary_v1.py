@@ -451,22 +451,21 @@ def build_stable_candidate_proof_v2(
         return None, "v2_follow_budget_unavailable"
     package = _text(capture.get("package"))
     activity = _text(capture.get("activity"))
-    # Preserve historical membership; extend only the certified original446 case.
-    qualified_main_tab = False
-    if (package == "com.instagram.android" and device_context is not None
-            and activity in ("com.instagram.android.activity.MainTabActivity",
-                             ".activity.MainTabActivity")):
-        from instagram_navigation import _followers_row_activity_allowed
-        try:
-            qualified_main_tab = _followers_row_activity_allowed(
-                device_context, package, activity)
-        except (AttributeError, TypeError):
-            qualified_main_tab = False
+    from instagram_navigation import _follow_446_activity_authority, _followers_row_activity_allowed
+
+    activity_allowed = _follow_446_activity_authority(device_context, package, activity)
+    if activity_allowed is None:
+        activity_allowed = "instagram" in activity.lower() and "mainactivity" in activity.lower()
+        if (not activity_allowed and package == "com.instagram.android" and device_context is not None
+                and activity in ("com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):
+            try:
+                activity_allowed = _followers_row_activity_allowed(device_context, package, activity)
+            except (AttributeError, TypeError):
+                activity_allowed = False
     if (
         capture.get("package_exact") is not True
         or not package
-        or (("instagram" not in activity.lower()
-             or "mainactivity" not in activity.lower()) and not qualified_main_tab)
+        or not activity_allowed
     ):
         return None, "v2_profile_surface_package_activity_not_exact"
     generation_fields = (

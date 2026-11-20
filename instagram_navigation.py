@@ -5603,7 +5603,10 @@ def _expected_profile_identity_boundary(
     if any(token in activity_norm for token in dangerous_activity_tokens):
         meta["reason"] = "profile_identity_dangerous_activity"
         return False, meta
-    if not _followers_row_activity_allowed(d, expected_package, current_activity):
+    activity_allowed = _follow_446_activity_authority(d, expected_package, current_activity)
+    if activity_allowed is None:
+        activity_allowed = _followers_row_activity_allowed(d, expected_package, current_activity)
+    if not activity_allowed:
         meta["reason"] = "profile_identity_activity_unproven"
         return False, meta
 
@@ -16862,7 +16865,9 @@ _OWN_UNIFIED_FOLLOWERS_TAB_TITLE_FR_RE = re.compile(
 )
 
 
-_FOLLOW_ROW_SESSION: ContextVar[tuple[dict, str] | None] = ContextVar("follow_row_session", default=None)
+_FOLLOW_ROW_SESSION: ContextVar[tuple[dict | None, str] | None] = ContextVar(
+    "follow_row_session", default=None,
+)
 
 
 @contextmanager
@@ -16873,7 +16878,8 @@ def verified_follow_row_session(account_id, run_id, request_id, verified_usernam
 
     binding = snapshot()
     session = None
-    if binding and binding["ui_profile"] == "UI_PROFILE_446" and binding["package"] != "com.instagram.android":
+    if binding and binding["ui_profile"] == "UI_PROFILE_446":
+        session = (None, "")
         runtime = runtime_context()
         emitter = _normalize_handle(verified_username or "")
         if (binding["account_id"] == account_id == runtime["account_id"]
@@ -16913,7 +16919,7 @@ def _followers_surface_scope(
         app_instance_id=str(
             runtime.get("app_instance_id")
             or os.environ.get("PHONEFARM_APP_INSTANCE_ID")
-            or (row_session[0]["app_instance_id"] if row_session else None)
+            or (row_session[0]["app_instance_id"] if row_session and row_session[0] else None)
             or "unbound"
         ),
         account_id=str(runtime.get("account_id") or "unbound"),
@@ -27664,7 +27670,7 @@ def _post_follow_post_reveal_safe_first_row_contract(
     activity = str(meta.get("current_activity") or "")
     if package != str(expected_package or ""):
         return _reject("post_reveal_package_mismatch")
-    if "instagram" not in activity.lower() or "mainactivity" not in activity.lower():
+    if not _follow_profile_or_viewer_activity(d, package, activity):
         return _reject("post_reveal_activity_mismatch")
     out["post_reveal_package"] = package
     out["post_reveal_activity"] = activity
@@ -27898,8 +27904,9 @@ def _post_follow_revalidate_transient_grid_once(
     }
     if (
         verified_meta["current_package"] != str(expected_package or "")
-        or "instagram" not in verified_meta["current_activity"].lower()
-        or "mainactivity" not in verified_meta["current_activity"].lower()
+        or not _follow_profile_or_viewer_activity(
+            d, verified_meta["current_package"], verified_meta["current_activity"],
+        )
     ):
         out["transient_grid_revalidation_skip_reason"] = (
             "stable_package_activity_missing"
@@ -30204,8 +30211,10 @@ def _post_open_intent_surface_from_final_proof(
     )
     if package != str(expected_package or ""):
         return "", ""
-    activity_lower = activity.lower()
-    if "instagram" not in activity_lower or "mainactivity" not in activity_lower:
+    authority = _follow_446_activity_authority(device_context, package, activity)
+    if authority is False:
+        return "", ""
+    if authority is None and ("instagram" not in activity.lower() or "mainactivity" not in activity.lower()):
         # Extend only the existing, version-qualified original446 authority.
         qualified_main_tab = False
         if (package == "com.instagram.android" and device_context is not None
@@ -35807,6 +35816,7 @@ def _post_open_context_v1_bridge_contract(
     current_package: str,
     current_activity: str,
     canonical_generation: int,
+    device_context: u2.Device | None = None,
 ) -> tuple[bool, str]:
     """Validate immutable V5 identity before rebuilding only the Like node."""
     ctx = dict(context or {})
@@ -35834,9 +35844,9 @@ def _post_open_context_v1_bridge_contract(
         return False, "liketapcontext_post_open_live_package_mismatch"
     if str(current_activity or "") != str(ctx.get("activity") or ""):
         return False, "liketapcontext_post_open_live_activity_mismatch"
-    if "instagram" not in str(current_activity or "").lower() or "mainactivity" not in str(
-        current_activity or ""
-    ).lower():
+    if not _follow_profile_or_viewer_activity(
+        device_context, str(current_package or ""), str(current_activity or ""),
+    ):
         return False, "liketapcontext_post_open_viewer_mismatch"
     if str(ctx.get("viewer_type") or "") != "Posts":
         return False, "liketapcontext_post_open_viewer_mismatch"
@@ -35864,6 +35874,7 @@ def _post_open_context_v1_fresh_reacquisition_contract(
     current_package: str,
     current_activity: str,
     canonical_generation: int,
+    device_context: u2.Device | None = None,
 ) -> tuple[bool, str]:
     """Keep durable stage identity while fresh XML replaces stale UI proof.
 
@@ -35898,9 +35909,9 @@ def _post_open_context_v1_fresh_reacquisition_contract(
         return False, "liketapcontext_post_open_live_package_mismatch"
     if str(current_activity or "") != str(ctx.get("activity") or ""):
         return False, "liketapcontext_post_open_live_activity_mismatch"
-    if "instagram" not in str(current_activity or "").lower() or "mainactivity" not in str(
-        current_activity or ""
-    ).lower():
+    if not _follow_profile_or_viewer_activity(
+        device_context, str(current_package or ""), str(current_activity or ""),
+    ):
         return False, "liketapcontext_post_open_viewer_mismatch"
     if not str(ctx.get("stage_nonce") or ""):
         return False, "liketapcontext_post_open_stage_nonce_missing"
@@ -36054,6 +36065,7 @@ def _create_like_tap_context_v2(
             current_package=package,
             current_activity=activity,
             canonical_generation=canonical_generation,
+            device_context=d,
         )
     transported_proof_valid = False
     if transported_exact_proof and not fresh_ui_authority:
@@ -36086,6 +36098,11 @@ def _create_like_tap_context_v2(
             return None, "liketapcontext_post_open_binding_mismatch"
         if str(stage_context.get("package") or "") != str(expected_package or ""):
             return None, "liketapcontext_post_open_package_mismatch"
+        if _FOLLOW_ROW_SESSION.get() is not None and (
+            str(stage_context.get("activity") or "") != activity
+            or not _follow_446_activity_authority(d, package, activity)
+        ):
+            return None, "liketapcontext_post_open_live_activity_mismatch"
         if not bool(stage_context.get("v5_positive")) or bool(
             stage_context.get("story_or_highlight_detected")
         ):
@@ -36193,11 +36210,11 @@ def _create_like_tap_context_v2(
         )
         if stage_context and not bridge_valid:
             return None, bridge_reason or "liketapcontext_post_open_bridge_rejected"
+        activity_allowed = _follow_profile_or_viewer_activity(d, package, activity)
         if fresh_ui_authority:
             v5_positive = bool(
                 package == str(expected_package or "")
-                and "instagram" in activity.lower()
-                and "mainactivity" in activity.lower()
+                and activity_allowed
                 and bool(identity.get("posts_action_bar_in_snapshot"))
                 and candidate_continuity
                 and not story_detected
@@ -36205,8 +36222,7 @@ def _create_like_tap_context_v2(
         else:
             v5_positive = bool(
                 package == str(expected_package or "")
-                and "instagram" in activity.lower()
-                and "mainactivity" in activity.lower()
+                and activity_allowed
                 and (
                     bridge_valid
                     or bool(identity.get("posts_action_bar_in_snapshot"))
@@ -36371,18 +36387,10 @@ def _validate_like_tap_context_v2(
             return False, "liketapcontext_package_mismatch", age_ms
         if live_activity != str(ctx.get("activity") or ""):
             return False, "liketapcontext_activity_mismatch", age_ms
-        activity_allowed = bool(
-            "instagram" in live_activity.lower() and "mainactivity" in live_activity.lower()
-        )
-        if (not activity_allowed and live_package == "com.instagram.android"
-                and live_activity in (
-                    "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):
-            try:
-                activity_allowed = _followers_row_activity_allowed(d, live_package, live_activity)
-            except (AttributeError, TypeError):
-                activity_allowed = False
-        if not activity_allowed:
+        if not _follow_profile_or_viewer_activity(d, live_package, live_activity, original_446=True):
             return False, "liketapcontext_viewer_mismatch", age_ms
+    elif _FOLLOW_ROW_SESSION.get() is not None:
+        return False, "liketapcontext_viewer_mismatch", age_ms
     try:
         from follow_60s_canary import runtime_context as _follow_60_runtime_context
         current_generation = int(
@@ -36888,22 +36896,20 @@ def visual_like_open_post(
                 for key in ("account_id", "run_id", "request_id", "action_id")
             )
         )
-        stage_activity_allowed = bool(
-            "InstagramMainActivity" in str(stage_ctx.get("activity") or "")
-        )
-        if (not stage_activity_allowed
-                and str(stage_ctx.get("package") or "") == "com.instagram.android"
-                and str(stage_ctx.get("activity") or "") in (
-                    "com.instagram.android.activity.MainTabActivity",
-                    ".activity.MainTabActivity")
-                and str(stage_ctx.get("activity") or "")
-                == str(meta0.get("current_activity") or "")):
-            try:
-                stage_activity_allowed = _followers_row_activity_allowed(
-                    d, str(stage_ctx.get("package") or ""),
-                    str(stage_ctx.get("activity") or ""))
-            except (AttributeError, TypeError):
-                stage_activity_allowed = False
+        stage_package = str(stage_ctx.get("package") or "")
+        stage_activity = str(stage_ctx.get("activity") or "")
+        same_activity = stage_activity == str(meta0.get("current_activity") or "")
+        stage_activity_allowed = _follow_446_activity_authority(d, stage_package, stage_activity)
+        if stage_activity_allowed is None:
+            stage_activity_allowed = "InstagramMainActivity" in stage_activity
+            if (not stage_activity_allowed and same_activity and stage_package == "com.instagram.android"
+                    and stage_activity in ("com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):
+                try:
+                    stage_activity_allowed = _followers_row_activity_allowed(d, stage_package, stage_activity)
+                except (AttributeError, TypeError):
+                    stage_activity_allowed = False
+        else:
+            stage_activity_allowed = stage_activity_allowed and same_activity
         stage_scoped_open_context_ok = bool(
             post_opened_via_profile_grid
             and _normalize_handle(
@@ -48830,30 +48836,7 @@ def open_followers_list_from_profile(
     return False, fmeta
 
 
-def _followers_row_activity_allowed(d, package: str, activity: str, *, row_scope=None) -> bool:
-    """Local membership only; consumes the already retained version evidence."""
-    if not package:
-        return False
-    if activity == "com.instagram.mainactivity.InstagramMainActivity":
-        return True
-    if activity not in ("com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity"):
-        return False
-    if package != "com.instagram.android":
-        from instagram_ui_profile_v1 import snapshot
-        from follow_60s_canary import runtime_context
-
-        session = _FOLLOW_ROW_SESSION.get()
-        if activity != ".activity.MainTabActivity" or session is None or row_scope is None:
-            return False
-        binding, emitter = session
-        runtime = runtime_context()
-        if (binding != snapshot() or binding["package"] != package
-                or binding["serial"] != row_scope.device_serial
-                or binding["app_instance_id"] != row_scope.app_instance_id
-                or not (binding["account_id"] == row_scope.account_id == runtime["account_id"])
-                or emitter != _normalize_handle(runtime["account_username"] or "")
-                or binding["run_id"] != runtime["run_id"] or runtime["package"] != package):
-            return False
+def _retained_446_activity_context(d, package: str) -> bool:
     from run_latency_observability_v1 import _TimedProxy
     from instagram_ui_446_compat import context_matches
     owner = d
@@ -48871,6 +48854,69 @@ def _followers_row_activity_allowed(d, package: str, activity: str, *, row_scope
             and observed[3:] == ("446.0.0.49.77", 385211304)
             and context_matches(vars(owner).get("_instagram_446_observed_context"),
                                 owner, serial, package))
+
+
+def _follow_446_activity_authority(d, package: str, activity: str, *, row_scope=None) -> bool | None:
+    """Check the current Follow invocation without acquiring another UI observation."""
+    session = _FOLLOW_ROW_SESSION.get()
+    if session is None:
+        return None
+    binding, emitter = session
+    if binding is None or d is None or binding["package"] != package or activity not in (
+        "com.instagram.mainactivity.InstagramMainActivity",
+        ".activity.MainTabActivity",
+        f"{package}.activity.MainTabActivity",
+    ):
+        return False
+    from follow_60s_canary import runtime_context
+    from instagram_ui_profile_v1 import snapshot
+
+    runtime = runtime_context()
+    scope = row_scope if row_scope is not None else _followers_surface_scope(d)
+    return (
+        binding == snapshot()
+        and binding["serial"] == scope.device_serial
+        and binding["app_instance_id"] == scope.app_instance_id
+        and binding["account_id"] == scope.account_id == runtime.get("account_id")
+        and binding["run_id"] == runtime.get("run_id")
+        and binding["attempt_id"] == runtime.get("attempt_id")
+        and runtime.get("package") == package
+        and emitter == _normalize_handle(runtime.get("account_username") or "")
+        and _retained_446_activity_context(d, package)
+    )
+
+
+def _followers_row_activity_allowed(d, package: str, activity: str, *, row_scope=None) -> bool:
+    """Recognize the row activity, keeping non-Follow callers on their existing contract."""
+    if _FOLLOW_ROW_SESSION.get() is not None:
+        return row_scope is not None and _follow_446_activity_authority(
+            d, package, activity, row_scope=row_scope,
+        ) is True
+    if not package:
+        return False
+    if activity == "com.instagram.mainactivity.InstagramMainActivity":
+        return True
+    return (
+        package == "com.instagram.android"
+        and activity in ("com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")
+        and _retained_446_activity_context(d, package)
+    )
+
+
+def _follow_profile_or_viewer_activity(d, package: str, activity: str, *, original_446=False) -> bool:
+    authority = _follow_446_activity_authority(d, package, activity)
+    if authority is not None:
+        return authority
+    if "instagram" in activity.lower() and "mainactivity" in activity.lower():
+        return True
+    if original_446 and package == "com.instagram.android" and activity in (
+        "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity",
+    ):
+        try:
+            return _followers_row_activity_allowed(d, package, activity)
+        except (AttributeError, TypeError):
+            return False
+    return False
 
 
 def _followers_prepare_exact_row_action_token(
@@ -58153,19 +58199,9 @@ def _post_open_live_positive_identity_contract(
     current_package = str(meta.get("current_package") or "")
     current_activity = str(meta.get("current_activity") or "")
     package_exact = bool(str(pkg or "") and current_package == str(pkg or ""))
-    activity_lower = current_activity.lower()
-    instagram_main_activity = bool(
-        "instagram" in activity_lower and "mainactivity" in activity_lower
+    instagram_main_activity = _follow_profile_or_viewer_activity(
+        d, current_package, current_activity, original_446=package_exact,
     )
-    if (not instagram_main_activity and package_exact
-            and current_package == "com.instagram.android"
-            and current_activity in ("com.instagram.android.activity.MainTabActivity",
-                                     ".activity.MainTabActivity")):
-        try:
-            instagram_main_activity = _followers_row_activity_allowed(
-                d, current_package, current_activity)
-        except (AttributeError, TypeError):
-            instagram_main_activity = False
 
     try:
         action_bar_title = str(_visual_read_action_bar_username(d) or "").strip()
@@ -58299,19 +58335,9 @@ def _post_open_snapshot_audit_signals(
         str(expected_package or "")
         and str(current_package or "") == str(expected_package or "")
     )
-    activity_lower = str(current_activity or "").lower()
-    instagram_main_activity = bool(
-        "instagram" in activity_lower and "mainactivity" in activity_lower
+    instagram_main_activity = _follow_profile_or_viewer_activity(
+        d, str(current_package or ""), str(current_activity or ""), original_446=package_exact,
     )
-    if (not instagram_main_activity and package_exact
-            and current_package == "com.instagram.android"
-            and current_activity in ("com.instagram.android.activity.MainTabActivity",
-                                     ".activity.MainTabActivity")):
-        try:
-            instagram_main_activity = _followers_row_activity_allowed(
-                d, current_package, current_activity)
-        except (AttributeError, TypeError):
-            instagram_main_activity = False
     posts_action_bar = bool(posts_action_bar_hint) or bool(
         identity_signals.get("posts_action_bar_in_snapshot")
     )
@@ -59386,8 +59412,7 @@ def run_post_follow_post_likes_phase(
             ordering_v2_post_first
             and proof.get("immutable_verdict") is True
             and expected_pkg
-            and "instagram" in expected_activity.lower()
-            and "mainactivity" in expected_activity.lower()
+            and _follow_profile_or_viewer_activity(d, expected_pkg, expected_activity)
         )
         if live_validation_deferred_to_post_intent:
             # POST_FIRST_V2 already binds this exact package/activity and the
@@ -59407,7 +59432,10 @@ def run_post_follow_post_likes_phase(
             except Exception:
                 cur_pkg = ""
                 cur_activity = ""
-        if cur_pkg and "instagram" not in cur_pkg.lower():
+        activity_authority = _follow_446_activity_authority(d, cur_pkg, cur_activity)
+        if activity_authority is False or (
+            activity_authority is None and cur_pkg and "instagram" not in cur_pkg.lower()
+        ):
             reject_reason = "instagram_not_foreground"
         if not reject_reason and expected_pkg and cur_pkg and expected_pkg != cur_pkg:
             reject_reason = "candidate_context_package_mismatch"

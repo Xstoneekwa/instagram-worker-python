@@ -14,6 +14,7 @@ from threading import RLock
 CERTIFIED = {('372.0.0.48.60', 377611059): 'UI_PROFILE_372',
              ('446.0.0.49.77', 385211304): 'UI_PROFILE_446'}
 PACKAGE = re.compile(r'com\.instagram\.[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*\Z')
+ANDROID_PACKAGE = re.compile(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z')
 PLAN_KEY = 'instagram_ui_binding'
 _METADATA_READ = ContextVar('instagram_ui_metadata_read', default=False)
 _DEPTH = ContextVar('instagram_ui_dispatch_depth', default=0)
@@ -99,18 +100,23 @@ class AppMetadata:
     version_code: int
 
 
-def resolve(metadata, package):
+def resolve(metadata, package, *, assigned_446=False):
     # Adapted from the qualified ui_action_capability.resolve, without Authority.
-    if (type(metadata) is not AppMetadata or not PACKAGE.fullmatch(package or '')
-            or metadata.package != package or type(metadata.version_code) is not int
+    if (type(metadata) is not AppMetadata or metadata.package != package
+            or type(metadata.version_code) is not int
             or (metadata.version_name, metadata.version_code) not in CERTIFIED):
         raise UIProfileStopped('instagram_app_version_not_certified')
-    return CERTIFIED[(metadata.version_name, metadata.version_code)]
+    profile = CERTIFIED[(metadata.version_name, metadata.version_code)]
+    matcher = ANDROID_PACKAGE if assigned_446 and profile == 'UI_PROFILE_446' else PACKAGE
+    if not matcher.fullmatch(package or ''):
+        raise UIProfileStopped('instagram_app_version_not_certified')
+    return profile
 
 
-def parse_installed_package(output, package):
+def parse_installed_package(output, package, *, assigned_446=False):
     """Only the unique installed Package section; never a global first hit."""
-    if not PACKAGE.fullmatch(package or '') or type(output) is not str:
+    matcher = ANDROID_PACKAGE if assigned_446 else PACKAGE
+    if not matcher.fullmatch(package or '') or type(output) is not str:
         raise UIProfileStopped('instagram_package_metadata_unproved')
     matches = list(re.finditer(r'^\s*Package \[([^\]]+)\].*$', output, re.M))
     sections = [output[m.end():matches[i+1].start() if i+1 < len(matches) else len(output)]
@@ -122,13 +128,14 @@ def parse_installed_package(output, package):
     if len(names) != 1 or len(codes) != 1:
         raise UIProfileStopped('instagram_package_metadata_ambiguous')
     value = AppMetadata(package, names[0], int(codes[0]))
-    resolve(value, package)
+    resolve(value, package, assigned_446=assigned_446)
     return value
 
 
-def read_metadata(serial, package):
+def read_metadata(serial, package, *, assigned_446=False):
     """Existing bounded ADB transport, same exact instance, no retry."""
-    if not serial or not PACKAGE.fullmatch(package or ''):
+    matcher = ANDROID_PACKAGE if assigned_446 else PACKAGE
+    if not serial or not matcher.fullmatch(package or ''):
         raise UIProfileStopped('instagram_app_instance_unproved')
     from device import _adb_run
     token = _METADATA_READ.set(True)
@@ -136,7 +143,7 @@ def read_metadata(serial, package):
         code, output, _ = _adb_run(serial, ['shell', 'dumpsys', 'package', package])
         if code:
             raise UIProfileStopped('instagram_package_metadata_read_failed')
-        return parse_installed_package(output, package)
+        return parse_installed_package(output, package, assigned_446=assigned_446)
     except Exception as exc:
         raise UIProfileStopped('instagram_package_metadata_read_failed') from exc
     finally:
@@ -165,7 +172,8 @@ class RunUIBinding:
                 raise UIProfileStopped('instagram_ui_binding_missing:' + key)
         if type(self.attempt_id) is not int or self.attempt_id < 1:
             raise UIProfileStopped('instagram_ui_attempt_unproved')
-        if resolve(AppMetadata(self.package, self.version_name, self.version_code), self.package) != self.ui_profile:
+        if resolve(AppMetadata(self.package, self.version_name, self.version_code), self.package,
+                   assigned_446=self.ui_profile == 'UI_PROFILE_446') != self.ui_profile:
             raise UIProfileStopped('instagram_ui_profile_mismatch')
 
     def to_dict(self):
@@ -239,7 +247,8 @@ class _Session:
             value = self.reader()
             if value != AppMetadata(self.binding.package, self.binding.version_name, self.binding.version_code):
                 self.stop('instagram_version_changed_during_run')
-            resolve(value, self.binding.package)
+            resolve(value, self.binding.package,
+                    assigned_446=self.binding.ui_profile == 'UI_PROFILE_446')
         except UIProfileStopped as exc:
             self.stop(str(exc))
         except Exception:
