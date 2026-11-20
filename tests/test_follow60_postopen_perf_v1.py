@@ -230,3 +230,34 @@ class Follow60PostOpenPerfV1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Bound446InitialReadTests(unittest.TestCase):
+    def test_deadline_after_exact_title_read_stops_before_screenshot_or_tap(self):
+        device = mock.MagicMock()
+        clock = [1.0]
+        def read_title(timeout):
+            clock[0] = 4.0
+            return True
+        device.return_value.exists.side_effect = read_title
+        package = str(config.INSTAGRAM_PACKAGE)
+        with mock.patch.object(nav, "follow_446_session", return_value=True), \
+             mock.patch.object(nav, "_followers_current_pkg_activity", return_value={"current_package":package}), \
+             mock.patch.object(nav, "_try_profile_signals_once", side_effect=AssertionError("broad probe")), \
+             mock.patch.object(nav.time, "monotonic", side_effect=lambda:clock[0]):
+            result = nav.visual_open_recent_post_from_profile(
+                device, expected_follower_username="candidate", likes_perf_phase_t0=1.0, monotonic_deadline=3.0)
+        device.assert_called_once_with(resourceId=package + ":id/action_bar_title", text="candidate")
+        self.assertEqual(result["post_open_budget_stage"], "after_initial_surface_read")
+        self.assertIsNone(result["tap_x"])
+        device.click.assert_not_called()
+        device.screenshot.assert_not_called()
+
+    def test_wrong_foreground_exits_before_selectors(self):
+        device = mock.MagicMock()
+        with mock.patch.object(nav, "follow_446_session", return_value=True), \
+             mock.patch.object(nav, "_followers_current_pkg_activity", return_value={"current_package":"foreign"}):
+            result = nav.visual_open_recent_post_from_profile(
+                device, expected_follower_username="candidate", likes_perf_phase_t0=1.0)
+        self.assertEqual(result["failure_reason"], "profile_identity_package_mismatch")
+        self.assertEqual(device.mock_calls, [])

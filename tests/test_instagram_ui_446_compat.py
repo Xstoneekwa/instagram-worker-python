@@ -678,3 +678,22 @@ class CandidateProfileActivityTests(unittest.TestCase):
         with patch.object(nav.followers_proof.time,'monotonic',return_value=token.issued_at_monotonic+2):
             stale,reason=nav.followers_proof.issue_row_action_token(token.scope,'candidate_exact',max_age_ms=1500.0)
         self.assertIsNone(stale);self.assertIn('stale',reason)
+
+
+class ExploreRotatingHintTests(unittest.TestCase):
+    def test_bound_suggestion_with_search_accessibility_action(self):
+        xml = search_mutate(search_capture(), 'action_bar_search_edit_text', 'text', 'A suggested search')
+        device = SearchDevice(xml)
+        bind(device)
+        self.assertTrue(nav._open_446_explore_search_entry(device, PACKAGE))
+        self.assertEqual(device.clicked, [PACKAGE + ':id/action_bar_search_edit_text'])
+        self.assertEqual(device.calls, ['dump', 'count', 'count', 'info', 'info', 'click'])
+
+    def test_suggestion_cannot_replace_accessible_action_or_live_identity(self):
+        xml = search_mutate(search_capture(), 'action_bar_search_edit_text', 'text', 'A suggested search')
+        for live in (search_mutate(xml, 'action_bar_search_edit_text', 'content-desc', 'Other'),
+                     search_mutate(xml, 'action_bar_search_edit_text', 'text', 'Another suggestion')):
+            device = SearchDevice(xml, live=live)
+            bind(device)
+            self.assertFalse(nav._open_446_explore_search_entry(device, PACKAGE))
+            self.assertEqual(device.clicked, [])

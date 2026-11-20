@@ -918,20 +918,53 @@ class PreservationTests(Isolated):
                     'tests/test_runner_device_serial.py',
                     'tests/test_runner_package_dispatch.py',
                     }
-        # Exact canonical baseline, independent of staged/unstaged state.
-        rows = subprocess.check_output(['git', '-C', str(root), 'diff', '--name-only',
-                                       'baf0bf85701e0c28e65ca8ebe71b9537e7293b73'], text=True).splitlines()
-        extra = subprocess.check_output(['git', '-C', str(root), 'ls-files', '--others', '--exclude-standard'], text=True).splitlines()
-        self.assertLessEqual(set(rows + extra), expected)
+        def paths(*args):
+            data = subprocess.check_output(['git', '-C', str(root), *args])
+            return {p.decode() for p in data.split(b'\0') if p}
+
+        historical = paths('diff', '--no-renames', '--name-only', '-z',
+                           'baf0bf85701e0c28e65ca8ebe71b9537e7293b73',
+                           '9165651e7522545666f7edabb7e1a1495d0aac80')
+        self.assertEqual(historical, expected)
+
+        # Compare the current working tree (including untracked paths) with the
+        # deployed parent. The two sets belong to the two signed Follow scopes.
+        frozen = {
+            'account_session_orchestrator.py', 'instagram_navigation.py',
+            'instagram_ui_446_compat.py', 'runner.py', 'supabase_client.py',
+            'tests/test_account_commercial_policy.py', 'tests/test_certification_admission.py',
+            'tests/test_ct_resume_cplus_convergence_v1.py', 'tests/test_follow60_postopen_perf_v1.py',
+            'tests/test_follow60_surface_driven_return_ct_v1.py', 'tests/test_followers_xml_self_exclusion.py',
+            'tests/test_instagram_ui_446_compat.py', 'tests/test_worker_startup_cancellation_v1.py',
+        }
+        historical_verifiers = {
+            'tests/test_account_run_request_consumer.py', 'tests/test_dm446_audited_failure_diagnostics.py',
+            'tests/test_dm446_healthy_search_nonmatch_v1.py', 'tests/test_instagram_ui_profile_v1.py',
+            'tests/test_outreach_search_absence_v1.py', 'tests/test_post_open_intent_v2.py',
+        }
+        delta = paths('diff', '--no-renames', '--name-only', '-z', '07150ea2ddcd36fd687650bb97689ba720fe34e8')
+        self.assertEqual(delta, frozen | historical_verifiers)
+        self.assertFalse(paths('ls-files', '--others', '--exclude-standard', '-z'))
 
     def test_navigation_sender_truth_and_business_primitives_unchanged(self):
+        from test_certification_admission import follow446_parent_for_comparison
+
         root = Path(runner.__file__).parent
         for name in ['instagram_navigation.py', 'dm_sender_engine.py', 'dm_thread_truth.py',
                      'follow60_mainline_v2.py', 'follow_action_engine.py', 'unfollow_profile_probe.py',
                      'outreach_session_orchestrator.py', 'account_run_request_consumer.py']:
             old = subprocess.check_output(['git', '-C', str(root), 'show',
                                           'baf0bf85701e0c28e65ca8ebe71b9537e7293b73:'+name])
-            self.assertEqual((root/name).read_bytes(), old, name)
+            profile_release = subprocess.check_output(['git', '-C', str(root), 'show',
+                '9165651e7522545666f7edabb7e1a1495d0aac80:'+name])
+            self.assertEqual(profile_release, old, name)
+            installed = subprocess.check_output(['git', '-C', str(root), 'show',
+                '07150ea2ddcd36fd687650bb97689ba720fe34e8:'+name])
+            source = (root/name).read_bytes()
+            if name == 'instagram_navigation.py':
+                self.assertNotEqual(source, installed, 'Missing Follow 446 change')
+            current = follow446_parent_for_comparison(name, source.decode()).encode()
+            self.assertEqual(current, installed, name)
 
 
 if __name__ == '__main__':unittest.main()

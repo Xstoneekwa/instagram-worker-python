@@ -137,7 +137,9 @@ class SelfExclusionTests(unittest.TestCase):
    env=dict(verified_current_account_username=a,call_kwargs={'account_id':'keep'});execute([b],env)
    self.assertEqual(env['call_kwargs'],{'account_id':'keep',**({'verified_current_account_username':a} if a is not None else {})})
  def test_only_picker_and_identity_parameter_delta_in_engine(self):
-  baseline=ast.parse(subprocess.check_output(['git','show',BASE+':runner.py'],cwd=ROOT,text=True));old=fn(baseline,'_run_followers_list_engine_session');new=copy.deepcopy(fn(R,'_run_followers_list_engine_session'))
+  from tests.test_certification_admission import follow446_parent_for_comparison
+  parent=ast.parse(follow446_parent_for_comparison('runner.py', (ROOT/'runner.py').read_text()))
+  baseline=ast.parse(subprocess.check_output(['git','show',BASE+':runner.py'],cwd=ROOT,text=True));old=fn(baseline,'_run_followers_list_engine_session');new=copy.deepcopy(fn(parent,'_run_followers_list_engine_session'))
   new.args.kwonlyargs.pop();new.args.kw_defaults.pop()
   new.body=[n for n in new.body if not(isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_verified_current_account_key' for t in n.targets))]
   picker=fn(new,'_first_eligible_follower_pick');loop=next(n for n in picker.body if isinstance(n,ast.For) and isinstance(n.target,ast.Name) and n.target.id=='c')

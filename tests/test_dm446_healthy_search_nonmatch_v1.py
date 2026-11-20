@@ -167,7 +167,9 @@ class HealthyNonmatchPreservationTests(TestCase):
         import test_certification_admission as pins,subprocess
         root=Path(__file__).resolve().parents[1]
         for name in ('instagram_navigation.py','dm_sender_engine.py'):
-            source=(root/name).read_text();parent=subprocess.check_output(['git','show','HEAD:'+name],cwd=root)
+            source=(root/name).read_bytes().decode()
+            # The inverse returns the bytes before the healthy-search change.
+            parent=subprocess.check_output(['git','show','f7c6bb515556fd583f66a245eeb1ee6d1b3a8b86:'+name],cwd=root)
             self.assertEqual(pins.restore_healthy_nonmatch_exact_delta(name,source).encode(),parent)
             self.assertEqual(pins.restore_healthy_nonmatch_exact_delta(name,parent.decode()).encode(),parent)
             lines=source.splitlines(keepends=True)

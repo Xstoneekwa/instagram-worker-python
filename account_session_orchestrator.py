@@ -94,6 +94,7 @@ class AccountSessionCPlusSnapshot:
     business_action_deadline: str
     deadline_revision: str
     p0c_intent_generation: str
+    finite_package_ends_at: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -5533,6 +5534,13 @@ def run_account_session(
                         device_actions_started=False,
                     )
                     _follow_persistence_settings = {}
+                finite_package = {}
+                if supabase_mode and not session_policy_revision and (follow60_mainline_active or follow60_canary_active):
+                    try:
+                        finite_package = supabase_client.get_follow_finite_package_revision(aid) or {}
+                    except RuntimeError as exc:
+                        log("warning", "follow_finite_package_read_unavailable", account_id=aid,
+                            run_id=run_id, reason=type(exc).__name__)
                 account_session_snapshot = AccountSessionCPlusSnapshot(
                     schema_version="ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1",
                     created_at=datetime.now(timezone.utc).isoformat(),
@@ -5550,7 +5558,8 @@ def run_account_session(
                         or ""
                     ),
                     instagram_package=str(config.INSTAGRAM_PACKAGE or ""),
-                    commercial_policy_revision=str(session_policy_revision or ""),
+                    commercial_policy_revision=str(session_policy_revision or finite_package.get("revision_token") or ""),
+                    finite_package_ends_at=str(finite_package.get("ends_at") or ""),
                     settings_revision=str(
                         _follow_persistence_settings.get("updated_at") or ""
                     ),

@@ -31214,6 +31214,17 @@ def evaluate_visual_roi_fast_path_shadow(
     return result
 
 
+def follow_446_session(package: str) -> bool:
+    """Use the existing run/lease-bound build selection. No device observation."""
+    from instagram_ui_profile_v1 import snapshot, UIProfileStopped
+    binding = snapshot()
+    if not binding or binding["ui_profile"] != "UI_PROFILE_446":
+        return False
+    if binding["package"] != package:
+        raise UIProfileStopped("instagram_ui_assignment_package_mismatch")
+    return True
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
@@ -31270,11 +31281,24 @@ def visual_open_recent_post_from_profile(
     meta0 = _followers_current_pkg_activity(d)
     act0 = meta0.get("current_activity")
     pkg0 = meta0.get("current_package")
-    prof0 = bool(
-        _try_profile_signals_once(d, "", pkg)
-        or _guess_profile_screen(d, pkg, "")
-        in ("likely_profile", "profile_header_rid", "action_bar_title")
-    )
+    if likes_perf_phase_t0 is not None and expected_follower_username and follow_446_session(pkg):
+        if not pkg or pkg0 != pkg:
+            return {"ok": False, "post_detected": False, "tap_x": None, "tap_y": None,
+                    "failure_reason": "profile_identity_package_mismatch", **meta0}
+        # A single scoped selector replaces the broad sequence of header, chrome
+        # and title probes. Later Golden gates still own grid, identity and tap.
+        try:
+            prof0 = bool(d(resourceId=pkg + ":id/action_bar_title",
+                           text=expected_follower_username).exists(timeout=0))
+        except Exception:
+            return {"ok": False, "post_detected": False, "tap_x": None, "tap_y": None,
+                    "failure_reason": "candidate_profile_observation_unavailable", **meta0}
+    else:
+        prof0 = bool(
+            _try_profile_signals_once(d, "", pkg)
+            or _guess_profile_screen(d, pkg, "")
+            in ("likely_profile", "profile_header_rid", "action_bar_title")
+        )
 
     lperf: dict[str, Any] | None = (
         {} if likes_perf_phase_t0 is not None else None
@@ -37677,6 +37701,8 @@ def visual_return_to_profile_from_post(
         "open_surface_kind": str(open_surface_kind or "unknown"),
     }
 
+    if not pkg or meta0.get("current_package") != pkg:
+        return {**base_out, **meta0, "failure_reason": "profile_identity_package_mismatch"}
     if not expected_profile:
         return {
             **base_out,
@@ -65574,6 +65600,8 @@ def classify_followers_recovery_surface(
             runtime_context=get_restriction_runtime_context(),
         )
     if bool(det.get("is_followers_list")):
+        from target_followers_progressive_resume_v2 import target_surface_identity_proved
+        meta["target_identity_proved"] = target_surface_identity_proved(det, expected_target=source_profile_username)
         meta["surface"] = FollowersRecoverySurface.FOLLOWERS_LIST.value
         meta["reason"] = "fresh_followers_surface_proved"
         return FollowersRecoverySurface.FOLLOWERS_LIST, meta
@@ -65676,6 +65704,7 @@ def recover_followers_after_candidate_profile_open_not_confirmed(
     *,
     candidate_username: str = "",
     max_navigation_actions: int = 3,
+    require_bound_446_surface: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Recover Followers from the current proved surface, one action at a time."""
 
@@ -65693,6 +65722,18 @@ def recover_followers_after_candidate_profile_open_not_confirmed(
             candidate_username=candidate_username,
         )
         observation = dict(observation)
+        if require_bound_446_surface and (
+            not pkg or not candidate_username or not follow_446_session(pkg)
+            or _followers_current_pkg_activity(d).get("current_package") != pkg
+        ):
+            return False, "followers_recovery_package_unproved", {
+                "navigation_actions_used": actions_used, "observations": observations,
+            }
+        if require_bound_446_surface and surface == FollowersRecoverySurface.FOLLOWERS_LIST:
+            if not observation.get("target_identity_proved"):
+                return False, "followers_recovery_target_unproved", {
+                    "navigation_actions_used": actions_used, "observations": observations,
+                }
         observation["observation_index"] = len(observations) + 1
         observation["navigation_actions_used"] = actions_used
         observations.append(observation)

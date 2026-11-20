@@ -12799,19 +12799,26 @@ def _follow60_ordering_v2_prepare_candidate(
                 _record("v1_fallback", metadata={"route_reason": result["reason"]})
                 clear_active_store(store)
                 return result
-            try:
-                visual_return_to_profile_from_post(
-                    d, source_profile_username=source_profile_username
-                )
-            except Exception:
-                pass
+            from instagram_navigation import follow_446_session
+            if follow_446_session(pkg):
+                # The caller owns one fresh depth-aware Return CT. An attempted
+                # PostOpen is not evidence that a post is still on screen.
+                result["recover_exact_candidate"] = True
+            else:
+                try:
+                    visual_return_to_profile_from_post(
+                        d, source_profile_username=source_profile_username
+                    )
+                except Exception:
+                    pass
             result.update(
                 abort_candidate=True,
-                reason=str(executed.get("reason") or "v2_post_action_failed_closed"),
+                reason=str(executed.get("likes_failure_kind") or executed.get("failure_reason")
+                           or executed.get("reason") or "v2_post_action_failed_closed"),
                 ledger=store,
                 plan=plan,
             )
-            _record("v2_partial", metadata={"reason": result["reason"], "post_action_started": True})
+            _record("v2_partial", metadata={"reason": result["reason"], "post_action_started": plan.post_action_started})
             return result
         precompleted = dict(executed)
 
@@ -13070,8 +13077,11 @@ def _run_followers_list_engine_session(
         "business_session_id": str(business_session_id or ""),
         "instagram_package": str(config.INSTAGRAM_PACKAGE or ""),
     }
+    finite_package_expiry = str(_snapshot_payload.get("finite_package_ends_at") or "")
+    finite_end = supabase_client.parse_utc_iso_timestamp(finite_package_expiry)
     _snapshot_valid = bool(
-        _snapshot_payload.get("schema_version") == "ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1"
+        (not finite_package_expiry or (finite_end is not None and finite_end > datetime.now(timezone.utc)))
+        and _snapshot_payload.get("schema_version") == "ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1"
         and all(
             str(_snapshot_payload.get(key) or "") == expected
             for key, expected in _snapshot_expected.items()
@@ -15773,6 +15783,15 @@ def _run_followers_list_engine_session(
                 1,
                 int(os.getenv("FOLLOW_ATOMIC_SAFE_STOP_BOUND_SECONDS") or "180"),
             )
+            if finite_package_expiry and not _action_start_allowed(
+                deadline=finite_package_expiry, bounded_action_seconds=_atomic_bound_seconds,
+            ):
+                _publish_followers_session_summary(
+                    exit_code=96, follow_session_outcome="partial_resumable",
+                    follow_stop_reason="commercial_package_window_closed",
+                    no_new_candidate_started=True,
+                )
+                return 96
             if _stop_context is not None:
                 if _follow_handoff_deadline and not _action_start_allowed(
                     deadline=_follow_handoff_deadline,
@@ -22574,9 +22593,15 @@ def _run_followers_list_engine_session(
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)
                     _ct_clear_candidate_attempt_timer()
                     _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
-                    ok_v2_abort_ct, _v2_abort_method = return_to_followers_list(
-                        d, source_profile_username, pkg
-                    )
+                    if _ordering_v2.get("recover_exact_candidate"):
+                        ok_v2_abort_ct, _v2_abort_method, _ = recover_followers_after_candidate_profile_open_not_confirmed(
+                            d, source_profile_username, pkg, candidate_username=str(follower_un or ""),
+                            require_bound_446_surface=True,
+                        )
+                    else:
+                        ok_v2_abort_ct, _v2_abort_method = return_to_followers_list(
+                            d, source_profile_username, pkg
+                        )
                     log(
                         "error",
                         "follow60_ordering_v2_candidate_aborted_fail_closed",
@@ -22587,6 +22612,19 @@ def _run_followers_list_engine_session(
                         follow_tap_blocked=True,
                     )
                     if not ok_v2_abort_ct:
+                        if _ordering_v2.get("recover_exact_candidate"):
+                            _followers_loop_finally_status = "recovery_surface_unproved"
+                            _followers_loop_finally_stop = _v2_abort_method
+                            _publish_followers_session_summary(
+                                **_followers_wrong_depth_recovery_failure_summary(
+                                    processed=processed, follows_completed_count=follows_completed_count,
+                                    follows_goal_effective=max_iter, global_follows_goal_effective=global_follow_goal_effective,
+                                    target_follow_budget_effective=target_follow_budget_effective,
+                                    source_profile_username=source_profile_username, recovery_reason=_v2_abort_method,
+                                ),
+                                first_causal_reason=str(_ordering_v2.get("reason") or ""),
+                            )
+                            return 42
                         if (
                             str(_v2_abort_method or "")
                             == "followers_surface_reacquisition_unproved"

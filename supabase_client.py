@@ -4173,6 +4173,32 @@ def get_account_commercial_policy_revision(account_id: str) -> dict[str, Any] | 
     return None
 
 
+def get_follow_finite_package_revision(account_id: str) -> dict[str, str] | None:
+    """Recover a missing Follow revision from one currently effective finite grant."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    now = datetime.now(timezone.utc)
+    stamp = now.isoformat()
+    rows = _request_json("GET", "account_commercial_packages", query={
+        "select": "account_id,package_code,status,starts_at,ends_at,updated_at",
+        "account_id": f"eq.{aid}", "status": "eq.active", "starts_at": f"lte.{stamp}",
+        "or": f"(ends_at.is.null,ends_at.gt.{stamp})", "limit": "2",
+    })
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    start = parse_utc_iso_timestamp(row.get("starts_at"))
+    end = parse_utc_iso_timestamp(row.get("ends_at"))
+    revision_time = row.get("updated_at") or row.get("starts_at")
+    code = str(row.get("package_code") or "").strip()
+    if (row.get("account_id") != aid or row.get("status") != "active" or not code
+            or not start or not end or not start <= now < end
+            or not parse_utc_iso_timestamp(revision_time)):
+        return None
+    return {"revision_token": f"package:{code}:{revision_time}", "ends_at": end.isoformat()}
+
+
 def get_active_client_instagram_account_ownership_rows(account_id: str) -> list[dict[str, Any]]:
     """Read at most two active canonical ownership links for ambiguity checks."""
     aid = str(account_id or "").strip()

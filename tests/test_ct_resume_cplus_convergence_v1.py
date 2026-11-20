@@ -282,3 +282,34 @@ def test_social_memory_unknown_uses_unit_fallback_and_fails_closed() -> None:
         )
         assert result.allowed is False
         assert result.reason == "social_memory_unknown"
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("account_id", "other"), ("request_id", "other"), ("run_id", "other"),
+    ("business_session_id", "other"), ("attempt_id", "2"), ("instagram_package", "foreign"),
+    ("worker_full_sha", "different"), ("settings_revision", ""), ("commercial_policy_revision", ""),
+    ("finite_package_ends_at", "invalid"), ("finite_package_ends_at", "2000-01-01T00:00:00Z"),
+    (None, None),
+])
+def test_finite_package_snapshot_keeps_all_identity_and_lease_gates(field, bad):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    import follow60_business_session_binding_v1 as binding
+    snapshot = dict(schema_version="ACCOUNT_SESSION_CPLUS_SNAPSHOT_V1", account_id="actor",
+                    request_id="request", run_id="run", business_session_id="session", attempt_id="1",
+                    instagram_package=runner.config.INSTAGRAM_PACKAGE, worker_full_sha="worker",
+                    worker_runtime_root="/release", settings_revision="settings",
+                    commercial_policy_revision="package:pro:revision",
+                    finite_package_ends_at=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat())
+    if field:
+        snapshot[field] = bad
+    device = mock.Mock(spec=[])
+    with mock.patch.object(binding, "validate_business_session_binding", return_value=(None, "lease_unproved")) as lease:
+        result = runner._run_followers_list_engine_session(
+            device, source_profile_username="source", account_id="actor", run_id="run", supabase_mode=False,
+            warm_session_used=False, force_stop_used=False, run_request_id="request",
+            business_session_id="session", follow60_mainline_active=True, account_session_snapshot=snapshot,
+            worker_runtime_identity=SimpleNamespace(worker_sha="worker"))
+    assert result != 0
+    assert lease.call_count == (0 if field else 1)
+    assert device.mock_calls == []

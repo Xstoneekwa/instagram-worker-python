@@ -124,10 +124,22 @@ class SearchCausalDiagnosticsTests(unittest.TestCase):
 
 class SignedScopePreservationTests(unittest.TestCase):
     def test_only_authorized_runtime_functions_change(self):
+        from test_certification_admission import follow446_parent_for_comparison
+
         expected={'instagram_navigation.py':{'_observe_outreach_missing_search'},
                   'dm_sender_engine.py':{'_complete_job_failed_retry','execute_dm_job_real_send','run_dm_sender_send'}}
         for name,changed in expected.items():
-            old=subprocess.check_output(['git','show',PARENT+':'+name],cwd=ROOT,text=True);new=(ROOT/name).read_text()
+            def revision(commit):
+                return subprocess.check_output(['git','show',commit+':'+name],cwd=ROOT,text=True)
+
+            # The function and call inventory below belongs to the diagnostics release.
+            installed = revision('07150ea2ddcd36fd687650bb97689ba720fe34e8')
+            current = (ROOT/name).read_bytes().decode()
+            if name == 'instagram_navigation.py':
+                self.assertNotEqual(current, installed, 'Missing Follow 446 change')
+            self.assertEqual(follow446_parent_for_comparison(name, current), installed, name)
+            old = revision(PARENT)
+            new = revision('c75b354ceff50828b0bb6ced225cc43cb6ca34d5')
             nodes=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
             a,b=nodes(old),nodes(new);self.assertEqual(set(a),set(b))
             self.assertEqual({k for k in a if a[k]!=b[k]},changed)

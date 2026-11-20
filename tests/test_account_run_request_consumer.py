@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 import tempfile
 from pathlib import Path
@@ -1183,8 +1184,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
                 metadata_safe={"action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
             )
-        self.assertIn("-m", cmd)
-        self.assertIn("instagram_login_provisioner_cli", cmd)
+        script = Path(__file__).resolve().parents[1] / "instagram_login_provisioner_cli.py"
+        self.assertEqual(cmd[:2], [sys.executable, str(script)])
+        self.assertNotIn("-m", cmd)
         self.assertIn("--resume-email-code-from-action", cmd)
         self.assertIn("--verification-action-id", cmd)
         self.assertEqual(cmd[cmd.index("--verification-action-id") + 1], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
@@ -1204,7 +1206,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 package_name="com.instagram.androie",
                 app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
             )
-        self.assertIn("instagram_login_provisioner_cli", cmd)
+        script = Path(__file__).resolve().parents[1] / "instagram_login_provisioner_cli.py"
+        self.assertEqual(cmd[:2], [sys.executable, str(script)])
+        self.assertNotIn("-m", cmd)
         self.assertNotIn("historical_auto_login_07ee_adapter", cmd)
         self.assertEqual(
             cmd[cmd.index("--request-id") + 1],

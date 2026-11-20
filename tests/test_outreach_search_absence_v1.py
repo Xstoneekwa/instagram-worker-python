@@ -289,14 +289,24 @@ class SearchAbsenceCompletionTests(TestCase):
 
 class SearchAbsenceScopeTests(TestCase):
     def test_only_signed_navigation_and_completion_nodes_change_on_cf069(self):
+        from test_certification_admission import follow446_parent_for_comparison
+
         root=Path(__file__).resolve().parents[1]
         scopes={
             "instagram_navigation.py":({"tap_account_result"},{"OutreachSearchAbsenceProof","_observe_outreach_missing_search"}),
             "dm_sender_engine.py":({"_navigate_to_recipient_dm_thread","execute_dm_job_real_send"},{"_complete_confirmed_search_absence"}),
         }
         for name,(changed,added) in scopes.items():
-            parent=subprocess.check_output(["git","show","cf069a3fc0a3e1bf3fd5806f8ff88c6fea11626e:"+name],cwd=root,text=True)
-            current=(root/name).read_text()
+            def revision(commit):
+                return subprocess.check_output(["git", "show", commit + ":" + name], cwd=root, text=True)
+
+            installed = revision("07150ea2ddcd36fd687650bb97689ba720fe34e8")
+            source = (root/name).read_bytes().decode()
+            if name == "instagram_navigation.py":
+                self.assertNotEqual(source, installed, "Missing Follow 446 change")
+            self.assertEqual(follow446_parent_for_comparison(name, source), installed, name)
+            parent = revision("cf069a3fc0a3e1bf3fd5806f8ff88c6fea11626e")
+            current = revision("89e862937eb7366c1185da1dc791c2ab1566ba95")
             nodes=lambda s:{n.name:ast.dump(n) for n in ast.parse(s).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
             a,b=nodes(parent),nodes(current)
             self.assertEqual(set(b)-set(a),added);self.assertFalse(set(a)-set(b))

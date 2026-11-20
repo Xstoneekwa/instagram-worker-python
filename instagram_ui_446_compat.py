@@ -155,8 +155,11 @@ def explore_search_entry_from_xml(xml, *, package):
             return None
         found[name] = matches[0]
     button = found[names[0]]
+    # The visible hint can suggest a search. The accessible action and live
+    # ancestry identify the button; an empty label or modal action cannot.
+    hint = (button.get('text') or '').strip()
     if (button.get('class') != 'android.widget.Button'
-            or button.get('text') != 'Search' or button.get('content-desc') != 'Search'
+            or not hint or hint.casefold() == 'not now' or button.get('content-desc') != 'Search'
             or button.get('focused') != 'false'):
         return None
     for child, parent in zip(names[:3], names[1:4]):

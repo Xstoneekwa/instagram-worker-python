@@ -477,7 +477,14 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
         for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
             current_bytes = (self.root/name).read_bytes()
             if name == "runner.py":
-                current_bytes = restore_exact_self_xml_delta(name, current_bytes.decode()).encode()
+                from tests.test_certification_admission import follow446_parent_for_comparison
+                installed = subprocess.check_output(["git", "show",
+                    "07150ea2ddcd36fd687650bb97689ba720fe34e8:" + name], cwd=self.root)
+                self.assertNotEqual(current_bytes, installed, "Missing Follow 446 change")
+                self.assertEqual(follow446_parent_for_comparison(name, current_bytes.decode()).encode(), installed)
+                profile_release = subprocess.check_output(["git", "show",
+                    "9165651e7522545666f7edabb7e1a1495d0aac80:" + name], cwd=self.root, text=True)
+                current_bytes = restore_exact_self_xml_delta(name, profile_release).encode()
             self.assertEqual(current_bytes,subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
 
 if __name__ == "__main__":

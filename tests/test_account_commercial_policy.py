@@ -170,3 +170,28 @@ class AccountCommercialPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class FiniteFollowPackageTests(unittest.TestCase):
+    def test_exact_active_window_and_ambiguity(self):
+        from datetime import datetime, timedelta, timezone
+        import supabase_client as client
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=1)).isoformat()
+        end = (now + timedelta(days=29)).isoformat()
+        row = dict(account_id="actor", status="active", package_code="pro",
+                   updated_at=start, starts_at=start, ends_at=end)
+        with patch.object(client, "_request_json", return_value=[row]) as get:
+            resolved = client.get_follow_finite_package_revision("actor")
+        self.assertEqual(resolved, {"revision_token": "package:pro:" + start, "ends_at": end})
+        self.assertEqual(get.call_args.args, ("GET", "account_commercial_packages"))
+        query = get.call_args.kwargs["query"]
+        self.assertEqual(query["account_id"], "eq.actor")
+        self.assertEqual(query["limit"], "2")
+        self.assertEqual(query["or"], "(ends_at.is.null,ends_at.gt." + query["starts_at"][4:] + ")")
+        for rows in ([], [row, row], [row, dict(row, ends_at=None)],
+                     [dict(row, ends_at=start)], [dict(row, starts_at=end)], [dict(row, ends_at=None)],
+                     [dict(row, account_id="other")], [dict(row, status="cancelled")],
+                     [dict(row, updated_at="invalid")]):
+            with self.subTest(rows=rows), patch.object(client, "_request_json", return_value=rows):
+                self.assertIsNone(client.get_follow_finite_package_revision("actor"))

@@ -157,3 +157,42 @@ class SurfaceDrivenPreparationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Exact446ReturnTests(unittest.TestCase):
+    def drive(self, surfaces, package=PKG):
+        device = _Device()
+        with mock.patch.object(nav, "follow_446_session", return_value=True), \
+             mock.patch.object(nav, "classify_followers_recovery_surface", side_effect=surfaces) as observe, \
+             mock.patch.object(nav, "_followers_current_pkg_activity", return_value=_meta(package)), \
+             mock.patch.object(nav, "followers_invalidate_surface_for_navigation"), \
+             mock.patch.object(nav, "followers_session_mark_list_committed_open"):
+            ok, why, details = nav.recover_followers_after_candidate_profile_open_not_confirmed(
+                device, "source", PKG, candidate_username="candidate", require_bound_446_surface=True)
+        self.assertTrue(all(c.kwargs["candidate_username"] == "candidate" for c in observe.call_args_list))
+        return ok, why, device.backs, details
+
+    def test_before_post_no_viewer_back_and_already_returned_no_action(self):
+        surface = nav.FollowersRecoverySurface
+        for sequence, backs in (([surface.FOLLOWERS_LIST], 0),
+                                ([surface.CANDIDATE_PROFILE, surface.FOLLOWERS_LIST], 1),
+                                ([surface.POST_SURFACE, surface.CANDIDATE_PROFILE, surface.FOLLOWERS_LIST], 2)):
+            rows = [(s, {"target_identity_proved": s == surface.FOLLOWERS_LIST}) for s in sequence]
+            ok, _, actual, details = self.drive(rows)
+            self.assertTrue(ok)
+            self.assertEqual(backs, actual)
+            self.assertEqual(len(details["observations"]), backs + 1)
+
+    def test_wrong_clone_and_wrong_followers_list_have_no_transport(self):
+        surface = nav.FollowersRecoverySurface
+        self.assertEqual(self.drive([(surface.POST_SURFACE, {})], "com.instagram.other")[:3],
+                         (False, "followers_recovery_package_unproved", 0))
+        self.assertEqual(self.drive([(surface.FOLLOWERS_LIST, {"target_identity_proved": False})])[:3],
+                         (False, "followers_recovery_target_unproved", 0))
+
+    def test_direct_viewer_return_refuses_foreign_clone_before_back(self):
+        device = _Device()
+        with mock.patch.object(nav, "_followers_current_pkg_activity", return_value=_meta("com.instagram.other")):
+            result = nav.visual_return_to_profile_from_post(device, expected_profile_username="candidate")
+        self.assertEqual(result["failure_reason"], "profile_identity_package_mismatch")
+        self.assertEqual(device.backs, 0)
