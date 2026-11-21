@@ -48,6 +48,37 @@ def _meta(package: str = PKG, activity: str = ACT) -> dict[str, str]:
 
 
 class SurfaceProbeContractTest(unittest.TestCase):
+    def test_private_return_publishes_only_fresh_exact_ct_and_bound_activity(self) -> None:
+        package, activity = "com.instagram.androig", ".activity.MainTabActivity"
+        for title, actual_package, native_authority, xml, reusable in (
+            ("ct", package, True, "<hierarchy/>", True),
+            ("foreign", package, True, "<hierarchy/>", False),
+            ("ct", "foreign", True, "<hierarchy/>", False),
+            ("ct", package, False, "<hierarchy/>", False),
+            ("ct", package, True, "", False),
+        ):
+            with self.subTest(title=title, package=actual_package, authority=native_authority, xml=bool(xml)):
+                proof = {"observed_at": 1, "detection": {"stale": True}}
+                det = {
+                    "is_followers_list": True, "action_bar_title": title,
+                    "current_package": actual_package, "current_activity": activity,
+                    "open_detection_method": "own_unified_follow_list",
+                }
+                device = _Device()
+                with (
+                    mock.patch.object(nav, "detect_followers_list_screen_fresh", return_value=(det, xml)) as fresh,
+                    mock.patch.object(nav, "_follow_446_activity_authority", return_value=native_authority),
+                    mock.patch("instagram_human_confirmation_challenge.guard_instagram_human_confirmation"),
+                    mock.patch.object(nav, "followers_session_mark_list_committed_open"),
+                    mock.patch.object(nav, "log"),
+                ):
+                    nav.return_to_followers_list(device, "ct", package, exact_return_snapshot=proof)
+                fresh.assert_called_once()
+                self.assertEqual(device.backs, 0)
+                self.assertEqual(bool(proof), reusable)
+                if reusable:
+                    self.assertEqual(proof["detection"], det)
+
     def _probe(
         self,
         title: str,
@@ -83,10 +114,11 @@ class SurfaceProbeContractTest(unittest.TestCase):
             "activity_mismatch",
         )
 
-    def test_exact_post_mute_return_uses_one_back_and_can_retain_canonical_detection(self):
+    def test_exact_mute_or_no_posts_return_uses_one_back_and_keeps_canonical_fallback(self):
         proof = {"is_followers_list": True, "action_bar_title": "ct", "current_package": PKG}
-        for post_mute, xml_valid in ((True, True), (True, False), (False, False)):
-            with self.subTest(post_mute=post_mute, xml_valid=xml_valid):
+        for origin, xml_valid in (("mute", True), ("mute", False), ("no_posts", True),
+                                  ("no_posts", False), ("other", False)):
+            with self.subTest(origin=origin, xml_valid=xml_valid):
                 device = _Device()
                 with mock.patch.object(nav, "verify_app_foreground", return_value=True), mock.patch.object(
                     nav, "_FOLLOW_ROW_SESSION",
@@ -99,11 +131,12 @@ class SurfaceProbeContractTest(unittest.TestCase):
                     ok, method, failure = nav.post_follow_controlled_return_to_followers_list(
                         device, pkg=PKG, source_profile_username="ct", follower_username="candidate",
                         visual_candidate_id="row", det=None, compact_after_follow_verified_mute=True,
-                        immediate_candidate_back_proof=True, post_mute_exact_return=post_mute,
+                        immediate_candidate_back_proof=True, post_mute_exact_return=origin == "mute",
+                        post_no_posts_exact_return=origin == "no_posts",
                     )
                 self.assertEqual((ok, method, failure), (True, "fresh_candidate_proof_one_back_then_exact_ct", None))
                 self.assertEqual(device.backs, 1)
-                self.assertEqual(fast.call_count, int(post_mute))
+                self.assertEqual(fast.call_count, int(origin in ("mute", "no_posts")))
                 self.assertEqual(fallback.call_count, int(not xml_valid))
 
 

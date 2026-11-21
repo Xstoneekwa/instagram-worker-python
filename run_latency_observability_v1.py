@@ -636,8 +636,21 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
         if first_for_candidate:
             state.previous_admission_ms = now_ms
             state.previous_admission_cycle = active_cycle.cycle_index
-    end_phase = _PHASE_ENDS.get(event)
-    end_phases = ("ct_followers", "ct_rotation") if event == "follow_latency_ct_confirmed" else (end_phase,)
+    private_skip = (
+        event == "private_skip_fast_path_completed"
+        and fields.get("safe_to_skip") is True
+        and fields.get("return_ok") is True
+        and fields.get("reason") == "private_account"
+        and bool(incoming.get("candidate_username"))
+    )
+    if event == "follow_latency_ct_confirmed":
+        end_phases = ("ct_followers", "ct_rotation")
+    elif event == "post_follow_like_perf_summary":
+        end_phases = ("post_open", "like")
+    elif private_skip:
+        end_phases = ("cycle",)
+    else:
+        end_phases = (_PHASE_ENDS.get(event),)
     for phase in end_phases:
         opened = state.phases.get(phase)
         bind = {k: v for k, v in fields.items() if k not in {"source_profile_username", "target_id"}} if phase == "ct_rotation" else fields
@@ -653,9 +666,20 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
             recovery_reason = fields.get("final_reason") if phase == "ct_search_recovery" else None
             failed = (event.endswith("_failed") or (phase == "ct_row" and fields.get("found") is False)
                       or recovery_reason == "search_results_still_blank_after_recovery")
+            outcome = "failed" if failed else "completed"
+            if event == "post_follow_like_perf_summary":
+                result = fields.get("result")
+                if result in ("skipped", "failed"):
+                    outcome = result
+                    recovery_reason = fields.get("failure_reason")
+                elif result == "failed_safe_continue":
+                    outcome = "failed"
+                    recovery_reason = fields.get("failure_reason")
+            elif private_skip:
+                outcome, recovery_reason = "skipped", "private_account"
             rows.append(_phase_row(
                 state, phase, event, opened, now_ms, cpu_ms,
-                outcome="failed" if failed else "completed", reason=recovery_reason,
+                outcome=outcome, reason=recovery_reason,
             ))
             if phase == "cycle":
                 rows.extend(_close_open_phases(state, event, now_ms, cpu_ms, "cycle_closed", keep_rotation=True))

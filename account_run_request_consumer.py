@@ -3002,6 +3002,17 @@ def _finalize_manual_run_after_subprocess(
         and timed_out
         and stop_proof.get("originating_stop_reason") == DEVICE_LOCK_RENEWAL_NOT_PROVEN
     )
+    owner_stop_during_renewal = bool(
+        run_type == "account_session"
+        and timed_out
+        and canceled
+        and canonical_latest
+        and canonical_latest.get("id") == request_id
+        and canonical_latest.get("account_id") == account_id
+        and canonical_latest.get("cancel_reason") == "botapp_manual_stop"
+        and run_id
+        and stop_proof.get("lock_renewal_request_mismatch_run_id") == run_id
+    )
     if (
         run_type == "account_session"
         and not device_lock_stop
@@ -3074,7 +3085,7 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
-    if timed_out and not (device_lock_stop and canceled):
+    if timed_out and not (owner_stop_during_renewal or (device_lock_stop and canceled)):
         lock_stop_message = (
             "Dispatcher stopped the Worker because device lock renewal could not be proven."
             if device_lock_stop else ""
@@ -3756,6 +3767,16 @@ def _wait_for_subprocess(
                             and diagnostics is not None):
                         # Keep the forced-stop cleanup contract and report the actual cause.
                         diagnostics["originating_stop_reason"] = reason
+                    if (
+                        run_type == "account_session"
+                        and reason == "device_lock_request_mismatch"
+                        and diagnostics is not None
+                        and latest
+                        and latest.get("id") == request_id
+                        and latest.get("account_id") == account_id
+                        and latest.get("run_id")
+                    ):
+                        diagnostics["lock_renewal_request_mismatch_run_id"] = str(latest["run_id"])
                     return exit_code, True
             except Exception as exc:
                 log(

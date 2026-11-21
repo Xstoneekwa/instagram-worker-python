@@ -19,6 +19,37 @@ class CandidateWindowTests(unittest.TestCase):
     def setUp(self):
         obs.reset_for_tests()
 
+    def test_post_open_skip_and_private_end_bind_to_the_correct_cycle(self):
+        with patch.object(obs.time, "monotonic", return_value=1.0) as clock:
+            current = {"candidate_username": "first"}
+            obs.observe_runtime_event("followers_candidate_selected", current)
+            obs.observe_runtime_event("post_follow_post_likes_phase_started", current)
+            obs.observe_runtime_event("post_like_surface_to_scroll_gap_started", current)
+            clock.return_value = 1.3
+            rows = obs.observe_runtime_event("post_follow_like_perf_summary", {
+                **current, "result": "skipped", "failure_reason": "no_posts",
+            })
+            self.assertEqual([(r["phase"], r["outcome"]) for r in rows],
+                             [("post_open", "skipped"), ("like", "skipped")])
+            self.assertEqual(rows[0]["duration_ms"], 300)
+            clock.return_value = 5
+            rows = obs.observe_runtime_event("post_return_critical_persist_completed", current)
+            self.assertEqual([r["phase"] for r in rows], ["cycle"])
+            private = {"candidate_username": "private"}
+            obs.observe_runtime_event("followers_candidate_selected", private)
+            flags = {"safe_to_skip": True, "return_ok": True, "reason": "private_account"}
+            self.assertEqual(obs.observe_runtime_event("private_skip_fast_path_completed", {
+                **flags, **current,
+            }), [])
+            clock.return_value = 6
+            cycle, = obs.observe_runtime_event("private_skip_fast_path_completed", {
+                **flags, **private,
+            })
+            self.assertEqual((cycle["phase"], cycle["outcome"]), ("cycle", "skipped"))
+            clock.return_value = 8
+            gap, = obs.observe_runtime_event("followers_candidate_selected", {"candidate_username": "third"})
+            self.assertEqual((gap["metric"], gap["duration_ms"]), ("inter_cycle_gap", 2000))
+
     def test_cycle_excludes_startup_and_transition_and_counts_overlaps_once(self):
         with patch.object(obs.time, "monotonic", return_value=1.0) as monotonic:
             obs.observe_runtime_event("run_latency_rpc_timing_v1", {"duration_ms": 900})

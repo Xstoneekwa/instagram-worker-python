@@ -499,6 +499,40 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             self.assertIsNotNone(reused)
             self.assertEqual(reason, "")
 
+    def test_446_activity_authority_applies_only_to_positive_no_posts(self) -> None:
+        package, activity = "com.instagram.androig", ".activity.MainTabActivity"
+        configure_canary(canary, account_id=TEST_CANARY_ACCOUNT_ID, account_username=TEST_CANARY_USERNAME,
+                         run_id="run-j-automatise", package=package, resume_policy=None)
+        producer = dict(
+            candidate_username="candidate", package_name=package, activity_name=activity,
+            navigation_generation="g1", viewport_fingerprint="v1", outcome="NO_POSTS_POSITIVE",
+            mute_sheet_closed=True, mute_posts_verified=True, mute_stories_verified=True,
+            profile_identity_method="test_exact_profile", screen_width=1080, screen_height=2340,
+            grid_tab_state="empty_grid_positive", no_posts_positive=True,
+            identity_exact=True, profile_tabs_present=True, grid_selected=True, empty_marker_xml=True,
+        )
+        consumer = dict(candidate_username="candidate", package=package, activity=activity, screen_size=(1080, 2340))
+        self.assertIsNone(canary.stash_post_grid_evidence(**producer))
+        self.assertIsNone(canary.stash_post_grid_evidence(
+            **{**producer, "outcome": "POST_ROW_POSITIVE_SAFE"}, bound_446_no_posts_activity=True,
+        ))
+        for override, reason in (
+            ({"bound_446_no_posts_activity": False}, "activity_not_instagram_main"),
+            ({"activity": "foreign_activity"}, "activity_mismatch"),
+            ({"package": "foreign_package"}, "package_mismatch"),
+            ({}, ""),
+        ):
+            with self.subTest(override=override):
+                self.assertIsNotNone(canary.stash_post_grid_evidence(
+                    **producer, bound_446_no_posts_activity=True,
+                ))
+                ev, _, actual = canary.consume_post_grid_evidence(
+                    **{**consumer, "bound_446_no_posts_activity": True, **override},
+                )
+                self.assertEqual(actual, reason)
+                self.assertEqual(ev is not None, not reason)
+                self.assertEqual(canary.consume_post_grid_evidence(**consumer)[2], "missing_evidence")
+
     def test_candidate_verdict_rejects_candidate_or_generation_mismatch(self) -> None:
         canary.create_candidate_profile_verdict(
             candidate_username="candidate", package="pkg", activity="act",

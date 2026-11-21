@@ -30,6 +30,89 @@ def _profile_shell(candidate: str, count: int, body: str = "") -> str:
 
 
 class NoPostsAndBelowFoldV4Tests(unittest.TestCase):
+    def test_446_two_axis_mute_close_yields_safe_skip_and_return_handoff(self) -> None:
+        package, activity = "com.instagram.androig", ".activity.MainTabActivity"
+        self.assertTrue(configure_canary(
+            canary, account_id=TEST_CANARY_ACCOUNT_ID, account_username=TEST_CANARY_USERNAME,
+            run_id="mute-no-post", package=package, resume_policy=None,
+        ))
+        self.addCleanup(configure_canary, canary, account_id="other", account_username="other",
+                        run_id="reset", package=PKG, resume_policy=None)
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        xml = _profile_shell("candidate", 0).replace(
+            '<node text="candidate"/>',
+            f'<node resource-id="{package}:id/action_bar_title" text="candidate" bounds="[0,0][1080,2340]"/>',
+        )
+        with (
+            mock.patch.object(nav, "log"),
+            mock.patch.object(canary, "log"),
+            mock.patch.object(nav, "_followers_current_pkg_activity", return_value={
+                "current_package": package, "current_activity": activity,
+            }),
+            mock.patch.object(nav, "_follow_446_activity_authority", return_value=True),
+            mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True),
+            mock.patch.object(nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True),
+            mock.patch.object(nav, "visual_open_recent_post_from_profile",
+                              side_effect=AssertionError("empty grid must not open a post")),
+        ):
+            context = nav._publish_post_mute_verdict_at_final_sheet_close(
+                device, source_profile_username="ct", candidate_username="candidate",
+                visual_candidate_id="candidate-action", candidate_context={},
+                mute_posts_verified=True, mute_stories_verified=True,
+                started_at=time.perf_counter(), profile_xml=xml,
+            )
+            self.assertEqual(context["post_grid_outcome"], "NO_POSTS_POSITIVE")
+            result = nav.run_post_follow_post_likes_phase(
+                device, pkg=package, source_profile_username="ct", follower_username="candidate",
+                visual_candidate_id="candidate-action", follow_success_verified=True,
+                follow_state_after="following", skipped_tap=False, candidate_profile_context=context,
+            )
+            self.assertEqual(nav._post_follow_like_terminal_binding(result, {})[0], "safe_skip")
+            self.assertEqual(result["attempted_count"], 0)
+            self.assertFalse(result["real_tap_sent"])
+            proof, _, reason = canary.consume(
+                "return_candidate_profile", subject_username="ct", target_username="candidate",
+                package=package, surface="candidate_profile_after_like", consume_once=True,
+            )
+            self.assertIsNotNone(proof, reason)
+            self.assertTrue(proof.metadata["exact_446_no_posts"])
+        device.click.assert_not_called()
+        device.dump_hierarchy.assert_not_called()
+
+    def test_expired_446_no_posts_handoff_uses_one_fresh_exact_profile(self) -> None:
+        package, activity = "com.instagram.androig", ".activity.MainTabActivity"
+        device = mock.MagicMock()
+        xml = _profile_shell("candidate", 0).replace(
+            '<node text="candidate"/>',
+            f'<node resource-id="{package}:id/action_bar_title" text="candidate" bounds="[0,0][1080,2340]"/>',
+        )
+        for hierarchy, live_package, authority, expected in (
+            (xml, package, True, True),
+            (xml.replace('text="candidate"', 'text="different"'), package, True, False),
+            (xml, "foreign", True, False),
+            (xml, package, False, False),
+            (xml.replace('text="0"', 'text="3"'), package, True, False),
+        ):
+            device.reset_mock()
+            device.dump_hierarchy.return_value = hierarchy
+            with (
+                self.subTest(live_package=live_package, authority=authority, expected=expected),
+                mock.patch.object(nav, "_followers_current_pkg_activity", return_value={
+                    "current_package": live_package, "current_activity": activity,
+                }),
+                mock.patch.object(nav, "_follow_446_activity_authority", return_value=authority),
+            ):
+                result = nav._reacquire_bound_446_no_posts(
+                    device, candidate="candidate", package=package, activity=activity,
+                    screen_width=1080, screen_height=2340,
+                )
+            self.assertEqual(result is not None, expected)
+            if result is not None:
+                self.assertEqual(result["outcome"], "NO_POSTS_POSITIVE")
+                self.assertIsNone(result["post_bounds"])
+            self.assertEqual(device.mock_calls, [mock.call.dump_hierarchy(compressed=False)])
+
     def test_structural_zero_posts_pair_is_positive_no_posts(self) -> None:
         xml = _profile_shell(
             "candidate",
@@ -264,6 +347,24 @@ class LikeTapContextFromA2V5V4Tests(unittest.TestCase):
                 "post_identity_confirmed": not story,
             }
         }
+
+    def test_reply_does_not_mask_an_exact_posts_viewer(self) -> None:
+        xml = (
+            '<hierarchy><node text="Posts"/><node text="candidate"/>'
+            '<node resource-id="com.instagram.androig:id/row_feed_button_like" content-desc="Like"/>'
+            '<node resource-id="com.instagram.androig:id/row_feed_button_comment" content-desc="Comment"/>'
+            '<node text="Reply"/></hierarchy>'
+        )
+        for snapshot, exact in (
+            (xml, True),
+            (xml.replace("row_feed_button_comment", "other_button"), False),
+            (xml.replace('text="candidate"', 'text="other"'), False),
+            (xml.replace("</hierarchy>", '<node resource-id="story_viewer_root"/></hierarchy>'), False),
+        ):
+            with self.subTest(exact=exact):
+                signals = nav._post_open_hierarchy_identity_signals(snapshot, expected_username="candidate")
+                self.assertEqual(signals["candidate_username_exact_in_snapshot"], exact)
+                self.assertEqual(signals["story_or_highlight_detected"], not exact)
 
     def test_a2_v5_snapshot_builds_like_context_without_new_dump(self) -> None:
         with mock.patch.object(

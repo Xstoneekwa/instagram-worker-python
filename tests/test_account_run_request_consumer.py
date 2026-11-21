@@ -29,6 +29,65 @@ def _canonical_device_lease(worker_id, *, transferred=False):
 
 
 class ObservedDeviceLockTests(unittest.TestCase):
+    def test_owner_stop_during_lock_renewal_requires_the_exact_native_cancel(self):
+        from types import SimpleNamespace
+
+        cfg = SimpleNamespace(worker_id="worker", heartbeat_seconds=20, subprocess_timeout_seconds=7200)
+        binding = _canonical_device_lease(cfg.worker_id)
+        running = dict(
+            id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID, run_id=TEST_RUN_ID,
+            requested_run_type="account_session", status="running",
+        )
+        canceled = {**running, "status": "canceled", "cancel_reason": "botapp_manual_stop"}
+        for latest, renewal_reason, expected in (
+            (canceled, "device_lock_request_mismatch", "canceled"),
+            ({**canceled, "run_id": "other"}, "device_lock_request_mismatch", "failed"),
+            ({**canceled, "account_id": "other"}, "device_lock_request_mismatch", "failed"),
+            ({**canceled, "id": "other"}, "device_lock_request_mismatch", "failed"),
+            (None, "device_lock_request_mismatch", "failed"),
+            (running, "device_lock_request_mismatch", "failed"),
+            (canceled, "device_lock_generation_mismatch", "failed"),
+        ):
+            with self.subTest(latest=latest, renewal_reason=renewal_reason):
+                proc = MagicMock()
+                proc.poll.return_value = None
+                proc.wait.return_value = -15
+                diagnostics = {}
+                with (
+                    patch.object(consumer, "get_account_run_request", side_effect=[running, latest]),
+                    patch.object(consumer, "renew_account_run_request_lease", return_value=True),
+                    patch.object(consumer, "renew_device_lock", return_value={"reason": renewal_reason}) as renew,
+                    patch.object(consumer, "_safe_complete_account_run_request") as complete,
+                    patch.object(consumer, "_reconcile_linked_run") as reconcile,
+                    patch.object(consumer, "_publish_run_failure_incident") as failure,
+                    patch.object(consumer, "_audit"),
+                    patch.object(consumer, "log"),
+                    patch("account_session_resume_plan_store.record_end_of_session"),
+                    patch.object(consumer.supabase_client, "reconcile_operator_canceled_run_v1",
+                                 return_value={"ok": True}),
+                ):
+                    exit_code, forced = consumer._wait_for_subprocess(
+                        cfg, proc, request_id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID,
+                        run_type="account_session", device_id=binding["device_id"],
+                        device_lock_renewal=True, device_lock_binding=binding, diagnostics=diagnostics,
+                    )
+                    self.assertTrue(forced)
+                    renew.assert_called_once_with(
+                        device_id=binding["device_id"], worker_id=cfg.worker_id,
+                        request_id=TEST_REQUEST_ID, expected_lease_id=binding["lease_id"],
+                        account_id=TEST_ACCOUNT_ID,
+                    )
+                    proc.send_signal.assert_called_once_with(consumer.signal.SIGTERM)
+                    proc.kill.assert_not_called()
+                    consumer._finalize_manual_run_after_subprocess(
+                        cfg, request_id=TEST_REQUEST_ID, account_id=TEST_ACCOUNT_ID,
+                        exit_code=exit_code, timed_out=forced, request_snapshot=canceled,
+                        cooperative_stop=diagnostics,
+                    )
+                    self.assertEqual(complete.call_args.args[2], expected)
+                    self.assertEqual(reconcile.call_args.kwargs["terminal_status"], expected)
+                    self.assertEqual(failure.called, expected == "failed")
+
     def test_measures_the_exact_returned_generation_without_changing_the_rpc(self):
         lease = _canonical_device_lease("worker")
         params = {

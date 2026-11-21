@@ -440,6 +440,7 @@ def _private_skip_fast_path_handle(
     run_id: Any = None,
     source_account_context: str = "",
     return_func: Any | None = None,
+    capture_exact_return: bool = False,
 ) -> dict[str, Any]:
     """Early no-tap private-account skip before heavier pre-follow guards."""
     t0 = time.perf_counter()
@@ -637,8 +638,12 @@ def _private_skip_fast_path_handle(
     ret = return_func or return_to_followers_list
     return_ok = False
     return_how = ""
+    exact_return_snapshot: dict[str, Any] = {}
     try:
-        return_ok, return_how = ret(d, src, pkg)
+        if capture_exact_return and return_func is None:
+            return_ok, return_how = ret(d, src, pkg, exact_return_snapshot=exact_return_snapshot)
+        else:
+            return_ok, return_how = ret(d, src, pkg)
     except Exception as exc:
         return_ok = False
         return_how = f"exception:{type(exc).__name__}"
@@ -665,6 +670,7 @@ def _private_skip_fast_path_handle(
         "reason": "private_account",
         "return_ok": bool(return_ok),
         "return_how": str(return_how or ""),
+        "exact_return_snapshot": exact_return_snapshot if return_ok else {},
         "probe": probe,
         "private_signal": private_signal,
         "proof_method": proof_method,
@@ -1752,6 +1758,7 @@ _CT_CHECKPOINT_POST_RETURN_SAFE_METHODS = frozenset(
         "compact_initial_list_confirmed",
         "already_on_followers_list",
         "fresh_candidate_proof_one_back_then_exact_ct",
+        "private_skip_exact_ct_return",
     )
 )
 
@@ -2079,6 +2086,8 @@ def _ct_checkpoint_should_reuse_post_return_visible_window(
         round((time.perf_counter() - proof_at) * 1000.0, 2) if proof_at > 0.0 else -1.0
     )
     proof_fresh = 0.0 <= proof_age_ms <= 15_000.0
+    if return_method == "private_skip_exact_ct_return" and not 0.0 <= proof_age_ms <= 3000.0:
+        return False, "private_return_proof_stale"
     if checkpoint_age_ms > _CT_CHECKPOINT_POST_RETURN_REUSE_MS and not proof_fresh:
         return False, "checkpoint_visible_window_stale"
     return True, "checkpoint_visible_window_fresh"
@@ -3594,6 +3603,7 @@ def _schedule_deferred_post_return_supabase_step(
     log_record_count: int | None = None,
     success_event: str = "",
     success_payload: dict[str, Any] | None = None,
+    log_schedule: bool = True,
 ) -> None:
     item = {
         "step": str(step or fn_name or ""),
@@ -3612,12 +3622,13 @@ def _schedule_deferred_post_return_supabase_step(
     }
     with _DEFERRED_POST_RETURN_QUEUE_LOCK:
         _DEFERRED_POST_RETURN_PERSIST_STEPS.append(item)
-    log(
-        "info",
-        "post_return_deferred_step_scheduled",
-        **_deferred_step_common_log_fields(item),
-        pending_deferred_count=_pending_deferred_follow_action_log_count(),
-    )
+    if log_schedule:
+        log(
+            "info",
+            "post_return_deferred_step_scheduled",
+            **_deferred_step_common_log_fields(item),
+            pending_deferred_count=_pending_deferred_follow_action_log_count(),
+        )
 
 
 def _flush_deferred_post_return_supabase_steps(*, reason: str) -> bool:
@@ -13700,7 +13711,10 @@ def _run_followers_list_engine_session(
             )
             return 1
 
-    def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
+    def _eng_log(
+        action_type: str, status: str, message: str, payload: dict,
+        *, defer_after_return_ack: bool = False,
+    ) -> None:
         if not (supabase_mode and run_id and account_id):
             return
         base = {
@@ -13708,8 +13722,7 @@ def _run_followers_list_engine_session(
             "target_id": str(target_id or ""),
             "source_account_context": account_id,
         }
-        _safe_supabase_call(
-            "insert_action_log",
+        action = dict(
             run_id=run_id,
             account_id=account_id,
             target_username=source_profile_username,
@@ -13718,6 +13731,15 @@ def _run_followers_list_engine_session(
             message=message,
             payload={**base, **payload},
         )
+        if defer_after_return_ack:
+            _schedule_deferred_post_return_supabase_step(
+                step=action_type, fn_name="insert_action_log", kwargs=action,
+                run_id=run_id, account_id=account_id,
+                source_profile_username=source_profile_username,
+                reason="same_ct_after_critical_ack", log_schedule=False,
+            )
+        else:
+            _safe_supabase_call("insert_action_log", **action)
 
     def _follow60_wait_at_evaluation_barrier_if_reached(
         *,
@@ -13963,7 +13985,7 @@ def _run_followers_list_engine_session(
             target_follow_budget_effective,
         )
 
-    def _log_target_budget_check(reason: str) -> None:
+    def _log_target_budget_check(reason: str, *, defer_after_return_ack: bool = False) -> None:
         payload = _target_budget_check_payload(reason)
         log("info", "follow_target_budget_check", **payload)
         _eng_log(
@@ -13971,6 +13993,7 @@ def _run_followers_list_engine_session(
             "info",
             reason,
             payload,
+            defer_after_return_ack=defer_after_return_ack,
         )
 
     def _maybe_set_rotation_pending_after_budget(
@@ -15744,7 +15767,10 @@ def _run_followers_list_engine_session(
                     },
                 )
                 target_followers_resume_controller = None
+        defer_same_ct_transition_audits = False
         while processed < max_iter:
+            defer_loop_audits = defer_same_ct_transition_audits
+            defer_same_ct_transition_audits = False
             # Existing candidate boundary: the prior Follow composite (including
             # Mute/Like/Return-CT/persistence) is terminal and no new physical
             # mutation has started.  A local token check is the only added
@@ -15852,7 +15878,9 @@ def _run_followers_list_engine_session(
             storage_health.require_irreversible_action_allowed(
                 boundary="follow60_candidate_cycle_start",
             )
-            _log_target_budget_check("before_candidate_selection")
+            _log_target_budget_check(
+                "before_candidate_selection", defer_after_return_ack=defer_loop_audits,
+            )
             _fleet_cap_boundary = supabase_client.fleet_follow_boundary_local_v1(
                 account_id=str(account_id or ""),
                 request_id=str(run_request_id or ""),
@@ -15909,6 +15937,7 @@ def _run_followers_list_engine_session(
                     "stop_reason": stop_r_loop,
                     "prev_candidate_row_count": prev_candidate_row_count,
                 },
+                defer_after_return_ack=defer_loop_audits and not stop_r_loop,
             )
 
             followers_xml_detect_skipped_this_iter = False
@@ -21060,6 +21089,7 @@ def _run_followers_list_engine_session(
                         pkg=pkg,
                         run_id=run_id,
                         source_account_context=str(account_id or ""),
+                        capture_exact_return=bool(follow60_mainline_active or follow60_canary_active),
                     )
                 except Exception as exc:
                     log(
@@ -21256,6 +21286,27 @@ def _run_followers_list_engine_session(
                                     visual_candidate_id=pick.get("visual_candidate_id"),
                                 )
                             return 42
+                    _private_return = _private_fast_path.get("exact_return_snapshot") or {}
+                    _private_detect = _private_return.get("detection")
+                    _private_return_at = float(_private_return.get("observed_at") or 0)
+                    if (
+                        isinstance(_private_detect, dict)
+                        and _private_detect.get("open_detection_method") == "own_unified_follow_list"
+                        and _private_return_at > 0
+                        and not is_follow_target_rotation_pending(target_username=source_profile_username)
+                    ):
+                        open_list_meta["last_poll_snapshot"] = _private_detect
+                        open_list_meta["source_profile_username"] = source_profile_username
+                        open_list_meta["post_return_snapshot_created_at_monotonic"] = _private_return_at
+                        visual_loop_state["post_return_picker_refresh_pending"] = True
+                        visual_loop_state["post_return_picker_refresh_meta"] = {
+                            "visual_candidate_id": str(_vcid_sm or pick.get("visual_candidate_id") or ""),
+                            "follower_username": str(follower_un or ""),
+                            "source_username": source_profile_username,
+                            "return_method": "private_skip_exact_ct_return",
+                            "post_return_proof_at_mono": _private_return_at,
+                            "checkpoint_sequence": int(ct_checkpoint.get("sequence") or 0),
+                        }
                     continue
             _candidate_follow_decision = _new_candidate_follow_decision(
                 follower_username=follower_un,
@@ -25307,7 +25358,18 @@ def _run_followers_list_engine_session(
                     "reopened_from_source_profile",
                     {"source_profile_username": source_profile_username},
                 )
-            _eng_log("followers_list_recovered", "success", "return_after_follower", {"method": how})
+            defer_same_ct_transition_audits = bool(
+                _pf_run_full
+                and _follow60_stage_receipts
+                and _critical_persist_ok
+                and _post_return_next_action == "same_target_next_candidate"
+                and (_pf.get("stage_persist_results") or {}).get("return_ct_exact") is True
+                and not device_action_latch.stop_requested()
+            )
+            _eng_log(
+                "followers_list_recovered", "success", "return_after_follower", {"method": how},
+                defer_after_return_ack=defer_same_ct_transition_audits,
+            )
             if _pf_run_full:
                 _start_deferred_post_return_background_flush(
                     reason="return_ct_stable_live_projection"
@@ -27646,7 +27708,6 @@ def _main_impl() -> int:
         )
 
     t_warm_decision = time.perf_counter()
-    _package_before_warm_check = _current_package_safe(d)
     warm_ok, warm_reason = instagram_warm_session_eligible(d, config.INSTAGRAM_PACKAGE)
     warm_session_decision_ms = (time.perf_counter() - t_warm_decision) * 1000
     log("info", "warm_session_decision_ms", value=round(warm_session_decision_ms, 2))
@@ -27660,7 +27721,6 @@ def _main_impl() -> int:
         warm_session_used=bool(warm_session_used),
         warm_session_reason=str(warm_reason or ""),
         force_stop_used=bool(force_stop_used),
-        package_before=_package_before_warm_check or None,
         expected_package=_expected_package or None,
     )
     if warm_ok:

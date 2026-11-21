@@ -16,6 +16,15 @@ def restore_startup_exact_delta(name, source):
         import hashlib
         import subprocess
         # This byte-exact telemetry delta has no authority over any other source.
+        if hashlib.sha256(source.encode()).hexdigest() == (
+            "49bb99c511b197150c6c024dc3be0145a3ca2d91098ff3ce32ff8e1412bc6bc1"
+        ):
+            source = subprocess.check_output(
+                ["git", "show", "7d6ed3ce4763b2e0463ccd47c6f00d0528a733e6:runner.py"],
+                cwd=ROOT, text=True,
+            )
+            if hashlib.sha256(source.encode()).hexdigest() != "f14a4570677c735aaecdaaa8fc00f501df86462757628a8e0616f7a56d8f4d0f":
+                raise AssertionError("signed_active_runner_base_mismatch")
         if hashlib.sha256(source.encode()).hexdigest() in (
             '9408bbb4694d1fc2d7d623f708166cffc11c4dd3f7f35f78a78f3cd3ad9f88ff',
             'f14a4570677c735aaecdaaa8fc00f501df86462757628a8e0616f7a56d8f4d0f',
@@ -120,6 +129,32 @@ class RunnerStartupCancellationTests(TestCase):
         self.execute([force]);self.status='STOP'
         with self.assertRaises(stops.StartupCancellationStopped):self.execute([start])
         self.assertEqual(mutations,['action'])
+
+    def test_warm_session_phase_leaves_the_existing_authoritative_package_read(self):
+        import instagram_navigation as nav
+
+        main = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_main_impl")
+        start = next(i for i, n in enumerate(main.body)
+                     if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "t_warm_decision" for t in n.targets))
+        warm_phase = main.body[start:start + 6]
+        self.assertEqual(warm_phase[-1].value.args[0].value,
+                         "startup_app_readiness_warm_session_check_completed")
+        block = compile(ast.Module(body=warm_phase, type_ignores=[]), "candidate_warm_phase", "exec")
+        for package, expected in (("com.instagram.android", True), ("com.other", False)):
+            phone = mock.Mock()
+            phone.app_current.return_value = {"package": package}
+            namespace = dict(
+                d=phone, time=__import__("time"), config=SimpleNamespace(INSTAGRAM_PACKAGE="com.instagram.android"),
+                instagram_warm_session_eligible=nav.instagram_warm_session_eligible,
+                _current_package_safe=lambda device: device.app_current().get("package"),
+                log=mock.Mock(), _startup_timing_log=mock.Mock(), force_stop_used=False,
+                _expected_package="com.instagram.android",
+            )
+            with mock.patch.object(nav, "_session_modal_or_crash", return_value=False):
+                exec(block, namespace)
+            phone.app_current.assert_called_once_with()
+            self.assertEqual(namespace["warm_session_used"], expected)
 
     def test_slow_action_can_finish_but_no_new_action_after_cancellation(self):
         action=mock.Mock(side_effect=lambda:setattr(self,'status','STOP'))

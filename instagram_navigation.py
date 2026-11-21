@@ -20846,6 +20846,7 @@ def _stash_post_mute_sheet_closed_proof(
     duration_ms: float,
     candidate_context: dict[str, Any] | None = None,
     authoritative_final_close: bool = False,
+    bound_446_no_posts_activity: bool = False,
 ) -> None:
     global _post_mute_sheet_closed_proof_stash
     src = _normalize_handle(str(source_profile_username or ""))
@@ -21079,6 +21080,7 @@ def _stash_post_mute_sheet_closed_proof(
                         posts_count_zero_exact=bool(
                             _grid.get("posts_count_zero_exact")
                         ),
+                        bound_446_no_posts_activity=bound_446_no_posts_activity,
                         ttl_ms=3000.0,
                     )
     except Exception:
@@ -21433,6 +21435,12 @@ def _publish_post_mute_verdict_at_final_sheet_close(
         duration_ms=duration_ms,
         candidate_context=context_out,
         authoritative_final_close=True,
+        bound_446_no_posts_activity=(
+            context_out.get("post_grid_outcome") == "NO_POSTS_POSITIVE"
+            and _follow_446_activity_authority(
+                d, context_out["package"], context_out["activity"]
+            ) is True
+        ),
     )
     log(
         "info",
@@ -26624,6 +26632,33 @@ def _finalize_grid_classification_transport(
         }
     )
     return final
+
+
+def _reacquire_bound_446_no_posts(
+    d: u2.Device, *, candidate: str, package: str, activity: str,
+    screen_width: int, screen_height: int,
+) -> dict[str, Any] | None:
+    """Reclassify an expired No-Post handoff with one fresh profile observation."""
+    xml = str(d.dump_hierarchy(compressed=False) or "")
+    title = _followers_entry_v2_action_bar_title_from_hierarchy_xml(xml)
+    if _normalize_handle(title or "") != _normalize_handle(candidate):
+        return None
+    live = _followers_current_pkg_activity(d)
+    if live.get("current_package") != package or live.get("current_activity") != activity:
+        return None
+    if _follow_446_activity_authority(d, package, activity) is not True:
+        return None
+    if not _post_follow_screen_dimensions_from_hierarchy(
+        xml, raw_width=screen_width, raw_height=screen_height,
+    ).get("screen_dimensions_trusted"):
+        return None
+    grid = _post_follow_post_grid_evidence_from_xml(
+        xml, candidate_username=candidate, ww=screen_width, wh=screen_height,
+        profile_identity_exact=True, profile_origin_exact=True,
+    )
+    if grid.get("outcome") == "NO_POSTS_POSITIVE":
+        return grid
+    return None
 
 
 def _post_follow_post_grid_evidence_from_xml(
@@ -50696,6 +50731,7 @@ def post_follow_controlled_return_to_followers_list(
     compact_reason: str | None = None,
     immediate_candidate_back_proof: bool = False,
     post_mute_exact_return: bool = False,
+    post_no_posts_exact_return: bool = False,
 ) -> tuple[bool, str, str | None]:
     """
     Return to the CT followers list after follow / mute.
@@ -50994,7 +51030,8 @@ def post_follow_controlled_return_to_followers_list(
             )
         else:
             row_session = _FOLLOW_ROW_SESSION.get()
-            xml_first = bool(post_mute_exact_return and row_session and row_session[0]
+            xml_first = bool((post_mute_exact_return or post_no_posts_exact_return)
+                             and row_session and row_session[0]
                              and row_session[0]["package"] == pkg)
             proof_method = "standard_detection"
             try:
@@ -58018,6 +58055,9 @@ def _post_open_hierarchy_identity_signals(
     candidate_exact = False
     candidate_method = ""
     post_action_controls_started = False
+    reply_label_present = False
+    feed_like_control = False
+    feed_comment_control = False
     for el in root.iter():
         text_raw = str(el.attrib.get("text") or "").strip()
         desc_raw = str(el.attrib.get("content-desc") or "").strip()
@@ -58029,8 +58069,9 @@ def _post_open_hierarchy_identity_signals(
         if any(marker in rid_lower for marker in _POST_OPEN_STORY_RESOURCE_MARKERS):
             story_detected = True
             story_method = "snapshot_story_highlight_resource_id"
+        reply_label_present |= "reply" in lowered
         if any(
-            value in ("reply", "send message", "message")
+            value in ("send message", "message")
             or "story controls" in value
             or "story viewer" in value
             or "highlight viewer" in value
@@ -58047,6 +58088,9 @@ def _post_open_hierarchy_identity_signals(
             for marker in ("like_button", "comment_button", "share_button", "row_feed_button")
         ):
             post_action_controls_started = True
+        resource_name = rid_lower.rsplit("/", 1)[-1]
+        feed_like_control |= resource_name in ("row_feed_button_like", "like_button")
+        feed_comment_control |= resource_name in ("row_feed_button_comment", "comment_button")
         if expected:
             for field_name, value in (("text", text_raw), ("content_desc", desc_raw)):
                 normalized_value = _normalize_handle(value)
@@ -58079,6 +58123,11 @@ def _post_open_hierarchy_identity_signals(
                     )
                     break
 
+    if reply_label_present and not story_detected and not (
+        posts_title and candidate_exact and feed_like_control and feed_comment_control
+    ):
+        story_detected = True
+        story_method = "snapshot_story_highlight_marker"
     if story_detected or not posts_title:
         candidate_exact = False
         candidate_method = ""
@@ -59709,7 +59758,7 @@ def run_post_follow_post_likes_phase(
         )
 
     def _stash_return_candidate_proof_after_safe_skip(
-        *, reason: str, identity_already_confirmed: bool = False
+        *, reason: str, identity_already_confirmed: bool = False, exact_no_posts: bool = False,
     ) -> bool:
         """Keep the fast Return CT path when Like is safely omitted on-profile."""
         exact_identity = bool(identity_already_confirmed)
@@ -59742,12 +59791,14 @@ def run_post_follow_post_likes_phase(
             if not _follow_60s_canary_enabled("return_candidate_handoff"):
                 return False
             meta = _followers_current_pkg_activity(d)
+            current_package = str(meta.get("current_package") or "")
+            current_activity = str(meta.get("current_activity") or "")
             proof = _stash_follow_60s_proof(
                 "return_candidate_profile",
                 subject_username=src,
                 target_username=cand,
-                package=str(meta.get("current_package") or pkg),
-                activity=str(meta.get("current_activity") or ""),
+                package=current_package or pkg,
+                activity=current_activity,
                 surface="candidate_profile_after_like",
                 detection_source=f"exact_candidate_profile_after_safe_like_skip:{reason}",
                 ttl_ms=1200.0,
@@ -59755,6 +59806,10 @@ def run_post_follow_post_likes_phase(
                     "visual_candidate_id": vcid,
                     "like_skipped_safely": True,
                     "skip_reason": str(reason or ""),
+                    "exact_446_no_posts": (
+                        exact_no_posts and current_package == pkg
+                        and _follow_446_activity_authority(d, current_package, current_activity) is True
+                    ),
                 },
             )
             if proof is not None:
@@ -59800,9 +59855,16 @@ def run_post_follow_post_likes_phase(
         if not ordering_v2_post_first and _follow_60s_canary_enabled("like_fresh_cell_bounds"):
             _grid_ww, _grid_wh = d.window_size()
             _expected_ctx = dict(continuity_evidence or candidate_profile_context or {})
+            _grid_package = str(_expected_ctx.get("package") or pkg)
+            _grid_activity = str(_expected_ctx.get("activity") or "")
+            _bound_446_activity = (
+                _grid_activity in (".activity.MainTabActivity", f"{_grid_package}.activity.MainTabActivity")
+                and _follow_446_activity_authority(d, _grid_package, _grid_activity) is True
+            )
             _grid_ev, _grid_age, _grid_reject = _consume_post_grid_evidence(
-                candidate_username=cand, package=str(_expected_ctx.get("package") or pkg),
-                activity=str(_expected_ctx.get("activity") or ""),
+                candidate_username=cand, package=_grid_package,
+                activity=_grid_activity,
+                bound_446_no_posts_activity=_bound_446_activity,
                 screen_size=(int(_grid_ww), int(_grid_wh)),
                 screen_dimensions_source="consumer_live_window_size",
                 screen_orientation=(
@@ -60124,6 +60186,16 @@ def run_post_follow_post_likes_phase(
                         golden_reason=_grid_reject,
                         dumps=0, screenshots=0, retries=0,
                     )
+            elif (
+                _bound_446_activity
+                and _grid_reject == "classification_reveal_ttl_expired"
+                and (fresh_no_posts := _reacquire_bound_446_no_posts(
+                    d, candidate=cand, package=_grid_package, activity=_grid_activity,
+                    screen_width=int(_grid_ww), screen_height=int(_grid_wh),
+                )) is not None
+            ):
+                _canary_grid_evidence = fresh_no_posts
+                _canary_grid_decision_consumed = True
             else:
                 _canary_grid_golden_direct = True
                 _canary_grid_golden_reason = str(
@@ -60349,6 +60421,7 @@ def run_post_follow_post_likes_phase(
             _stash_return_candidate_proof_after_safe_skip(
                 reason="no_posts_positive",
                 identity_already_confirmed=bool(ab_match and prof_like),
+                exact_no_posts=no_posts_check.get("detection_method") == "single_post_grid_evidence",
             )
             post_rec["outcome"] = "no_posts"
             post_rec["failure_reason"] = reason_np
@@ -65448,6 +65521,7 @@ def run_visual_candidate_post_follow_phase(
         _ret_proof_age = 0.0
         _ret_proof_reject = ""
         _ret_proof_source = ""
+        _ret_no_posts_exact = False
         try:
             from follow_60s_canary import (
                 consume as _consume_follow_60s_proof,
@@ -65510,6 +65584,10 @@ def run_visual_candidate_post_follow_phase(
                     immediate_candidate_back_proof = _ret_proof is not None
                     if immediate_candidate_back_proof:
                         _ret_proof_source = "post_like_candidate_profile"
+                        _ret_no_posts_exact = bool(
+                            _ret_proof.metadata.get("exact_446_no_posts") is True
+                            and _ret_proof.metadata.get("visual_candidate_id") == vcid
+                        )
 
                 if not immediate_candidate_back_proof:
                     _record_follow_60s_outcome(
@@ -65562,6 +65640,7 @@ def run_visual_candidate_post_follow_phase(
             compact_reason=compact_reason_str if compact_post_follow_return else None,
             immediate_candidate_back_proof=immediate_candidate_back_proof,
             post_mute_exact_return=_ret_proof_source == "post_mute_exact_sheet_closed",
+            post_no_posts_exact_return=_ret_no_posts_exact,
         )
     likes_out["post_follow_likes_return_ct_recovery_used"] = bool(
         likes_return_recovery_used
@@ -65732,12 +65811,14 @@ def classify_followers_recovery_surface(
     pkg: str | None = None,
     *,
     candidate_username: str = "",
+    exact_return_snapshot: dict[str, Any] | None = None,
 ) -> tuple[FollowersRecoverySurface, dict[str, Any]]:
     """Classify the live recovery surface from fresh, positive evidence."""
 
     pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
     det: dict[str, Any] = {}
     hierarchy_xml = ""
+    capture_started_at = time.perf_counter() if exact_return_snapshot is not None else 0.0
     try:
         det, hierarchy_xml = detect_followers_list_screen_fresh(
             d,
@@ -65776,6 +65857,18 @@ def classify_followers_recovery_surface(
     if bool(det.get("is_followers_list")):
         from target_followers_progressive_resume_v2 import target_surface_identity_proved
         meta["target_identity_proved"] = target_surface_identity_proved(det, expected_target=source_profile_username)
+        if (
+            exact_return_snapshot is not None
+            and hierarchy_xml
+            and meta["target_identity_proved"]
+            and det.get("current_package") == pkg
+            and _follow_446_activity_authority(
+                d, pkg, str(det.get("current_activity") or ""),
+            ) is True
+        ):
+            exact_return_snapshot.update(
+                detection=det, observed_at=capture_started_at,
+            )
         meta["surface"] = FollowersRecoverySurface.FOLLOWERS_LIST.value
         meta["reason"] = "fresh_followers_surface_proved"
         return FollowersRecoverySurface.FOLLOWERS_LIST, meta
@@ -65879,6 +65972,7 @@ def recover_followers_after_candidate_profile_open_not_confirmed(
     candidate_username: str = "",
     max_navigation_actions: int = 3,
     require_bound_446_surface: bool = False,
+    exact_return_snapshot: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Recover Followers from the current proved surface, one action at a time."""
 
@@ -65894,6 +65988,8 @@ def recover_followers_after_candidate_profile_open_not_confirmed(
             source_profile_username,
             pkg,
             candidate_username=candidate_username,
+            **({"exact_return_snapshot": exact_return_snapshot}
+               if exact_return_snapshot is not None else {}),
         )
         observation = dict(observation)
         if require_bound_446_surface and (
@@ -66057,17 +66153,22 @@ def return_to_followers_list(
     pkg: str | None = None,
     *,
     max_retries: int | None = None,
+    exact_return_snapshot: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Depth-aware return to Followers, based only on fresh surface proof."""
     ui_continuity_v1.check("instagram_navigation.py::return_to_followers_list")
     retries = max_retries
     if retries is None:
         retries = int(getattr(config, "FOLLOWERS_LIST_RETURN_MAX_RETRIES", 2))
+    if exact_return_snapshot is not None:
+        exact_return_snapshot.clear()
     ok, reason, detail = recover_followers_after_candidate_profile_open_not_confirmed(
         d,
         source_profile_username,
         pkg,
         max_navigation_actions=max(1, int(retries) + 1),
+        **({"exact_return_snapshot": exact_return_snapshot}
+           if exact_return_snapshot is not None else {}),
     )
     if ok:
         if str(reason or "") == "followers_already_present":

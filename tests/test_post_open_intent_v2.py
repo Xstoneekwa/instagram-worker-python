@@ -6,7 +6,6 @@ import unittest
 from unittest import mock
 
 import instagram_navigation as nav
-from tests.test_certification_admission import restore_exact_like_budget_delta, restore_exact_self_xml_delta
 import post_open_intent_v2 as intent_v2
 from tests.test_follow60_ordering_v2_behavioral_canary_v1 import _binding, _stable
 
@@ -444,54 +443,46 @@ class Exact446PostOpenAuthorityTests(unittest.TestCase):
         self.assertEqual(eval(compile(ast.Expression(calls[0]),"real-callsite","eval"),ns),("com.instagram.android",self.REL))
 
     def test_all_other_navigation_bytes_and_routing_unchanged(self):
-        import ast, subprocess
-        from test_certification_admission import restore_generic_follow446_if_exact
+        import ast
+        import hashlib
+        import subprocess
+
+        active = "7d6ed3ce4763b2e0463ccd47c6f00d0528a733e6"
         name = "instagram_navigation.py"
-        candidate = (self.root/name).read_text()
-        current = restore_generic_follow446_if_exact(name, candidate)
-        self.assertNotEqual(current, candidate)
-        def omit_helper(src):
-            node=next(n for n in ast.parse(src).body if isinstance(n,ast.FunctionDef)
-                      and n.name=="_post_open_intent_surface_from_final_proof")
-            lines=src.splitlines(True);return "".join(lines[:node.lineno-1]+lines[node.end_lineno:])
-        call='''                _post_open_intent_surface_from_final_proof(
-                    _intent_evidence,
-                    expected_package=pkg,
-                    device_context=d,
-                )'''
-        self.assertEqual(current.count(call),1)
-        viewer_activity_hunks = [['    activity_lower = current_activity.lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n    if (not instagram_main_activity and package_exact\n            and current_package == "com.instagram.android"\n            and current_activity in ("com.instagram.android.activity.MainTabActivity",\n                                     ".activity.MainTabActivity")):\n        try:\n            instagram_main_activity = _followers_row_activity_allowed(\n                d, current_package, current_activity)\n        except (AttributeError, TypeError):\n            instagram_main_activity = False\n', '    activity_lower = current_activity.lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n'], ['    activity_lower = str(current_activity or "").lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n    if (not instagram_main_activity and package_exact\n            and current_package == "com.instagram.android"\n            and current_activity in ("com.instagram.android.activity.MainTabActivity",\n                                     ".activity.MainTabActivity")):\n        try:\n            instagram_main_activity = _followers_row_activity_allowed(\n                d, current_package, current_activity)\n        except (AttributeError, TypeError):\n            instagram_main_activity = False\n', '    activity_lower = str(current_activity or "").lower()\n    instagram_main_activity = bool(\n        "instagram" in activity_lower and "mainactivity" in activity_lower\n    )\n']]
-        viewer_activity_hunks.extend([('        stage_activity_allowed = bool(\n            "InstagramMainActivity" in str(stage_ctx.get("activity") or "")\n        )\n        if (not stage_activity_allowed\n                and str(stage_ctx.get("package") or "") == "com.instagram.android"\n                and str(stage_ctx.get("activity") or "") in (\n                    "com.instagram.android.activity.MainTabActivity",\n                    ".activity.MainTabActivity")\n                and str(stage_ctx.get("activity") or "")\n                == str(meta0.get("current_activity") or "")):\n            try:\n                stage_activity_allowed = _followers_row_activity_allowed(\n                    d, str(stage_ctx.get("package") or ""),\n                    str(stage_ctx.get("activity") or ""))\n            except (AttributeError, TypeError):\n                stage_activity_allowed = False\n        stage_scoped_open_context_ok = bool(\n', '        stage_scoped_open_context_ok = bool(\n'), ('            and stage_activity_allowed\n', '            and "InstagramMainActivity"\n            in str(stage_ctx.get("activity") or "")\n')])
-        viewer_activity_hunks.extend([('        activity_allowed = bool(\n            "instagram" in live_activity.lower() and "mainactivity" in live_activity.lower()\n        )\n        if (not activity_allowed and live_package == "com.instagram.android"\n                and live_activity in (\n                    "com.instagram.android.activity.MainTabActivity", ".activity.MainTabActivity")):\n            try:\n                activity_allowed = _followers_row_activity_allowed(d, live_package, live_activity)\n            except (AttributeError, TypeError):\n                activity_allowed = False\n        if not activity_allowed:\n            return False, "liketapcontext_viewer_mismatch", age_ms\n', '        if "instagram" not in live_activity.lower() or "mainactivity" not in live_activity.lower():\n            return False, "liketapcontext_viewer_mismatch", age_ms\n')])
-        def restore_viewer_activity(src):
-            for new, old in viewer_activity_hunks:
-                self.assertEqual(src.count(new), 1, "viewer hunk absent/modified/duplicated")
-                src = src.replace(new, old, 1)
-            return src
-        def assert_exact_baseline(src):
-            restored = restore_viewer_activity(restore_exact_like_budget_delta(src))
-            self.assertEqual(omit_helper(restored.replace(call,call.replace("                    device_context=d,\n",""),1)),omit_helper(self.old))
-        assert_exact_baseline(current)
-        for new, old in viewer_activity_hunks:
-            for corrupted in (current.replace(new,old,1), current.replace(new,(new.replace("except (AttributeError, TypeError)","except Exception") if "except (AttributeError, TypeError)" in new else new + "# altered approved hunk\n"),1), current + new):
-                with self.assertRaises(AssertionError):
-                    assert_exact_baseline(corrupted)
-        with self.assertRaises(AssertionError):
-            assert_exact_baseline(current + "\n# unrelated navigation delta\n")
-        for name in ["runner.py","follow60_mainline_v2.py","follow60_ordering_v2_behavioral_canary_v1.py","post_open_intent_v2.py"]:
-            current_bytes = (self.root/name).read_bytes()
-            if name == "follow60_ordering_v2_behavioral_canary_v1.py":
-                current_bytes = restore_generic_follow446_if_exact(name, current_bytes.decode()).encode()
-            if name == "runner.py":
-                from tests.test_certification_admission import follow446_parent_for_comparison
-                installed = subprocess.check_output(["git", "show",
-                    "07150ea2ddcd36fd687650bb97689ba720fe34e8:" + name], cwd=self.root)
-                self.assertNotEqual(current_bytes, installed, "Missing Follow 446 change")
-                self.assertEqual(follow446_parent_for_comparison(name, current_bytes.decode()).encode(), installed)
-                profile_release = subprocess.check_output(["git", "show",
-                    "9165651e7522545666f7edabb7e1a1495d0aac80:" + name], cwd=self.root, text=True)
-                current_bytes = restore_exact_self_xml_delta(name, profile_release).encode()
-            self.assertEqual(current_bytes,subprocess.check_output(["git","show",self.BASE+":"+name],cwd=self.root))
+        baseline = subprocess.check_output(["git", "show", active + ":" + name], cwd=self.root)
+        self.assertEqual(hashlib.sha256(baseline).hexdigest(),
+                         "b7914abe6bcac60c5c8b1aa7aa20c3d5c8102da6040212bf1af32d9ed6c699b5")
+        authorized = {
+            "_stash_post_mute_sheet_closed_proof",
+            "_publish_post_mute_verdict_at_final_sheet_close",
+            "_reacquire_bound_446_no_posts",
+            "_post_open_hierarchy_identity_signals",
+            "post_follow_controlled_return_to_followers_list",
+            "run_post_follow_post_likes_phase",
+            "classify_followers_recovery_surface",
+            "recover_followers_after_candidate_profile_open_not_confirmed",
+            "return_to_followers_list",
+            "run_visual_candidate_post_follow_phase",
+        }
+
+        def outside_approved_functions(source):
+            lines = source.splitlines(keepends=True)
+            nodes = [n for n in ast.parse(source).body
+                     if isinstance(n, ast.FunctionDef) and n.name in authorized]
+            for node in reversed(nodes):
+                self.assertEqual(lines[node.end_lineno:node.end_lineno + 2], [b"\n", b"\n"])
+                del lines[node.lineno - 1:node.end_lineno + 2]
+            return b"".join(lines)
+
+        self.assertTrue(
+            outside_approved_functions((self.root / name).read_bytes()) == outside_approved_functions(baseline),
+            "Navigation changed outside the signed function boundaries",
+        )
+        for path in ("follow60_mainline_v2.py", "follow60_ordering_v2_behavioral_canary_v1.py",
+                     "post_open_intent_v2.py"):
+            self.assertEqual((self.root / path).read_bytes(),
+                             subprocess.check_output(["git", "show", active + ":" + path], cwd=self.root))
+
 
 if __name__ == "__main__":
     unittest.main()

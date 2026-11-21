@@ -3864,6 +3864,50 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
 
         self.assertEqual(request_id, "")
 
+    def test_same_ct_audits_spool_on_stop_without_sending_synchronously(self) -> None:
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        node = next(
+            n for n in ast.walk(ast.parse(source))
+            if isinstance(n, ast.FunctionDef) and n.name == "_eng_log"
+        )
+        synchronous = Mock()
+        namespace = dict(
+            supabase_mode=True, run_id="run", account_id="acct", source_profile_username="ct",
+            target_id="target", _safe_supabase_call=synchronous,
+            _schedule_deferred_post_return_supabase_step=runner._schedule_deferred_post_return_supabase_step,
+        )
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "signed_engine_audit", "exec"), namespace)
+        audits = [
+            ("followers_list_recovered", "success", "return_after_follower"),
+            ("follow_target_budget_check", "info", "before_candidate_selection"),
+            ("followers_loop_iteration", "info", "followers_loop_iteration"),
+        ]
+        with (
+            patch.object(runner, "_DEFERRED_POST_RETURN_PERSIST_STEPS", []),
+            patch.object(runner, "_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES", []),
+            patch.object(runner.deferred_projection_outbox, "enqueue", side_effect=len) as enqueue,
+            patch.object(runner, "log") as logfile,
+        ):
+            for kind, status, message in audits:
+                namespace["_eng_log"](kind, status, message, {"test": True}, defer_after_return_ack=True)
+            synchronous.assert_not_called()
+            logfile.assert_not_called()
+            runner._spool_noncritical_deferred_projections(reason="manual_stop")
+            records = enqueue.call_args.args[0]
+            self.assertEqual(len(records), 3)
+            for row, (kind, status, message) in zip(records, audits):
+                self.assertEqual(row["kind"], "supabase_step")
+                self.assertEqual(row["payload"]["fn_name"], "insert_action_log")
+                self.assertEqual(row["payload"]["kwargs"], dict(
+                    run_id="run", account_id="acct", target_username="ct",
+                    action_type=kind, status=status, message=message,
+                    payload={"source_profile_username": "ct", "target_id": "target",
+                             "source_account_context": "acct", "test": True},
+                ))
+            self.assertEqual(runner._pending_deferred_follow_action_log_count(), 0)
+            namespace["_eng_log"]("followers_list_engine_return_failed", "failed", "unsafe", {})
+            synchronous.assert_called_once()
+
     def test_deferred_action_logs_spool_before_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(
@@ -4884,6 +4928,23 @@ class CtCheckpointV1Tests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(reason, "checkpoint_visible_window_fresh")
+
+    def test_private_skip_requires_current_return_proof_even_with_fresh_checkpoint(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_two"]
+        for age, source, expected in ((0, "ct_one", True), (3.2, "ct_one", False), (0, "foreign", False)):
+            with self.subTest(age=age, source=source), patch.object(
+                runner, "followers_session_list_committed_open_for", return_value=True
+            ):
+                state = self._post_return_visual_state(
+                    "private_skip_exact_ct_return", source_username=source,
+                    proof_at_mono=time.perf_counter() - age,
+                )
+                result, _ = runner._ct_checkpoint_should_reuse_post_return_visible_window(
+                    ck, source_username="ct_one", account_id="acct-1", run_id="run-1",
+                    scroll_used=0, visual_loop_state=state,
+                )
+                self.assertEqual(result, expected)
 
     def test_post_return_picker_refresh_falls_back_on_scroll_mismatch(self) -> None:
         ck = self._new_checkpoint(last_scroll_index=0)

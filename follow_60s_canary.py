@@ -1242,6 +1242,7 @@ def stash_post_grid_evidence(
     loading_visible: bool = False,
     empty_marker_xml: bool = False,
     posts_count_zero_exact: bool = False,
+    bound_446_no_posts_activity: bool = False,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
@@ -1250,7 +1251,11 @@ def stash_post_grid_evidence(
     if not candidate or normalized not in POST_GRID_CANONICAL_OUTCOMES:
         return None
     package_exact = str(package_name or "").strip() == str(_RUNTIME.package or "").strip()
-    activity_compatible = "InstagramMainActivity" in str(activity_name or "")
+    activity_compatible = "InstagramMainActivity" in str(activity_name or "") or (
+        normalized == NO_POSTS_POSITIVE
+        and activity_name in (".activity.MainTabActivity", f"{package_name}.activity.MainTabActivity")
+        and bound_446_no_posts_activity is True
+    )
     if not package_exact or not activity_compatible:
         return None
     if not all((mute_sheet_closed, mute_posts_verified, mute_stories_verified)):
@@ -1381,6 +1386,7 @@ def consume_post_grid_evidence(
     producer_fingerprint: str = "",
     screen_orientation: str = "",
     screen_density: float | None = None,
+    bound_446_no_posts_activity: bool = False,
 ) -> tuple[PostGridEvidence | None, float, str]:
     ui_continuity_v1.check("follow_60s_canary.py::consume_post_grid_evidence")
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
@@ -1399,7 +1405,12 @@ def consume_post_grid_evidence(
                 break
         if not reason and ev.package_name != str(_RUNTIME.package or ""):
             reason = "package_not_instagram_exact"
-        if not reason and "InstagramMainActivity" not in ev.activity_name:
+        if not reason and "InstagramMainActivity" not in ev.activity_name and not (
+            ev.outcome == NO_POSTS_POSITIVE
+            and ev.activity_name == activity
+            and activity in (".activity.MainTabActivity", f"{ev.package_name}.activity.MainTabActivity")
+            and bound_446_no_posts_activity is True
+        ):
             reason = "activity_not_instagram_main"
         if (
             not reason
