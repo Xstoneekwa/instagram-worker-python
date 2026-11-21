@@ -35100,8 +35100,9 @@ def visual_verify_post_liked(
             "like_verify_total_ms": total_ms,
         }
 
-    def _surface_continuity_reason() -> str:
-        live = _followers_current_pkg_activity(d)
+    def _surface_continuity_reason(live: dict[str, Any] | None = None) -> str:
+        if live is None:
+            live = _followers_current_pkg_activity(d)
         if str(live.get("current_package") or "") != expected_package:
             return "like_verify_package_changed"
         if str(live.get("current_activity") or "") != expected_activity:
@@ -35165,7 +35166,12 @@ def visual_verify_post_liked(
     )
 
     t_verify_wall0 = time.perf_counter()
-    continuity_reason = _surface_continuity_reason()
+    bound_surface = (
+        bool(expected_binding)
+        and verify_context.get("version") == "PostTapLikeVerifyV1"
+        and bool(verify_context.get("package") and verify_context.get("activity"))
+    )
+    continuity_reason = _surface_continuity_reason(meta0 if bound_surface else None)
     if continuity_reason:
         fail_snap["semantic_result"] = continuity_reason
     else:
@@ -54558,12 +54564,16 @@ def _mute_engine_v2_pick_following_cta(
                 ) + 1
         return structural_peers
 
-    def _element_passes(el: Any, *, pick_reason: str) -> tuple[Any | None, str]:
+    def _element_passes(
+        el: Any, *, pick_reason: str, info: dict[str, Any] | None = None,
+    ) -> tuple[Any | None, str]:
         try:
-            raw_txt = str(el.info.get("text") or "").strip()
-            cd = str(el.info.get("contentDescription") or "").strip()
-            rid = str(el.info.get("resourceName") or el.info.get("resourceId") or "")
-            b = el.info.get("bounds") or {}
+            if info is None:
+                info = dict(el.info or {})
+            raw_txt = str(info.get("text") or "").strip()
+            cd = str(info.get("contentDescription") or "").strip()
+            rid = str(info.get("resourceName") or info.get("resourceId") or "")
+            b = info.get("bounds") or {}
         except Exception:
             return None, ""
         merged = raw_txt or cd
@@ -54685,10 +54695,8 @@ def _mute_engine_v2_pick_following_cta(
             el = d(text=lab)
             if not el.exists(timeout=ex_to):
                 continue
-            try:
-                raw_txt = str(el.info.get("text") or "").strip()
-            except Exception:
-                raw_txt = lab
+            info = dict(el.info or {})
+            raw_txt = str(info.get("text") or "").strip()
             if raw_txt != lab and _normalize_handle(raw_txt) != _normalize_handle(lab):
                 if not _mute_engine_v2_following_header_text_ok(raw_txt):
                     log(
@@ -54703,7 +54711,7 @@ def _mute_engine_v2_pick_following_cta(
                     continue
             if _mute_engine_v2_text_rejected(raw_txt):
                 continue
-            picked, pr = _element_passes(el, pick_reason=f"text_exact:{lab}")
+            picked, pr = _element_passes(el, pick_reason=f"text_exact:{lab}", info=info)
             if picked is not None:
                 return picked, pr
         except Exception:

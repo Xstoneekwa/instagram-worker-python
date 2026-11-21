@@ -628,6 +628,46 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(other, (0, False))
         terminate.assert_called_once_with(canceled_proc)
 
+    def test_bound_owner_stop_is_published_before_grace_lookup(self) -> None:
+        cfg = MagicMock(worker_id="dispatcher", heartbeat_seconds=20, subprocess_timeout_seconds=100)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        context = consumer.StopContext("account", "request", "device", "session", "run", "generation")
+        stop = {
+            "id": "request", "account_id": "account", "run_id": "run",
+            "status": "canceled", "cancel_reason": "botapp_manual_stop",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=stop),
+            patch.object(consumer, "_fleet_supervise_existing", return_value=stop),
+            patch.object(consumer, "request_cooperative_stop", return_value={"reason": "human_manual_stop"}) as publish,
+            patch.object(consumer, "record_termination_origin"),
+            patch.object(consumer, "_follow60_control_applies", return_value=True) as applies,
+            patch.object(consumer, "_terminate_subprocess", return_value=143) as terminate,
+        ):
+            def evaluate_grace(**_):
+                publish.assert_called_once_with(context, reason="human_manual_stop")
+                return True
+
+            applies.side_effect = evaluate_grace
+            options = dict(request_id="request", account_id="account", run_type="account_session",
+                           device_id="device", stop_context=context)
+            self.assertEqual(consumer._wait_for_subprocess(cfg, proc, **options), (143, False))
+            terminate.assert_called_once_with(proc, graceful_timeout_seconds=90.0)
+
+            applies.reset_mock()
+            terminate.reset_mock()
+            publish.side_effect = OSError("fixture")
+            self.assertEqual(consumer._wait_for_subprocess(cfg, proc, **options), (143, False))
+            applies.assert_not_called()
+            terminate.assert_called_once_with(proc)
+
+            stop["run_id"] = "unrelated-run"
+            publish.reset_mock()
+            applies.side_effect = None
+            consumer._wait_for_subprocess(cfg, proc, **options)
+            publish.assert_not_called()
+
     def test_follow_60s_canary_manual_stop_gets_extended_verified_follow_flush_grace(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

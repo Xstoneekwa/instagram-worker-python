@@ -1,7 +1,11 @@
+import os
+import tempfile
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 import device_action_latch as latch
+from cooperative_business_stop import StopContext, request_stop
 import ui_continuity_v1 as continuity
 from tests.test_ui_continuity_v1 import Clock
 
@@ -67,6 +71,46 @@ class SuspensionDeviceTests(unittest.TestCase):
         self.device.click(1, 2)
         self.device.jsonrpc_call("dumpWindowHierarchy")
         self.assertEqual(self.device.calls, ["click", "dumpWindowHierarchy"])
+
+    def test_bound_manual_stop_blocks_new_gestures_and_ignores_older_generation(self):
+        binding = StopContext("account", "request", "device", "session", "run", "fresh")
+        latch.configure(enabled=False, account_id="account", run_id="run", stop_context=binding)
+        self.addCleanup(latch.configure, enabled=False, account_id="", run_id="")
+        with tempfile.TemporaryDirectory() as path, mock.patch.dict(os.environ, {
+            "COOPERATIVE_STOP_CONTROL_DIR": path, "SCHEDULED_SESSION_START": "",
+        }):
+            request_stop(replace(binding, generation="old"), reason="human_manual_stop")
+            self.device.click(1, 2)
+            request_stop(binding, reason="human_manual_stop")
+            for dispatch, args in (
+                (self.device.click, (1, 2)),
+                (self.device.jsonrpc_call, ("click",)),
+                (self.device.shell, ("input tap 1 2",)),
+            ):
+                with self.assertRaises(latch.DeviceActionBlocked):
+                    dispatch(*args)
+        self.assertEqual(self.device.calls, ["click"])
+        self.assertEqual(latch.trace()["stop_reason"], "human_manual_stop")
+
+    def test_manual_stop_between_high_level_action_and_transport_prevents_dispatch(self):
+        binding = StopContext("account", "request", "device", "session", "run", "fresh")
+        latch.configure(enabled=False, account_id="account", run_id="run", stop_context=binding)
+        self.addCleanup(latch.configure, enabled=False, account_id="", run_id="")
+        device = Device(self.clock)
+
+        def press_after_stop(*args):
+            request_stop(binding, reason="human_manual_stop")
+            device.jsonrpc_call("click", *args)
+
+        device.click = press_after_stop
+        latch.install_device_guard(device)
+        with tempfile.TemporaryDirectory() as path, mock.patch.dict(os.environ, {
+            "COOPERATIVE_STOP_CONTROL_DIR": path, "SCHEDULED_SESSION_START": "",
+        }):
+            with self.assertRaises(latch.DeviceActionBlocked):
+                device.click(1, 2)
+        self.assertEqual(device.calls, [])
+        self.assertIn("device_actions_quiesced_at", latch.trace())
 
 
 class RequiredContinuityChallengeTests(unittest.TestCase):

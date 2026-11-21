@@ -3656,6 +3656,30 @@ def _wait_for_subprocess(
                     manual_end = datetime.now(timezone.utc) + timedelta(milliseconds=outreach_cleanup_grace_ms)
                     hard_deadline = min(hard_deadline, manual_end) if hard_deadline else manual_end
             else:
+                canonical_manual_stop = (
+                    run_type == "account_session"
+                    and stop_context is not None
+                    and stop_context.account_id == account_id
+                    and stop_context.request_id == request_id
+                    and stop_context.device_id == device_id
+                    and bool(stop_context.run_id and stop_context.generation)
+                    and latest.get("id") == request_id
+                    and latest.get("account_id") == account_id
+                    and latest.get("run_id") == stop_context.run_id
+                    and latest.get("cancel_reason") == "botapp_manual_stop"
+                )
+                if canonical_manual_stop:
+                    try:
+                        intent = request_cooperative_stop(stop_context, reason="human_manual_stop")
+                        if intent.get("reason") != "human_manual_stop":
+                            return _terminate_subprocess(proc), False
+                    except OSError as exc:
+                        log(
+                            "warning", "manual_run_stop_intent_publish_failed",
+                            request_id=request_id, account_id=account_id,
+                            error_code=type(exc).__name__,
+                        )
+                        return _terminate_subprocess(proc), False
                 log(
                     "info",
                     "manual_run_subprocess_cancel_requested",

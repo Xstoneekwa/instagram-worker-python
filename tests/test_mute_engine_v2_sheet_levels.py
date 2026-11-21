@@ -9,6 +9,38 @@ import navigation_engine
 
 
 class MuteEngineV2SheetLevelsTest(unittest.TestCase):
+    def test_following_cta_uses_one_snapshot_and_rejects_foreign_header(self) -> None:
+        for resource, expected in (
+            ("pkg:id/profile_header_follow_button", True),
+            ("pkg:id/profile_header_message_button", False),
+        ):
+            with self.subTest(resource=resource):
+                device = mock.Mock()
+                element = mock.Mock()
+                element.exists.return_value = True
+                info = mock.PropertyMock(return_value={
+                    "text": "Following",
+                    "resourceId": resource,
+                    "bounds": {"left": 30, "top": 670, "right": 610, "bottom": 750},
+                })
+                with (
+                    mock.patch.object(type(element), "info", info, create=True),
+                    mock.patch.object(nav, "_mute_engine_v2_remaining_s", return_value=2),
+                    mock.patch.object(nav, "_MUTE_V2_FOLLOWING_STATE_LABELS", ("Following",)),
+                ):
+                    def select(**selector):
+                        if selector == {"text": "Following"}:
+                            return element
+                        return mock.Mock(exists=lambda **kwargs: False, all=lambda: [])
+
+                    device.side_effect = select
+                    selected, _ = nav._mute_engine_v2_pick_following_cta(
+                        device, ww=1080, wh=2400, t0=0,
+                        candidate_profile_confirmed=True,
+                    )
+                    self.assertIs(selected, element if expected else None)
+                    info.assert_called_once_with()
+
     def test_following_transition_happy_path_reuses_first_fresh_classification(self) -> None:
         device = mock.MagicMock()
         with mock.patch.object(nav, "_mute_engine_v2_detect_sheet_level") as detect, mock.patch.object(

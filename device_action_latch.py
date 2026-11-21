@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MethodType
 from typing import Any
 
+from cooperative_business_stop import StopContext, read_stop
 from logs import log
 from runtime_artifacts import runtime_artifact_path
 import ui_continuity_v1
@@ -28,6 +29,7 @@ class DeviceActionBlocked(RuntimeError):
 _LOCK = threading.RLock()
 _ENABLED = False
 _STOP_REQUESTED = False
+_STOP_CONTEXT: StopContext | None = None
 _ACTIVE_ACTIONS = 0
 _TRACE: dict[str, Any] = {}
 _TRACE_DIR = runtime_artifact_path("follow60-stop-traces")
@@ -37,11 +39,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def configure(*, enabled: bool, account_id: str, run_id: str) -> None:
-    global _ENABLED, _STOP_REQUESTED, _ACTIVE_ACTIONS, _TRACE
+def configure(
+    *, enabled: bool, account_id: str, run_id: str,
+    stop_context: StopContext | None = None,
+) -> None:
+    global _ENABLED, _STOP_REQUESTED, _STOP_CONTEXT, _ACTIVE_ACTIONS, _TRACE
     with _LOCK:
         _ENABLED = bool(enabled)
         _STOP_REQUESTED = False
+        _STOP_CONTEXT = None
+        if (
+            run_id and stop_context
+            and (stop_context.account_id, stop_context.run_id) == (account_id, run_id)
+        ):
+            _STOP_CONTEXT = stop_context
         _ACTIVE_ACTIONS = 0
         _TRACE = {"account_id": account_id, "run_id": run_id, "configured_at": _now()}
 
@@ -61,13 +72,24 @@ def request_stop(*, signal_number: int | None = None, reason: str = "manual_stop
 
 def stop_requested() -> bool:
     with _LOCK:
-        return bool(_ENABLED and _STOP_REQUESTED)
+        return _stop_active()
+
+
+def _stop_active() -> bool:
+    if _STOP_REQUESTED:
+        return _ENABLED or _STOP_CONTEXT is not None
+    if _STOP_CONTEXT is not None:
+        intent = read_stop(_STOP_CONTEXT)
+        if intent is not None and intent.get("reason") == "human_manual_stop":
+            request_stop(reason="human_manual_stop")
+            return True
+    return False
 
 
 def assert_device_action_allowed(action: str) -> None:
     ui_continuity_v1.check("device_action:" + action)
     with _LOCK:
-        if _ENABLED and _STOP_REQUESTED:
+        if _stop_active():
             log("warning", "follow_60s_device_action_blocked", action=action, **dict(_TRACE))
             raise DeviceActionBlocked(f"device_action_blocked_after_stop:{action}")
 
@@ -76,7 +98,7 @@ def _before(action: str, device: Any = None) -> None:
     global _ACTIVE_ACTIONS
     ui_continuity_v1.check("device_action:" + action)
     with _LOCK:
-        if _ENABLED and _STOP_REQUESTED:
+        if _stop_active():
             log("warning", "follow_60s_device_action_blocked", action=action, **dict(_TRACE))
             raise DeviceActionBlocked(f"device_action_blocked_after_stop:{action}")
         instagram_ui_profile_v1.begin_dispatch(device)
@@ -95,7 +117,10 @@ def _after() -> None:
 
 
 def install_device_guard(device: Any) -> Any:
-    if (not _ENABLED and not ui_continuity_v1.armed() and not instagram_ui_profile_v1.armed()) or getattr(device, "_follow60_action_guard_installed", False):
+    if getattr(device, "_follow60_action_guard_installed", False) or not (
+        _ENABLED or _STOP_CONTEXT is not None
+        or ui_continuity_v1.armed() or instagram_ui_profile_v1.armed()
+    ):
         return device
     for name in (
         "click",

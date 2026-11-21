@@ -48,6 +48,8 @@ from follow_target_private_streak_retirement_v1 import (
     PrivateProfileStreakRetirement,
 )
 from run_latency_observability_v1 import (
+    capture_deferred_persistence,
+    deferred_persistence_timing,
     first_scroll_segment_fields,
     instrument_device,
     observed_operation,
@@ -66,7 +68,7 @@ import storage_health
 from runtime_artifacts import runtime_artifact_path
 from follow60_mainline_v2 import DEFAULT_FOLLOW_ENGINE
 from follow60_mainline_integrity_v3 import verify_runtime_integrity
-from cooperative_business_stop import StartupCancellationStopped
+from cooperative_business_stop import StartupCancellationStopped, StopContext
 from worker_runtime_identity import (
     WorkerRuntimeIdentity,
     bind_worker_runtime_identity,
@@ -3619,6 +3621,11 @@ def _schedule_deferred_post_return_supabase_step(
         "log_record_count": log_record_count,
         "success_event": str(success_event or ""),
         "success_payload": dict(success_payload or {}),
+        "timing_binding": capture_deferred_persistence(
+            run_id=run_id, account_id=account_id,
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username or target_username,
+        ),
     }
     with _DEFERRED_POST_RETURN_QUEUE_LOCK:
         _DEFERRED_POST_RETURN_PERSIST_STEPS.append(item)
@@ -3647,16 +3654,19 @@ def _flush_deferred_post_return_supabase_steps(*, reason: str) -> bool:
                 **common,
                 pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
             )
-            out = _timed_safe_supabase_call(
-                str(item.get("step") or item.get("fn_name") or ""),
-                str(item.get("fn_name") or ""),
-                *(item.get("args") or ()),
-                **dict(item.get("kwargs") or {}),
-                log_run_id=str(item.get("run_id") or "") or None,
-                log_account_id=str(item.get("account_id") or "") or None,
-                log_record_count=item.get("log_record_count"),
-                return_status=True,
-            )
+            attempt = int(item.get("timing_attempt") or 0) + 1
+            item["timing_attempt"] = attempt
+            with deferred_persistence_timing(item.get("timing_binding") or {}, attempt=attempt):
+                out = _timed_safe_supabase_call(
+                    str(item.get("step") or item.get("fn_name") or ""),
+                    str(item.get("fn_name") or ""),
+                    *(item.get("args") or ()),
+                    **dict(item.get("kwargs") or {}),
+                    log_run_id=str(item.get("run_id") or "") or None,
+                    log_account_id=str(item.get("account_id") or "") or None,
+                    log_record_count=item.get("log_record_count"),
+                    return_status=True,
+                )
             duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             ok = bool(isinstance(out, dict) and out.get("_supabase_call_ok"))
             if ok:
@@ -27552,10 +27562,14 @@ def _main_impl() -> int:
     _CURRENT_DEVICE = d
     if account_session_run or unfollow_session_run or _follow60_canary_active:
         ui_continuity_v1.begin_attempt(run_id or "standalone-follow")
+    bound_stop_context = StopContext.from_env() if account_session_run else None
+    if bound_stop_context and bound_stop_context.request_id != run_request_id:
+        bound_stop_context = None
     device_action_latch.configure(
         enabled=bool(_follow60_canary_active),
         account_id=account_id or "",
         run_id=run_id or "",
+        stop_context=bound_stop_context,
     )
     d = device_action_latch.install_device_guard(d)
     t = _phase("connect_device", t)

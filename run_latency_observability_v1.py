@@ -65,6 +65,7 @@ _PHASE_ENDS = {
     "post_follow_return_ct_success": "return_ct",
     "post_follow_return_ct_failed": "return_ct",
     "supabase_persist_step_completed": "persistence",
+    "supabase_persist_step_failed": "persistence",
     "p0c_recovery_before_ct_resume_completed": "p0c",
     "ct_resume_checkpoint_load_claim_completed": "ct_checkpoint_claim",
     "ct_resume_first_scroll_completed": "ct_first_scroll",
@@ -142,6 +143,7 @@ class _ObserverState:
     log_events_in_cycle: int = 0
     dm446_context: dict[str, Any] = field(default_factory=dict)
     dm446_generation: int = 0
+    deferred_persistence: dict[str, Any] = field(default_factory=dict)
 
 
 _LOCAL = threading.local()
@@ -163,6 +165,8 @@ def current_context() -> dict[str, Any]:
     """Return only the bounded identity currently correlated to the run."""
 
     state = _state()
+    if state.deferred_persistence:
+        return dict(state.deferred_persistence)
     if state.dm446_context:
         # Outreach spans carry their own opaque binding, never a prior
         # candidate username left by an unrelated logger/previous job.
@@ -170,6 +174,45 @@ def current_context() -> dict[str, Any]:
                 'generation_scope': 'observed_proxy_mutations_not_admission_authority'}
     cycle = state.phases.get("cycle")
     return {**state.context, "cycle_index": cycle.cycle_index if cycle else 0}
+
+
+def capture_deferred_persistence(**identity: Any) -> dict[str, Any]:
+    if not timing_enabled():
+        return {}
+    state = _state()
+    cycle = state.phases.get("cycle")
+    if (
+        cycle is None
+        or not identity.get("run_id")
+        or not identity.get("account_id")
+        or not _matches_phase(cycle, identity, check_invocation=False)
+    ):
+        return {}
+    state.phase_sequence += 1
+    return {
+        **cycle.identity,
+        **_safe_identity(identity),
+        "cycle_index": cycle.cycle_index,
+        "phase_invocation": state.phase_sequence,
+        "deferred": True,
+    }
+
+
+@contextmanager
+def deferred_persistence_timing(binding: dict[str, Any], *, attempt: int):
+    if not timing_enabled():
+        yield
+        return
+    previous = getattr(_LOCAL, "state", None)
+    # A deferred operation may execute during the next candidate, or during
+    # terminal drain. Its time belongs to its own invocation in either case.
+    _LOCAL.state = _ObserverState(deferred_persistence={
+        **binding, "deferred": True, "deferred_attempt": attempt,
+    })
+    try:
+        yield
+    finally:
+        _LOCAL.state = previous
 
 
 @contextmanager
@@ -488,6 +531,34 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
     if event == PUBLIC_EVENT or not timing_enabled():
         return []
     state = _state()
+    deferred = state.deferred_persistence
+    if deferred:
+        # Low-level RPC rows already carry this scope via current_context().
+        # Never fold a deferred operation into the active candidate totals.
+        if event not in {
+            "supabase_persist_step_started", "supabase_persist_step_completed",
+            "supabase_persist_step_failed",
+        }:
+            return []
+        if any(
+            deferred.get(key) and fields.get(key) and deferred[key] != fields[key]
+            for key in ("run_id", "account_id")
+        ):
+            return []
+        if event == "supabase_persist_step_started":
+            state.phases["persistence"] = _OpenPhase(
+                time.monotonic() * 1000.0, _cpu_ms(),
+                deferred.get("phase_invocation", 0), deferred.get("cycle_index", 0),
+                {**_safe_identity(fields), **deferred},
+            )
+            return []
+        opened = state.phases.pop("persistence", None)
+        if opened is None:
+            return []
+        return [_phase_row(
+            state, "persistence", event, opened, time.monotonic() * 1000.0, _cpu_ms(),
+            outcome="failed" if event.endswith("_failed") or fields.get("ok") is False else "completed",
+        )]
     incoming = _safe_identity(fields)
     incoming_run_id = str(incoming.get("run_id") or "")
     prior_run_id = str(state.context.get("run_id") or "")
@@ -643,11 +714,16 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
         and fields.get("reason") == "private_account"
         and bool(incoming.get("candidate_username"))
     )
+    memory_skip = (
+        event == "followers_candidate_preopen_skipped_persistent_already_connected"
+        and bool(incoming.get("candidate_username"))
+        and bool(fields.get("skip_reason"))
+    )
     if event == "follow_latency_ct_confirmed":
         end_phases = ("ct_followers", "ct_rotation")
     elif event == "post_follow_like_perf_summary":
         end_phases = ("post_open", "like")
-    elif private_skip:
+    elif private_skip or memory_skip:
         end_phases = ("cycle",)
     else:
         end_phases = (_PHASE_ENDS.get(event),)
@@ -665,6 +741,7 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
             del state.phases[phase]
             recovery_reason = fields.get("final_reason") if phase == "ct_search_recovery" else None
             failed = (event.endswith("_failed") or (phase == "ct_row" and fields.get("found") is False)
+                      or (phase == "persistence" and fields.get("ok") is False)
                       or recovery_reason == "search_results_still_blank_after_recovery")
             outcome = "failed" if failed else "completed"
             if event == "post_follow_like_perf_summary":
@@ -677,6 +754,8 @@ def observe_runtime_event(event: str, fields: dict[str, Any]) -> list[dict[str, 
                     recovery_reason = fields.get("failure_reason")
             elif private_skip:
                 outcome, recovery_reason = "skipped", "private_account"
+            elif memory_skip:
+                outcome, recovery_reason = "skipped", str(fields["skip_reason"])
             rows.append(_phase_row(
                 state, phase, event, opened, now_ms, cpu_ms,
                 outcome=outcome, reason=recovery_reason,

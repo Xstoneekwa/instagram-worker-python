@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from statistics import median
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +19,63 @@ import run_latency_observability_v1 as obs
 class CandidateWindowTests(unittest.TestCase):
     def setUp(self):
         obs.reset_for_tests()
+
+    def test_deferred_rpc_binding_survives_candidate_change_and_concurrent_runs(self):
+        def schedule(run_id, account_id):
+            identity = dict(run_id=run_id, account_id=account_id, candidate_username="first")
+            obs.observe_runtime_event("followers_candidate_selected", identity)
+            binding = obs.capture_deferred_persistence(**identity)
+            obs.observe_runtime_event("followers_candidate_selected", {
+                **identity, "candidate_username": "next",
+            })
+            return binding
+
+        first = schedule("run1", "account1")
+        second = schedule("run2", "account2")
+        self.assertEqual(obs.current_context()["candidate_username"], "next")
+
+        def perform(binding):
+            with obs.deferred_persistence_timing(binding, attempt=1):
+                self.assertEqual(obs.current_context()["phase_invocation"], binding["phase_invocation"])
+                self.assertEqual(obs.observe_runtime_event("supabase_persist_step_started", binding), [])
+                self.assertEqual(obs.observe_runtime_event("run_latency_rpc_timing_v1", dict(
+                    obs.current_context(), duration_ms=100, attempt_count=2, backoff_ms=5,
+                )), [])
+                foreign = {**binding, "account_id": "wrong"}
+                self.assertEqual(obs.observe_runtime_event("supabase_persist_step_completed", foreign), [])
+                rows = obs.observe_runtime_event("supabase_persist_step_completed", binding)
+                self.assertEqual(obs.observe_runtime_event("supabase_persist_step_completed", binding), [])
+                return rows[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            observed = list(pool.map(perform, (first, second)))
+        self.assertEqual([(row["run_id"], row["account_id"], row["cycle_index"],
+                           row["candidate_username"], row["phase"]) for row in observed],
+                         [("run1", "account1", 1, "first", "persistence"),
+                          ("run2", "account2", 1, "first", "persistence")])
+        perform(second)  # A synchronous drain also leaves the current scope intact.
+        self.assertEqual(obs.current_context()["candidate_username"], "next")
+        row = obs.observe_runtime_event("post_return_critical_persist_completed", {
+            "run_id": "run2", "account_id": "account2", "candidate_username": "next",
+        })[0]
+        self.assertEqual(row.get("rpc_count", 0), 0)
+
+    def test_proved_memory_skip_closes_at_decision_then_accounts_for_gap(self):
+        current = {"run_id": "run", "candidate_username": "first"}
+        with patch.object(obs.time, "monotonic", return_value=1.0) as clock:
+            obs.observe_runtime_event("followers_candidate_selected", current)
+            clock.return_value = 1.25
+            rows = obs.observe_runtime_event(
+                "followers_candidate_preopen_skipped_persistent_already_connected",
+                {**current, "skip_reason": "already_connected"},
+            )
+            self.assertEqual([(r["phase"], r["outcome"], r["duration_ms"]) for r in rows],
+                             [("cycle", "skipped", 250)])
+            clock.return_value = 1.75
+            rows = obs.observe_runtime_event("followers_candidate_selected", {
+                **current, "candidate_username": "next",
+            })
+            self.assertEqual([(r["metric"], r["duration_ms"]) for r in rows], [("inter_cycle_gap", 500)])
 
     def test_post_open_skip_and_private_end_bind_to_the_correct_cycle(self):
         with patch.object(obs.time, "monotonic", return_value=1.0) as clock:

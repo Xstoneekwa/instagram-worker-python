@@ -68,6 +68,7 @@ class BoundedLikeVerificationTest(unittest.TestCase):
         identity: dict[str, object] | None = None,
         context: dict[str, object] | None = None,
         live_package: str = "com.instagram.android",
+        foreground: mock.Mock | None = None,
     ) -> tuple[dict[str, object], mock.Mock]:
         semantic_mock = mock.Mock(side_effect=semantic)
         with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
@@ -75,6 +76,7 @@ class BoundedLikeVerificationTest(unittest.TestCase):
                 mock.patch.object(
                     nav,
                     "_followers_current_pkg_activity",
+                    side_effect=foreground,
                     return_value={
                         "current_package": live_package,
                         "current_activity": "com.instagram.mainactivity.MainActivity",
@@ -216,6 +218,25 @@ class BoundedLikeVerificationTest(unittest.TestCase):
         self.assertEqual(semantic.call_count, 0)
         self.assertEqual(device.screenshot_calls, 0)
         self.assertEqual(device.dump_calls, 0)
+
+    def test_bound_entry_and_later_probe_each_require_one_fresh_foreground_read(self) -> None:
+        surface = {
+            "current_package": "com.instagram.android",
+            "current_activity": "com.instagram.mainactivity.MainActivity",
+        }
+        fresh = mock.Mock(side_effect=[surface, surface])
+        out, semantic = self._run(
+            _Device(), foreground=fresh,
+            semantic=[(True, "ui_description_exact_unlike", 0.99, {})],
+        )
+        self.assertTrue(out["liked_verified"])
+        self.assertEqual((fresh.call_count, semantic.call_count), (2, 1))
+
+        changed = mock.Mock(return_value={**surface, "current_activity": ".Different"})
+        out, semantic = self._run(_Device(), foreground=changed, semantic=[])
+        self.assertEqual(out["semantic_result"], "like_verify_activity_changed")
+        # The fallback has its own continuity guard and acquires no evidence.
+        self.assertEqual((changed.call_count, semantic.call_count), (2, 0))
 
     def test_candidate_mismatch_fails_closed(self) -> None:
         device = _Device()
