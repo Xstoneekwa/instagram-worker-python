@@ -199,6 +199,75 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
         dump.assert_not_called()
         shot.assert_not_called()
 
+    def test_observed_446_title_lookup_preserves_first_post_snapshot_before_deadline(self):
+        for package in ("com.instagram.android", "com.instagram.androig"):
+            for qualified, intent, reused in ((True, True, True), (False, True, False), (True, False, False)):
+                with self.subTest(package=package, qualified=qualified, intent=intent):
+                    device = mock.MagicMock()
+                    device.window_size.return_value = (1080, 2400)
+                    activity = "com.instagram.mainactivity.InstagramMainActivity"
+                    title = mock.Mock()
+                    heart = mock.Mock()
+                    heart.exists.return_value = True
+                    device.side_effect = lambda **sel: title if "resourceIdMatches" in sel else heart
+                    tap = 100.0
+                    clock = [tap + 0.66124]
+
+                    def read_title(**kwargs):
+                        clock[0] += 1.21163
+                        return "Posts"
+
+                    def title_exists(**kwargs):
+                        clock[0] += 0.56803
+                        return True
+
+                    def dump(_):
+                        clock[0] += 0.3
+                        return '<hierarchy><node text="Posts"/><node content-desc="Like" bounds="[50,1700][110,1800]" clickable="true"/></hierarchy>'
+
+                    def foreground(_):
+                        clock[0] += 0.48049
+                        return {"current_package": package, "current_activity": activity}
+
+                    title.get_text.side_effect = read_title
+                    title.exists.side_effect = title_exists
+                    provenance = _fresh_stage_provenance(
+                        now_monotonic=tap + 1.8, package=package, activity=activity,
+                    )
+                    with mock.patch.object(nav.time, "perf_counter", side_effect=lambda: clock[0]), \
+                         mock.patch.object(nav, "_retained_446_activity_context", return_value=qualified), \
+                         mock.patch.object(nav, "_post_viewer_still_profile_grid_strong", return_value=(False, "")), \
+                         mock.patch.object(nav, "_followers_current_pkg_activity", side_effect=foreground) as read_foreground, \
+                         mock.patch.object(nav, "_dump_post_viewer_hierarchy", side_effect=dump) as capture, \
+                         mock.patch.object(nav, "log"):
+                        view = nav._visual_detect_post_viewer_opened_after_tap(
+                            device, pkg=package, expected_follower_username="cand",
+                            post_follow_fast=True, post_open_intent_v2=intent,
+                        )
+                        view["post_open_stage_provenance"] = provenance
+                        self.assertTrue(nav._stash_post_follow_open_like_proof(
+                            view, source_profile_username="ct", follower_username="cand",
+                        ))
+                        proof = nav._post_open_snapshot_audit_signals(
+                            device, snapshot_xml=view["post_open_snapshot_xml"],
+                            proof_method="ui_description_exact_like", expected_username="cand",
+                            posts_action_bar_hint=True, current_package=view["current_package"],
+                            expected_package=package, current_activity=view["current_activity"],
+                            stage_provenance=provenance,
+                            snapshot_captured_at_monotonic=view["post_open_snapshot_captured_at_monotonic"],
+                        )
+                    self.assertEqual(bool(proof.get("post_identity_confirmed")), reused, proof)
+                    self.assertAlmostEqual(clock[0] - tap, 2.65336 if reused else 3.22139, places=5)
+                    capture.assert_called_once()
+                    read_foreground.assert_called_once()
+                    if reused:
+                        title.exists.assert_not_called()
+                        title.get_text.assert_called_once_with(timeout=0.18)
+                    else:
+                        title.exists.assert_called_once_with(timeout=0.18)
+                        title.get_text.assert_called_once_with()
+                    device.click.assert_not_called()
+
     def test_a2_without_header_and_without_provenance_is_fail_closed(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2400)

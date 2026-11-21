@@ -28855,6 +28855,7 @@ def _visual_wait_post_viewer_opened_after_tap(
     act_before: Any,
     poll_label: str = "first_tap",
     post_follow_fast: bool = False,
+    post_open_intent_v2: bool = False,
 ) -> dict[str, Any]:
     """Adaptive poll for post viewer after grid tap (replaces fixed 1.6s sleep)."""
     t0 = time.perf_counter()
@@ -28892,6 +28893,7 @@ def _visual_wait_post_viewer_opened_after_tap(
             expected_follower_username=expected_follower_username,
             act_before=act_before,
             post_follow_fast=bool(post_follow_fast),
+            **({"post_open_intent_v2": True} if post_open_intent_v2 else {}),
         )
         last_detect_ms = (time.perf_counter() - t_detect0) * 1000.0
         if bool(det.get("post_detected")):
@@ -29737,6 +29739,7 @@ def _visual_detect_post_viewer_opened_after_tap(
     expected_follower_username: str = "",
     act_before: Any = None,
     post_follow_fast: bool = False,
+    post_open_intent_v2: bool = False,
 ) -> dict[str, Any]:
     """
     Post-open detection aligned with post-follow like viewer guard (not legacy profile guess alone).
@@ -29869,8 +29872,14 @@ def _visual_detect_post_viewer_opened_after_tap(
     def _run_a2() -> tuple[bool, str, list[str], str]:
         nonlocal a2_result, a2_elapsed_ms
         t_a20 = time.perf_counter()
+        single_title_read = (
+            post_follow_fast and post_open_intent_v2
+            and _retained_446_activity_context(d, pkg)
+        )
         like_a2, reason_a2, a2_sigs, exact_sig, guard_res, a2_stage = (
-            _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
+            _ui_post_viewer_open_exact_like_desc_fast(
+                d, pkg=pkg, **({"single_title_read": True} if single_title_read else {})
+            )
         )
         a2_elapsed_ms = _visual_detect_post_viewer_stage_ms(t_a20)
         a2_result = bool(like_a2)
@@ -33964,6 +33973,7 @@ def _ui_post_viewer_open_exact_like_desc_fast(
     d: u2.Device,
     *,
     pkg: str,
+    single_title_read: bool = False,
 ) -> tuple[bool, str, list[str], str, str, dict[str, Any]]:
     """
     Phase A2: A2b guarded exact descriptors first, then A2a trusted band fallback.
@@ -33998,7 +34008,9 @@ def _ui_post_viewer_open_exact_like_desc_fast(
 
     t_posts0 = time.perf_counter()
     try:
-        ab_raw = str(_visual_read_action_bar_username(d) or "").strip()
+        ab_raw = _visual_read_action_bar_username(
+            d, **({"single_read": True} if single_title_read else {})
+        )
     except Exception:
         ab_raw = ""
     posts_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw)
@@ -38535,9 +38547,13 @@ def visual_verify_profile_followed(
     }
 
 
-def _visual_read_action_bar_username(d: u2.Device) -> str:
+def _visual_read_action_bar_username(d: u2.Device, *, single_read: bool = False) -> str:
     try:
         ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if single_read:
+            # get_text already proves the element exists. A second lookup can
+            # expire the bound PostOpen proof before its first snapshot audit.
+            return str(ab.get_text(timeout=0.18) or "").strip()
         if ab.exists(timeout=0.18):
             return str(ab.get_text() or "").strip()
     except Exception:
@@ -61672,6 +61688,7 @@ def run_post_follow_post_likes_phase(
                 _viewer = _visual_wait_post_viewer_opened_after_tap(
                     d, pkg=pkg, expected_follower_username=cand,
                     act_before=_meta_before.get("current_activity"), post_follow_fast=True,
+                    **({"post_open_intent_v2": True} if ordering_v2_post_first else {}),
                 )
                 _viewer["post_open_stage_provenance"] = dict(
                     _intent_dispatch.get("post_open_stage_provenance") or {}
@@ -62905,6 +62922,7 @@ def run_post_follow_post_likes_phase(
                             expected_follower_username=cand,
                             act_before=meta_before_direct.get("current_activity"),
                             post_follow_fast=True,
+                            **({"post_open_intent_v2": True} if ordering_v2_post_first else {}),
                         )
                         viewer_direct["post_open_stage_provenance"] = stage_provenance
                         if bool(viewer_direct.get("post_detected")):
