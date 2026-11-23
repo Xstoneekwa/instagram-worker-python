@@ -1348,11 +1348,29 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "00000000-0000-4000-8000-000000000101",
         )
         self.assertNotIn("--resume-email-code-from-action", cmd)
+        self.assertNotIn("--verify-manual-open-profile", cmd)
         self.assertIn("--publish", cmd)
         self.assertNotIn("--no-publish", cmd)
         self.assertIn("--expected-username", cmd)
         self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androie")
         self.assertEqual(cmd[cmd.index("--expected-app-instance-id") + 1], "7637db9a-3581-4099-8068-d5eb1ed86f96")
+
+    def test_manual_observation_uses_the_existing_runner_entry_point_and_binding(self) -> None:
+        with patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"):
+            cmd = consumer._build_runner_command(
+                TEST_ACCOUNT_ID, "login_provisioning", TEST_REQUEST_ID, device_serial="test-fixture",
+                package_name="com.instagram.androig", app_instance_id="bound-instance",
+                metadata_safe={"device_id": "bound-device", "manual_profile_observation": "v1"},
+            )
+            self.assertEqual(cmd[-1], "--verify-manual-open-profile")
+            self.assertEqual(cmd[cmd.index("--expected-app-instance-id") + 1], "bound-instance")
+            self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androig")
+            with self.assertRaisesRegex(ValueError, "manual_profile_observation_run_type_invalid"):
+                consumer._build_runner_command(
+                    TEST_ACCOUNT_ID, "login_email_code_resume", TEST_REQUEST_ID,
+                    package_name="com.instagram.androig", app_instance_id="bound-instance",
+                    metadata_safe={"manual_profile_observation": "v1"},
+                )
 
     def test_login_provisioner_env_enables_controlled_publish(self) -> None:
         with patch.object(consumer, "runner_subprocess_env", return_value={"PATH": "/usr/bin"}):

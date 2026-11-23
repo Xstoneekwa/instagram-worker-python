@@ -23,6 +23,7 @@ from instagram_login_provisioner_orchestrator import (
     DEFAULT_INSTAGRAM_PACKAGE_NAME,
     DEFAULT_POST_APP_START_WAIT_MS,
     POST_EMAIL_CODE_PASSWORD_SCREENS,
+    publish_observed_manual_profile,
     run_email_code_resume_flow,
     run_login_provisioning_flow,
 )
@@ -79,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Diagnostic mode: skip app_start and only observe the current screen.",
     )
+    parser.add_argument("--verify-manual-open-profile", action="store_true")
     parser.add_argument(
         "--post-start-wait-ms",
         type=int,
@@ -157,6 +159,8 @@ def run_cli_command(
 ) -> tuple[int, dict[str, Any]]:
     run_id = _safe_run_id(getattr(args, "run_id", "") or str(uuid.uuid4()))
     _load_dotenv_if_present()
+    if getattr(args, "verify_manual_open_profile", False):
+        return _verify_manual_open_profile(args, run_id, connect_func, status_publisher)
     package_required_reason = _package_name_required_reason(args)
     if package_required_reason:
         summary = _safe_summary_from_error(package_required_reason, args=args, run_id=run_id)
@@ -270,6 +274,42 @@ def run_cli_command(
     summary = _safe_summary_from_result(result, args=args, run_id=run_id)
     _append_safe_jsonl(summary, args=args)
     return (0 if bool(getattr(result, "ok", False)) else 1), summary
+
+
+def _verify_manual_open_profile(
+    args: argparse.Namespace, run_id: str,
+    connect_func: ConnectFunc | None, status_publisher: StatusPublisher | None,
+) -> tuple[int, dict[str, Any]]:
+    reason = "manual_profile_binding_missing"
+    ok = False
+    if all(str(getattr(args, key, "") or "").strip() for key in (
+        "device_serial", "device_id", "package_name", "expected_app_instance_id", "request_id", "run_id", "expected_username",
+    )) and not (args.dry_run or args.no_submit or args.observe_current_screen_only
+                or args.resume_email_code_from_action or args.resume_email_code_stdin):
+        if not _publish_enabled_from_args_env(args):
+            reason = "manual_profile_publish_disabled"
+        else:
+            try:
+                device = (connect_func or _connect_uiautomator2)(args.device_serial)
+            except Exception:
+                reason = "connect_failed"
+            else:
+                publisher = _build_status_publisher(
+                    args=args, run_id=run_id,
+                    status_publisher=status_publisher or publish_instagram_account_status,
+                )
+                ok, reason = publish_observed_manual_profile(
+                    device, account_id=args.account_id, package=args.package_name,
+                    expected_username=args.expected_username, run_id=run_id, publisher=publisher,
+                )
+    summary = {
+        **_safe_summary_from_error(reason, args=args, run_id=run_id),
+        "ok": ok, "completed": ok, "final_outcome": "connected" if ok else "unknown",
+        "published": ok, "publish_result": "published" if ok else "skipped",
+        "failure_reason": "" if ok else reason,
+    }
+    _append_safe_jsonl(summary, args=args)
+    return (0 if ok else 1), summary
 
 
 def _preflight_email_code_resume(

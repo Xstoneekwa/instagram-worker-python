@@ -41,6 +41,59 @@ class AccountRunControlTest(unittest.TestCase):
             row = account_run_control.claim_next_account_run_request("run-dispatcher:test")
         self.assertIsNone(row)
 
+    def test_observation_capable_worker_uses_versioned_claim_once(self) -> None:
+        request_id = "00000000-0000-4000-8000-000000000001"
+        sha = "a" * 40
+        with (
+            patch.object(account_run_control.supabase_client, "call_rpc_once", return_value={"id": request_id}) as claim,
+            patch.object(account_run_control.supabase_client, "call_rpc") as legacy,
+        ):
+            row = account_run_control.claim_next_account_run_request(
+                "run-dispatcher:test", allowed_run_types=["login_provisioning"], observation_worker_sha=sha,
+            )
+        self.assertEqual(row["id"], request_id)
+        claim.assert_called_once_with(
+            "claim_next_account_run_request_v2",
+            {"p_worker_id": "run-dispatcher:test", "p_lease_seconds": 120,
+             "p_allowed_run_types": ["login_provisioning"], "p_observation_worker_sha": sha},
+            timeout_seconds=30,
+        )
+        legacy.assert_not_called()
+
+    def test_missing_versioned_rpc_keeps_ordinary_claim_available(self) -> None:
+        missing = account_run_control.supabase_client.SupabaseRestError(
+            "supabase_rpc_not_available", status=404, detail='{"code":"PGRST202","message":"Function not found"}',
+        )
+        with (
+            patch.object(account_run_control.supabase_client, "call_rpc_once", side_effect=missing) as claim,
+            patch.object(account_run_control.supabase_client, "call_rpc", return_value=None) as legacy,
+        ):
+            row = account_run_control.claim_next_account_run_request("run-dispatcher:test", observation_worker_sha="a" * 40)
+        self.assertIsNone(row)
+        self.assertIsNone(claim.call_args.args[1]["p_allowed_run_types"])
+        legacy.assert_called_once_with("claim_next_account_run_request", {
+            "p_worker_id": "run-dispatcher:test", "p_lease_seconds": 120,
+        })
+
+    def test_uncertain_versioned_claim_never_attempts_legacy_claim(self) -> None:
+        for failure in (
+            account_run_control.supabase_client.SupabaseRestError("supabase_timeout"),
+            account_run_control.supabase_client.SupabaseRestError(
+                "supabase_rpc_not_available", status=404, detail='{"code":"42883"}',
+            ),
+        ):
+            with self.subTest(failure=failure):
+                with (
+                    patch.object(account_run_control.supabase_client, "call_rpc_once", side_effect=failure) as claim,
+                    patch.object(account_run_control.supabase_client, "call_rpc") as legacy,
+                ):
+                    with self.assertRaises(account_run_control.supabase_client.SupabaseRestError):
+                        account_run_control.claim_next_account_run_request(
+                            "run-dispatcher:test", observation_worker_sha="a" * 40,
+                        )
+                    claim.assert_called_once()
+                    legacy.assert_not_called()
+
     def test_complete_account_run_request_skips_empty_request_id(self) -> None:
         with patch.object(account_run_control.supabase_client, "call_rpc") as rpc:
             row = account_run_control.complete_account_run_request(

@@ -1074,6 +1074,9 @@ def _heartbeat(cfg: DispatcherConfig, *, status: str = "idle", metadata: dict[st
                 "observed_socket_hostname": socket.gethostname(),
                 "health_only": cfg.health_only,
                 "launch_enabled": cfg.launch_enabled,
+                "manual_profile_observation_worker_sha": (
+                    _CERTIFIED_RUNTIME_IDENTITY.worker_sha if _CERTIFIED_RUNTIME_IDENTITY else None
+                ),
                 **(metadata or {}),
             },
             force=True,
@@ -1255,6 +1258,8 @@ def _build_login_provisioner_command(
         raise ValueError("auto_login_app_instance_binding_required")
     expected_username = _load_expected_username(account_id)
     normalized_run_type = str(run_type or "").strip().lower()
+    meta = dict(metadata_safe or {})
+    observation = meta.get("manual_profile_observation") == "v1"
     # Every login path enters the same authoritative engine.  The historical
     # 07ee tree is retained only as forensic source material; routing a live
     # request through it would silently drop modern recovery and challenge
@@ -1266,7 +1271,7 @@ def _build_login_provisioner_command(
         "--account-id",
         account_id,
         "--expected-username",
-        expected_username or "unknown",
+        expected_username if observation else (expected_username or "unknown"),
         "--publish",
         "--json",
         "--run-id",
@@ -1280,7 +1285,6 @@ def _build_login_provisioner_command(
         cmd.extend(["--device-serial", serial])
     cmd.extend(["--package-name", package])
     cmd.extend(["--expected-app-instance-id", app_instance])
-    meta = dict(metadata_safe or {})
     device_id = str(meta.get("device_id") or "").strip()
     if device_id:
         cmd.extend(["--device-id", device_id])
@@ -1289,6 +1293,10 @@ def _build_login_provisioner_command(
         action_id = str(meta.get("action_id") or meta.get("verification_action_id") or "").strip()
         if action_id:
             cmd.extend(["--verification-action-id", action_id])
+    if observation:
+        if normalized_run_type != "login_provisioning":
+            raise ValueError("manual_profile_observation_run_type_invalid")
+        cmd.append("--verify-manual-open-profile")
     return cmd
 
 
@@ -3361,6 +3369,26 @@ def _finalize_manual_run_after_subprocess(
             request_metadata=request_metadata,
             summary=summary,
         )
+    if request_metadata.get("manual_profile_observation") == "v1" and summary:
+        reason = str(summary.get("failure_reason") or summary.get("reason") or "")
+        if reason in {
+            "manual_profile_binding_missing", "manual_profile_foreground_package_mismatch",
+            "manual_profile_not_open_or_unproved", "manual_profile_identity_ambiguous",
+            "active_instagram_account_mismatch", "manual_profile_publish_disabled",
+            "manual_profile_publish_failed", "manual_profile_publish_unproved", "connect_failed",
+        }:
+            _safe_complete_account_run_request(
+                request_id, cfg.worker_id, "blocked", error_code=reason,
+                error_message_safe="Manual profile observation did not confirm the current session.",
+            )
+            _reconcile_linked_run(
+                account_id=account_id, run_id=run_id, terminal_status="failed",
+                request_id=request_id, exit_code=exit_code,
+            )
+            _audit(account_id=account_id, action_type="manual_profile_observation_blocked", status="blocked",
+                   message="Manual profile observation did not confirm the current session.", run_id=run_id,
+                   payload={"request_id": request_id, "reason": reason})
+            return
     if _is_orphan_recovery_run_type(run_type):
         from login_orphan_recovery_state import resolve_orphan_recovery_state
 
@@ -4226,6 +4254,19 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         **protection_metadata,
     }
     login_binding: dict[str, Any] | None = None
+    if "manual_profile_observation" in request_metadata or request.get("source_surface") == "botapp_manual_profile_observation":
+        identity = _CERTIFIED_RUNTIME_IDENTITY
+        if (request_metadata.get("manual_profile_observation") != "v1"
+                or request.get("source_surface") != "botapp_manual_profile_observation"
+                or not request.get("requested_by")
+                or run_type != "login_provisioning"
+                or request_metadata.get("execution_worker_id") != cfg.worker_id
+                or not identity or identity.worker_sha != request_metadata.get("observation_worker_sha")):
+            _safe_complete_account_run_request(
+                request_id, cfg.worker_id, "blocked", error_code="manual_profile_observation_authority_unproved",
+                error_message_safe="Manual profile observation scope or Worker identity could not be verified.",
+            )
+            return
     if _is_login_run_type(run_type):
         binding_ok, binding_reason, login_binding = _validate_login_request_binding(
             request_metadata,
@@ -4977,10 +5018,12 @@ def _claim_next_dispatch_request(
     if cfg.health_only or not cfg.launch_enabled:
         return None, {"ok": True, "mode": "health_only", "reclaimed": reclaimed}
 
+    identity = _CERTIFIED_RUNTIME_IDENTITY
     request = claim_next_account_run_request(
         cfg.worker_id,
         lease_seconds=cfg.lease_seconds,
         allowed_run_types=cfg.allowed_run_types,
+        **({"observation_worker_sha": identity.worker_sha} if identity else {}),
     )
     if not request:
         return None, {"ok": True, "mode": "idle", "reclaimed": reclaimed}

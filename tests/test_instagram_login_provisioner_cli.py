@@ -43,6 +43,66 @@ class FakeDevice:
         return {"package": self.foreground_package} if self.foreground_package is not None else {}
 
 
+class ManualProfileObservationTest(unittest.TestCase):
+    PACKAGE = "com.instagram.androig"
+
+    def execute_observation(self, *, title=USERNAME, package=PACKAGE, own_profile=True, published=True):
+        xml = (
+            f'<hierarchy><node package="{package}" resource-id="{package}:id/action_bar_title" text="{title}" />'
+            f'<node package="{package}" resource-id="{package}:id/profile_header" />'
+            f'<node package="{package}" text="{"Edit profile" if own_profile else "Follow"}" /></hierarchy>'
+        )
+        device = FakeDevice(xml, foreground_package=package)
+        run_id, request_id, device_id, app_instance_id = [str(uuid.uuid4()) for _ in range(4)]
+        options = cli.build_parser().parse_args([
+            "--verify-manual-open-profile", "--publish", "--device-serial", "test-fixture",
+            "--device-id", device_id, "--expected-app-instance-id", app_instance_id,
+            "--account-id", ACCOUNT_ID, "--expected-username", USERNAME, "--package-name", self.PACKAGE,
+            "--run-id", run_id, "--request-id", request_id,
+        ])
+        credentials = Mock(side_effect=AssertionError("Credential access is prohibited"))
+        old_flow = Mock(side_effect=AssertionError("Auto Login must not run"))
+        publisher = Mock(return_value={"published": published})
+        with patch.object(cli, "_append_safe_jsonl"), patch.object(cli, "_load_dotenv_if_present"), \
+                patch.dict(cli.os.environ, {"LOGIN_PROVISIONER_PUBLISH_ENABLED": "true"}):
+            code, receipt = cli.run_cli_command(
+                options, connect_func=lambda serial: device, credentials_lookup=credentials,
+                secret_reader=credentials, run_flow_func=old_flow, status_publisher=publisher,
+            )
+        credentials.assert_not_called()
+        old_flow.assert_not_called()
+        device.app_start.assert_not_called()
+        return code, receipt, publisher, run_id
+
+    def test_manual_open_profile_requires_published_exact_identity(self):
+        code, receipt, publisher, run_id = self.execute_observation()
+        self.assertEqual(code, 0)
+        self.assertTrue(receipt["published"])
+        metadata = publisher.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["actual_logged_in_username"], USERNAME)
+        self.assertEqual(metadata["run_id"], run_id)
+        self.assertTrue(metadata["profile_opened"])
+        self.assertEqual(metadata["identity_verification_status"], "verified")
+
+    def test_refuses_another_account_package_or_non_own_profile_without_publishing(self):
+        for fields, reason in (
+            ({"title": USERNAME + "_copy"}, "active_instagram_account_mismatch"),
+            ({"package": "com.instagram.android"}, "manual_profile_foreground_package_mismatch"),
+            ({"own_profile": False}, "manual_profile_not_open_or_unproved"),
+        ):
+            with self.subTest(fields=fields):
+                code, receipt, publisher, _ = self.execute_observation(**fields)
+                self.assertEqual(code, 1)
+                self.assertEqual(receipt["failure_reason"], reason)
+                publisher.assert_not_called()
+
+    def test_unproved_status_write_is_never_a_success(self):
+        code, receipt, publisher, _ = self.execute_observation(published=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt["failure_reason"], "manual_profile_publish_unproved")
+        publisher.assert_called_once()
+
+
 class ActiveCredentialSelectionContractTest(unittest.TestCase):
     def test_lookup_selects_only_latest_active_revision(self) -> None:
         with patch.object(cli, "_request_json", return_value=[{

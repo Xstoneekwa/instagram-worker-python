@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -68,6 +69,7 @@ def claim_next_account_run_request(
     *,
     lease_seconds: int = 120,
     allowed_run_types: list[str] | None = None,
+    observation_worker_sha: str | None = None,
 ) -> dict[str, Any] | None:
     params: dict[str, Any] = {
         "p_worker_id": worker_id,
@@ -75,7 +77,25 @@ def claim_next_account_run_request(
     }
     if allowed_run_types:
         params["p_allowed_run_types"] = allowed_run_types
-    row = _row_or_none(supabase_client.call_rpc("claim_next_account_run_request", params))
+    if observation_worker_sha is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", observation_worker_sha):
+            raise ValueError("manual_profile_claim_worker_sha_invalid")
+        try:
+            result = supabase_client.call_rpc_once(
+                "claim_next_account_run_request_v2",
+                {**params, "p_allowed_run_types": allowed_run_types or None,
+                 "p_observation_worker_sha": observation_worker_sha},
+                timeout_seconds=30,
+            )
+        except supabase_client.SupabaseRestError as exc:
+            # A missing RPC cannot have claimed a row. A timeout or an
+            # uncertain response must not be followed by another claim.
+            if exc.status != 404 or not re.search(r'"code"\s*:\s*"PGRST202"', exc.detail):
+                raise
+            result = supabase_client.call_rpc("claim_next_account_run_request", params)
+    else:
+        result = supabase_client.call_rpc("claim_next_account_run_request", params)
+    row = _row_or_none(result)
     if not row:
         return None
     if not normalize_request_uuid(row.get("id")):

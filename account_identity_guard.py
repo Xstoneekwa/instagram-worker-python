@@ -484,6 +484,37 @@ def _device_foreground_package(d: u2.Device) -> str:
         return ""
 
 
+def observe_open_instagram_profile(
+    device: u2.Device, *, package: str, expected_username: str,
+) -> tuple[str, str]:
+    """Verify the already open own profile without interacting with the phone."""
+    expected = normalize_account_username(expected_username)
+    if not package or not _looks_like_handle(expected):
+        return "", "manual_profile_binding_missing"
+    if _device_foreground_package(device) != package:
+        return "", "manual_profile_foreground_package_mismatch"
+    hierarchy = _dump_hierarchy(device)
+    if not _own_profile_xml_package_proved(hierarchy, package) or _device_foreground_package(device) != package:
+        return "", "manual_profile_foreground_package_mismatch"
+    outcome, evidence = classify_own_profile_destination(hierarchy, expected_username=expected)
+    actual = normalize_account_username(evidence.get("action_bar_title"))
+    if (outcome is not OwnProfileNavigationOutcome.PROFILE_OPENED
+            or not evidence.get("own_profile_control_present")
+            or not evidence.get("profile_structure_present")
+            or evidence.get("profile_title_method") not in {"action_bar_title", "profile_header_username"}):
+        return "", "manual_profile_not_open_or_unproved"
+    # A second title in the same hierarchy can signal a transition or an overlay.
+    _, _, metadata = _extract_own_profile_username_from_hierarchy(hierarchy)
+    candidates = metadata.get("candidate_texts", [])
+    titles = {normalize_account_username(candidate.get("username"))
+              for candidate in candidates if candidate.get("rank") in {0, 1}}
+    if not actual or titles != {actual} or len(candidates) == 8:
+        return "", "manual_profile_identity_ambiguous"
+    if actual != expected:
+        return "", "active_instagram_account_mismatch"
+    return actual, ""
+
+
 def _wake_device_for_preflight(d: u2.Device) -> bool:
     """Best-effort wake before keyguard handling; never enters credentials."""
     woke = False

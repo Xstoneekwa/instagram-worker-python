@@ -5566,6 +5566,38 @@ def _finalize(
     )
 
 
+def publish_observed_manual_profile(
+    device: Any, *, account_id: str, package: str, expected_username: str,
+    run_id: str, publisher: Publisher,
+) -> tuple[bool, str]:
+    from account_identity_guard import normalize_account_username, observe_open_instagram_profile
+
+    actual, reason = observe_open_instagram_profile(device, package=package, expected_username=expected_username)
+    if reason:
+        return False, reason
+    metadata = {
+        "run_id": run_id,
+        "expected_username": normalize_account_username(expected_username),
+        "actual_logged_in_username": actual,
+        "profile_opened": True,
+        "expected_identity_verified": True,
+        "identity_verification_status": "verified",
+        "identity_verification_method": "manual_open_profile_observation",
+    }
+    try:
+        result = publisher(**_publish_payload(
+            account_id=account_id, final_login_status="connected", final_provisioning_status="ready",
+            final_onboarding_status=None, reason="manual_open_profile_observed",
+            final_outcome=LoginProbeOutcome.CONNECTED.value, retry_count=0, dashboard_action_type=None,
+            extra_metadata=metadata,
+        ))
+    except Exception:
+        return False, "manual_profile_publish_failed"
+    if not (result or {}).get("published") is True:
+        return False, "manual_profile_publish_unproved"
+    return True, "manual_open_profile_observed"
+
+
 def _publish_payload(
     *,
     account_id: str,
