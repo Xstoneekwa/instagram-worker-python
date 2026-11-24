@@ -44,6 +44,7 @@ import config
 import runtime_events
 import runtime_heartbeat
 import supabase_client
+from ct_target_evaluation_evidence import TargetEvaluationCapture
 from follow_target_private_streak_retirement_v1 import (
     PrivateProfileStreakRetirement,
 )
@@ -13242,6 +13243,19 @@ def _run_followers_list_engine_session(
             _run_followers_list_engine_session.last_session_summary = dict(_followers_session_summary)
 
     _target_availability_existing_proof: dict[str, Any] = {}
+    _ct_evaluation_capture = None
+    if supabase_mode and target_id:
+        try:
+            _ct_evaluation_capture = TargetEvaluationCapture(
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                worker_sha=getattr(worker_runtime_identity, "worker_sha", "") or os.environ.get("WORKER_GIT_SHA"),
+                source_username=source_profile_username,
+                submit=supabase_client.enqueue_target_evaluation_evidence,
+            )
+        except (TypeError, ValueError):
+            pass
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
     private_streak_retirement = PrivateProfileStreakRetirement(
         account_id=str(account_id or ""),
@@ -20653,6 +20667,7 @@ def _run_followers_list_engine_session(
             if not pending_username and _resolved_prefollow:
                 pick["username"] = _resolved_prefollow
 
+            _ct_open_observed_username = ""
             if pending_username:
                 try:
                     log(
@@ -20939,6 +20954,8 @@ def _run_followers_list_engine_session(
                             return 42
                         continue
                 _prof_ok_after_read = verify_profile(d, follower_un)
+                if _prof_ok_after_read:
+                    _ct_open_observed_username = follower_un
                 if not _prof_ok_after_read and pick.get("visual_candidate_id"):
                     _nav_fb = observe_instagram_state(
                         d,
@@ -21198,6 +21215,12 @@ def _run_followers_list_engine_session(
                         },
                     )
                 if bool(_private_fast_path.get("handled")):
+                    if _ct_evaluation_capture is not None:
+                        _ct_evaluation_capture.observe(
+                            candidate_username=follower_un,
+                            observed_username=_ct_open_observed_username,
+                            outcome="private",
+                        )
                     _observe_private_profile_classification(
                         candidate_key=str(
                             follower_un
@@ -22003,6 +22026,12 @@ def _run_followers_list_engine_session(
                     _g_final = _g_pre
                     if not _guard_ok:
                         if str(_g_pre.get("reason") or "") == "private_account":
+                            if _ct_evaluation_capture is not None:
+                                _ct_evaluation_capture.observe(
+                                    candidate_username=follower_un,
+                                    observed_username=_g_pre.get("action_bar_title"),
+                                    outcome="private",
+                                )
                             _observe_private_profile_classification(
                                 candidate_key=str(
                                     follower_un
@@ -22341,6 +22370,12 @@ def _run_followers_list_engine_session(
                         private_detected=True,
                     )
                 if _pre_follow_priv.get("reject"):
+                    if _ct_evaluation_capture is not None and _pre_follow_private_detected:
+                        _ct_evaluation_capture.observe(
+                            candidate_username=follower_un,
+                            observed_username=_g_final.get("action_bar_title") or _ct_open_observed_username,
+                            outcome="private",
+                        )
                     _target_rejection_record(
                         target_scan_tracker,
                         reason="private_account",
@@ -22542,6 +22577,12 @@ def _run_followers_list_engine_session(
                             )
                         return 42
                     continue
+                if _ct_evaluation_capture is not None:
+                    _ct_evaluation_capture.observe(
+                        candidate_username=follower_un,
+                        observed_username=_g_final.get("action_bar_title") or _ct_open_observed_username,
+                        outcome="eligible",
+                    )
                 _ordering_v2: dict[str, Any] = {
                     "selected": False,
                     "abort_candidate": False,

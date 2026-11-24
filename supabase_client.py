@@ -13,6 +13,7 @@ from urllib import error, parse, request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from ct_target_evaluation_evidence import EvaluationEvidenceWriter
 from logs import log
 from run_latency_observability_v1 import current_context, timing_enabled
 import account_protection_lists
@@ -3480,6 +3481,24 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
         timeout_seconds=max(30.0, _rest_timeout_seconds()),
         max_retries=None,
     )
+
+
+def _write_target_evaluation_evidence(params: dict[str, Any]) -> None:
+    receipt = _call_rpc(
+        "ct_record_target_evaluation_event_v1",
+        params,
+        timeout_seconds=2.0,
+        max_retries=1,
+    )
+    if not isinstance(receipt, dict) or not receipt.get("eventId"):
+        raise ValueError("ct_evaluation_evidence_receipt_invalid")
+
+
+_TARGET_EVALUATION_WRITER = EvaluationEvidenceWriter(_write_target_evaluation_evidence)
+
+
+def enqueue_target_evaluation_evidence(params: dict[str, Any]) -> bool:
+    return _TARGET_EVALUATION_WRITER.submit(params)
 
 
 def call_rpc_once(
